@@ -1,5 +1,11 @@
 pub const DEBUG_TIMERS: bool = false;
 
+pub const MAX_IMAGE_WIDTH: usize = 384;
+pub const MAX_IMAGE_HEIGHT: usize = 384;
+
+pub const FPS_TARGET :usize = 60;
+pub const TARGET_FRAMETIME :usize = (1000.0 / FPS_TARGET as f64) as usize;
+
 pub const MAX_ERROR_PER_PIXEL: f64 = 441.6729559300637; // Math::sqrt(255.0 * 255.0 * 3.0);
 pub const PER_POINT_MULTIPLIER: f64 = 1.0 / 5000000.0;
 pub const MIN_ALPHA: u8 = 10;
@@ -21,4 +27,4 @@ pub const OFFSET_POLYGON_MAGNITUDE: f64 = 0.1;
 pub const MIN_POINTS_PER_POLYGON: usize = 3;
 pub const MAX_POLYGONS_PER_IMAGE: usize = 1000;
 pub const MIN_POLYGONS_PER_IMAGE: usize = 1;
-pub const START_WITH_POLYGONS_PER_IMAGE: usize = 50; // can not go below 2 using range 0..START_WITH_POLYGONS_PER_IMAGE
+pub const START_WITH_POLYGONS_PER_IMAGE: usize = 150; // can not go below 2 using range 0..START_WITH_POLYGONS_PER_IMAGE

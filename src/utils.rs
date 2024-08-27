@@ -4,6 +4,11 @@ use rand::Rng;
 
 use crate::models::{color::Color, line::Line, point::Point};
 
+pub struct ImageDimensions {
+    pub width: usize,
+    pub height: usize,
+}
+
 pub fn randomu8() -> u8 {
     rand::thread_rng().gen::<u8>()
 }
@@ -16,6 +21,23 @@ pub fn randomf64_clamped(min: f64, max: f64) -> f64 {
     return rand::thread_rng().gen_range(min..max);
 }
 
+pub fn calculate_aspect_ratio_fit(
+    src_width: usize,
+    src_height: usize,
+    max_w: usize,
+    max_h: usize,
+) -> ImageDimensions {
+    let w = src_width as f64;
+    let h = src_height as f64;
+    let ratio: f64 = (max_w as f64 / w as f64).min(max_h as f64 / h as f64);
+    ImageDimensions {
+        width: (w * ratio).round() as usize,
+        height: (h * ratio).round() as usize,
+    }
+}
+
+// based on scanline fill
+// https://www.cs.ucdavis.edu/~ma/ECS175_S00/Notes/0413_a.pdf
 pub fn fill_shape(buffer: &mut Vec<u8>, points: &Vec<Point>, color: &Color, w: usize, h: usize) {
     let pixel_coords: Vec<Point> = points.iter().map(|p| p.translate(w, h)).collect();
     let sides = sides(&pixel_coords);
@@ -24,7 +46,6 @@ pub fn fill_shape(buffer: &mut Vec<u8>, points: &Vec<Point>, color: &Color, w: u
         let x = p.x as usize;
         let y = p.y as usize;
         let idx = 4 * y * w + 4 * x;
-        // console::log_1(&format!("idx: {} == {},{}", idx, x, y).into());
         fill_pixel(buffer, idx, color);
     });
 }
@@ -51,11 +72,11 @@ fn sides(points: &Vec<Point>) -> Vec<Line> {
         .collect()
 }
 
+// https://www.cs.ucdavis.edu/~ma/ECS175_S00/Notes/0413_a.pdf
 fn get_points_inside(sides: Vec<Line>) -> Vec<Point> {
     let mut points: Vec<Point> = vec![];
 
     let br = get_bounding_rect(&sides);
-
     if br.min_y >= br.max_y || br.min_x >= br.max_x {
         return points;
     }

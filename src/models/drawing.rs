@@ -14,9 +14,9 @@ use super::polygon::Polygon;
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Drawing {
-    polygons: Vec<Polygon>,
-    is_dirty: bool,
-    fitness: f64,
+    pub polygons: Vec<Polygon>,
+    pub is_dirty: bool,
+    pub fitness: f64,
 }
 
 impl Drawing {
