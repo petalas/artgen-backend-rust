@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use rand::Rng;
 
-use crate::models::{color::Color, line::Line, point::Point};
+use crate::models::{color::Color, line::Line, point::Point, polygon::Polygon};
 
 pub struct ImageDimensions {
     pub width: usize,
@@ -38,7 +38,8 @@ pub fn calculate_aspect_ratio_fit(
 
 // based on scanline fill
 // https://www.cs.ucdavis.edu/~ma/ECS175_S00/Notes/0413_a.pdf
-pub fn fill_shape(buffer: &mut Vec<u8>, points: &Vec<Point>, color: &Color, w: usize, h: usize) {
+pub fn fill_shape(buffer: &mut Vec<u8>, polygon: &Polygon, w: usize, h: usize) {
+    let points = &polygon.points;
     let pixel_coords: Vec<Point> = points.iter().map(|p| p.translate(w, h)).collect();
     let sides = sides(&pixel_coords);
     let points_inside: Vec<Point> = get_points_inside(sides);
@@ -46,8 +47,85 @@ pub fn fill_shape(buffer: &mut Vec<u8>, points: &Vec<Point>, color: &Color, w: u
         let x = p.x as usize;
         let y = p.y as usize;
         let idx = 4 * y * w + 4 * x;
-        fill_pixel(buffer, idx, color);
+        fill_pixel(buffer, idx, &polygon.color);
     });
+}
+
+pub fn fill_shape_2(buffer: &mut Vec<u8>, polygon: &Polygon, w: usize, h: usize) {
+    let points = &polygon.points;
+    let v: Vec<Point> = points.iter().map(|p| p.translate(w, h)).collect();
+
+    let Y1 = (v[0].y * 16f64).round() as i32;
+    let Y2 = (v[1].y * 16f64).round() as i32;
+    let Y3 = (v[2].y * 16f64).round() as i32;
+
+    let X1 = (v[0].x * 16f64).round() as i32;
+    let X2 = (v[1].x * 16f64).round() as i32;
+    let X3 = (v[2].x * 16f64).round() as i32;
+
+    // Deltas
+    let DX12 = X1 - X2;
+    let DX23 = X2 - X3;
+    let DX31 = X3 - X1;
+
+    let DY12 = Y1 - Y2;
+    let DY23 = Y2 - Y3;
+    let DY31 = Y3 - Y1;
+
+    // Fixed-point deltas
+    let FDX12 = DX12 << 4;
+    let FDX23 = DX23 << 4;
+    let FDX31 = DX31 << 4;
+    let FDY12 = DY12 << 4;
+    let FDY23 = DY23 << 4;
+    let FDY31 = DY31 << 4;
+
+    // Bounding rectangle
+    let minx = (i32::min(i32::min(X1, X2), X3) + 0xF) >> 4;
+    let maxx = (i32::max(i32::max(X1, X2), X3) + 0xF) >> 4;
+    let miny = (i32::min(i32::min(Y1, Y2), Y3) + 0xF) >> 4;
+    let maxy = (i32::max(i32::max(Y1, Y2), Y3) + 0xF) >> 4;
+
+    // Constant part of half-edge functions
+    let mut C1 = DY12 * X1 - DX12 * Y1;
+    let mut C2 = DY23 * X2 - DX23 * Y2;
+    let mut C3 = DY31 * X3 - DX31 * Y3;
+
+    // Correct for fill convention
+    if DY12 < 0 || (DY12 == 0 && DX12 > 0) {
+        C1 += 1
+    };
+    if DY23 < 0 || (DY23 == 0 && DX23 > 0) {
+        C2 += 1
+    };
+    if DY31 < 0 || (DY31 == 0 && DX31 > 0) {
+        C3 += 1
+    };
+
+    let mut CY1 = C1 + DX12 * (miny << 4) - DY12 * (minx << 4);
+    let mut CY2 = C2 + DX23 * (miny << 4) - DY23 * (minx << 4);
+    let mut CY3 = C3 + DX31 * (miny << 4) - DY31 * (minx << 4);
+
+    // Scan through bounding rectangle
+    for y in miny as usize..maxy as usize {
+        // Start value for horizontal scan
+        let mut CX1 = CY1;
+        let mut CX2 = CY2;
+        let mut CX3 = CY3;
+
+        for x in minx as usize..maxx as usize {
+            if (CX1 > 0 && CX2 > 0 && CX3 > 0) || (CX1 < 0 && CX2 < 0 && CX3 < 0) {
+                let idx = 4 * y * w + 4 * x;
+                fill_pixel(buffer, idx, &polygon.color);
+            }
+            CX1 -= FDY12;
+            CX2 -= FDY23;
+            CX3 -= FDY31;
+        }
+        CY1 += FDX12;
+        CY2 += FDX23;
+        CY3 += FDX31;
+    }
 }
 
 fn fill_pixel(buffer: &mut Vec<u8>, index: usize, color: &Color) {

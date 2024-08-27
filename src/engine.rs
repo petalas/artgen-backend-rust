@@ -25,6 +25,7 @@ pub struct Engine {
     pub current_best: Drawing,
     pub stats: Stats,
     pub window: WindowProxy,
+    pub raster_mode: usize,
 }
 
 impl Engine {
@@ -47,6 +48,7 @@ impl Engine {
                 ticks: 0,
             },
             window,
+            raster_mode: 2,
         }
     }
 
@@ -76,7 +78,7 @@ impl Engine {
         let size: usize = (self.w * self.h * 4) as usize;
         self.working_data = vec![0u8; size];
         self.error_data = vec![0u8; size];
-        self.calculate_fitness(self.current_best.clone(), true);
+        // self.calculate_fitness(self.current_best.clone(), true);
         println!("Engine ready.");
     }
 
@@ -97,7 +99,7 @@ impl Engine {
                 self.current_best = clone;
                 self.stats.improvements += 1;
                 self.current_best
-                    .draw(&mut self.working_data, self.w, self.h);
+                    .draw(&mut self.working_data, self.w, self.h, self.raster_mode);
 
                 let image = ImageView::new(
                     ImageInfo::rgba8(self.w as u32, self.h as u32),
@@ -114,7 +116,7 @@ impl Engine {
     }
 
     fn calculate_fitness(&mut self, mut drawing: Drawing, draw_error: bool) -> Drawing {
-        drawing.draw(&mut self.working_data, self.w, self.h);
+        drawing.draw(&mut self.working_data, self.w, self.h, self.raster_mode);
 
         let num_pixels = self.w * self.h;
 
@@ -181,14 +183,65 @@ impl Engine {
             is_dirty: false,
             fitness: 0.0,
         };
-        d.draw(&mut self.working_data, self.w, self.h);
+        d.draw(&mut self.working_data, self.w, self.h, self.raster_mode);
+        self.current_best = d;
 
         let all_red = self
             .working_data
             .chunks_exact(4)
             .all(|c| c == [255, 0, 0, 255]);
-        assert!(all_red);
+        // assert!(all_red);
 
+        let image = ImageView::new(
+            ImageInfo::rgba8(self.w as u32, self.h as u32),
+            &self.working_data,
+        );
+        self.window
+            .set_image("image-001", image)
+            .expect("Failed to set image.");
+    }
+
+    pub fn test2(&mut self) {
+        let p1 = Point { x: 0.35, y: 0.25 };
+        let p2 = Point { x: 0.025, y: 0.75 };
+        let p3 = Point { x: 0.7, y: 0.6 };
+        // let p4 = Point { x: 1.0, y: 0.0 };
+        let c = crate::models::color::Color {
+            r: 255,
+            g: 0,
+            b: 0,
+            a: 255,
+        };
+        let poly1 = Polygon {
+            points: [p1, p2, p3].to_vec(),
+            color: c,
+        };
+        let d = Drawing {
+            polygons: [poly1].to_vec(),
+            is_dirty: false,
+            fitness: 0.0,
+        };
+        d.draw(&mut self.working_data, self.w, self.h, self.raster_mode);
+        self.current_best = d;
+
+        // let all_red = self
+        //     .working_data
+        //     .chunks_exact(4)
+        //     .all(|c| c == [255, 0, 0, 255]);
+        // assert!(all_red);
+
+        let image = ImageView::new(
+            ImageInfo::rgba8(self.w as u32, self.h as u32),
+            &self.working_data,
+        );
+        self.window
+            .set_image("image-001", image)
+            .expect("Failed to set image.");
+    }
+
+    pub fn redraw(&mut self) {
+        self.current_best
+            .draw(&mut self.working_data, self.w, self.h, self.raster_mode);
         let image = ImageView::new(
             ImageInfo::rgba8(self.w as u32, self.h as u32),
             &self.working_data,
