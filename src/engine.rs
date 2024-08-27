@@ -4,7 +4,7 @@ use image::{imageops::FilterType::Lanczos3, EncodableLayout, ImageReader};
 use show_image::{create_window, ImageInfo, ImageView, WindowProxy};
 
 use crate::{
-    models::drawing::Drawing,
+    models::{drawing::Drawing, point::Point, polygon::Polygon},
     settings::{MAX_ERROR_PER_PIXEL, PER_POINT_MULTIPLIER},
 };
 
@@ -153,5 +153,48 @@ impl Engine {
         drawing.fitness -= penalty;
 
         drawing
+    }
+
+    // testing our rasterization logic
+    // should be able to perfectly fill a rectangle with 2 triangles
+    pub fn test(&mut self) {
+        let p1 = Point { x: 0.0, y: 0.0 };
+        let p2 = Point { x: 0.0, y: 1.0 };
+        let p3 = Point { x: 1.0, y: 1.0 };
+        let p4 = Point { x: 1.0, y: 0.0 };
+        let c = crate::models::color::Color {
+            r: 255,
+            g: 0,
+            b: 0,
+            a: 255,
+        };
+        let poly1 = Polygon {
+            points: [p1, p2, p3].to_vec(),
+            color: c,
+        };
+        let poly2 = Polygon {
+            points: [p1, p4, p3].to_vec(),
+            color: c,
+        };
+        let d = Drawing {
+            polygons: [poly1, poly2].to_vec(),
+            is_dirty: false,
+            fitness: 0.0,
+        };
+        d.draw(&mut self.working_data, self.w, self.h);
+
+        let all_red = self
+            .working_data
+            .chunks_exact(4)
+            .all(|c| c == [255, 0, 0, 255]);
+        assert!(all_red);
+
+        let image = ImageView::new(
+            ImageInfo::rgba8(self.w as u32, self.h as u32),
+            &self.working_data,
+        );
+        self.window
+            .set_image("image-001", image)
+            .expect("Failed to set image.");
     }
 }
