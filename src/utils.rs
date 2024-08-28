@@ -51,10 +51,14 @@ pub fn fill_shape(buffer: &mut Vec<u8>, polygon: &Polygon, w: usize, h: usize) {
     });
 }
 
-pub fn fill_shape_2(buffer: &mut Vec<u8>, polygon: &Polygon, w: usize, h: usize) {
+// Based on https://web.archive.org/web/20050408192410/http://sw-shader.sourceforge.net/rasterizer.html
+// Had to do additional checks otherwise it doesn't work for all triangles
+// Another solution (maybe?) would be to sort points clockwise.
+pub fn fill_triangle(buffer: &mut Vec<u8>, polygon: &Polygon, w: usize, h: usize) {
     let points = &polygon.points;
-    let v: Vec<Point> = points.iter().map(|p| p.translate(w, h)).collect();
+    let mut v: Vec<Point> = points.iter().map(|p| p.translate(w, h)).collect();
 
+    // 28.4 fixed-point coordinates
     let Y1 = (v[0].y * 16f64).round() as i32;
     let Y2 = (v[1].y * 16f64).round() as i32;
     let Y3 = (v[2].y * 16f64).round() as i32;
@@ -76,15 +80,27 @@ pub fn fill_shape_2(buffer: &mut Vec<u8>, polygon: &Polygon, w: usize, h: usize)
     let FDX12 = DX12 << 4;
     let FDX23 = DX23 << 4;
     let FDX31 = DX31 << 4;
+
     let FDY12 = DY12 << 4;
     let FDY23 = DY23 << 4;
     let FDY31 = DY31 << 4;
 
     // Bounding rectangle
-    let minx = (i32::min(i32::min(X1, X2), X3) + 0xF) >> 4;
+    let mut minx = (i32::min(i32::min(X1, X2), X3) + 0xF) >> 4;
     let maxx = (i32::max(i32::max(X1, X2), X3) + 0xF) >> 4;
-    let miny = (i32::min(i32::min(Y1, Y2), Y3) + 0xF) >> 4;
+    let mut miny = (i32::min(i32::min(Y1, Y2), Y3) + 0xF) >> 4;
     let maxy = (i32::max(i32::max(Y1, Y2), Y3) + 0xF) >> 4;
+
+    // println!("minx={}, maxx={}, miny={}, maxy={}", minx, maxx, miny, maxy);
+
+    // Block size, standard 8x8 (must be power of two)
+    let q = 8;
+
+    // Start in corner of 8x8 block
+    minx &= !(q - 1);
+    miny &= !(q - 1);
+
+    // println!("minx {}, miny {}", minx, miny);
 
     // Constant part of half-edge functions
     let mut C1 = DY12 * X1 - DX12 * Y1;
@@ -102,29 +118,95 @@ pub fn fill_shape_2(buffer: &mut Vec<u8>, polygon: &Polygon, w: usize, h: usize)
         C3 += 1
     };
 
-    let mut CY1 = C1 + DX12 * (miny << 4) - DY12 * (minx << 4);
-    let mut CY2 = C2 + DX23 * (miny << 4) - DY23 * (minx << 4);
-    let mut CY3 = C3 + DX31 * (miny << 4) - DY31 * (minx << 4);
+    // loop through blocks
+    for y in (miny..maxy).step_by(q as usize) {
+        for x in (minx..maxx).step_by(q as usize) {
+            // Corners of block
+            let x0 = x << 4;
+            let x1 = (x + q - 1) << 4;
+            let y0 = y << 4;
+            let y1 = (y + q - 1) << 4;
 
-    // Scan through bounding rectangle
-    for y in miny as usize..maxy as usize {
-        // Start value for horizontal scan
-        let mut CX1 = CY1;
-        let mut CX2 = CY2;
-        let mut CX3 = CY3;
+            // Evaluate half-space functions
+            let a00 = (C1 + DX12 * y0 - DY12 * x0 > 0) as i32;
+            let a10 = (C1 + DX12 * y0 - DY12 * x1 > 0) as i32;
+            let a01 = (C1 + DX12 * y1 - DY12 * x0 > 0) as i32;
+            let a11 = (C1 + DX12 * y1 - DY12 * x1 > 0) as i32;
+            let a = (a00 << 0) | (a10 << 1) | (a01 << 2) | (a11 << 3);
 
-        for x in minx as usize..maxx as usize {
-            if (CX1 > 0 && CX2 > 0 && CX3 > 0) || (CX1 < 0 && CX2 < 0 && CX3 < 0) {
-                let idx = 4 * y * w + 4 * x;
-                fill_pixel(buffer, idx, &polygon.color);
+            let a002 = (C1 + DX12 * y0 - DY12 * x0 < 0) as i32;
+            let a102 = (C1 + DX12 * y0 - DY12 * x1 < 0) as i32;
+            let a012 = (C1 + DX12 * y1 - DY12 * x0 < 0) as i32;
+            let a112 = (C1 + DX12 * y1 - DY12 * x1 < 0) as i32;
+            let a2 = (a002 << 0) | (a102 << 1) | (a012 << 2) | (a112 << 3);
+
+            let b00 = (C2 + DX23 * y0 - DY23 * x0 > 0) as i32;
+            let b10 = (C2 + DX23 * y0 - DY23 * x1 > 0) as i32;
+            let b01 = (C2 + DX23 * y1 - DY23 * x0 > 0) as i32;
+            let b11 = (C2 + DX23 * y1 - DY23 * x1 > 0) as i32;
+            let b = (b00 << 0) | (b10 << 1) | (b01 << 2) | (b11 << 3);
+
+            let b002 = (C2 + DX23 * y0 - DY23 * x0 < 0) as i32;
+            let b102 = (C2 + DX23 * y0 - DY23 * x1 < 0) as i32;
+            let b012 = (C2 + DX23 * y1 - DY23 * x0 < 0) as i32;
+            let b112 = (C2 + DX23 * y1 - DY23 * x1 < 0) as i32;
+            let b2 = (b002 << 0) | (b102 << 1) | (b012 << 2) | (b112 << 3);
+
+            let c00 = (C3 + DX31 * y0 - DY31 * x0 > 0) as i32;
+            let c10 = (C3 + DX31 * y0 - DY31 * x1 > 0) as i32;
+            let c01 = (C3 + DX31 * y1 - DY31 * x0 > 0) as i32;
+            let c11 = (C3 + DX31 * y1 - DY31 * x1 > 0) as i32;
+            let c = (c00 << 0) | (c10 << 1) | (c01 << 2) | (c11 << 3);
+
+            let c002 = (C3 + DX31 * y0 - DY31 * x0 < 0) as i32;
+            let c102 = (C3 + DX31 * y0 - DY31 * x1 < 0) as i32;
+            let c012 = (C3 + DX31 * y1 - DY31 * x0 < 0) as i32;
+            let c112 = (C3 + DX31 * y1 - DY31 * x1 < 0) as i32;
+            let c2 = (c002 << 0) | (c102 << 1) | (c012 << 2) | (c112 << 3);
+
+            // Skip block when outside an edge
+            // TODO optimization? (should only have to check one set of these)
+            if (a == 0x0 || b == 0x0 || c == 0x0) && (a2 == 0x0 || b2 == 0x0 || c2 == 0x0) {
+                continue;
             }
-            CX1 -= FDY12;
-            CX2 -= FDY23;
-            CX3 -= FDY31;
+
+            // Accept whole block when totally covered
+            // TODO optimization? (should only have to check one set of these)
+            if (a == 0xF && b == 0xF && c == 0xF) || (a2 == 0xF && b2 == 0xF && c2 == 0xF) {
+                for iy in y..(y + q) {
+                    for ix in x..(x + q) {
+                        let idx = 4 * iy * w as i32 + 4 * ix;
+                        fill_pixel(buffer, idx as usize, &polygon.color);
+                    }
+                }
+            } else {
+                let mut CY1 = C1 + DX12 * y0 - DY12 * x0;
+                let mut CY2 = C2 + DX23 * y0 - DY23 * x0;
+                let mut CY3 = C3 + DX31 * y0 - DY31 * x0;
+
+                for iy in y..(y + q) {
+                    let mut CX1 = CY1;
+                    let mut CX2 = CY2;
+                    let mut CX3 = CY3;
+
+                    for ix in x..(x + q) {
+                        // TODO optimization? (should only have to check one set of these)
+                        if (CX1 >= 0 && CX2 >= 0 && CX3 >= 0) || (CX1 <= 0 && CX2 <= 0 && CX3 <= 0)
+                        {
+                            let idx = 4 * iy * w as i32 + 4 * ix;
+                            fill_pixel(buffer, idx as usize, &&polygon.color);
+                        }
+                        CX1 -= FDY12;
+                        CX2 -= FDY23;
+                        CX3 -= FDY31;
+                    }
+
+                    CY1 += FDX12;
+                    CY2 += FDX23;
+                    CY3 += FDX31;
+                }
+            }
         }
-        CY1 += FDX12;
-        CY2 += FDX23;
-        CY3 += FDX31;
     }
 }
 

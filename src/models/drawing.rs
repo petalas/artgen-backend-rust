@@ -3,9 +3,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     settings::{
-        ADD_POLYGON_PROB, MAX_POLYGONS_PER_IMAGE, MIN_POLYGONS_PER_IMAGE, REMOVE_POLYGON_PROB, REORDER_POLYGON_PROB, START_WITH_POLYGONS_PER_IMAGE
+        ADD_POLYGON_PROB, MAX_POLYGONS_PER_IMAGE, MIN_POLYGONS_PER_IMAGE, REMOVE_POLYGON_PROB,
+        REORDER_POLYGON_PROB, START_WITH_POLYGONS_PER_IMAGE,
     },
-    utils::{fill_shape, fill_shape_2, randomf64},
+    utils::{fill_shape, fill_triangle, randomf64},
 };
 
 use super::polygon::Polygon;
@@ -27,10 +28,7 @@ impl Drawing {
             if rm == 1 {
                 fill_shape(buffer, &polygon, w, h);
             } else {
-                // TODO: implement a faster way to rasterize our triangles
-                // https://web.archive.org/web/20050408192410/http://sw-shader.sourceforge.net/rasterizer.html
-                // println!("filling polygon {:?}", polygon);
-                fill_shape_2(buffer, &polygon, w, h);
+                fill_triangle(buffer, &polygon, w, h);
             }
         }
     }

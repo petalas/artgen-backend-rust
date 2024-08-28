@@ -15,6 +15,7 @@ fn main() {
     engine.init("ff.jpg", MAX_IMAGE_WIDTH, MAX_IMAGE_HEIGHT);
     // engine.test();
     // engine.test2();
+    // engine.test3();
 
     let mut ticks: usize = 0;
     let t0 = Instant::now();
@@ -38,7 +39,7 @@ fn main() {
     //     .expect("Failed to get event_channel")
     // {
     //     if let event::WindowEvent::KeyboardInput(event) = event {
-    //         println!("{:#?}", event);
+    //         // println!("{:#?}", event);
     //         if event.input.key_code == Some(event::VirtualKeyCode::Escape)
     //             && event.input.state.is_pressed()
     //         {
@@ -52,7 +53,7 @@ fn main() {
     //             engine.redraw();
     //         }
     //     }
-    //     // engine.tick(TARGET_FRAMETIME);
+    //     engine.tick(TARGET_FRAMETIME);
     //     // println!("{:?}", engine.stats);
     // }
 }

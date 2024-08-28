@@ -239,6 +239,21 @@ impl Engine {
             .expect("Failed to set image.");
     }
 
+    pub fn test3(&mut self) {
+      
+        let d = Drawing::new_random();
+        d.draw(&mut self.working_data, self.w, self.h, self.raster_mode);
+        self.current_best = d;
+
+        let image = ImageView::new(
+            ImageInfo::rgba8(self.w as u32, self.h as u32),
+            &self.working_data,
+        );
+        self.window
+            .set_image("image-001", image)
+            .expect("Failed to set image.");
+    }
+
     pub fn redraw(&mut self) {
         self.current_best
             .draw(&mut self.working_data, self.w, self.h, self.raster_mode);
