@@ -2,11 +2,10 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    settings::{
+    engine::Rasterizer, settings::{
         ADD_POLYGON_PROB, MAX_POLYGONS_PER_IMAGE, MIN_POLYGONS_PER_IMAGE, REMOVE_POLYGON_PROB,
         REORDER_POLYGON_PROB, START_WITH_POLYGONS_PER_IMAGE,
-    },
-    utils::{fill_shape, fill_triangle, randomf64},
+    }, utils::{fill_shape, fill_triangle, randomf64}
 };
 
 use super::polygon::Polygon;
@@ -20,12 +19,12 @@ pub struct Drawing {
 }
 
 impl Drawing {
-    pub fn draw(&self, buffer: &mut Vec<u8>, w: usize, h: usize, rm: usize) {
+    pub fn draw(&self, buffer: &mut Vec<u8>, w: usize, h: usize, rm: Rasterizer) {
         // start with white background
         buffer.into_iter().for_each(|item| *item = 255u8);
 
         for polygon in &self.polygons {
-            if rm == 1 {
+            if rm == Rasterizer::Scanline || polygon.points.len() > 3 {
                 fill_shape(buffer, &polygon, w, h);
             } else {
                 fill_triangle(buffer, &polygon, w, h);

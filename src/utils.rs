@@ -56,7 +56,7 @@ pub fn fill_shape(buffer: &mut Vec<u8>, polygon: &Polygon, w: usize, h: usize) {
 // Another solution (maybe?) would be to sort points clockwise.
 pub fn fill_triangle(buffer: &mut Vec<u8>, polygon: &Polygon, w: usize, h: usize) {
     let points = &polygon.points;
-    let mut v: Vec<Point> = points.iter().map(|p| p.translate(w, h)).collect();
+    let v: Vec<Point> = points.iter().map(|p| p.translate(w, h)).collect();
 
     // 28.4 fixed-point coordinates
     let Y1 = (v[0].y * 16f64).round() as i32;

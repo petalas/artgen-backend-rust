@@ -8,6 +8,20 @@ use crate::{
     settings::{MAX_ERROR_PER_PIXEL, PER_POINT_MULTIPLIER},
 };
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Rasterizer {
+    // Scanline fill, slower but works for any polygons
+    Scanline,
+
+    // Advanced Rasterization based on half space functions
+    // It is faster than scanline but only implemented for triangles
+    // https://web.archive.org/web/20050907040950/http://sw-shader.sourceforge.net:80/rasterizer.html
+    HalfSpace,
+
+    // will default to Half-Space unless the polygon has more than 3 points
+    Optimal,
+}
+
 #[derive(Debug)]
 pub struct Stats {
     pub generated: usize,
@@ -25,7 +39,7 @@ pub struct Engine {
     pub current_best: Drawing,
     pub stats: Stats,
     pub window: WindowProxy,
-    pub raster_mode: usize,
+    pub raster_mode: Rasterizer,
 }
 
 impl Engine {
@@ -48,7 +62,7 @@ impl Engine {
                 ticks: 0,
             },
             window,
-            raster_mode: 2,
+            raster_mode: Rasterizer::Optimal,
         }
     }
 

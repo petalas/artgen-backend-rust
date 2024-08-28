@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use engine::Engine;
+use engine::{Engine, Rasterizer};
 use settings::{MAX_IMAGE_HEIGHT, MAX_IMAGE_WIDTH, TARGET_FRAMETIME};
 use show_image::event;
 
@@ -48,12 +48,12 @@ fn main() {
     //         if event.input.key_code == Some(event::VirtualKeyCode::Space)
     //             && event.input.state.is_pressed()
     //         {
-    //             engine.raster_mode = if engine.raster_mode == 1 { 0 } else { 1 };
-    //             println!("raster mode set to {}", engine.raster_mode);
+    //             engine.raster_mode = if engine.raster_mode == Rasterizer::Scanline { Rasterizer::HalfSpace } else { Rasterizer::Scanline };
+    //             println!("raster mode set to {:?}", engine.raster_mode);
     //             engine.redraw();
     //         }
     //     }
-    //     engine.tick(TARGET_FRAMETIME);
+    //     // engine.tick(TARGET_FRAMETIME);
     //     // println!("{:?}", engine.stats);
     // }
 }
