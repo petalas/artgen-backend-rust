@@ -1,11 +1,15 @@
+use std::{fs::File, io::BufReader, path::Path};
+
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    engine::Rasterizer, settings::{
+    engine::Rasterizer,
+    settings::{
         ADD_POLYGON_PROB, MAX_POLYGONS_PER_IMAGE, MIN_POLYGONS_PER_IMAGE, REMOVE_POLYGON_PROB,
         REORDER_POLYGON_PROB, START_WITH_POLYGONS_PER_IMAGE,
-    }, utils::{fill_shape, fill_triangle, randomf32}
+    },
+    utils::{fill_shape, fill_triangle, randomf32},
 };
 
 use super::polygon::Polygon;
@@ -111,6 +115,11 @@ impl Drawing {
         }
         self.polygons.swap(i1, i2);
         return true;
+    }
+
+    pub fn from_file(path: &str) -> Self {
+        let file = BufReader::new(File::open(&Path::new(&path)).expect("Failed to open file"));
+        return serde_json::from_reader(file).expect("Failed to parse json");
     }
 }
 

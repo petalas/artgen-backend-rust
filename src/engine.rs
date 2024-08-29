@@ -40,6 +40,7 @@ pub struct Engine {
     pub stats: Stats,
     pub window: WindowProxy,
     pub raster_mode: Rasterizer,
+    pub initialized: bool,
 }
 
 impl Engine {
@@ -63,6 +64,7 @@ impl Engine {
             },
             window,
             raster_mode: Rasterizer::Optimal,
+            initialized: false,
         }
     }
 
@@ -88,12 +90,19 @@ impl Engine {
         self.post_init();
     }
 
+    pub fn set_best(&mut self, drawing: Drawing) {
+        assert!(self.initialized);
+        self.current_best = drawing;
+        self.current_best.fitness = 0.0; // do not trust
+        self.redraw();
+    }
+
     fn post_init(&mut self) {
         let size: usize = (self.w * self.h * 4) as usize;
         self.working_data = vec![0u8; size];
         self.error_data = vec![0u8; size];
-        // self.calculate_fitness(self.current_best.clone(), true);
         println!("Engine ready.");
+        self.initialized = true;
     }
 
     pub fn tick(&mut self, max_time_ms: usize) {
@@ -254,7 +263,6 @@ impl Engine {
     }
 
     pub fn test3(&mut self) {
-      
         let d = Drawing::new_random();
         d.draw(&mut self.working_data, self.w, self.h, self.raster_mode);
         self.current_best = d;

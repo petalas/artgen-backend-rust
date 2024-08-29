@@ -1,6 +1,7 @@
 use std::time::Instant;
 
 use engine::{Engine, Rasterizer};
+use models::drawing::Drawing;
 use settings::{MAX_IMAGE_HEIGHT, MAX_IMAGE_WIDTH, TARGET_FRAMETIME};
 use show_image::event;
 
@@ -13,6 +14,8 @@ mod utils;
 fn main() {
     let mut engine = Engine::new();
     engine.init("ff.jpg", MAX_IMAGE_WIDTH, MAX_IMAGE_HEIGHT);
+    engine.set_best(Drawing::from_file("ff.json"));
+
     // engine.test();
     // engine.test2();
     // engine.test3();
@@ -29,7 +32,7 @@ fn main() {
             }
             let g = engine.stats.generated;
             let rate = (g as f32 / t as f32).round() as usize;
-            println!("Generated {:?} in {}s (~{}/s)", g, t, rate);
+            println!("Generated {:?} in {}s (~{}/s) --> {}", g, t, rate, engine.current_best.fitness);
         }
     }
 
