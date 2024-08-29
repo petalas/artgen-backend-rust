@@ -2,11 +2,13 @@ use std::time::Instant;
 
 use image::{imageops::FilterType::Lanczos3, EncodableLayout, ImageReader};
 use show_image::{create_window, ImageInfo, ImageView, WindowProxy};
+use wgpu::{Gles3MinorVersion, InstanceFlags};
 
 use crate::{
-    models::{drawing::Drawing, point::Point, polygon::Polygon},
-    settings::{MAX_ERROR_PER_PIXEL, PER_POINT_MULTIPLIER},
+    buffer_dimensions::BufferDimensions, gpu_pipeline::GpuPipeline, models::{drawing::Drawing, point::Point, polygon::Polygon}, settings::{MAX_ERROR_PER_PIXEL, MAX_IMAGE_HEIGHT, MAX_IMAGE_WIDTH, PER_POINT_MULTIPLIER}
 };
+
+
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Rasterizer {
@@ -20,6 +22,8 @@ pub enum Rasterizer {
 
     // will default to Half-Space unless the polygon has more than 3 points
     Optimal,
+
+    GPU,
 }
 
 #[derive(Debug)]
@@ -41,6 +45,7 @@ pub struct Engine {
     pub window: WindowProxy,
     pub raster_mode: Rasterizer,
     pub initialized: bool,
+    pub gpu_pipeline: Option<GpuPipeline>,
 }
 
 impl Engine {
@@ -49,6 +54,8 @@ impl Engine {
         let error_data: Vec<u8> = vec![];
         let working_data: Vec<u8> = vec![];
         let window = create_window("image", Default::default()).expect("Failed to create window.");
+
+
         Engine {
             ref_image_data,
             error_data,
@@ -65,10 +72,11 @@ impl Engine {
             window,
             raster_mode: Rasterizer::Optimal,
             initialized: false,
+            gpu_pipeline: None
         }
     }
 
-    pub fn init(&mut self, filepath: &str, max_w: usize, max_h: usize) {
+    pub async fn init(&mut self, filepath: &str, max_w: usize, max_h: usize) {
         let mut img = ImageReader::open(filepath)
             .expect("Failed to load image")
             .decode()
@@ -87,7 +95,7 @@ impl Engine {
         self.ref_image_data = img.into_rgba8().as_bytes().to_vec();
         println!("Loaded {}x{} image.", self.w, self.h);
         assert!(self.ref_image_data.len() == self.w * self.h * 4);
-        self.post_init();
+        self.post_init().await;
     }
 
     pub fn set_best(&mut self, drawing: Drawing) {
@@ -97,10 +105,12 @@ impl Engine {
         self.redraw();
     }
 
-    fn post_init(&mut self) {
+    async fn post_init(&mut self) {
         let size: usize = (self.w * self.h * 4) as usize;
         self.working_data = vec![0u8; size];
         self.error_data = vec![0u8; size];
+
+        self.gpu_pipeline = Some(GpuPipeline::new(self.ref_image_data.clone(), self.w, self.h).await);
         println!("Engine ready.");
         self.initialized = true;
     }

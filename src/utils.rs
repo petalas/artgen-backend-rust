@@ -357,3 +357,11 @@ fn points_between(a: &Point, b: &Point) -> Vec<Point> {
     // console::log_1(&format!("{:?}", p).into());
     return p;
 }
+
+pub fn translate_coord(number: f32) -> f32 {
+    return number * 2.0 - 1.0;
+}
+
+pub fn translate_color(color: u8) -> f32 {
+    color as f32 / 255.0
+}

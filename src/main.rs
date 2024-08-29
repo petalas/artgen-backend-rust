@@ -13,33 +13,36 @@ use show_image::event;
 // mod utils;
 
 #[show_image::main]
-fn main() {
+#[tokio::main]
+async fn main() {
     let mut engine = Engine::new();
-    engine.init("ff.jpg", MAX_IMAGE_WIDTH, MAX_IMAGE_HEIGHT);
+    engine.init("ff.jpg", MAX_IMAGE_WIDTH, MAX_IMAGE_HEIGHT).await;
     engine.set_best(Drawing::from_file("ff.json"));
+
+    dbg!(engine.gpu_pipeline);
 
     // engine.test();
     // engine.test2();
     // engine.test3();
 
-    let mut ticks: usize = 0;
-    let t0 = Instant::now();
-    loop {
-        ticks += 1;
-        engine.tick(TARGET_FRAMETIME);
-        if ticks % TARGET_FRAMETIME == 0 {
-            let t = (Instant::now() - t0).as_secs();
-            if t < 1 {
-                continue;
-            }
-            let g = engine.stats.generated;
-            let rate = (g as f32 / t as f32).round() as usize;
-            println!(
-                "Generated {:?} in {}s (~{}/s) --> {}",
-                g, t, rate, engine.current_best.fitness
-            );
-        }
-    }
+    // let mut ticks: usize = 0;
+    // let t0 = Instant::now();
+    // loop {
+    //     ticks += 1;
+    //     engine.tick(TARGET_FRAMETIME);
+    //     if ticks % TARGET_FRAMETIME == 0 {
+    //         let t = (Instant::now() - t0).as_secs();
+    //         if t < 1 {
+    //             continue;
+    //         }
+    //         let g = engine.stats.generated;
+    //         let rate = (g as f32 / t as f32).round() as usize;
+    //         println!(
+    //             "Generated {:?} in {}s (~{}/s) --> {}",
+    //             g, t, rate, engine.current_best.fitness
+    //         );
+    //     }
+    // }
 
     // for event in engine
     //     .window

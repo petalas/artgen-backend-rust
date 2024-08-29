@@ -4,12 +4,10 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    engine::Rasterizer,
-    settings::{
+    engine::Rasterizer, gpu_pipeline::Vertex, settings::{
         ADD_POLYGON_PROB, MAX_POLYGONS_PER_IMAGE, MIN_POLYGONS_PER_IMAGE, REMOVE_POLYGON_PROB,
         REORDER_POLYGON_PROB, START_WITH_POLYGONS_PER_IMAGE,
-    },
-    utils::{fill_shape, fill_triangle, randomf32},
+    }, utils::{fill_shape, fill_triangle, randomf32, translate_color, translate_coord}
 };
 
 use super::polygon::Polygon;
@@ -24,6 +22,11 @@ pub struct Drawing {
 
 impl Drawing {
     pub fn draw(&self, buffer: &mut Vec<u8>, w: usize, h: usize, rm: Rasterizer) {
+        if rm == Rasterizer::GPU {
+            // TODO 
+            return;
+        }
+
         // start with white background
         buffer.into_iter().for_each(|item| *item = 255u8);
 
@@ -120,6 +123,98 @@ impl Drawing {
     pub fn from_file(path: &str) -> Self {
         let file = BufReader::new(File::open(&Path::new(&path)).expect("Failed to open file"));
         return serde_json::from_reader(file).expect("Failed to parse json");
+    }
+
+    // for gpu rendering
+    pub fn to_vertices(&self) -> Vec<Vertex> {
+        // FIXME: hacky workaround --> 2 white triangles as background seems to fix blending issues
+        let mut background = vec![
+            Vertex {
+                position: [
+                    translate_coord(0.0f32),
+                    translate_coord(0.0f32),
+                    0.0f32,
+                    1.0f32,
+                ],
+                color: [1.0f32, 1.0f32, 1.0f32, 1.0f32],
+            },
+            Vertex {
+                position: [
+                    translate_coord(1.0f32),
+                    translate_coord(0.0f32),
+                    0.0f32,
+                    1.0f32,
+                ],
+                color: [1.0f32, 1.0f32, 1.0f32, 1.0f32],
+            },
+            Vertex {
+                position: [
+                    translate_coord(1.0f32),
+                    translate_coord(1.0f32),
+                    0.0f32,
+                    1.0f32,
+                ],
+                color: [1.0f32, 1.0f32, 1.0f32, 1.0f32],
+            },
+            Vertex {
+                position: [
+                    translate_coord(0.0f32),
+                    translate_coord(0.0f32),
+                    0.0f32,
+                    1.0f32,
+                ],
+                color: [1.0f32, 1.0f32, 1.0f32, 1.0f32],
+            },
+            Vertex {
+                position: [
+                    translate_coord(0.0f32),
+                    translate_coord(1.0f32),
+                    0.0f32,
+                    1.0f32,
+                ],
+                color: [1.0f32, 1.0f32, 1.0f32, 1.0f32],
+            },
+            Vertex {
+                position: [
+                    translate_coord(1.0f32),
+                    translate_coord(1.0f32),
+                    0.0f32,
+                    1.0f32,
+                ],
+                color: [1.0f32, 1.0f32, 1.0f32, 1.0f32],
+            },
+        ];
+
+        let vert: Vec<Vertex> = self
+            .clone()
+            .polygons
+            .into_iter()
+            .map(|pp| {
+                let arr: Vec<Vertex> = pp
+                    .points
+                    .into_iter()
+                    .map(|p| Vertex {
+                        position: [
+                            translate_coord(p.x),
+                            translate_coord(1.0 - p.y),
+                            0.0f32,
+                            1.0f32,
+                        ],
+                        color: [
+                            translate_color(pp.color.r),
+                            translate_color(pp.color.g),
+                            translate_color(pp.color.b),
+                            translate_color(pp.color.a),
+                        ],
+                    })
+                    .collect();
+                arr
+            })
+            .flatten()
+            .collect();
+
+        background.extend(vert);
+        background
     }
 }
 

@@ -4,12 +4,16 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+anyhow = "1.0.86"
+bytemuck = { version = "1.17.1", features = ["derive"] }
 divan = "0.1.14"
 image = "0.25.2"
 rand = "0.8.5"
 serde = { version = "1.0.209", features = ["derive"] }
 serde_json = "1.0.127"
 show-image = "0.14.0"
+tokio = { version = "1.40.0", features = ["macros", "rt-multi-thread"] }
+wgpu = "22.1.0"
 
 [[bench]]
 name = "bench"
