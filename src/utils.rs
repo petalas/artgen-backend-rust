@@ -2,7 +2,12 @@ use std::collections::HashMap;
 
 use rand::Rng;
 
-use crate::models::{color::Color, line::Line, point::Point, polygon::Polygon};
+use crate::models::{
+    color::Color,
+    line::Line,
+    point::{FixedPoint, Point},
+    polygon::Polygon,
+};
 
 pub struct ImageDimensions {
     pub width: usize,
@@ -56,16 +61,16 @@ pub fn fill_shape(buffer: &mut Vec<u8>, polygon: &Polygon, w: usize, h: usize) {
 // Another solution (maybe?) would be to sort points clockwise.
 pub fn fill_triangle(buffer: &mut Vec<u8>, polygon: &Polygon, w: usize, h: usize) {
     let points = &polygon.points;
-    let v: Vec<Point> = points.iter().map(|p| p.translate(w, h)).collect();
+    let v: Vec<FixedPoint> = points.iter().map(|p| p.translate_to_fixed(w, h)).collect();
 
     // 28.4 fixed-point coordinates
-    let Y1 = (v[0].y * 16f32).round() as i32;
-    let Y2 = (v[1].y * 16f32).round() as i32;
-    let Y3 = (v[2].y * 16f32).round() as i32;
-
-    let X1 = (v[0].x * 16f32).round() as i32;
-    let X2 = (v[1].x * 16f32).round() as i32;
-    let X3 = (v[2].x * 16f32).round() as i32;
+    // << 4 is basically multiplying by 16
+    let Y1 = v[0].y << 4;
+    let Y2 = v[1].y << 4;
+    let Y3 = v[2].y << 4;
+    let X1 = v[0].x << 4;
+    let X2 = v[1].x << 4;
+    let X3 = v[2].x << 4;
 
     // Deltas
     let DX12 = X1 - X2;
@@ -194,7 +199,7 @@ pub fn fill_triangle(buffer: &mut Vec<u8>, polygon: &Polygon, w: usize, h: usize
                         if (CX1 >= 0 && CX2 >= 0 && CX3 >= 0) || (CX1 <= 0 && CX2 <= 0 && CX3 <= 0)
                         {
                             let idx = 4 * iy * w as i32 + 4 * ix;
-                            fill_pixel(buffer, idx as usize, &&polygon.color);
+                            fill_pixel(buffer, idx as usize, &polygon.color);
                         }
                         CX1 -= FDY12;
                         CX2 -= FDY23;
@@ -211,9 +216,7 @@ pub fn fill_triangle(buffer: &mut Vec<u8>, polygon: &Polygon, w: usize, h: usize
 }
 
 fn fill_pixel(buffer: &mut Vec<u8>, index: usize, color: &Color) {
-    if buffer.len() <= index {
-        return;
-    }
+    assert!(buffer.len() > index + 3);
     let a = color.a as f32 / 255.0;
     let b = 1.0 - a;
     buffer[index] = ((buffer[index] as f32 * b) + (color.r as f32 * a)).round() as u8;

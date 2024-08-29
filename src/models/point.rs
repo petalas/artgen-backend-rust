@@ -14,6 +14,13 @@ pub struct Point {
     pub y: f32,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, PartialOrd)]
+#[repr(C)]
+pub struct FixedPoint {
+    pub x: i32,
+    pub y: i32,
+}
+
 impl Point {
     pub fn new_random() -> Point {
         Point {
@@ -50,6 +57,13 @@ impl Point {
         let y = (self.y * h as f32).round();
         assert!(x >= 0.0 && x <= w as f32 && y >= 0.0 && y <= h as f32);
         return Point { x, y };
+    }
+
+    pub fn translate_to_fixed(&self, w: usize, h: usize) -> FixedPoint {
+        let x = (self.x * w as f32).round() as i32;
+        let y = (self.y * h as f32).round() as i32;
+        assert!(x >= 0 && x <= w as i32 && y >= 0 && y <= h as i32);
+        return FixedPoint { x, y };
     }
 }
 

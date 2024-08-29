@@ -5,6 +5,7 @@ use crate::utils::{randomf32, randomu8};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy)]
+#[repr(C)]
 pub struct Color {
     pub r: u8,
     pub g: u8,
