@@ -61,7 +61,18 @@ pub fn fill_shape(buffer: &mut Vec<u8>, polygon: &Polygon, w: usize, h: usize) {
 // Another solution (maybe?) would be to sort points clockwise.
 pub fn fill_triangle(buffer: &mut Vec<u8>, polygon: &Polygon, w: usize, h: usize) {
     let points = &polygon.points;
-    let v: Vec<FixedPoint> = points.iter().map(|p| p.translate_to_fixed(w, h)).collect();
+    assert_eq!(points.len(), 3);
+    let mut v: Vec<FixedPoint> = points.iter().map(|p| p.translate_to_fixed(w, h)).collect();
+
+    // ensure correct orientation, swap two points around if needed
+    let orient = orient_2d(&v[0], &v[1], &v[2]);
+    if orient == 0 {
+        return; // degenerate triangle
+    }
+
+    if orient > 0 {
+        v.swap(0, 1);
+    }
 
     // 28.4 fixed-point coordinates
     // << 4 is basically multiplying by 16
@@ -139,23 +150,11 @@ pub fn fill_triangle(buffer: &mut Vec<u8>, polygon: &Polygon, w: usize, h: usize
             let a11 = (C1 + DX12 * y1 - DY12 * x1 > 0) as i32;
             let a = (a00 << 0) | (a10 << 1) | (a01 << 2) | (a11 << 3);
 
-            let a002 = (C1 + DX12 * y0 - DY12 * x0 < 0) as i32;
-            let a102 = (C1 + DX12 * y0 - DY12 * x1 < 0) as i32;
-            let a012 = (C1 + DX12 * y1 - DY12 * x0 < 0) as i32;
-            let a112 = (C1 + DX12 * y1 - DY12 * x1 < 0) as i32;
-            let a2 = (a002 << 0) | (a102 << 1) | (a012 << 2) | (a112 << 3);
-
             let b00 = (C2 + DX23 * y0 - DY23 * x0 > 0) as i32;
             let b10 = (C2 + DX23 * y0 - DY23 * x1 > 0) as i32;
             let b01 = (C2 + DX23 * y1 - DY23 * x0 > 0) as i32;
             let b11 = (C2 + DX23 * y1 - DY23 * x1 > 0) as i32;
             let b = (b00 << 0) | (b10 << 1) | (b01 << 2) | (b11 << 3);
-
-            let b002 = (C2 + DX23 * y0 - DY23 * x0 < 0) as i32;
-            let b102 = (C2 + DX23 * y0 - DY23 * x1 < 0) as i32;
-            let b012 = (C2 + DX23 * y1 - DY23 * x0 < 0) as i32;
-            let b112 = (C2 + DX23 * y1 - DY23 * x1 < 0) as i32;
-            let b2 = (b002 << 0) | (b102 << 1) | (b012 << 2) | (b112 << 3);
 
             let c00 = (C3 + DX31 * y0 - DY31 * x0 > 0) as i32;
             let c10 = (C3 + DX31 * y0 - DY31 * x1 > 0) as i32;
@@ -163,21 +162,13 @@ pub fn fill_triangle(buffer: &mut Vec<u8>, polygon: &Polygon, w: usize, h: usize
             let c11 = (C3 + DX31 * y1 - DY31 * x1 > 0) as i32;
             let c = (c00 << 0) | (c10 << 1) | (c01 << 2) | (c11 << 3);
 
-            let c002 = (C3 + DX31 * y0 - DY31 * x0 < 0) as i32;
-            let c102 = (C3 + DX31 * y0 - DY31 * x1 < 0) as i32;
-            let c012 = (C3 + DX31 * y1 - DY31 * x0 < 0) as i32;
-            let c112 = (C3 + DX31 * y1 - DY31 * x1 < 0) as i32;
-            let c2 = (c002 << 0) | (c102 << 1) | (c012 << 2) | (c112 << 3);
-
             // Skip block when outside an edge
-            // TODO optimization? (should only have to check one set of these)
-            if (a == 0x0 || b == 0x0 || c == 0x0) && (a2 == 0x0 || b2 == 0x0 || c2 == 0x0) {
+            if a == 0x0 || b == 0x0 || c == 0x0 {
                 continue;
             }
 
             // Accept whole block when totally covered
-            // TODO optimization? (should only have to check one set of these)
-            if (a == 0xF && b == 0xF && c == 0xF) || (a2 == 0xF && b2 == 0xF && c2 == 0xF) {
+            if a == 0xF && b == 0xF && c == 0xF {
                 for iy in y..(y + q) {
                     for ix in x..(x + q) {
                         let idx = 4 * iy * w as i32 + 4 * ix;
@@ -195,9 +186,7 @@ pub fn fill_triangle(buffer: &mut Vec<u8>, polygon: &Polygon, w: usize, h: usize
                     let mut CX3 = CY3;
 
                     for ix in x..(x + q) {
-                        // TODO optimization? (should only have to check one set of these)
-                        if (CX1 >= 0 && CX2 >= 0 && CX3 >= 0) || (CX1 <= 0 && CX2 <= 0 && CX3 <= 0)
-                        {
+                        if CX1 >= 0 && CX2 >= 0 && CX3 >= 0 {
                             let idx = 4 * iy * w as i32 + 4 * ix;
                             fill_pixel(buffer, idx as usize, &polygon.color);
                         }
@@ -223,6 +212,11 @@ fn fill_pixel(buffer: &mut Vec<u8>, index: usize, color: &Color) {
     buffer[index + 1] = ((buffer[index + 1] as f32 * b) + (color.g as f32 * a)).round() as u8;
     buffer[index + 2] = ((buffer[index + 2] as f32 * b) + (color.b as f32 * a)).round() as u8;
     buffer[index + 3] = u8::max(buffer[index + 3], color.a);
+}
+
+// https://fgiesen.wordpress.com/2013/02/08/triangle-rasterization-in-practice/
+pub fn orient_2d(a: &FixedPoint, b: &FixedPoint, c: &FixedPoint) -> i32 {
+    return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
 }
 
 /// Returns all lines looping back to the first one
