@@ -204,7 +204,7 @@ pub fn fill_triangle(buffer: &mut Vec<u8>, polygon: &Polygon, w: usize, h: usize
     }
 }
 
-fn fill_pixel(buffer: &mut Vec<u8>, index: usize, color: &Color) {
+pub fn fill_pixel(buffer: &mut Vec<u8>, index: usize, color: &Color) {
     assert!(buffer.len() > index + 3);
     let a = color.a as f32 / 255.0;
     let b = 1.0 - a;
