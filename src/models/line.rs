@@ -4,15 +4,15 @@ use super::point::Point;
 pub struct Line<'a> {
     pub a: &'a Point,
     pub b: &'a Point,
-    pub slope: f64,
+    pub slope: f32,
 
     pub max_x: usize,
     pub max_y: usize,
     pub min_x: usize,
     pub min_y: usize,
-    pub x_of_min_y: f64,
-    pub inverse_slope: f64,
-    pub next_x_to_fill: f64,
+    pub x_of_min_y: f32,
+    pub inverse_slope: f32,
+    pub next_x_to_fill: f32,
 }
 
 impl<'a> Line<'a> {
@@ -46,18 +46,18 @@ impl<'a> Line<'a> {
 
     /// returns false if this line segment is entirely above or below the row
     pub fn intersects(&self, row: usize) -> bool {
-        let y = row as f64;
+        let y = row as f32;
         (self.a.y >= y && self.b.y <= y) || (self.a.y <= y && self.b.y >= y)
     }
 
     /// y = mx + c => x = (y - c) / m               // line equation -> solve for x
     /// m = dy / dx = (b.y - a.y) / (b.x - a.x)     // slope
-    pub fn x_intercept(&self, y: usize) -> f64 {
+    pub fn x_intercept(&self, y: usize) -> f32 {
         if self.slope == 0.0 {
             // vertical line
             return self.a.x;
         }
-        let y = y as f64;
+        let y = y as f32;
         let c = self.a.y - (self.slope * self.a.x);
         (y - c) / self.slope // we return early for vertical lines -> no risk of dividing by zero
     }
@@ -69,7 +69,7 @@ impl<'a> Line<'a> {
             let x = self.x_intercept(row);
             return Some(Point {
                 x: x.round(),
-                y: row as f64,
+                y: row as f32,
             });
         }
     }

@@ -126,7 +126,7 @@ impl Engine {
             elapsed += t0.elapsed().as_millis() as usize;
         }
 
-        self.stats.cycle_time = elapsed; // can't get f64 ms directly
+        self.stats.cycle_time = elapsed; // can't get f32 ms directly
     }
 
     fn calculate_fitness(&mut self, mut drawing: Drawing, draw_error: bool) -> Drawing {
@@ -146,12 +146,12 @@ impl Engine {
             let ge = self.working_data[g] as isize - self.ref_image_data[g] as isize;
             let be = self.working_data[b] as isize - self.ref_image_data[b] as isize;
 
-            let sqrt = f64::sqrt(((re * re) + (ge * ge) + (be * be)) as f64);
+            let sqrt = f32::sqrt(((re * re) + (ge * ge) + (be * be)) as f32);
             error += sqrt;
 
             if draw_error {
                 // scale it to 0 - 255, full red = max error
-                let err_color = f64::floor(255.0 * (1.0 - sqrt / MAX_ERROR_PER_PIXEL)) as u8;
+                let err_color = f32::floor(255.0 * (1.0 - sqrt / MAX_ERROR_PER_PIXEL)) as u8;
                 self.error_data[r] = 255;
                 self.error_data[g] = err_color;
                 self.error_data[b] = err_color;
@@ -163,9 +163,9 @@ impl Engine {
             // TODO
         }
 
-        let max_total_error = MAX_ERROR_PER_PIXEL * self.w as f64 * self.h as f64;
+        let max_total_error = MAX_ERROR_PER_PIXEL * self.w as f32 * self.h as f32;
         drawing.fitness = 100.0 * (1.0 - error / max_total_error);
-        let penalty = drawing.fitness * PER_POINT_MULTIPLIER * drawing.num_points() as f64;
+        let penalty = drawing.fitness * PER_POINT_MULTIPLIER * drawing.num_points() as f32;
         drawing.fitness -= penalty;
 
         drawing

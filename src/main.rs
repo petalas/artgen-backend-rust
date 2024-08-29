@@ -28,7 +28,7 @@ fn main() {
                 continue;
             }
             let g = engine.stats.generated;
-            let rate = (g as f64 / t as f64).round() as usize;
+            let rate = (g as f32 / t as f32).round() as usize;
             println!("Generated {:?} in {}s (~{}/s)", g, t, rate);
         }
     }

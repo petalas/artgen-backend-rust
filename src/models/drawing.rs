@@ -5,7 +5,7 @@ use crate::{
     engine::Rasterizer, settings::{
         ADD_POLYGON_PROB, MAX_POLYGONS_PER_IMAGE, MIN_POLYGONS_PER_IMAGE, REMOVE_POLYGON_PROB,
         REORDER_POLYGON_PROB, START_WITH_POLYGONS_PER_IMAGE,
-    }, utils::{fill_shape, fill_triangle, randomf64}
+    }, utils::{fill_shape, fill_triangle, randomf32}
 };
 
 use super::polygon::Polygon;
@@ -15,7 +15,7 @@ use super::polygon::Polygon;
 pub struct Drawing {
     pub polygons: Vec<Polygon>,
     pub is_dirty: bool,
-    pub fitness: f64,
+    pub fitness: f32,
 }
 
 impl Drawing {
@@ -49,19 +49,19 @@ impl Drawing {
     }
 
     pub fn mutate(&mut self) {
-        if randomf64() < ADD_POLYGON_PROB {
+        if randomf32() < ADD_POLYGON_PROB {
             if self.add_polygon() {
                 self.is_dirty = true;
             }
         }
 
-        if randomf64() < REMOVE_POLYGON_PROB {
+        if randomf32() < REMOVE_POLYGON_PROB {
             if self.remove_polygon() {
                 self.is_dirty = true;
             }
         }
 
-        if randomf64() < REORDER_POLYGON_PROB {
+        if randomf32() < REORDER_POLYGON_PROB {
             if self.reorder_polygons() {
                 self.is_dirty = true;
             }

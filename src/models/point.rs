@@ -5,50 +5,50 @@ use crate::{
         MICRO_ADJUSTMENT_DELTA, MICRO_ADJUSTMENT_PROBABILITY, MOVE_POINT_MAX_DELTA,
         MOVE_POINT_PROBABILITY,
     },
-    utils::{randomf64, randomf64_clamped},
+    utils::{randomf32, randomf32_clamped},
 };
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, PartialOrd)]
 pub struct Point {
-    pub x: f64,
-    pub y: f64,
+    pub x: f32,
+    pub y: f32,
 }
 
 impl Point {
     pub fn new_random() -> Point {
         Point {
-            x: randomf64(),
-            y: randomf64(),
+            x: randomf32(),
+            y: randomf32(),
         }
     }
 
-    pub fn offset(&mut self, x_offset: f64, y_offset: f64) {
+    pub fn offset(&mut self, x_offset: f32, y_offset: f32) {
         self.x = (self.x + x_offset).clamp(0.0, 1.0);
         self.y = (self.y + y_offset).clamp(0.0, 1.0);
     }
 
     pub fn mutate(&mut self) -> bool {
         let mut mutated = false;
-        if randomf64() < MOVE_POINT_PROBABILITY {
+        if randomf32() < MOVE_POINT_PROBABILITY {
             let d = MOVE_POINT_MAX_DELTA;
-            self.x = randomf64_clamped(self.x - d, self.x + d).clamp(0.0, 1.0);
-            self.y = randomf64_clamped(self.y - d, self.y + d).clamp(0.0, 1.0);
+            self.x = randomf32_clamped(self.x - d, self.x + d).clamp(0.0, 1.0);
+            self.y = randomf32_clamped(self.y - d, self.y + d).clamp(0.0, 1.0);
             mutated = true;
         }
 
-        if randomf64() < MICRO_ADJUSTMENT_PROBABILITY {
+        if randomf32() < MICRO_ADJUSTMENT_PROBABILITY {
             let d = MICRO_ADJUSTMENT_DELTA;
-            self.x = randomf64_clamped(self.x - d, self.x + d).clamp(0.0, 1.0);
-            self.y = randomf64_clamped(self.y - d, self.y + d).clamp(0.0, 1.0);
+            self.x = randomf32_clamped(self.x - d, self.x + d).clamp(0.0, 1.0);
+            self.y = randomf32_clamped(self.y - d, self.y + d).clamp(0.0, 1.0);
             mutated = true;
         }
         mutated
     }
 
     pub fn translate(&self, w: usize, h: usize) -> Point {
-        let x = (self.x * w as f64).round();
-        let y = (self.y * h as f64).round();
-        assert!(x >= 0.0 && x <= w as f64 && y >= 0.0 && y <= h as f64);
+        let x = (self.x * w as f32).round();
+        let y = (self.y * h as f32).round();
+        assert!(x >= 0.0 && x <= w as f32 && y >= 0.0 && y <= h as f32);
         return Point { x, y };
     }
 }

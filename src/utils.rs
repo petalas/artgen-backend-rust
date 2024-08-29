@@ -13,11 +13,11 @@ pub fn randomu8() -> u8 {
     rand::thread_rng().gen::<u8>()
 }
 
-pub fn randomf64() -> f64 {
-    rand::thread_rng().gen::<f64>()
+pub fn randomf32() -> f32 {
+    rand::thread_rng().gen::<f32>()
 }
 
-pub fn randomf64_clamped(min: f64, max: f64) -> f64 {
+pub fn randomf32_clamped(min: f32, max: f32) -> f32 {
     return rand::thread_rng().gen_range(min..max);
 }
 
@@ -27,9 +27,9 @@ pub fn calculate_aspect_ratio_fit(
     max_w: usize,
     max_h: usize,
 ) -> ImageDimensions {
-    let w = src_width as f64;
-    let h = src_height as f64;
-    let ratio: f64 = (max_w as f64 / w as f64).min(max_h as f64 / h as f64);
+    let w = src_width as f32;
+    let h = src_height as f32;
+    let ratio: f32 = (max_w as f32 / w as f32).min(max_h as f32 / h as f32);
     ImageDimensions {
         width: (w * ratio).round() as usize,
         height: (h * ratio).round() as usize,
@@ -59,13 +59,13 @@ pub fn fill_triangle(buffer: &mut Vec<u8>, polygon: &Polygon, w: usize, h: usize
     let v: Vec<Point> = points.iter().map(|p| p.translate(w, h)).collect();
 
     // 28.4 fixed-point coordinates
-    let Y1 = (v[0].y * 16f64).round() as i32;
-    let Y2 = (v[1].y * 16f64).round() as i32;
-    let Y3 = (v[2].y * 16f64).round() as i32;
+    let Y1 = (v[0].y * 16f32).round() as i32;
+    let Y2 = (v[1].y * 16f32).round() as i32;
+    let Y3 = (v[2].y * 16f32).round() as i32;
 
-    let X1 = (v[0].x * 16f64).round() as i32;
-    let X2 = (v[1].x * 16f64).round() as i32;
-    let X3 = (v[2].x * 16f64).round() as i32;
+    let X1 = (v[0].x * 16f32).round() as i32;
+    let X2 = (v[1].x * 16f32).round() as i32;
+    let X3 = (v[2].x * 16f32).round() as i32;
 
     // Deltas
     let DX12 = X1 - X2;
@@ -214,11 +214,11 @@ fn fill_pixel(buffer: &mut Vec<u8>, index: usize, color: &Color) {
     if buffer.len() <= index {
         return;
     }
-    let a = color.a as f64 / 255.0;
+    let a = color.a as f32 / 255.0;
     let b = 1.0 - a;
-    buffer[index] = ((buffer[index] as f64 * b) + (color.r as f64 * a)).round() as u8;
-    buffer[index + 1] = ((buffer[index + 1] as f64 * b) + (color.g as f64 * a)).round() as u8;
-    buffer[index + 2] = ((buffer[index + 2] as f64 * b) + (color.b as f64 * a)).round() as u8;
+    buffer[index] = ((buffer[index] as f32 * b) + (color.r as f32 * a)).round() as u8;
+    buffer[index + 1] = ((buffer[index + 1] as f32 * b) + (color.g as f32 * a)).round() as u8;
+    buffer[index + 2] = ((buffer[index + 2] as f32 * b) + (color.b as f32 * a)).round() as u8;
     buffer[index + 3] = u8::max(buffer[index + 3], color.a);
 }
 
@@ -269,7 +269,7 @@ fn get_points_inside(sides: Vec<Line>) -> Vec<Point> {
             if line.max_y != row {
                 intersection_points.push(Point {
                     x: line.next_x_to_fill,
-                    y: row as f64,
+                    y: row as f32,
                 });
             }
             // TODO: change x = x+ dx/dy to integer arithmetic
@@ -352,7 +352,7 @@ fn points_between(a: &Point, b: &Point) -> Vec<Point> {
 
     let p = (min as usize..max as usize)
         .map(|x| Point {
-            x: x as f64,
+            x: x as f32,
             y: a.y,
         })
         .collect();
