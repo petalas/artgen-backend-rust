@@ -2,9 +2,15 @@ use std::{borrow::Cow, mem};
 
 use wgpu::{
     vertex_attr_array, BlendState, ComputePipeline, Device, Gles3MinorVersion, InstanceFlags,
+    SubmissionIndex,
 };
 
-use crate::{buffer_dimensions::BufferDimensions, models::drawing::Drawing, texture::Texture};
+use crate::{
+    buffer_dimensions::BufferDimensions,
+    models::drawing::Drawing,
+    settings::{MAX_ERROR_PER_PIXEL, PER_POINT_MULTIPLIER},
+    texture::Texture,
+};
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -28,6 +34,8 @@ pub struct GpuPipeline {
     pub queue: wgpu::Queue,
     pub render_pipeline: wgpu::RenderPipeline,
     pub texture_extent: wgpu::Extent3d,
+    pub w: usize,
+    pub h: usize,
 }
 
 impl GpuPipeline {
@@ -295,10 +303,12 @@ impl GpuPipeline {
             queue,
             render_pipeline,
             texture_extent,
+            w,
+            h,
         }
     }
 
-    pub async fn draw(&self, drawing: &Drawing) {
+    pub async fn draw(&self, drawing: &Drawing) -> SubmissionIndex {
         let vertices: Vec<Vertex> = drawing.to_vertices();
 
         // create buffer, write buffer (bytemuck?)
@@ -362,10 +372,10 @@ impl GpuPipeline {
             encoder.finish()
         };
 
-        self.queue.submit(Some(command_buffer));
+        self.queue.submit(Some(command_buffer))
     }
 
-    pub async fn calculate_error(&self, width: u32, height: u32) -> wgpu::SubmissionIndex {
+    pub async fn calculate_error(&self, width: u32, height: u32) -> SubmissionIndex {
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -388,11 +398,73 @@ impl GpuPipeline {
             0,
             (width * height * 4) as u64,
         );
-
+        
         self.queue.submit(Some(encoder.finish()))
     }
 
-    pub async fn draw_and_evaluate(&self, drawing: &Drawing) {
-        todo!()
+    pub async fn draw_and_evaluate(&self, drawing: &mut Drawing) -> (f32, f32, Vec<u8>, Vec<u8>) {
+        // step 1 - render pipeline --> draw our triangles to a texture
+        let draw_si = self.draw(&drawing).await; // <-- WaitForSubmissionIndex after queue submit in there
+        self.device.poll(wgpu::MaintainBase::Poll); // extra poll just in case?
+        let best_drawing_bytes = self.get_bytes(&self.drawing_output_buffer, draw_si).await; // still stuck
+                                                                                             // self.device.poll(wgpu::Maintain::Wait);
+
+        // Step 2 - compute pipeline --> diff drawing texture vs source texture
+        let ce_si = self.calculate_error(self.w as u32, self.h as u32).await;
+
+        // Step 3 - calculate error and error heatmap (sum output of compute pipeline)
+        // TODO: parallel reduction on GPU, something like https://eximia.co/implementing-parallel-reduction-in-cuda/
+        let error_buffer = self.get_bytes(&self.error_output_buffer, ce_si).await;
+        // self.device.poll(wgpu::Maintain::Wait);
+        let (error, error_heatmap) = calculate_error_from_gpu(&error_buffer);
+        let max_total_error: f32 = MAX_ERROR_PER_PIXEL * self.w as f32 * self.h as f32;
+        let mut fitness: f32 = 100.0 * (1.0 - error / max_total_error);
+        let penalty = fitness * PER_POINT_MULTIPLIER * drawing.num_points() as f32;
+        fitness -= penalty;
+        drawing.fitness = fitness;
+
+        (error, fitness, best_drawing_bytes, error_heatmap)
     }
+
+    async fn get_bytes(&self, output_buffer: &wgpu::Buffer, si: SubmissionIndex) -> Vec<u8> {
+        let buffer_slice = output_buffer.slice(..);
+
+        // Sets the buffer up for mapping, sending over the result of the mapping back to us when it is finished.
+        let (sender, receiver) = futures_intrusive::channel::shared::oneshot_channel();
+        buffer_slice.map_async(wgpu::MapMode::Read, move |v| sender.send(v).unwrap());
+        self.device
+            .poll(wgpu::MaintainBase::WaitForSubmissionIndex(si));
+
+        if let Some(Ok(())) = receiver.receive().await {
+            let padded_buffer = buffer_slice.get_mapped_range();
+            let vec = padded_buffer.to_vec();
+            drop(padded_buffer); // avoid --> "You cannot unmap a buffer that still has accessible mapped views."
+            output_buffer.unmap(); // avoid --> Buffer ObjectId { id: Some(1) } is already mapped' (breaks looping logic)
+            return vec;
+        } else {
+            output_buffer.unmap(); // probably makes no difference but just to be safe
+            return vec![];
+        }
+    }
+}
+
+// we are now calculating sqrt(((re * re) + (ge * ge) + (be * be))) in the gpu
+// error_buffer is raw bytes straight out of the gpu so need to convert chunks of 4 back into f32
+fn calculate_error_from_gpu(error_buffer: &Vec<u8>) -> (f32, Vec<u8>) {
+    let error_buffer_f32: Vec<f32> = error_buffer
+        .chunks_exact(4)
+        .map(|c| f32::from_ne_bytes(c.try_into().unwrap()))
+        .collect();
+
+    let mut error_heatmap: Vec<u8> = Vec::with_capacity(error_buffer.len() * 4);
+    let mut error: f32 = 0.0;
+    error_buffer_f32.into_iter().for_each(|sqrt| {
+        // info!("error = {}", sqrt);
+        error += sqrt;
+        let err_color = f32::floor(255.0 * (1.0 - sqrt / MAX_ERROR_PER_PIXEL)) as u8;
+        error_heatmap.extend_from_slice(&[255, err_color, err_color, 255]);
+    });
+
+    // info!("{:?}", error_heatmap);
+    return (error, error_heatmap);
 }

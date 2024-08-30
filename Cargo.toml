@@ -7,6 +7,8 @@ edition = "2021"
 anyhow = "1.0.86"
 bytemuck = { version = "1.17.1", features = ["derive"] }
 divan = "0.1.14"
+futures = "0.3.30"
+futures-intrusive = "0.5.0"
 image = "0.25.2"
 rand = "0.8.5"
 serde = { version = "1.0.209", features = ["derive"] }

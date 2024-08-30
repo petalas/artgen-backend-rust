@@ -2,12 +2,12 @@ use std::time::Instant;
 
 use image::{imageops::FilterType::Lanczos3, EncodableLayout, ImageReader};
 use show_image::{create_window, ImageInfo, ImageView, WindowProxy};
-use tokio::runtime::Runtime;
+use tokio::runtime::{Handle, Runtime};
 use wgpu::{core::pipeline, Gles3MinorVersion, InstanceFlags};
 
 use crate::{
     buffer_dimensions::BufferDimensions,
-    gpu_pipeline::GpuPipeline,
+    gpu_pipeline::{self, GpuPipeline},
     models::{
         color::{Color, WHITE},
         drawing::Drawing,
@@ -55,6 +55,7 @@ pub struct Engine {
     pub initialized: bool,
     pub gpu_pipeline: Option<GpuPipeline>,
     pub rt: Runtime,
+    pub handle: Option<Handle>,
 }
 
 impl Engine {
@@ -81,6 +82,7 @@ impl Engine {
             initialized: false,
             gpu_pipeline: None,
             rt: Runtime::new().expect("failed to create runtime"),
+            handle: None,
         }
     }
 
@@ -128,12 +130,13 @@ impl Engine {
             Some(create_window("image", Default::default()).expect("Failed to create window."));
     }
 
-    pub async fn init_gpu(&mut self) {
+    pub async fn init_gpu(&mut self, handle: Handle) {
+        self.handle = Some(handle);
         self.gpu_pipeline =
             Some(GpuPipeline::new(to_u8_vec(&self.ref_image_data.clone()), self.w, self.h).await);
     }
 
-    pub fn tick(&mut self, max_time_ms: usize) {
+    pub async fn tick(&mut self, max_time_ms: usize) {
         self.stats.ticks = 0;
         let mut elapsed: usize = 0;
         while elapsed < max_time_ms {
@@ -143,17 +146,24 @@ impl Engine {
             let mut clone = self.current_best.clone();
             clone.mutate();
             self.stats.generated += 1;
-            self.calculate_fitness(&mut clone, false);
+            self.calculate_fitness(&mut clone, false).await;
             if clone.fitness > self.current_best.fitness {
                 // calculate again this time including error data (for display purposes)
-                self.calculate_fitness(&mut clone, true);
+                self.calculate_fitness(&mut clone, true).await;
                 self.current_best = clone;
                 self.stats.improvements += 1;
-                self.current_best
-                    .draw(&mut self.working_data, self.w, self.h, self.raster_mode);
+
+                if self.raster_mode != Rasterizer::GPU {
+                    self.current_best.draw(
+                        &mut self.working_data,
+                        self.w,
+                        self.h,
+                        self.raster_mode,
+                    );
+                }
 
                 if self.window.is_some() {
-                    let pixels = to_u8_vec(&self.working_data);
+                    let pixels = to_u8_vec(&self.working_data); // FIXME if GPU mode don't convert to Colors and Back to u8s
                     let image =
                         ImageView::new(ImageInfo::rgba8(self.w as u32, self.h as u32), &pixels);
                     self.window
@@ -169,12 +179,24 @@ impl Engine {
         self.stats.cycle_time = elapsed; // can't get f32 ms directly
     }
 
-    pub fn calculate_fitness(&mut self, drawing: &mut Drawing, draw_error: bool) {
+    pub async fn calculate_fitness(&mut self, drawing: &mut Drawing, draw_error: bool) {
         if self.raster_mode == Rasterizer::GPU {
-            let gpu_pipeline = self.gpu_pipeline.as_ref().expect("no gpu pipeline?");
-            self.rt.block_on(async move {
-                gpu_pipeline.draw_and_evaluate(drawing).await;
-            });
+            let gpu_pipeline = self
+                .gpu_pipeline
+                .as_mut()
+                .expect("gpu pipeline not initialized.");
+
+            let (_, _, pixels, _) = gpu_pipeline.draw_and_evaluate(drawing).await;
+            self.working_data = to_color_vec(&pixels);
+            // FIXME: Cannot start a runtime from within a runtime
+            // let future = async {
+            //     let gpu_pipeline = self
+            //         .gpu_pipeline
+            //         .as_mut()
+            //         .expect("gpu pipeline not initialized.");
+            //     gpu_pipeline.draw_and_evaluate(drawing).await;
+            // };
+            // self.handle.as_mut().expect("welp").block_on(future);
         } else {
             drawing.draw(&mut self.working_data, self.w, self.h, self.raster_mode);
 

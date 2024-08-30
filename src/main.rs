@@ -1,4 +1,7 @@
-use std::time::Instant;
+use std::{
+    thread::sleep,
+    time::{Duration, Instant},
+};
 
 use artgen_backend_rust::{
     engine::{self, Engine, Rasterizer},
@@ -6,19 +9,18 @@ use artgen_backend_rust::{
     settings::{MAX_IMAGE_HEIGHT, MAX_IMAGE_WIDTH, TARGET_FRAMETIME},
 };
 use show_image::event;
+use tokio::runtime::Handle;
 
-// mod engine;
-// mod models;
-// mod settings;
-// mod utils;
-
-#[show_image::main]
 #[tokio::main]
+#[show_image::main]
 async fn main() {
+    let handle = Handle::current();
     let mut engine = Engine::new();
     engine.init("ff.jpg", MAX_IMAGE_WIDTH, MAX_IMAGE_HEIGHT);
     engine.init_window();
-    // engine.set_best(Drawing::from_file("ff.json"));
+    engine.init_gpu(handle).await;
+    engine.raster_mode = Rasterizer::GPU;
+    engine.set_best(Drawing::from_file("ff.json"));
 
     // engine.test();
     // engine.test2();
@@ -28,7 +30,7 @@ async fn main() {
     let t0 = Instant::now();
     loop {
         ticks += 1;
-        engine.tick(TARGET_FRAMETIME);
+        engine.tick(TARGET_FRAMETIME).await;
         if ticks % TARGET_FRAMETIME == 0 {
             let t = (Instant::now() - t0).as_millis();
             if t < 1 {
