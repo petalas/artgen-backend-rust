@@ -298,7 +298,7 @@ impl GpuPipeline {
         }
     }
 
-    async fn draw(&self, drawing: &Drawing) {
+    pub async fn draw(&self, drawing: &Drawing) {
         let vertices: Vec<Vertex> = drawing.to_vertices();
 
         // create buffer, write buffer (bytemuck?)
@@ -365,7 +365,7 @@ impl GpuPipeline {
         self.queue.submit(Some(command_buffer));
     }
 
-    async fn calculate_error(&self, width: u32, height: u32) -> wgpu::SubmissionIndex {
+    pub async fn calculate_error(&self, width: u32, height: u32) -> wgpu::SubmissionIndex {
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -390,5 +390,9 @@ impl GpuPipeline {
         );
 
         self.queue.submit(Some(encoder.finish()))
+    }
+
+    pub async fn draw_and_evaluate(&self, drawing: &Drawing) {
+        todo!()
     }
 }

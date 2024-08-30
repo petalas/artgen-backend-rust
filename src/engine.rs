@@ -2,13 +2,15 @@ use std::time::Instant;
 
 use image::{imageops::FilterType::Lanczos3, EncodableLayout, ImageReader};
 use show_image::{create_window, ImageInfo, ImageView, WindowProxy};
-use wgpu::{Gles3MinorVersion, InstanceFlags};
+use tokio::runtime::Runtime;
+use wgpu::{core::pipeline, Gles3MinorVersion, InstanceFlags};
 
 use crate::{
-    buffer_dimensions::BufferDimensions, gpu_pipeline::GpuPipeline, models::{drawing::Drawing, point::Point, polygon::Polygon}, settings::{MAX_ERROR_PER_PIXEL, MAX_IMAGE_HEIGHT, MAX_IMAGE_WIDTH, PER_POINT_MULTIPLIER}
+    buffer_dimensions::BufferDimensions,
+    gpu_pipeline::GpuPipeline,
+    models::{drawing::Drawing, point::Point, polygon::Polygon},
+    settings::{MAX_ERROR_PER_PIXEL, MAX_IMAGE_HEIGHT, MAX_IMAGE_WIDTH, PER_POINT_MULTIPLIER},
 };
-
-
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Rasterizer {
@@ -42,10 +44,11 @@ pub struct Engine {
     pub h: usize,
     pub current_best: Drawing,
     pub stats: Stats,
-    pub window: WindowProxy,
+    pub window: Option<WindowProxy>,
     pub raster_mode: Rasterizer,
     pub initialized: bool,
     pub gpu_pipeline: Option<GpuPipeline>,
+    pub rt: Runtime,
 }
 
 impl Engine {
@@ -53,8 +56,6 @@ impl Engine {
         let ref_image_data: Vec<u8> = vec![];
         let error_data: Vec<u8> = vec![];
         let working_data: Vec<u8> = vec![];
-        let window = create_window("image", Default::default()).expect("Failed to create window.");
-
 
         Engine {
             ref_image_data,
@@ -69,14 +70,15 @@ impl Engine {
                 cycle_time: 0,
                 ticks: 0,
             },
-            window,
+            window: None,
             raster_mode: Rasterizer::Optimal,
             initialized: false,
-            gpu_pipeline: None
+            gpu_pipeline: None,
+            rt: Runtime::new().expect("failed to create runtime"),
         }
     }
 
-    pub async fn init(&mut self, filepath: &str, max_w: usize, max_h: usize) {
+    pub fn init(&mut self, filepath: &str, max_w: usize, max_h: usize) {
         let mut img = ImageReader::open(filepath)
             .expect("Failed to load image")
             .decode()
@@ -93,26 +95,35 @@ impl Engine {
         }
 
         self.ref_image_data = img.into_rgba8().as_bytes().to_vec();
-        println!("Loaded {}x{} image.", self.w, self.h);
+        // println!("Loaded {}x{} image.", self.w, self.h);
         assert!(self.ref_image_data.len() == self.w * self.h * 4);
-        self.post_init().await;
+        self.post_init();
     }
 
     pub fn set_best(&mut self, drawing: Drawing) {
         assert!(self.initialized);
         self.current_best = drawing;
         self.current_best.fitness = 0.0; // do not trust
-        self.redraw();
+        if self.window.is_some() {
+            self.redraw();
+        }
     }
 
-    async fn post_init(&mut self) {
+    fn post_init(&mut self) {
         let size: usize = (self.w * self.h * 4) as usize;
         self.working_data = vec![0u8; size];
         self.error_data = vec![0u8; size];
-
-        self.gpu_pipeline = Some(GpuPipeline::new(self.ref_image_data.clone(), self.w, self.h).await);
-        println!("Engine ready.");
         self.initialized = true;
+    }
+
+    pub fn init_window(&mut self) {
+        self.window =
+            Some(create_window("image", Default::default()).expect("Failed to create window."));
+    }
+
+    pub async fn init_gpu(&mut self) {
+        self.gpu_pipeline =
+            Some(GpuPipeline::new(self.ref_image_data.clone(), self.w, self.h).await);
     }
 
     pub fn tick(&mut self, max_time_ms: usize) {
@@ -125,22 +136,26 @@ impl Engine {
             let mut clone = self.current_best.clone();
             clone.mutate();
             self.stats.generated += 1;
-            clone = self.calculate_fitness(clone, false);
+            self.calculate_fitness(&mut clone, false);
             if clone.fitness > self.current_best.fitness {
                 // calculate again this time including error data (for display purposes)
-                clone = self.calculate_fitness(clone, true);
+                self.calculate_fitness(&mut clone, true);
                 self.current_best = clone;
                 self.stats.improvements += 1;
                 self.current_best
                     .draw(&mut self.working_data, self.w, self.h, self.raster_mode);
 
-                let image = ImageView::new(
-                    ImageInfo::rgba8(self.w as u32, self.h as u32),
-                    &self.working_data,
-                );
-                self.window
-                    .set_image("image-001", image)
-                    .expect("Failed to set image.");
+                if self.window.is_some() {
+                    let image = ImageView::new(
+                        ImageInfo::rgba8(self.w as u32, self.h as u32),
+                        &self.working_data,
+                    );
+                    self.window
+                        .as_mut()
+                        .expect("no window?")
+                        .set_image("image-001", image)
+                        .expect("Failed to set image.");
+                }
             }
             elapsed += t0.elapsed().as_millis() as usize;
         }
@@ -148,46 +163,51 @@ impl Engine {
         self.stats.cycle_time = elapsed; // can't get f32 ms directly
     }
 
-    fn calculate_fitness(&mut self, mut drawing: Drawing, draw_error: bool) -> Drawing {
-        drawing.draw(&mut self.working_data, self.w, self.h, self.raster_mode);
+    pub fn calculate_fitness(&mut self, drawing: &mut Drawing, draw_error: bool) {
+        if self.raster_mode == Rasterizer::GPU {
+            let gpu_pipeline = self.gpu_pipeline.as_ref().expect("no gpu pipeline?");
+            self.rt.block_on(async move {
+                gpu_pipeline.draw_and_evaluate(drawing).await;
+            });
+        } else {
+            drawing.draw(&mut self.working_data, self.w, self.h, self.raster_mode);
 
-        let num_pixels = self.w * self.h;
+            let num_pixels = self.w * self.h;
 
-        let mut error = 0.0;
-        for i in 0..num_pixels {
-            let r = (i * 4) as usize;
-            let g = r + 1;
-            let b = g + 1;
-            let a = b + 1;
+            let mut error = 0.0;
+            for i in 0..num_pixels {
+                let r = (i * 4) as usize;
+                let g = r + 1;
+                let b = g + 1;
+                let a = b + 1;
 
-            // can't subtract u8 from u8 -> potential underflow
-            let re = self.working_data[r] as isize - self.ref_image_data[r] as isize;
-            let ge = self.working_data[g] as isize - self.ref_image_data[g] as isize;
-            let be = self.working_data[b] as isize - self.ref_image_data[b] as isize;
+                // can't subtract u8 from u8 -> potential underflow
+                let re = self.working_data[r] as isize - self.ref_image_data[r] as isize;
+                let ge = self.working_data[g] as isize - self.ref_image_data[g] as isize;
+                let be = self.working_data[b] as isize - self.ref_image_data[b] as isize;
 
-            let sqrt = f32::sqrt(((re * re) + (ge * ge) + (be * be)) as f32);
-            error += sqrt;
+                let sqrt = f32::sqrt(((re * re) + (ge * ge) + (be * be)) as f32);
+                error += sqrt;
+
+                if draw_error {
+                    // scale it to 0 - 255, full red = max error
+                    let err_color = f32::floor(255.0 * (1.0 - sqrt / MAX_ERROR_PER_PIXEL)) as u8;
+                    self.error_data[r] = 255;
+                    self.error_data[g] = err_color;
+                    self.error_data[b] = err_color;
+                    self.error_data[a] = 255;
+                }
+            }
 
             if draw_error {
-                // scale it to 0 - 255, full red = max error
-                let err_color = f32::floor(255.0 * (1.0 - sqrt / MAX_ERROR_PER_PIXEL)) as u8;
-                self.error_data[r] = 255;
-                self.error_data[g] = err_color;
-                self.error_data[b] = err_color;
-                self.error_data[a] = 255;
+                // TODO
             }
+
+            let max_total_error = MAX_ERROR_PER_PIXEL * self.w as f32 * self.h as f32;
+            drawing.fitness = 100.0 * (1.0 - error / max_total_error);
+            let penalty = drawing.fitness * PER_POINT_MULTIPLIER * drawing.num_points() as f32;
+            drawing.fitness -= penalty;
         }
-
-        if draw_error {
-            // TODO
-        }
-
-        let max_total_error = MAX_ERROR_PER_PIXEL * self.w as f32 * self.h as f32;
-        drawing.fitness = 100.0 * (1.0 - error / max_total_error);
-        let penalty = drawing.fitness * PER_POINT_MULTIPLIER * drawing.num_points() as f32;
-        drawing.fitness -= penalty;
-
-        drawing
     }
 
     // testing our rasterization logic
@@ -230,6 +250,8 @@ impl Engine {
             &self.working_data,
         );
         self.window
+            .as_mut()
+            .expect("no window?")
             .set_image("image-001", image)
             .expect("Failed to set image.");
     }
@@ -268,6 +290,8 @@ impl Engine {
             &self.working_data,
         );
         self.window
+            .as_mut()
+            .expect("no window?")
             .set_image("image-001", image)
             .expect("Failed to set image.");
     }
@@ -282,6 +306,8 @@ impl Engine {
             &self.working_data,
         );
         self.window
+            .as_mut()
+            .expect("no window?")
             .set_image("image-001", image)
             .expect("Failed to set image.");
     }
@@ -294,6 +320,8 @@ impl Engine {
             &self.working_data,
         );
         self.window
+            .as_mut()
+            .expect("no window?")
             .set_image("image-001", image)
             .expect("Failed to set image.");
     }
