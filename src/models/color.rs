@@ -1,5 +1,6 @@
 use crate::settings::{
-    CHANGE_COLOR_PROB, DARKEN_COLOR_PROB, LIGHTEN_COLOR_PROB, MAX_ALPHA, MICRO_ADJUSTMENT_PROBABILITY, MIN_ALPHA
+    CHANGE_COLOR_PROB, DARKEN_COLOR_PROB, LIGHTEN_COLOR_PROB, MAX_ALPHA,
+    MICRO_ADJUSTMENT_PROBABILITY, MIN_ALPHA,
 };
 use crate::utils::{randomf32, randomu8};
 use serde::{Deserialize, Serialize};
@@ -12,6 +13,13 @@ pub struct Color {
     pub b: u8,
     pub a: u8,
 }
+
+pub const WHITE: Color = Color {
+    r: 255,
+    g: 255,
+    b: 255,
+    a: 255,
+};
 
 impl Color {
     pub fn new_random() -> Color {
@@ -97,5 +105,16 @@ impl Color {
             }
         };
         val
+    }
+}
+
+impl From<&[u8]> for Color {
+    fn from(value: &[u8]) -> Self {
+        Color {
+            r: value[0],
+            g: value[1],
+            b: value[2],
+            a: value[3],
+        }
     }
 }

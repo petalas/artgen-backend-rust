@@ -10,7 +10,7 @@ use crate::{
     }, utils::{fill_shape, fill_triangle, randomf32, translate_color, translate_coord}
 };
 
-use super::polygon::Polygon;
+use super::{color::{Color, WHITE}, polygon::Polygon};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -21,14 +21,14 @@ pub struct Drawing {
 }
 
 impl Drawing {
-    pub fn draw(&self, buffer: &mut Vec<u8>, w: usize, h: usize, rm: Rasterizer) {
+    pub fn draw(&self, buffer: &mut Vec<Color>, w: usize, h: usize, rm: Rasterizer) {
         if rm == Rasterizer::GPU {
             // TODO 
             return;
         }
 
         // start with white background
-        buffer.into_iter().for_each(|item| *item = 255u8);
+        buffer.into_iter().for_each(|item| *item = WHITE);
 
         for polygon in &self.polygons {
             if rm == Rasterizer::Scanline || polygon.points.len() > 3 {

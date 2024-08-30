@@ -8,8 +8,9 @@ use wgpu::{core::pipeline, Gles3MinorVersion, InstanceFlags};
 use crate::{
     buffer_dimensions::BufferDimensions,
     gpu_pipeline::GpuPipeline,
-    models::{drawing::Drawing, point::Point, polygon::Polygon},
+    models::{color::Color, drawing::Drawing, point::Point, polygon::Polygon},
     settings::{MAX_ERROR_PER_PIXEL, MAX_IMAGE_HEIGHT, MAX_IMAGE_WIDTH, PER_POINT_MULTIPLIER},
+    utils::{to_color_vec, to_u8_vec},
 };
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -37,9 +38,9 @@ pub struct Stats {
 }
 
 pub struct Engine {
-    pub ref_image_data: Vec<u8>,
-    pub working_data: Vec<u8>,
-    pub error_data: Vec<u8>,
+    pub ref_image_data: Vec<Color>,
+    pub working_data: Vec<Color>,
+    pub error_data: Vec<Color>,
     pub w: usize,
     pub h: usize,
     pub current_best: Drawing,
@@ -53,9 +54,9 @@ pub struct Engine {
 
 impl Engine {
     pub fn new() -> Engine {
-        let ref_image_data: Vec<u8> = vec![];
-        let error_data: Vec<u8> = vec![];
-        let working_data: Vec<u8> = vec![];
+        let ref_image_data: Vec<Color> = vec![];
+        let error_data: Vec<Color> = vec![];
+        let working_data: Vec<Color> = vec![];
 
         Engine {
             ref_image_data,
@@ -94,9 +95,9 @@ impl Engine {
             self.h = img.height() as usize;
         }
 
-        self.ref_image_data = img.into_rgba8().as_bytes().to_vec();
+        self.ref_image_data = to_color_vec(&img.into_rgba8().as_bytes().to_vec());
         // println!("Loaded {}x{} image.", self.w, self.h);
-        assert!(self.ref_image_data.len() == self.w * self.h * 4);
+        assert!(self.ref_image_data.len() == self.w * self.h);
         self.post_init();
     }
 
@@ -110,9 +111,25 @@ impl Engine {
     }
 
     fn post_init(&mut self) {
-        let size: usize = (self.w * self.h * 4) as usize;
-        self.working_data = vec![0u8; size];
-        self.error_data = vec![0u8; size];
+        let size: usize = (self.w * self.h) as usize;
+        self.working_data = vec![
+            Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 0
+            };
+            size
+        ];
+        self.error_data = vec![
+            Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 0
+            };
+            size
+        ];
         self.initialized = true;
     }
 
@@ -123,7 +140,7 @@ impl Engine {
 
     pub async fn init_gpu(&mut self) {
         self.gpu_pipeline =
-            Some(GpuPipeline::new(self.ref_image_data.clone(), self.w, self.h).await);
+            Some(GpuPipeline::new(to_u8_vec(&self.ref_image_data.clone()), self.w, self.h).await);
     }
 
     pub fn tick(&mut self, max_time_ms: usize) {
@@ -146,10 +163,9 @@ impl Engine {
                     .draw(&mut self.working_data, self.w, self.h, self.raster_mode);
 
                 if self.window.is_some() {
-                    let image = ImageView::new(
-                        ImageInfo::rgba8(self.w as u32, self.h as u32),
-                        &self.working_data,
-                    );
+                    let pixels = to_u8_vec(&self.working_data);
+                    let image =
+                        ImageView::new(ImageInfo::rgba8(self.w as u32, self.h as u32), &pixels);
                     self.window
                         .as_mut()
                         .expect("no window?")
@@ -173,18 +189,20 @@ impl Engine {
             drawing.draw(&mut self.working_data, self.w, self.h, self.raster_mode);
 
             let num_pixels = self.w * self.h;
+            assert!(num_pixels == self.working_data.len());
+            assert!(self.ref_image_data.len() == self.working_data.len());
 
             let mut error = 0.0;
             for i in 0..num_pixels {
-                let r = (i * 4) as usize;
-                let g = r + 1;
-                let b = g + 1;
-                let a = b + 1;
+                // let r = (i * 4) as usize;
+                // let g = r + 1;
+                // let b = g + 1;
+                // let a = b + 1;
 
                 // can't subtract u8 from u8 -> potential underflow
-                let re = self.working_data[r] as isize - self.ref_image_data[r] as isize;
-                let ge = self.working_data[g] as isize - self.ref_image_data[g] as isize;
-                let be = self.working_data[b] as isize - self.ref_image_data[b] as isize;
+                let re = self.working_data[i].r as i32 - self.ref_image_data[i].r as i32;
+                let ge = self.working_data[i].g as i32 - self.ref_image_data[i].g as i32;
+                let be = self.working_data[i].b as i32 - self.ref_image_data[i].b as i32;
 
                 let sqrt = f32::sqrt(((re * re) + (ge * ge) + (be * be)) as f32);
                 error += sqrt;
@@ -192,10 +210,10 @@ impl Engine {
                 if draw_error {
                     // scale it to 0 - 255, full red = max error
                     let err_color = f32::floor(255.0 * (1.0 - sqrt / MAX_ERROR_PER_PIXEL)) as u8;
-                    self.error_data[r] = 255;
-                    self.error_data[g] = err_color;
-                    self.error_data[b] = err_color;
-                    self.error_data[a] = 255;
+                    self.error_data[i].r = 255;
+                    self.error_data[i].g = err_color;
+                    self.error_data[i].b = err_color;
+                    self.error_data[i].a = 255;
                 }
             }
 
@@ -241,14 +259,12 @@ impl Engine {
 
         let all_red = self
             .working_data
-            .chunks_exact(4)
-            .all(|c| c == [255, 0, 0, 255]);
+            .iter()
+            .all(|c| c.r == 255 && c.g == 0 && c.b == 0 && c.a == 255);
         // assert!(all_red);
 
-        let image = ImageView::new(
-            ImageInfo::rgba8(self.w as u32, self.h as u32),
-            &self.working_data,
-        );
+        let pixels = to_u8_vec(&self.working_data);
+        let image = ImageView::new(ImageInfo::rgba8(self.w as u32, self.h as u32), &pixels);
         self.window
             .as_mut()
             .expect("no window?")
@@ -285,10 +301,8 @@ impl Engine {
         //     .all(|c| c == [255, 0, 0, 255]);
         // assert!(all_red);
 
-        let image = ImageView::new(
-            ImageInfo::rgba8(self.w as u32, self.h as u32),
-            &self.working_data,
-        );
+        let pixels = to_u8_vec(&self.working_data);
+        let image = ImageView::new(ImageInfo::rgba8(self.w as u32, self.h as u32), &pixels);
         self.window
             .as_mut()
             .expect("no window?")
@@ -301,10 +315,8 @@ impl Engine {
         d.draw(&mut self.working_data, self.w, self.h, self.raster_mode);
         self.current_best = d;
 
-        let image = ImageView::new(
-            ImageInfo::rgba8(self.w as u32, self.h as u32),
-            &self.working_data,
-        );
+        let pixels = to_u8_vec(&self.working_data);
+        let image = ImageView::new(ImageInfo::rgba8(self.w as u32, self.h as u32), &pixels);
         self.window
             .as_mut()
             .expect("no window?")
@@ -315,10 +327,8 @@ impl Engine {
     pub fn redraw(&mut self) {
         self.current_best
             .draw(&mut self.working_data, self.w, self.h, self.raster_mode);
-        let image = ImageView::new(
-            ImageInfo::rgba8(self.w as u32, self.h as u32),
-            &self.working_data,
-        );
+        let pixels = to_u8_vec(&self.working_data);
+        let image = ImageView::new(ImageInfo::rgba8(self.w as u32, self.h as u32), &pixels);
         self.window
             .as_mut()
             .expect("no window?")

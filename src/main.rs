@@ -30,12 +30,12 @@ async fn main() {
         ticks += 1;
         engine.tick(TARGET_FRAMETIME);
         if ticks % TARGET_FRAMETIME == 0 {
-            let t = (Instant::now() - t0).as_secs();
+            let t = (Instant::now() - t0).as_millis();
             if t < 1 {
                 continue;
             }
             let g = engine.stats.generated;
-            let rate = (g as f32 / t as f32).round() as usize;
+            let rate = (g as f32 / t as f32 * 1000.0).round() as usize;
             println!(
                 "Generated {:?} in {}s (~{}/s) --> {}",
                 g, t, rate, engine.current_best.fitness

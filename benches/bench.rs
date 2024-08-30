@@ -3,7 +3,7 @@ use artgen_backend_rust::{
         Engine,
         Rasterizer::{self, *},
     },
-    models::drawing::Drawing,
+    models::{color::WHITE, drawing::Drawing},
 };
 use divan::Bencher;
 
@@ -15,7 +15,7 @@ fn main() {
 fn draw(bencher: Bencher, rm: Rasterizer) {
     let w = 384;
     let h = 384;
-    let mut buffer = vec![0u8; w * h * 4];
+    let mut buffer = vec![WHITE; w * h];
     let d = Drawing::from_file("ff.json");
 
     bencher.bench_local(move || {
