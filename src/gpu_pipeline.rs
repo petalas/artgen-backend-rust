@@ -31,17 +31,15 @@ pub struct GpuPipeline {
     pub drawing_texture: wgpu::Texture,
     pub error_output_buffer: wgpu::Buffer,
     pub error_source_buffer: wgpu::Buffer,
+    pub h: usize,
     pub queue: wgpu::Queue,
     pub render_pipeline: wgpu::RenderPipeline,
     pub texture_extent: wgpu::Extent3d,
     pub w: usize,
-    pub h: usize,
 }
 
 impl GpuPipeline {
     pub async fn new(source_bytes: Vec<u8>, w: usize, h: usize) -> GpuPipeline {
-        // gpu pipeline
-
         let backends = wgpu::util::backend_bits_from_env().unwrap_or_else(wgpu::Backends::all);
         let flags: InstanceFlags = InstanceFlags::DEBUG;
         let gles_minor_version: Gles3MinorVersion = Gles3MinorVersion::Automatic;
@@ -61,7 +59,6 @@ impl GpuPipeline {
             .request_adapter(adapter_options)
             .await
             .expect("Failed to find an appropriate adapter");
-        println!("created adapter {:?}", adapter);
 
         let (device, queue) = adapter
             .request_device(
@@ -81,7 +78,9 @@ impl GpuPipeline {
         // up to the next multiple of wgpu::COPY_BYTES_PER_ROW_ALIGNMENT.
         // https://en.wikipedia.org/wiki/Data_structure_alignment#Computing_padding
         let buffer_dimensions = BufferDimensions::new(w, h); // FIXME do this inside init with new calculated w, h
-                                                             // The output buffer lets us retrieve the data as an array
+        assert!(w * h > 0);
+
+        // The output buffer lets us retrieve the data as an array
         let drawing_output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
             size: (buffer_dimensions.padded_bytes_per_row * buffer_dimensions.height) as u64,
@@ -178,7 +177,7 @@ impl GpuPipeline {
             dimensions,
             &"source",
         )
-        .unwrap();
+        .expect("Failed to create source_texture");
 
         let compute_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: &compute_bind_group_layout,
@@ -300,11 +299,11 @@ impl GpuPipeline {
             drawing_texture,
             error_output_buffer,
             error_source_buffer,
+            h,
             queue,
             render_pipeline,
             texture_extent,
             w,
-            h,
         }
     }
 
@@ -398,16 +397,14 @@ impl GpuPipeline {
             0,
             (width * height * 4) as u64,
         );
-        
+
         self.queue.submit(Some(encoder.finish()))
     }
 
     pub async fn draw_and_evaluate(&self, drawing: &mut Drawing) -> (f32, f32, Vec<u8>, Vec<u8>) {
         // step 1 - render pipeline --> draw our triangles to a texture
-        let draw_si = self.draw(&drawing).await; // <-- WaitForSubmissionIndex after queue submit in there
-        self.device.poll(wgpu::MaintainBase::Poll); // extra poll just in case?
-        let best_drawing_bytes = self.get_bytes(&self.drawing_output_buffer, draw_si).await; // still stuck
-                                                                                             // self.device.poll(wgpu::Maintain::Wait);
+        let draw_si = self.draw(&drawing).await;
+        let best_drawing_bytes = self.get_bytes(&self.drawing_output_buffer, draw_si).await;
 
         // Step 2 - compute pipeline --> diff drawing texture vs source texture
         let ce_si = self.calculate_error(self.w as u32, self.h as u32).await;
@@ -415,7 +412,7 @@ impl GpuPipeline {
         // Step 3 - calculate error and error heatmap (sum output of compute pipeline)
         // TODO: parallel reduction on GPU, something like https://eximia.co/implementing-parallel-reduction-in-cuda/
         let error_buffer = self.get_bytes(&self.error_output_buffer, ce_si).await;
-        // self.device.poll(wgpu::Maintain::Wait);
+
         let (error, error_heatmap) = calculate_error_from_gpu(&error_buffer);
         let max_total_error: f32 = MAX_ERROR_PER_PIXEL * self.w as f32 * self.h as f32;
         let mut fitness: f32 = 100.0 * (1.0 - error / max_total_error);
@@ -442,13 +439,14 @@ impl GpuPipeline {
             output_buffer.unmap(); // avoid --> Buffer ObjectId { id: Some(1) } is already mapped' (breaks looping logic)
             return vec;
         } else {
+            // should we ever end up here?
             output_buffer.unmap(); // probably makes no difference but just to be safe
             return vec![];
         }
     }
 }
 
-// we are now calculating sqrt(((re * re) + (ge * ge) + (be * be))) in the gpu
+// we are now calculating sqrt(((re * re) + (ge * ge) + (be * be))) on the gpu
 // error_buffer is raw bytes straight out of the gpu so need to convert chunks of 4 back into f32
 fn calculate_error_from_gpu(error_buffer: &Vec<u8>) -> (f32, Vec<u8>) {
     let error_buffer_f32: Vec<f32> = error_buffer
@@ -456,15 +454,21 @@ fn calculate_error_from_gpu(error_buffer: &Vec<u8>) -> (f32, Vec<u8>) {
         .map(|c| f32::from_ne_bytes(c.try_into().unwrap()))
         .collect();
 
+    // FIXME: all errors coming back as 0
+    let zeros = error_buffer_f32.iter().filter(|&v| *v == 0.0).count();
+    println!(
+        "{} out of {} errors came back 0",
+        zeros,
+        error_buffer_f32.len()
+    );
+
     let mut error_heatmap: Vec<u8> = Vec::with_capacity(error_buffer.len() * 4);
     let mut error: f32 = 0.0;
     error_buffer_f32.into_iter().for_each(|sqrt| {
-        // info!("error = {}", sqrt);
-        error += sqrt;
+        error += sqrt; // FIXME: always 0 ?
         let err_color = f32::floor(255.0 * (1.0 - sqrt / MAX_ERROR_PER_PIXEL)) as u8;
         error_heatmap.extend_from_slice(&[255, err_color, err_color, 255]);
     });
 
-    // info!("{:?}", error_heatmap);
-    return (error, error_heatmap);
+    (error, error_heatmap)
 }

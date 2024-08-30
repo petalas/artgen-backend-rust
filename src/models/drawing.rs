@@ -1,16 +1,23 @@
 use std::{fs::File, io::BufReader, path::Path};
 
+use futures::future::err;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    engine::Rasterizer, gpu_pipeline::Vertex, settings::{
+    engine::Rasterizer,
+    gpu_pipeline::Vertex,
+    settings::{
         ADD_POLYGON_PROB, MAX_POLYGONS_PER_IMAGE, MIN_POLYGONS_PER_IMAGE, REMOVE_POLYGON_PROB,
         REORDER_POLYGON_PROB, START_WITH_POLYGONS_PER_IMAGE,
-    }, utils::{fill_shape, fill_triangle, randomf32, translate_color, translate_coord}
+    },
+    utils::{fill_shape, fill_triangle, randomf32, translate_color, translate_coord},
 };
 
-use super::{color::{Color, WHITE}, polygon::Polygon};
+use super::{
+    color::{Color, WHITE},
+    polygon::Polygon,
+};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -23,8 +30,7 @@ pub struct Drawing {
 impl Drawing {
     pub fn draw(&self, buffer: &mut Vec<Color>, w: usize, h: usize, rm: Rasterizer) {
         if rm == Rasterizer::GPU {
-            // TODO 
-            return;
+            panic!("should have been drawn on the GPU");
         }
 
         // start with white background

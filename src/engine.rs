@@ -3,18 +3,16 @@ use std::time::Instant;
 use image::{imageops::FilterType::Lanczos3, EncodableLayout, ImageReader};
 use show_image::{create_window, ImageInfo, ImageView, WindowProxy};
 use tokio::runtime::{Handle, Runtime};
-use wgpu::{core::pipeline, Gles3MinorVersion, InstanceFlags};
 
 use crate::{
-    buffer_dimensions::BufferDimensions,
-    gpu_pipeline::{self, GpuPipeline},
+    gpu_pipeline::GpuPipeline,
     models::{
-        color::{Color, WHITE},
+        color::{Color, BLACK, RED, WHITE},
         drawing::Drawing,
         point::Point,
         polygon::Polygon,
     },
-    settings::{MAX_ERROR_PER_PIXEL, MAX_IMAGE_HEIGHT, MAX_IMAGE_WIDTH, PER_POINT_MULTIPLIER},
+    settings::{MAX_ERROR_PER_PIXEL, PER_POINT_MULTIPLIER},
     utils::{to_color_vec, to_u8_vec},
 };
 
@@ -31,6 +29,8 @@ pub enum Rasterizer {
     // will default to Half-Space unless the polygon has more than 3 points
     Optimal,
 
+    // Offload rendering and array diff to wgpu
+    // Still doing the final fitness calculation and mutation generation on the CPU until we can figure out how to do it all as a compute shader.
     GPU,
 }
 
@@ -55,7 +55,6 @@ pub struct Engine {
     pub initialized: bool,
     pub gpu_pipeline: Option<GpuPipeline>,
     pub rt: Runtime,
-    pub handle: Option<Handle>,
 }
 
 impl Engine {
@@ -82,7 +81,6 @@ impl Engine {
             initialized: false,
             gpu_pipeline: None,
             rt: Runtime::new().expect("failed to create runtime"),
-            handle: None,
         }
     }
 
@@ -117,8 +115,8 @@ impl Engine {
 
     fn post_init(&mut self) {
         let size: usize = (self.w * self.h) as usize;
-        self.working_data = vec![WHITE; size];
-        self.error_data = vec![WHITE; size];
+        self.working_data = vec![BLACK; size];
+        self.error_data = vec![BLACK; size];
         assert!(self.ref_image_data.len() == size);
         assert!(self.working_data.len() == size);
         assert!(self.error_data.len() == size);
@@ -130,8 +128,8 @@ impl Engine {
             Some(create_window("image", Default::default()).expect("Failed to create window."));
     }
 
-    pub async fn init_gpu(&mut self, handle: Handle) {
-        self.handle = Some(handle);
+    pub async fn init_gpu(&mut self) {
+        println!("init_gpu {}x{}", self.w, self.h);
         self.gpu_pipeline =
             Some(GpuPipeline::new(to_u8_vec(&self.ref_image_data.clone()), self.w, self.h).await);
     }
@@ -186,17 +184,9 @@ impl Engine {
                 .as_mut()
                 .expect("gpu pipeline not initialized.");
 
-            let (_, _, pixels, _) = gpu_pipeline.draw_and_evaluate(drawing).await;
+            let (_, _, pixels, error_heatmap) = gpu_pipeline.draw_and_evaluate(drawing).await;
             self.working_data = to_color_vec(&pixels);
-            // FIXME: Cannot start a runtime from within a runtime
-            // let future = async {
-            //     let gpu_pipeline = self
-            //         .gpu_pipeline
-            //         .as_mut()
-            //         .expect("gpu pipeline not initialized.");
-            //     gpu_pipeline.draw_and_evaluate(drawing).await;
-            // };
-            // self.handle.as_mut().expect("welp").block_on(future);
+            self.error_data = to_color_vec(&error_heatmap);
         } else {
             drawing.draw(&mut self.working_data, self.w, self.h, self.raster_mode);
 
@@ -206,11 +196,6 @@ impl Engine {
 
             let mut error = 0.0;
             for i in 0..num_pixels {
-                // let r = (i * 4) as usize;
-                // let g = r + 1;
-                // let b = g + 1;
-                // let a = b + 1;
-
                 // can't subtract u8 from u8 -> potential underflow
                 let re = self.working_data[i].r as i32 - self.ref_image_data[i].r as i32;
                 let ge = self.working_data[i].g as i32 - self.ref_image_data[i].g as i32;
@@ -242,7 +227,7 @@ impl Engine {
 
     // testing our rasterization logic
     // should be able to perfectly fill a rectangle with 2 triangles
-    pub fn test(&mut self) {
+    pub async fn test(&mut self) {
         let p1 = Point { x: 0.0, y: 0.0 };
         let p2 = Point { x: 0.0, y: 1.0 };
         let p3 = Point { x: 1.0, y: 1.0 };
@@ -261,71 +246,30 @@ impl Engine {
             points: [p1, p4, p3].to_vec(),
             color: c,
         };
-        let d = Drawing {
+        let mut d = Drawing {
             polygons: [poly1, poly2].to_vec(),
             is_dirty: false,
             fitness: 0.0,
         };
-        d.draw(&mut self.working_data, self.w, self.h, self.raster_mode);
-        self.current_best = d;
 
+        // confirm we are starting with all 0s
+        let all_black = self
+            .working_data
+            .iter()
+            .all(|c| c.r == 0 && c.g == 0 && c.b == 0 && c.a == 0);
+        assert!(all_black);
+
+        self.calculate_fitness(&mut d, false).await;
+        // self.current_best = d;
+
+        // confirm every pixel is red after drawing 2 red triangles that cover 100% of the area
         let all_red = self
             .working_data
             .iter()
             .all(|c| c.r == 255 && c.g == 0 && c.b == 0 && c.a == 255);
-        // assert!(all_red);
-
-        let pixels = to_u8_vec(&self.working_data);
-        let image = ImageView::new(ImageInfo::rgba8(self.w as u32, self.h as u32), &pixels);
-        self.window
-            .as_mut()
-            .expect("no window?")
-            .set_image("image-001", image)
-            .expect("Failed to set image.");
-    }
-
-    pub fn test2(&mut self) {
-        let p1 = Point { x: 0.35, y: 0.25 };
-        let p2 = Point { x: 0.025, y: 0.75 };
-        let p3 = Point { x: 0.7, y: 0.6 };
-        // let p4 = Point { x: 1.0, y: 0.0 };
-        let c = crate::models::color::Color {
-            r: 255,
-            g: 0,
-            b: 0,
-            a: 255,
-        };
-        let poly1 = Polygon {
-            points: [p1, p2, p3].to_vec(),
-            color: c,
-        };
-        let d = Drawing {
-            polygons: [poly1].to_vec(),
-            is_dirty: false,
-            fitness: 0.0,
-        };
-        d.draw(&mut self.working_data, self.w, self.h, self.raster_mode);
-        self.current_best = d;
-
-        // let all_red = self
-        //     .working_data
-        //     .chunks_exact(4)
-        //     .all(|c| c == [255, 0, 0, 255]);
-        // assert!(all_red);
-
-        let pixels = to_u8_vec(&self.working_data);
-        let image = ImageView::new(ImageInfo::rgba8(self.w as u32, self.h as u32), &pixels);
-        self.window
-            .as_mut()
-            .expect("no window?")
-            .set_image("image-001", image)
-            .expect("Failed to set image.");
-    }
-
-    pub fn test3(&mut self) {
-        let d = Drawing::new_random();
-        d.draw(&mut self.working_data, self.w, self.h, self.raster_mode);
-        self.current_best = d;
+        dbg!(all_red);
+        assert!(all_red);
+        // dbg!(&self.error_data);
 
         let pixels = to_u8_vec(&self.working_data);
         let image = ImageView::new(ImageInfo::rgba8(self.w as u32, self.h as u32), &pixels);

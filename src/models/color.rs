@@ -14,6 +14,13 @@ pub struct Color {
     pub a: u8,
 }
 
+pub const BLACK: Color = Color {
+    r: 0,
+    g: 0,
+    b: 0,
+    a: 0,
+};
+
 pub const WHITE: Color = Color {
     r: 255,
     g: 255,
