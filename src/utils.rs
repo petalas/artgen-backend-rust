@@ -51,9 +51,9 @@ pub fn fill_shape(buffer: &mut Vec<Color>, polygon: &Polygon, w: usize, h: usize
     points_inside.iter().for_each(|p| {
         let x = p.x as usize;
         let y = p.y as usize;
-        // let idx = 4 * y * w + 4 * x;
         let idx = y * w + x;
-        fill_pixel(buffer, idx, &polygon.color);
+        assert!(buffer.len() > idx);
+        blend(&mut buffer[idx], &polygon.color)
     });
 }
 
@@ -172,9 +172,8 @@ pub fn fill_triangle(buffer: &mut Vec<Color>, polygon: &Polygon, w: usize, h: us
             if a == 0xF && b == 0xF && c == 0xF {
                 for iy in y..(y + q) {
                     for ix in x..(x + q) {
-                        // let idx = 4 * iy * w as i32 + 4 * ix;
-                        let idx = iy * w as i32 + ix;
-                        fill_pixel(buffer, idx as usize, &polygon.color);
+                        let idx = (iy * w as i32 + ix) as usize;
+                        blend(&mut buffer[idx], &polygon.color);
                     }
                 }
             } else {
@@ -189,9 +188,8 @@ pub fn fill_triangle(buffer: &mut Vec<Color>, polygon: &Polygon, w: usize, h: us
 
                     for ix in x..(x + q) {
                         if CX1 >= 0 && CX2 >= 0 && CX3 >= 0 {
-                            // let idx = 4 * iy * w as i32 + 4 * ix;
-                            let idx = iy * w as i32 + ix;
-                            fill_pixel(buffer, idx as usize, &polygon.color);
+                            let idx = (iy * w as i32 + ix) as usize;
+                            blend(&mut buffer[idx], &polygon.color);
                         }
                         CX1 -= FDY12;
                         CX2 -= FDY23;
@@ -207,14 +205,13 @@ pub fn fill_triangle(buffer: &mut Vec<Color>, polygon: &Polygon, w: usize, h: us
     }
 }
 
-pub fn fill_pixel(buffer: &mut Vec<Color>, index: usize, color: &Color) {
-    assert!(buffer.len() > index);
-    let a = color.a as f32 / 255.0;
+pub fn blend(prev: &mut Color, new: &Color) {
+    let a = new.a as f32 / 255.0;
     let b = 1.0 - a;
-    buffer[index].r = ((buffer[index].r as f32 * b) + (color.r as f32 * a)).round() as u8;
-    buffer[index].g = ((buffer[index].g as f32 * b) + (color.g as f32 * a)).round() as u8;
-    buffer[index].b = ((buffer[index].b as f32 * b) + (color.b as f32 * a)).round() as u8;
-    buffer[index].a = u8::max(buffer[index].a, color.a);
+    prev.r = ((prev.r as f32 * b) + (new.r as f32 * a)).round() as u8;
+    prev.g = ((prev.g as f32 * b) + (new.g as f32 * a)).round() as u8;
+    prev.b = ((prev.b as f32 * b) + (new.b as f32 * a)).round() as u8;
+    prev.a = u8::max(prev.a, new.a);
 }
 
 // https://fgiesen.wordpress.com/2013/02/08/triangle-rasterization-in-practice/

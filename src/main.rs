@@ -18,7 +18,7 @@ async fn main() {
     let mut engine = Engine::new();
     engine.init("ff.jpg", MAX_IMAGE_WIDTH, MAX_IMAGE_HEIGHT);
     engine.init_window();
-    engine.set_best(Drawing::from_file("ff.json"));
+    // engine.set_best(Drawing::from_file("ff.json"));
 
     // engine.test();
     // engine.test2();

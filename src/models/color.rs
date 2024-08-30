@@ -21,6 +21,13 @@ pub const WHITE: Color = Color {
     a: 255,
 };
 
+pub const RED: Color = Color {
+    r: 255,
+    g: 0,
+    b: 0,
+    a: 255,
+};
+
 impl Color {
     pub fn new_random() -> Color {
         Color {

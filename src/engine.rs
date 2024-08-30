@@ -8,7 +8,12 @@ use wgpu::{core::pipeline, Gles3MinorVersion, InstanceFlags};
 use crate::{
     buffer_dimensions::BufferDimensions,
     gpu_pipeline::GpuPipeline,
-    models::{color::Color, drawing::Drawing, point::Point, polygon::Polygon},
+    models::{
+        color::{Color, WHITE},
+        drawing::Drawing,
+        point::Point,
+        polygon::Polygon,
+    },
     settings::{MAX_ERROR_PER_PIXEL, MAX_IMAGE_HEIGHT, MAX_IMAGE_WIDTH, PER_POINT_MULTIPLIER},
     utils::{to_color_vec, to_u8_vec},
 };
@@ -96,8 +101,6 @@ impl Engine {
         }
 
         self.ref_image_data = to_color_vec(&img.into_rgba8().as_bytes().to_vec());
-        // println!("Loaded {}x{} image.", self.w, self.h);
-        assert!(self.ref_image_data.len() == self.w * self.h);
         self.post_init();
     }
 
@@ -112,24 +115,11 @@ impl Engine {
 
     fn post_init(&mut self) {
         let size: usize = (self.w * self.h) as usize;
-        self.working_data = vec![
-            Color {
-                r: 0,
-                g: 0,
-                b: 0,
-                a: 0
-            };
-            size
-        ];
-        self.error_data = vec![
-            Color {
-                r: 0,
-                g: 0,
-                b: 0,
-                a: 0
-            };
-            size
-        ];
+        self.working_data = vec![WHITE; size];
+        self.error_data = vec![WHITE; size];
+        assert!(self.ref_image_data.len() == size);
+        assert!(self.working_data.len() == size);
+        assert!(self.error_data.len() == size);
         self.initialized = true;
     }
 

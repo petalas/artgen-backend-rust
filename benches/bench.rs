@@ -3,7 +3,11 @@ use artgen_backend_rust::{
         Engine,
         Rasterizer::{self, *},
     },
-    models::{color::WHITE, drawing::Drawing},
+    models::{
+        color::{Color, RED, WHITE},
+        drawing::Drawing,
+    },
+    utils::blend,
 };
 use divan::Bencher;
 
@@ -35,5 +39,19 @@ fn calculate_fitness(bencher: Bencher, rm: Rasterizer) {
 
     bencher.bench_local(move || {
         engine.calculate_fitness(&mut d, false);
+    });
+}
+
+#[divan::bench]
+fn fill_color(bencher: Bencher) {
+    let w = 384;
+    let h = 384;
+    let mut buffer = vec![WHITE; w * h];
+    let new_buffer = vec![RED; w * h];
+
+    bencher.bench_local(move || {
+        for i in 0..buffer.len() {
+            blend(&mut buffer[i], &new_buffer[i]);
+        }
     });
 }
