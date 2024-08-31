@@ -1,34 +1,27 @@
-use std::{
-    thread::{self, sleep},
-    time::{Duration, Instant},
-};
 
-use artgen_backend_rust::{
-    engine::{self, Engine, Rasterizer},
-    models::drawing::Drawing,
-    settings::{MAX_IMAGE_HEIGHT, MAX_IMAGE_WIDTH, TARGET_FRAMETIME},
-};
-use show_image::event;
-use tokio::{runtime::Handle, task::yield_now};
 
 // FIXME: figure out what to do about runtimes, show_image wants to be run from main
 
+use artgen_backend_rust::{engine::{Engine, Rasterizer}, models::drawing::Drawing, settings::{MAX_IMAGE_HEIGHT, MAX_IMAGE_WIDTH}};
+use winit::event_loop::{ControlFlow, EventLoop};
+
 #[tokio::main]
-#[show_image::main]
 async fn main() {
-    let mut engine = Engine::new();
+    // tracing_subscriber::fmt().init();
+
+    let event_loop = EventLoop::new().unwrap();
+    // event_loop.set_control_flow(ControlFlow::Poll);
+
+    let mut engine = Engine::default();
     engine.raster_mode = Rasterizer::GPU;
     engine.init("ff.jpg", MAX_IMAGE_WIDTH, MAX_IMAGE_HEIGHT);
-    engine.init_window();
-    engine.init_gpu().await;
-   
-    // engine.set_best(Drawing::from_file("ff.json"));
+    engine.set_best(Drawing::from_file("ff.json"));
 
-    engine.test().await;
+    event_loop.run_app(&mut engine).expect("app to run")
 
-    loop {
-        thread::sleep(Duration::from_secs(1));
-    }
+    
+
+    // engine.test().await;
 
     // let mut ticks: usize = 0;
     // let t0 = Instant::now();

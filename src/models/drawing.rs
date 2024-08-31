@@ -1,12 +1,10 @@
 use std::{fs::File, io::BufReader, path::Path};
 
-use futures::future::err;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    engine::Rasterizer,
-    gpu_pipeline::Vertex,
+    engine::{Rasterizer, Vertex},
     settings::{
         ADD_POLYGON_PROB, MAX_POLYGONS_PER_IMAGE, MIN_POLYGONS_PER_IMAGE, REMOVE_POLYGON_PROB,
         REORDER_POLYGON_PROB, START_WITH_POLYGONS_PER_IMAGE,
@@ -19,7 +17,7 @@ use super::{
     polygon::Polygon,
 };
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Default, Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Drawing {
     pub polygons: Vec<Polygon>,

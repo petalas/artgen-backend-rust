@@ -4,4 +4,4 @@ pub mod settings;
 pub mod utils;
 pub mod buffer_dimensions;
 pub mod gpu_pipeline;
-pub mod texture;
+pub mod texture_wrapper;

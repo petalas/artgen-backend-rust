@@ -1,4 +1,4 @@
-#[derive(Debug)]
+#[derive(Default, Debug)]
 pub struct BufferDimensions {
     pub width: usize,
     pub height: usize,
