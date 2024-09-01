@@ -113,7 +113,6 @@ impl Engine {
         self.ref_image_data = img.into_rgba8().as_bytes().to_vec();
         self.working_data = vec![0u8; size];
         self.error_data = vec![0u8; size];
-        dbg!(self.ref_image_data.len(), size);
         assert!(self.ref_image_data.len() == size);
         assert!(self.working_data.len() == size);
         assert!(self.error_data.len() == size);
@@ -141,11 +140,7 @@ impl Engine {
             self.init_gpu(); // wgpu pipelines
         }
 
-
-
         assert!(self.current_best.num_points() > 2);
-
-
         self.initialized = true;
     }
 
@@ -489,11 +484,7 @@ impl Engine {
         assert!(self.w > 0);
         assert!(self.h > 0);
 
-        // let window_attributes = Window::default_attributes().with_title("polygon renderer");
-        // let window = Arc::new(event_loop.create_window(window_attributes).unwrap());
-        // self.window = Some(window.clone());
-
-        let (instance, adapter, device, queue) = futures_lite::future::block_on(async move {
+        let (device, queue) = futures_lite::future::block_on(async move {
             let instance = wgpu::Instance::default();
             // let surface = instance.create_surface().unwrap();
 
@@ -522,17 +513,9 @@ impl Engine {
                 .await
                 .expect("Failed to create device");
 
-            (instance, adapter, device, queue)
+            (device, queue)
         });
 
-        // let config = surface
-        //     .get_default_config(&adapter, self.w as u32, self.h as u32)
-        //     .unwrap();
-        // surface.configure(&device, &config);
-
-        //TODO see if we need to keep references to the rest
-        // self.config = Some(config);
-        // self.surface = Some(surface);
         self.device = Some(device);
         self.queue = Some(queue);
 
@@ -804,11 +787,8 @@ impl Engine {
         // TODO only set things we need
         self.texture_extent = Some(texture_extent);
         self.render_pipeline = Some(render_pipeline);
-        // self.drawing_texture = Some(drawing_texture);
         self.compute_pipeline = Some(compute_pipeline);
         self.compute_bind_group = Some(compute_bind_group);
-        // self.drawing_output_buffer = Some(drawing_output_buffer);
-        // self.error_output_buffer = Some(error_output_buffer);
     }
 }
 
@@ -821,12 +801,12 @@ fn calculate_error_from_gpu(error_buffer: &Vec<u8>) -> (f32, Vec<u8>) {
         .collect();
 
     // FIXME: all errors coming back as 0
-    let zeros = error_buffer_f32.iter().filter(|&v| *v == 0.0).count();
-    println!(
-        "{} out of {} errors came back 0",
-        zeros,
-        error_buffer_f32.len()
-    );
+    // let zeros = error_buffer_f32.iter().filter(|&v| *v == 0.0).count();
+    // println!(
+    //     "{} out of {} errors came back 0",
+    //     zeros,
+    //     error_buffer_f32.len()
+    // );
 
     let mut error_heatmap: Vec<u8> = Vec::with_capacity(error_buffer.len() * 4);
     let mut error: f32 = 0.0;

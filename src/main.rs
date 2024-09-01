@@ -15,7 +15,7 @@ fn main() {
     let mut engine = Engine::default();
     engine.raster_mode = Rasterizer::HalfSpace;
     engine.init("ff.jpg", MAX_IMAGE_WIDTH, MAX_IMAGE_HEIGHT);
-    engine.set_best(Drawing::from_file("ff.json"));
+    // engine.set_best(Drawing::from_file("ff.json"));
 
     let sdl_context = sdl2::init().unwrap();
     let t0 = Instant::now();

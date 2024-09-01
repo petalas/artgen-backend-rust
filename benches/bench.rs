@@ -3,11 +3,8 @@ use artgen_backend_rust::{
         Engine,
         Rasterizer::{self, *},
     },
-    models::{
-        color::{Color, RED, WHITE},
-        drawing::Drawing,
-    },
-    utils::blend,
+    models::{color::RED, drawing::Drawing},
+    utils::fill_pixel,
 };
 use divan::Bencher;
 
@@ -19,7 +16,7 @@ fn main() {
 fn draw(bencher: Bencher, rm: Rasterizer) {
     let w = 384;
     let h = 384;
-    let mut buffer = vec![WHITE; w * h];
+    let mut buffer = vec![0u8; w * h * 4];
     let d = Drawing::from_file("ff.json");
 
     bencher.bench_local(move || {
@@ -27,14 +24,14 @@ fn draw(bencher: Bencher, rm: Rasterizer) {
     });
 }
 
-#[divan::bench(args=[HalfSpace, Scanline])]
+#[divan::bench(args=[HalfSpace, Scanline, GPU])]
 fn calculate_fitness(bencher: Bencher, rm: Rasterizer) {
     let w = 384;
     let h = 384;
 
-    let mut engine = Engine::new();
-    engine.init("ff.jpg", w, h);
+    let mut engine = Engine::default();
     engine.raster_mode = rm;
+    engine.init("ff.jpg", w, h);
     let mut d = Drawing::from_file("ff.json");
 
     bencher.bench_local(move || {
@@ -46,12 +43,12 @@ fn calculate_fitness(bencher: Bencher, rm: Rasterizer) {
 fn fill_color(bencher: Bencher) {
     let w = 384;
     let h = 384;
-    let mut buffer = vec![WHITE; w * h];
-    let new_buffer = vec![RED; w * h];
+    let num_pixels = w * h;
+    let mut buffer = vec![255u8; num_pixels * 4];
 
     bencher.bench_local(move || {
-        for i in 0..buffer.len() {
-            blend(&mut buffer[i], &new_buffer[i]);
+        for i in 0..num_pixels {
+            fill_pixel(&mut buffer, i, &RED);
         }
     });
 }
