@@ -1,12 +1,11 @@
-use std::{borrow::Cow, mem, ops::Deref, sync::Arc, time::Instant};
+use std::{borrow::Cow, mem, time::Instant};
 
 use image::{imageops::FilterType::Lanczos3, EncodableLayout, ImageReader};
 use sdl2::{pixels::PixelFormatEnum, render::Canvas, video::Window};
 use tracing::info;
 use wgpu::{
-    vertex_attr_array, BindGroup, BlendState, Buffer, ComputePipeline, Device, Extent3d,
-    Gles3MinorVersion, InstanceFlags, Queue, RenderPipeline, SubmissionIndex, Surface,
-    SurfaceConfiguration, Texture,
+    vertex_attr_array, BindGroup, BlendState, Buffer, ComputePipeline, Device, Extent3d, Queue,
+    RenderPipeline, SubmissionIndex, Texture,
 };
 
 #[repr(C)]
@@ -18,14 +17,8 @@ pub struct Vertex {
 
 use crate::{
     buffer_dimensions::BufferDimensions,
-    gpu_pipeline::GpuPipeline,
-    models::{
-        color::{Color, BLACK, RED, WHITE},
-        drawing::Drawing,
-        point::Point,
-        polygon::Polygon,
-    },
-    settings::{MAX_ERROR_PER_PIXEL, PER_POINT_MULTIPLIER, TARGET_FRAMETIME},
+    models::{drawing::Drawing, point::Point, polygon::Polygon},
+    settings::{MAX_ERROR_PER_PIXEL, PER_POINT_MULTIPLIER},
     texture_wrapper::TextureWrapper,
     // utils::{to_color_vec, to_u8_vec},
 };
@@ -64,8 +57,6 @@ pub struct Engine {
     pub buffer_dimensions: BufferDimensions,
     pub compute_bind_group: Option<BindGroup>,
     pub compute_pipeline: Option<ComputePipeline>,
-    // pub config: Option<SurfaceConfiguration>,
-    // pub surface: Option<Surface<'a>>,
     pub current_best: Drawing,
     pub device: Option<Device>,
     pub drawing_output_buffer: Option<Buffer>,
@@ -84,10 +75,8 @@ pub struct Engine {
     pub texture_extent: Option<Extent3d>,
     pub w: usize,
     pub working_data: Vec<u8>,
-    // SDL2
-    // pub window: Option<Arc<Window>>,
     pub sdl2_canvas: Option<Canvas<Window>>,
-    // pub sdl2_texture: Option<Arc<sdl2::render::Texture<'a>>>,
+    pub should_display: bool,
 }
 
 impl Engine {
@@ -127,14 +116,7 @@ impl Engine {
             .unwrap();
 
         let canvas = window.into_canvas().build().unwrap();
-        // let texture_creator = canvas.texture_creator();
-        // let texture = texture_creator
-        //     .create_texture_streaming(PixelFormatEnum::ABGR8888, self.w as u32, self.h as u32)
-        //     .unwrap();
-
-        // self.window = Some(Arc::new(window));
         self.sdl2_canvas = Some(canvas);
-        // self.sdl2_texture = Some(Arc::new(texture));
 
         if self.raster_mode == Rasterizer::GPU {
             self.init_gpu(); // wgpu pipelines
@@ -149,7 +131,7 @@ impl Engine {
         self.current_best = drawing;
         self.current_best.fitness = 0.0; // do not trust
         if self.sdl2_canvas.is_some() {
-            self.redraw();
+            self.display();
         }
     }
 
@@ -166,17 +148,20 @@ impl Engine {
             self.calculate_fitness(&mut clone, false);
             if clone.fitness > self.current_best.fitness {
                 // calculate again this time including error data (for display purposes)
-                self.calculate_fitness(&mut clone, true); // TODO: benchmark if this is actually worth it
+                // self.calculate_fitness(&mut clone, true); // TODO: benchmark if this is actually worth it
                 self.current_best = clone;
                 self.stats.improvements += 1;
-                self.redraw();
+                self.should_display = true;
             }
             elapsed += t0.elapsed().as_millis() as usize;
         }
 
-        self.stats.cycle_time = elapsed; // can't get f32 ms directly
+        self.stats.cycle_time = elapsed;
 
-        // return self.stats.clone()
+        if self.should_display {
+            self.display();
+            self.should_display = false;
+        }
     }
 
     pub fn calculate_fitness(&mut self, drawing: &mut Drawing, draw_error: bool) {
@@ -274,19 +259,19 @@ impl Engine {
         assert!(all_red);
     }
 
-    // draws current working_data (should be called right after we have a new best)
-    pub fn redraw(&mut self) {
+    // draws current working_data to the sdl2 window (should be called right after we have a new best)
+    pub fn display(&mut self) {
         if self.sdl2_canvas.is_none() {
             return;
         }
 
+        // FIXME: reuse texture (the problem is lifetime)
+        // https://devcry.heiho.net/html/2022/20220716-rust-and-sdl2-fighting-with-lifetimes-2.html
         let canvas = self.sdl2_canvas.as_mut().unwrap();
         let texture_creator = canvas.texture_creator();
         let mut texture = texture_creator
             .create_texture_streaming(PixelFormatEnum::ABGR8888, self.w as u32, self.h as u32)
             .unwrap();
-
-        // TODO reuse texture (the problem is lifetime)
 
         texture
             .update(None, &self.working_data, self.w * 4)

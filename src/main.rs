@@ -6,7 +6,7 @@ use artgen_backend_rust::{
 
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 // #[tokio::main]
 fn main() {
@@ -44,7 +44,5 @@ fn main() {
             "Generated {:?} in {}s (~{}/s) --> {}",
             g, sec, rate, engine.current_best.fitness
         );
-
-        ::std::thread::sleep(Duration::new(0, 1_000_000_000u32 / 60));
     }
 }
