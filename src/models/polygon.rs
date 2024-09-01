@@ -88,3 +88,9 @@ impl Polygon {
         mutated
     }
 }
+
+impl Default for Polygon {
+    fn default() -> Self {
+        Self::new_random()
+    }
+}

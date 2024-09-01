@@ -17,7 +17,7 @@ use super::{
     polygon::Polygon,
 };
 
-#[derive(Default, Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Drawing {
     pub polygons: Vec<Polygon>,
@@ -26,13 +26,13 @@ pub struct Drawing {
 }
 
 impl Drawing {
-    pub fn draw(&self, buffer: &mut Vec<Color>, w: usize, h: usize, rm: Rasterizer) {
+    pub fn draw(&self, buffer: &mut Vec<u8>, w: usize, h: usize, rm: Rasterizer) {
         if rm == Rasterizer::GPU {
             panic!("should have been drawn on the GPU");
         }
 
         // start with white background
-        buffer.into_iter().for_each(|item| *item = WHITE);
+        buffer.into_iter().for_each(|item| *item = 255u8);
 
         for polygon in &self.polygons {
             if rm == Rasterizer::Scanline || polygon.points.len() > 3 {
@@ -225,5 +225,11 @@ impl Drawing {
 impl From<String> for Drawing {
     fn from(json: String) -> Self {
         serde_json::from_str(&json).expect(&format!("Expected deserializable Drawing.\n{}", json))
+    }
+}
+
+impl Default for Drawing {
+    fn default() -> Self {
+        Self::new_random()
     }
 }

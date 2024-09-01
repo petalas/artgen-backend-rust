@@ -80,3 +80,9 @@ impl Ord for Point {
         return std::cmp::Ordering::Equal;
     }
 }
+
+impl Default for Point {
+    fn default() -> Self {
+        Self::new_random()
+    }
+}

@@ -132,3 +132,9 @@ impl From<&[u8]> for Color {
         }
     }
 }
+
+impl Default for Color {
+    fn default() -> Self {
+        Self::new_random()
+    }
+}

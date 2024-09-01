@@ -43,7 +43,7 @@ pub fn calculate_aspect_ratio_fit(
 
 // based on scanline fill
 // https://www.cs.ucdavis.edu/~ma/ECS175_S00/Notes/0413_a.pdf
-pub fn fill_shape(buffer: &mut Vec<Color>, polygon: &Polygon, w: usize, h: usize) {
+pub fn fill_shape(buffer: &mut Vec<u8>, polygon: &Polygon, w: usize, h: usize) {
     let points = &polygon.points;
     let pixel_coords: Vec<Point> = points.iter().map(|p| p.translate(w, h)).collect();
     let sides = sides(&pixel_coords);
@@ -51,16 +51,16 @@ pub fn fill_shape(buffer: &mut Vec<Color>, polygon: &Polygon, w: usize, h: usize
     points_inside.iter().for_each(|p| {
         let x = p.x as usize;
         let y = p.y as usize;
-        let idx = y * w + x;
+        let idx = 4 * y * w + 4 * x;
         assert!(buffer.len() > idx);
-        blend(&mut buffer[idx], &polygon.color)
+        fill_pixel(buffer, idx as usize, &polygon.color);
     });
 }
 
 // Based on https://web.archive.org/web/20050408192410/http://sw-shader.sourceforge.net/rasterizer.html
 // Had to do additional checks otherwise it doesn't work for all triangles
 // Another solution (maybe?) would be to sort points clockwise.
-pub fn fill_triangle(buffer: &mut Vec<Color>, polygon: &Polygon, w: usize, h: usize) {
+pub fn fill_triangle(buffer: &mut Vec<u8>, polygon: &Polygon, w: usize, h: usize) {
     let points = &polygon.points;
     assert_eq!(points.len(), 3);
     let mut v: Vec<FixedPoint> = points.iter().map(|p| p.translate_to_fixed(w, h)).collect();
@@ -172,8 +172,8 @@ pub fn fill_triangle(buffer: &mut Vec<Color>, polygon: &Polygon, w: usize, h: us
             if a == 0xF && b == 0xF && c == 0xF {
                 for iy in y..(y + q) {
                     for ix in x..(x + q) {
-                        let idx = (iy * w as i32 + ix) as usize;
-                        blend(&mut buffer[idx], &polygon.color);
+                        let idx = (4 * iy * w as i32 + 4 * ix) as usize;
+                        fill_pixel(buffer, idx as usize, &polygon.color);
                     }
                 }
             } else {
@@ -188,8 +188,8 @@ pub fn fill_triangle(buffer: &mut Vec<Color>, polygon: &Polygon, w: usize, h: us
 
                     for ix in x..(x + q) {
                         if CX1 >= 0 && CX2 >= 0 && CX3 >= 0 {
-                            let idx = (iy * w as i32 + ix) as usize;
-                            blend(&mut buffer[idx], &polygon.color);
+                            let idx = (4 * iy * w as i32 + 4 * ix) as usize;
+                            fill_pixel(buffer, idx as usize, &polygon.color);
                         }
                         CX1 -= FDY12;
                         CX2 -= FDY23;
@@ -205,14 +205,24 @@ pub fn fill_triangle(buffer: &mut Vec<Color>, polygon: &Polygon, w: usize, h: us
     }
 }
 
-pub fn blend(prev: &mut Color, new: &Color) {
-    let a = new.a as f32 / 255.0;
+pub fn fill_pixel(buffer: &mut Vec<u8>, index: usize, color: &Color) {
+    assert!(buffer.len() > index + 3);
+    let a = color.a as f32 / 255.0;
     let b = 1.0 - a;
-    prev.r = ((prev.r as f32 * b) + (new.r as f32 * a)).round() as u8;
-    prev.g = ((prev.g as f32 * b) + (new.g as f32 * a)).round() as u8;
-    prev.b = ((prev.b as f32 * b) + (new.b as f32 * a)).round() as u8;
-    prev.a = u8::max(prev.a, new.a);
+    buffer[index] = ((buffer[index] as f32 * b) + (color.r as f32 * a)).round() as u8;
+    buffer[index + 1] = ((buffer[index + 1] as f32 * b) + (color.g as f32 * a)).round() as u8;
+    buffer[index + 2] = ((buffer[index + 2] as f32 * b) + (color.b as f32 * a)).round() as u8;
+    buffer[index + 3] = u8::max(buffer[index + 3], color.a);
 }
+
+// pub fn blend(prev: &mut Color, new: &Color) {
+//     let a = new.a as f32 / 255.0;
+//     let b = 1.0 - a;
+//     prev.r = ((prev.r as f32 * b) + (new.r as f32 * a)).round() as u8;
+//     prev.g = ((prev.g as f32 * b) + (new.g as f32 * a)).round() as u8;
+//     prev.b = ((prev.b as f32 * b) + (new.b as f32 * a)).round() as u8;
+//     prev.a = u8::max(prev.a, new.a);
+// }
 
 // https://fgiesen.wordpress.com/2013/02/08/triangle-rasterization-in-practice/
 pub fn orient_2d(a: &FixedPoint, b: &FixedPoint, c: &FixedPoint) -> i32 {
@@ -366,10 +376,10 @@ pub fn translate_color(color: u8) -> f32 {
     color as f32 / 255.0
 }
 
-pub fn to_color_vec(buffer: &Vec<u8>) -> Vec<Color> {
-    buffer.chunks_exact(4).map(Color::from).collect()
-}
+// pub fn to_color_vec(buffer: &Vec<u8>) -> Vec<Color> {
+//     buffer.chunks_exact(4).map(Color::from).collect()
+// }
 
-pub fn to_u8_vec(buffer: &Vec<Color>) -> Vec<u8> {
-    buffer.iter().flat_map(|c| [c.r, c.g, c.b, c.a]).collect()
-}
+// pub fn to_u8_vec(buffer: &Vec<Color>) -> Vec<u8> {
+//     buffer.iter().flat_map(|c| [c.r, c.g, c.b, c.a]).collect()
+// }

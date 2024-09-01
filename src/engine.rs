@@ -1,18 +1,12 @@
 use std::{borrow::Cow, mem, ops::Deref, sync::Arc, time::Instant};
 
 use image::{imageops::FilterType::Lanczos3, EncodableLayout, ImageReader};
+use sdl2::{pixels::PixelFormatEnum, render::Canvas, video::Window};
 use tracing::info;
 use wgpu::{
     vertex_attr_array, BindGroup, BlendState, Buffer, ComputePipeline, Device, Extent3d,
     Gles3MinorVersion, InstanceFlags, Queue, RenderPipeline, SubmissionIndex, Surface,
     SurfaceConfiguration, Texture,
-};
-use winit::{
-    application::ApplicationHandler,
-    dpi::PhysicalSize,
-    event::{ElementState, KeyEvent, WindowEvent},
-    keyboard::{Key, NamedKey},
-    window::Window,
 };
 
 #[repr(C)]
@@ -33,7 +27,7 @@ use crate::{
     },
     settings::{MAX_ERROR_PER_PIXEL, PER_POINT_MULTIPLIER, TARGET_FRAMETIME},
     texture_wrapper::TextureWrapper,
-    utils::{to_color_vec, to_u8_vec},
+    // utils::{to_color_vec, to_u8_vec},
 };
 
 #[derive(Default, Clone, Copy, Debug, PartialEq)]
@@ -55,7 +49,7 @@ pub enum Rasterizer {
     GPU,
 }
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone, Copy)]
 pub struct Stats {
     pub generated: usize,
     pub improvements: usize,
@@ -64,37 +58,39 @@ pub struct Stats {
 }
 
 #[derive(Default)]
-pub struct Engine<'a> {
+pub struct Engine {
     pub best_drawing_bytes: Vec<u8>,
     pub best_drawing: Drawing,
     pub buffer_dimensions: BufferDimensions,
     pub compute_bind_group: Option<BindGroup>,
     pub compute_pipeline: Option<ComputePipeline>,
-    pub config: Option<SurfaceConfiguration>,
-    pub surface: Option<Surface<'a>>,
+    // pub config: Option<SurfaceConfiguration>,
+    // pub surface: Option<Surface<'a>>,
     pub current_best: Drawing,
     pub device: Option<Device>,
     pub drawing_output_buffer: Option<Buffer>,
     pub drawing_texture_wrapper: Option<TextureWrapper>,
     pub drawing_texture: Option<Texture>,
-    pub error_data: Vec<Color>,
+    pub error_data: Vec<u8>,
     pub error_output_buffer: Option<Buffer>,
     pub error_source_buffer: Option<Buffer>,
     pub h: usize,
     pub initialized: bool,
     pub queue: Option<Queue>,
     pub raster_mode: Rasterizer,
-    pub ref_image_bytes: Vec<u8>,
-    pub ref_image_data: Vec<Color>,
+    pub ref_image_data: Vec<u8>,
     pub render_pipeline: Option<RenderPipeline>,
     pub stats: Stats,
     pub texture_extent: Option<Extent3d>,
     pub w: usize,
-    pub window: Option<Arc<Window>>,
-    pub working_data: Vec<Color>,
+    pub working_data: Vec<u8>,
+    // SDL2
+    // pub window: Option<Arc<Window>>,
+    pub sdl2_canvas: Option<Canvas<Window>>,
+    // pub sdl2_texture: Option<Arc<sdl2::render::Texture<'a>>>,
 }
 
-impl<'a> Engine<'a> {
+impl Engine {
     pub fn init(&mut self, filepath: &str, max_w: usize, max_h: usize) {
         let mut img = ImageReader::open(filepath)
             .expect("Failed to load image")
@@ -111,32 +107,58 @@ impl<'a> Engine<'a> {
             self.h = img.height() as usize;
         }
 
-        self.ref_image_bytes = img.into_rgba8().as_bytes().to_vec();
-        self.ref_image_data = to_color_vec(&self.ref_image_bytes);
-        self.post_init();
+        let size = (self.w * self.h * 4) as usize;
+        assert!(size > 0);
+
+        self.ref_image_data = img.into_rgba8().as_bytes().to_vec();
+        self.working_data = vec![0u8; size];
+        self.error_data = vec![0u8; size];
+        dbg!(self.ref_image_data.len(), size);
+        assert!(self.ref_image_data.len() == size);
+        assert!(self.working_data.len() == size);
+        assert!(self.error_data.len() == size);
+
+        // SDL2
+        let sdl_context = sdl2::init().unwrap();
+        let video_subsystem = sdl_context.video().unwrap();
+        let window = video_subsystem
+            .window("polygon renderer", self.w as u32, self.h as u32)
+            .position_centered()
+            .build()
+            .unwrap();
+
+        let canvas = window.into_canvas().build().unwrap();
+        // let texture_creator = canvas.texture_creator();
+        // let texture = texture_creator
+        //     .create_texture_streaming(PixelFormatEnum::ABGR8888, self.w as u32, self.h as u32)
+        //     .unwrap();
+
+        // self.window = Some(Arc::new(window));
+        self.sdl2_canvas = Some(canvas);
+        // self.sdl2_texture = Some(Arc::new(texture));
+
+        if self.raster_mode == Rasterizer::GPU {
+            self.init_gpu(); // wgpu pipelines
+        }
+
+
+
+        assert!(self.current_best.num_points() > 2);
+
+
+        self.initialized = true;
     }
 
     pub fn set_best(&mut self, drawing: Drawing) {
         assert!(self.initialized);
         self.current_best = drawing;
         self.current_best.fitness = 0.0; // do not trust
-        if self.window.is_some() {
+        if self.sdl2_canvas.is_some() {
             self.redraw();
         }
     }
 
-    fn post_init(&mut self) {
-        let size: usize = (self.w * self.h) as usize;
-        assert!(size > 0);
-        self.working_data = vec![BLACK; size];
-        self.error_data = vec![BLACK; size];
-        assert!(self.ref_image_data.len() == size);
-        assert!(self.working_data.len() == size);
-        assert!(self.error_data.len() == size);
-        self.initialized = true;
-    }
-
-    pub async fn tick(&mut self, max_time_ms: usize) {
+    pub fn tick(&mut self, max_time_ms: usize) {
         self.stats.ticks = 0;
         let mut elapsed: usize = 0;
         while elapsed < max_time_ms {
@@ -146,62 +168,47 @@ impl<'a> Engine<'a> {
             let mut clone = self.current_best.clone();
             clone.mutate();
             self.stats.generated += 1;
-            self.calculate_fitness(&mut clone, false).await;
+            self.calculate_fitness(&mut clone, false);
             if clone.fitness > self.current_best.fitness {
                 // calculate again this time including error data (for display purposes)
-                self.calculate_fitness(&mut clone, true).await; // TODO: benchmark if this is actually worth it
+                self.calculate_fitness(&mut clone, true); // TODO: benchmark if this is actually worth it
                 self.current_best = clone;
                 self.stats.improvements += 1;
-
-                // FIXME: cleanup
-
-                self.window.as_mut().expect("no window?").request_redraw();
-
-                // if self.raster_mode != Rasterizer::GPU {
-                //     self.current_best.draw(
-                //         &mut self.working_data,
-                //         self.w,
-                //         self.h,
-                //         self.raster_mode,
-                //     );
-                // }
-
-                // if self.window.is_some() {
-                // let pixels = to_u8_vec(&self.working_data); // FIXME if GPU mode don't convert to Colors and Back to u8s
-
-                // let image =
-                //     ImageView::new(ImageInfo::rgba8(self.w as u32, self.h as u32), &pixels);
-                // self.window
-                //     .as_mut()
-                //     .expect("no window?")
-                //     .set_image("image-001", image)
-                //     .expect("Failed to set image.");
-                // }
+                self.redraw();
             }
             elapsed += t0.elapsed().as_millis() as usize;
         }
 
         self.stats.cycle_time = elapsed; // can't get f32 ms directly
+
+        // return self.stats.clone()
     }
 
-    pub async fn calculate_fitness(&mut self, drawing: &mut Drawing, draw_error: bool) {
+    pub fn calculate_fitness(&mut self, drawing: &mut Drawing, draw_error: bool) {
         if self.raster_mode == Rasterizer::GPU {
-            let (_, _, pixels, error_heatmap) = self.draw_and_evaluate(drawing).await;
-            self.working_data = to_color_vec(&pixels);
-            self.error_data = to_color_vec(&error_heatmap);
+            futures_lite::future::block_on(async move {
+                let (_, _, pixels, error_heatmap) = self.draw_and_evaluate(drawing).await;
+                self.working_data = pixels;
+                self.error_data = error_heatmap;
+            });
         } else {
             drawing.draw(&mut self.working_data, self.w, self.h, self.raster_mode);
 
             let num_pixels = self.w * self.h;
-            assert!(num_pixels == self.working_data.len());
+            assert!(num_pixels == self.working_data.len() / 4);
             assert!(self.ref_image_data.len() == self.working_data.len());
 
             let mut error = 0.0;
             for i in 0..num_pixels {
+                let r = (i * 4) as usize;
+                let g = r + 1;
+                let b = g + 1;
+                let a = b + 1; // don't need to involve alpha in error calc
+
                 // can't subtract u8 from u8 -> potential underflow
-                let re = self.working_data[i].r as i32 - self.ref_image_data[i].r as i32;
-                let ge = self.working_data[i].g as i32 - self.ref_image_data[i].g as i32;
-                let be = self.working_data[i].b as i32 - self.ref_image_data[i].b as i32;
+                let re = self.working_data[r] as i32 - self.ref_image_data[r] as i32;
+                let ge = self.working_data[g] as i32 - self.ref_image_data[g] as i32;
+                let be = self.working_data[b] as i32 - self.ref_image_data[b] as i32;
 
                 let sqrt = f32::sqrt(((re * re) + (ge * ge) + (be * be)) as f32);
                 error += sqrt;
@@ -209,10 +216,10 @@ impl<'a> Engine<'a> {
                 if draw_error {
                     // scale it to 0 - 255, full red = max error
                     let err_color = f32::floor(255.0 * (1.0 - sqrt / MAX_ERROR_PER_PIXEL)) as u8;
-                    self.error_data[i].r = 255;
-                    self.error_data[i].g = err_color;
-                    self.error_data[i].b = err_color;
-                    self.error_data[i].a = 255;
+                    self.error_data[r] = 255;
+                    self.error_data[g] = err_color;
+                    self.error_data[b] = err_color;
+                    self.error_data[a] = 255;
                 }
             }
 
@@ -229,14 +236,14 @@ impl<'a> Engine<'a> {
 
     // testing our rasterization logic
     // should be able to perfectly fill a rectangle with 2 triangles
-    pub async fn test(&mut self) {
+    pub fn test(&mut self) {
         let p1 = Point { x: 0.0, y: 0.0 };
         let p2 = Point { x: 0.0, y: 1.0 };
         let p3 = Point { x: 1.0, y: 1.0 };
         let p4 = Point { x: 1.0, y: 0.0 };
         let c = crate::models::color::Color {
-            r: 255,
-            g: 0,
+            r: 0,
+            g: 255,
             b: 0,
             a: 255,
         };
@@ -261,41 +268,37 @@ impl<'a> Engine<'a> {
         //     .all(|c| c.r == 0 && c.g == 0 && c.b == 0 && c.a == 0);
         // assert!(all_black);
 
-        self.calculate_fitness(&mut d, false).await;
-        // self.current_best = d;
+        self.calculate_fitness(&mut d, false);
+        self.current_best = d;
 
         // confirm every pixel is red after drawing 2 red triangles that cover 100% of the area
         let all_red = self
             .working_data
-            .iter()
-            .all(|c| c.r == 255 && c.g == 0 && c.b == 0 && c.a == 255);
-        dbg!(all_red);
+            .chunks_exact(4)
+            .all(|c| c[0] == 255 && c[1] == 0 && c[2] == 0 && c[3] == 255);
         assert!(all_red);
-        // dbg!(&self.error_data);
-
-        // self.window.as_mut().expect("no window?").request_redraw();
-
-        // let pixels = to_u8_vec(&self.working_data);
-        // let image = ImageView::new(ImageInfo::rgba8(self.w as u32, self.h as u32), &pixels);
-        // self.window
-        //     .as_mut()
-        //     .expect("no window?")
-        //     .set_image("image-001", image)
-        //     .expect("Failed to set image.");
     }
 
+    // draws current working_data (should be called right after we have a new best)
     pub fn redraw(&mut self) {
-        // todo!()
-        self.current_best
-            .draw(&mut self.working_data, self.w, self.h, self.raster_mode);
-        // FIXME : window.request_redraw?
-        // let pixels = to_u8_vec(&self.working_data);
-        // let image = ImageView::new(ImageInfo::rgba8(self.w as u32, self.h as u32), &pixels);
-        // self.window
-        //     .as_mut()
-        //     .expect("no window?")
-        //     .set_image("image-001", image)
-        //     .expect("Failed to set image.");
+        if self.sdl2_canvas.is_none() {
+            return;
+        }
+
+        let canvas = self.sdl2_canvas.as_mut().unwrap();
+        let texture_creator = canvas.texture_creator();
+        let mut texture = texture_creator
+            .create_texture_streaming(PixelFormatEnum::ABGR8888, self.w as u32, self.h as u32)
+            .unwrap();
+
+        // TODO reuse texture (the problem is lifetime)
+
+        texture
+            .update(None, &self.working_data, self.w * 4)
+            .unwrap();
+        canvas.copy(&texture, None, None).unwrap();
+
+        canvas.present();
     }
 
     pub async fn draw(&self, drawing: &Drawing) -> SubmissionIndex {
@@ -481,58 +484,55 @@ impl<'a> Engine<'a> {
             return vec![];
         }
     }
-}
 
-impl<'a> ApplicationHandler for Engine<'a> {
-    fn resumed(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
+    pub fn init_gpu(&mut self) {
         assert!(self.w > 0);
         assert!(self.h > 0);
 
-        let window_attributes = Window::default_attributes().with_title("polygon renderer");
-        let window = Arc::new(event_loop.create_window(window_attributes).unwrap());
-        self.window = Some(window.clone());
+        // let window_attributes = Window::default_attributes().with_title("polygon renderer");
+        // let window = Arc::new(event_loop.create_window(window_attributes).unwrap());
+        // self.window = Some(window.clone());
 
-        let (instance, surface, adapter, device, queue) =
-            futures_lite::future::block_on(async move {
-                let instance = wgpu::Instance::default();
-                let surface = instance.create_surface(window).unwrap();
+        let (instance, adapter, device, queue) = futures_lite::future::block_on(async move {
+            let instance = wgpu::Instance::default();
+            // let surface = instance.create_surface().unwrap();
 
-                let adapter_options = &wgpu::RequestAdapterOptions {
-                    power_preference: wgpu::PowerPreference::HighPerformance,
-                    force_fallback_adapter: false,
-                    compatible_surface: Some(&surface),
-                };
+            let adapter_options = &wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                force_fallback_adapter: false,
+                compatible_surface: None,
+            };
 
-                let adapter = instance
-                    .request_adapter(adapter_options)
-                    .await
-                    .expect("Failed to find an appropriate adapter");
+            let adapter = instance
+                .request_adapter(adapter_options)
+                .await
+                .expect("Failed to find an appropriate adapter");
 
-                let (device, queue) = adapter
-                    .request_device(
-                        &wgpu::DeviceDescriptor {
-                            label: None,
-                            required_features: wgpu::Features::empty(),
-                            required_limits: wgpu::Limits::downlevel_defaults()
-                                .using_resolution(adapter.limits()),
-                            memory_hints: wgpu::MemoryHints::Performance,
-                        },
-                        None,
-                    )
-                    .await
-                    .expect("Failed to create device");
+            let (device, queue) = adapter
+                .request_device(
+                    &wgpu::DeviceDescriptor {
+                        label: None,
+                        required_features: wgpu::Features::empty(),
+                        required_limits: wgpu::Limits::downlevel_defaults()
+                            .using_resolution(adapter.limits()),
+                        memory_hints: wgpu::MemoryHints::Performance,
+                    },
+                    None,
+                )
+                .await
+                .expect("Failed to create device");
 
-                (instance, surface, adapter, device, queue)
-            });
+            (instance, adapter, device, queue)
+        });
 
-        let config = surface
-            .get_default_config(&adapter, self.w as u32, self.h as u32)
-            .unwrap();
-        surface.configure(&device, &config);
+        // let config = surface
+        //     .get_default_config(&adapter, self.w as u32, self.h as u32)
+        //     .unwrap();
+        // surface.configure(&device, &config);
 
         //TODO see if we need to keep references to the rest
-        self.config = Some(config);
-        self.surface = Some(surface);
+        // self.config = Some(config);
+        // self.surface = Some(surface);
         self.device = Some(device);
         self.queue = Some(queue);
 
@@ -656,11 +656,11 @@ impl<'a> ApplicationHandler for Engine<'a> {
             });
 
         let dimensions = (self.w as u32, self.h as u32);
-        assert!(self.ref_image_bytes.len() == self.w * self.h * 4);
+        assert!(self.ref_image_data.len() == self.w * self.h * 4);
         let source_texture_wrapper = TextureWrapper::from_bytes(
             &self.device.as_mut().expect("no device?"),
             &self.queue.as_mut().expect("no queue?"),
-            &self.ref_image_bytes.as_slice(),
+            &self.ref_image_data.as_slice(),
             dimensions,
             &"source",
         )
@@ -809,166 +809,6 @@ impl<'a> ApplicationHandler for Engine<'a> {
         self.compute_bind_group = Some(compute_bind_group);
         // self.drawing_output_buffer = Some(drawing_output_buffer);
         // self.error_output_buffer = Some(error_output_buffer);
-    }
-
-    fn window_event(
-        &mut self,
-        event_loop: &winit::event_loop::ActiveEventLoop,
-        window_id: winit::window::WindowId,
-        event: winit::event::WindowEvent,
-    ) {
-        // info!("{event:?}");
-
-        match event {
-            WindowEvent::CloseRequested => {
-                // There is a bug on macos which panics when
-                // the window closes. This
-                // isn't a huge deal since the application
-                // is already closing, but theoretically
-                // would prevent cleanup (since it is a
-                // panic) and is ugly from a DX/UX
-                // perspective.
-                //
-                // ```
-                // a delegate was not configured on the application
-                // ```
-                //
-                // that can be worked around by taking the
-                // window and dropping it here ourselves.
-                // the fix has already been merged, but is
-                // not in a winit release yet. https://github.com/rust-windowing/winit/pull/3684
-                //
-                // we use `.take()` to replace the options
-                // with `None` in our `App`, then we own the
-                // data and it will drop.
-                //
-                // `surface` keeps a reference to the
-                // window, so we need to drop that first
-                let _ = self.surface.take();
-                // then we can drop the window
-                let _ = self.window.take();
-
-                event_loop.exit();
-            }
-            WindowEvent::Resized(PhysicalSize { width, height }) => {
-                let Self {
-                    config: Some(config),
-                    surface: Some(surface),
-                    device: Some(device),
-                    window: Some(window),
-                    ..
-                } = self
-                else {
-                    return;
-                };
-
-                // Reconfigure the surface with the new size
-                config.width = width.max(1);
-                config.height = height.max(1);
-
-                surface.configure(device, config);
-                // On macos the window needs to be redrawn
-                // manually after resizing
-                window.request_redraw();
-            }
-            WindowEvent::KeyboardInput {
-                event:
-                    KeyEvent {
-                        logical_key: key,
-                        state: ElementState::Pressed,
-                        ..
-                    },
-                ..
-            } => {
-                // allow a single_match here so that people
-                // who use this example can easily match on
-                // new keys
-                #[allow(clippy::single_match)]
-                match key.as_ref() {
-                    // WARNING: Consider using
-                    // `key_without_modifiers()` if
-                    // available on your platform.
-                    Key::Named(NamedKey::Escape) => {
-                        // TODO: This is the same handling
-                        // as `WindowEvent::CloseRequested`,
-                        // which we'll be removing in a
-                        // future version
-                        let _ = self.surface.take();
-                        // then we can drop the window
-                        let _ = self.window.take();
-
-                        event_loop.exit();
-                    }
-                    _ => (),
-                }
-            }
-            WindowEvent::RedrawRequested => {
-                // FIXME: what was this about?
-                // let Self {
-                //     surface: Some(surface),
-                //     device: Some(device),
-                //     queue: Some(queue),
-                //     render_pipeline: Some(render_pipeline),
-                //     ..
-                // } = self
-                // else {
-                //     return;
-                // };
-
-                // FIXME: how to always just draw whatever is in self.working_data
-                let frame = self
-                    .surface
-                    .as_mut()
-                    .expect("no surface?")
-                    .get_current_texture()
-                    .expect("Failed to acquire next swap chain texture");
-                frame.present();
-            }
-            _ => (),
-        }
-    }
-
-    fn new_events(
-        &mut self,
-        event_loop: &winit::event_loop::ActiveEventLoop,
-        cause: winit::event::StartCause,
-    ) {
-        let _ = (event_loop, cause);
-    }
-
-    fn user_event(&mut self, event_loop: &winit::event_loop::ActiveEventLoop, event: ()) {
-        let _ = (event_loop, event);
-        // info!("{event:?}");
-    }
-
-    fn device_event(
-        &mut self,
-        event_loop: &winit::event_loop::ActiveEventLoop,
-        device_id: winit::event::DeviceId,
-        event: winit::event::DeviceEvent,
-    ) {
-        let _ = (event_loop, device_id, event);
-        // info!("{event:?}");
-    }
-
-    fn about_to_wait(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
-        futures_lite::future::block_on(async move {
-            // self.test().await;
-            self.tick(TARGET_FRAMETIME).await;
-            // self.window.as_mut().expect("no window?").request_redraw(); // TODO: not sure if should call this? maybe only call on new best
-        });
-    }
-
-    fn suspended(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
-        let _ = event_loop;
-    }
-
-    fn exiting(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
-        let _ = event_loop;
-    }
-
-    fn memory_warning(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
-        let _ = event_loop;
     }
 }
 
