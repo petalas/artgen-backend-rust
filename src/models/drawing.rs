@@ -12,10 +12,7 @@ use crate::{
     utils::{fill_shape, fill_triangle, randomf32, translate_color, translate_coord},
 };
 
-use super::{
-    color::{Color, WHITE},
-    polygon::Polygon,
-};
+use super::polygon::Polygon;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -32,7 +29,7 @@ impl Drawing {
         }
 
         // start with white background
-        buffer.into_iter().for_each(|item| *item = 255u8);
+        buffer.fill(255u8);
 
         for polygon in &self.polygons {
             if rm == Rasterizer::Scanline || polygon.points.len() > 3 {
