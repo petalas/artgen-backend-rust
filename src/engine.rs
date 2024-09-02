@@ -1,9 +1,10 @@
 use std::{borrow::Cow, mem, time::Instant};
 
 use image::{imageops::FilterType::Lanczos3, EncodableLayout, ImageReader};
-use sdl2::{pixels::PixelFormatEnum, render::Canvas, video::Window};
-use tokio::sync::RwLock;
-use tracing::info;
+use tokio::{
+    runtime::Builder,
+    sync::{RwLock, Semaphore},
+};
 use wgpu::{
     vertex_attr_array, BindGroup, BlendState, Buffer, ComputePipeline, Device, Extent3d, Queue,
     RenderPipeline, SubmissionIndex, Texture,
@@ -51,7 +52,6 @@ pub struct Stats {
     pub ticks: usize,
 }
 
-#[derive(Default)]
 pub struct Engine {
     pub best_drawing_bytes: Vec<u8>,
     pub best_drawing: Drawing,
@@ -72,12 +72,13 @@ pub struct Engine {
     pub raster_mode: Rasterizer,
     pub ref_image_data: Vec<u8>,
     pub render_pipeline: Option<RenderPipeline>,
-    pub stats: Stats,
+    pub stats: RwLock<Stats>,
+    pub stats_semaphore: Semaphore, // to update
     pub texture_extent: Option<Extent3d>,
     pub w: usize,
     pub working_data: Vec<u8>,
-    pub sdl2_canvas: Option<Canvas<Window>>,
-    pub should_display: bool,
+    pub should_display: RwLock<bool>,
+    pub stopped: RwLock<bool>,
 }
 
 impl Engine {
@@ -107,18 +108,6 @@ impl Engine {
         assert!(self.working_data.len() == size);
         assert!(self.error_data.len() == size);
 
-        // SDL2
-        let sdl_context = sdl2::init().unwrap();
-        let video_subsystem = sdl_context.video().unwrap();
-        let window = video_subsystem
-            .window("polygon renderer", self.w as u32, self.h as u32)
-            .position_centered()
-            .build()
-            .unwrap();
-
-        let canvas = window.into_canvas().build().unwrap();
-        self.sdl2_canvas = Some(canvas);
-
         if self.raster_mode == Rasterizer::GPU {
             self.init_gpu(); // wgpu pipelines
         }
@@ -131,44 +120,53 @@ impl Engine {
         assert!(self.initialized);
         *self.current_best.blocking_write() = drawing;
         self.current_best.blocking_write().fitness = 0.0; // do not trust
-        if self.sdl2_canvas.is_some() {
-            self.display();
-        }
+        *self.should_display.blocking_write() = true;
+        // if self.sdl2_canvas.is_some() {
+        //     self.display();
+        // }
     }
 
     pub fn tick(&mut self, max_time_ms: usize) {
-        self.stats.ticks = 0;
+        // each thread needs to calculate its own statistics and only add them to the global stats at the end
+        let mut ticks = 0;
+        let mut generated = 0;
+        let mut improvements = 0;
+
         let mut elapsed: usize = 0;
         while elapsed < max_time_ms {
-            self.stats.ticks += 1;
+            ticks += 1;
             let t0 = Instant::now();
 
             let mut clone = self.current_best.blocking_read().clone();
             clone.mutate();
-            self.stats.generated += 1;
+            generated += 1;
             self.calculate_fitness(&mut clone, false);
             if clone.fitness > self.current_best.blocking_read().fitness {
                 // calculate again this time including error data (for display purposes)
                 // self.calculate_fitness(&mut clone, true); // TODO: benchmark if this is actually worth it
                 *self.current_best.blocking_write() = clone;
-                self.stats.improvements += 1;
-                self.should_display = true;
+                improvements += 1;
+                *self.should_display.blocking_write() = true;
             }
             elapsed += t0.elapsed().as_millis() as usize;
         }
 
-        self.stats.cycle_time = elapsed;
-
-        if self.should_display {
-            self.display();
-            self.should_display = false;
-        }
+        // self.stats.cycle_time = elapsed; // FIXME: think about how to have average cycle time when multi-threaded
+        // FIXME: just use atomics for stats?
+        futures_lite::future::block_on(async {
+            let _ = self.stats_semaphore.acquire().await;
+            let mut stats = self.stats.blocking_read().clone();
+            stats.generated += generated;
+            stats.improvements += improvements;
+            stats.ticks += ticks;
+            *self.stats.blocking_write() = stats;
+        });
     }
 
     pub fn calculate_fitness(&mut self, drawing: &mut Drawing, draw_error: bool) {
         if self.raster_mode == Rasterizer::GPU {
             futures_lite::future::block_on(async move {
-                let (_, _, pixels, error_heatmap) = self.draw_and_evaluate(drawing).await;
+                let (_, _, pixels, error_heatmap) = self.draw_and_evaluate(drawing);
                 self.working_data = pixels;
                 self.error_data = error_heatmap;
             });
@@ -195,6 +193,7 @@ impl Engine {
                 error += sqrt;
 
                 if draw_error {
+                    // this is for the error heatmap
                     // scale it to 0 - 255, full red = max error
                     let err_color = f32::floor(255.0 * (1.0 - sqrt / MAX_ERROR_PER_PIXEL)) as u8;
                     self.error_data[r] = 255;
@@ -202,10 +201,6 @@ impl Engine {
                     self.error_data[b] = err_color;
                     self.error_data[a] = 255;
                 }
-            }
-
-            if draw_error {
-                // TODO
             }
 
             let max_total_error = MAX_ERROR_PER_PIXEL * self.w as f32 * self.h as f32;
@@ -242,13 +237,6 @@ impl Engine {
             fitness: 0.0,
         };
 
-        // confirm we are starting with all 0s
-        // let all_black = self
-        //     .working_data
-        //     .iter()
-        //     .all(|c| c.r == 0 && c.g == 0 && c.b == 0 && c.a == 0);
-        // assert!(all_black);
-
         self.calculate_fitness(&mut d, false);
         *self.current_best.blocking_write() = d;
 
@@ -260,29 +248,7 @@ impl Engine {
         assert!(all_red);
     }
 
-    // draws current working_data to the sdl2 window (should be called right after we have a new best)
-    pub fn display(&mut self) {
-        if self.sdl2_canvas.is_none() {
-            return;
-        }
-
-        // FIXME: reuse texture (the problem is lifetime)
-        // https://devcry.heiho.net/html/2022/20220716-rust-and-sdl2-fighting-with-lifetimes-2.html
-        let canvas = self.sdl2_canvas.as_mut().unwrap();
-        let texture_creator = canvas.texture_creator();
-        let mut texture = texture_creator
-            .create_texture_streaming(PixelFormatEnum::ABGR8888, self.w as u32, self.h as u32)
-            .unwrap();
-
-        texture
-            .update(None, &self.working_data, self.w * 4)
-            .unwrap();
-        canvas.copy(&texture, None, None).unwrap();
-
-        canvas.present();
-    }
-
-    pub async fn draw(&self, drawing: &Drawing) -> SubmissionIndex {
+    pub fn draw(&self, drawing: &Drawing) -> SubmissionIndex {
         let vertices: Vec<Vertex> = drawing.to_vertices();
 
         // create buffer, write buffer (bytemuck?)
@@ -362,7 +328,7 @@ impl Engine {
             .submit(Some(command_buffer))
     }
 
-    pub async fn calculate_error(&self, width: u32, height: u32) -> SubmissionIndex {
+    pub fn calculate_error(&self, width: u32, height: u32) -> SubmissionIndex {
         let mut encoder = self
             .device
             .as_ref()
@@ -412,17 +378,17 @@ impl Engine {
             .submit(Some(encoder.finish()))
     }
 
-    pub async fn draw_and_evaluate(&self, drawing: &mut Drawing) -> (f32, f32, Vec<u8>, Vec<u8>) {
+    pub fn draw_and_evaluate(&self, drawing: &mut Drawing) -> (f32, f32, Vec<u8>, Vec<u8>) {
         // step 1 - render pipeline --> draw our triangles to a texture
-        let draw_si = self.draw(&drawing).await;
+        let draw_si = self.draw(&drawing);
         let dob = self
             .drawing_output_buffer
             .as_ref()
             .expect("no drawing_output_buffer?");
-        let best_drawing_bytes = self.get_bytes(&dob, draw_si).await;
+        let best_drawing_bytes = self.get_bytes(&dob, draw_si);
 
         // Step 2 - compute pipeline --> diff drawing texture vs source texture
-        let ce_si = self.calculate_error(self.w as u32, self.h as u32).await;
+        let ce_si = self.calculate_error(self.w as u32, self.h as u32);
 
         // Step 3 - calculate error and error heatmap (sum output of compute pipeline)
         // TODO: parallel reduction on GPU, something like https://eximia.co/implementing-parallel-reduction-in-cuda/
@@ -430,7 +396,7 @@ impl Engine {
             .error_output_buffer
             .as_ref()
             .expect("no drawing_output_buffer?");
-        let error_buffer = self.get_bytes(&eob, ce_si).await;
+        let error_buffer = self.get_bytes(&eob, ce_si);
 
         let (error, error_heatmap) = calculate_error_from_gpu(&error_buffer);
         let max_total_error: f32 = MAX_ERROR_PER_PIXEL * self.w as f32 * self.h as f32;
@@ -442,18 +408,18 @@ impl Engine {
         (error, fitness, best_drawing_bytes, error_heatmap)
     }
 
-    async fn get_bytes(&self, output_buffer: &wgpu::Buffer, si: SubmissionIndex) -> Vec<u8> {
+    fn get_bytes(&self, output_buffer: &wgpu::Buffer, si: SubmissionIndex) -> Vec<u8> {
         let buffer_slice = output_buffer.slice(..);
 
         // Sets the buffer up for mapping, sending over the result of the mapping back to us when it is finished.
-        let (sender, receiver) = futures_intrusive::channel::shared::oneshot_channel();
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
         buffer_slice.map_async(wgpu::MapMode::Read, move |v| sender.send(v).unwrap());
         self.device
             .as_ref()
             .expect("no device?")
             .poll(wgpu::MaintainBase::WaitForSubmissionIndex(si));
 
-        if let Some(Ok(())) = receiver.receive().await {
+        if let Ok(_) = receiver.recv() {
             let padded_buffer = buffer_slice.get_mapped_range();
             let vec = padded_buffer.to_vec();
             drop(padded_buffer); // avoid --> "You cannot unmap a buffer that still has accessible mapped views."
@@ -803,4 +769,42 @@ fn calculate_error_from_gpu(error_buffer: &Vec<u8>) -> (f32, Vec<u8>) {
     });
 
     (error, error_heatmap)
+}
+
+impl Default for Engine {
+    fn default() -> Self {
+        let runtime = Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .build()
+            .unwrap();
+        Self {
+            best_drawing_bytes: Default::default(),
+            best_drawing: Default::default(),
+            buffer_dimensions: Default::default(),
+            compute_bind_group: Default::default(),
+            compute_pipeline: Default::default(),
+            current_best: Default::default(),
+            device: Default::default(),
+            drawing_output_buffer: Default::default(),
+            drawing_texture_wrapper: Default::default(),
+            drawing_texture: Default::default(),
+            error_data: Default::default(),
+            error_output_buffer: Default::default(),
+            error_source_buffer: Default::default(),
+            h: Default::default(),
+            initialized: Default::default(),
+            queue: Default::default(),
+            raster_mode: Default::default(),
+            ref_image_data: Default::default(),
+            render_pipeline: Default::default(),
+            stats: Default::default(),
+            stats_semaphore: Semaphore::new(1),
+            texture_extent: Default::default(),
+            w: Default::default(),
+            working_data: Default::default(),
+            should_display: Default::default(),
+            stopped: Default::default(),
+        }
+    }
 }
