@@ -6,6 +6,7 @@ use artgen_backend_rust::{
 
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
+use tokio::runtime::Builder;
 use std::time::Instant;
 
 // #[tokio::main]
@@ -16,6 +17,12 @@ fn main() {
     engine.raster_mode = Rasterizer::HalfSpace;
     engine.init("ff.jpg", MAX_IMAGE_WIDTH, MAX_IMAGE_HEIGHT);
     // engine.set_best(Drawing::from_file("ff.json"));
+
+    let runtime = Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()
+        .unwrap();
 
     let sdl_context = sdl2::init().unwrap();
     let t0 = Instant::now();
@@ -42,7 +49,7 @@ fn main() {
         let rate = (g as f32 / t as f32 * 1000.0).round() as usize;
         println!(
             "Generated {:?} in {}s (~{}/s) --> {}",
-            g, sec, rate, engine.current_best.fitness
+            g, sec, rate, engine.current_best.blocking_read().fitness
         );
     }
 }

@@ -2,6 +2,7 @@ use std::{borrow::Cow, mem, time::Instant};
 
 use image::{imageops::FilterType::Lanczos3, EncodableLayout, ImageReader};
 use sdl2::{pixels::PixelFormatEnum, render::Canvas, video::Window};
+use tokio::sync::RwLock;
 use tracing::info;
 use wgpu::{
     vertex_attr_array, BindGroup, BlendState, Buffer, ComputePipeline, Device, Extent3d, Queue,
@@ -57,7 +58,7 @@ pub struct Engine {
     pub buffer_dimensions: BufferDimensions,
     pub compute_bind_group: Option<BindGroup>,
     pub compute_pipeline: Option<ComputePipeline>,
-    pub current_best: Drawing,
+    pub current_best: RwLock<Drawing>,
     pub device: Option<Device>,
     pub drawing_output_buffer: Option<Buffer>,
     pub drawing_texture_wrapper: Option<TextureWrapper>,
@@ -122,14 +123,14 @@ impl Engine {
             self.init_gpu(); // wgpu pipelines
         }
 
-        assert!(self.current_best.num_points() > 2);
+        assert!(self.current_best.blocking_read().num_points() > 2);
         self.initialized = true;
     }
 
     pub fn set_best(&mut self, drawing: Drawing) {
         assert!(self.initialized);
-        self.current_best = drawing;
-        self.current_best.fitness = 0.0; // do not trust
+        *self.current_best.blocking_write() = drawing;
+        self.current_best.blocking_write().fitness = 0.0; // do not trust
         if self.sdl2_canvas.is_some() {
             self.display();
         }
@@ -142,14 +143,14 @@ impl Engine {
             self.stats.ticks += 1;
             let t0 = Instant::now();
 
-            let mut clone = self.current_best.clone();
+            let mut clone = self.current_best.blocking_read().clone();
             clone.mutate();
             self.stats.generated += 1;
             self.calculate_fitness(&mut clone, false);
-            if clone.fitness > self.current_best.fitness {
+            if clone.fitness > self.current_best.blocking_read().fitness {
                 // calculate again this time including error data (for display purposes)
                 // self.calculate_fitness(&mut clone, true); // TODO: benchmark if this is actually worth it
-                self.current_best = clone;
+                *self.current_best.blocking_write() = clone;
                 self.stats.improvements += 1;
                 self.should_display = true;
             }
@@ -249,7 +250,7 @@ impl Engine {
         // assert!(all_black);
 
         self.calculate_fitness(&mut d, false);
-        self.current_best = d;
+        *self.current_best.blocking_write() = d;
 
         // confirm every pixel is red after drawing 2 red triangles that cover 100% of the area
         let all_red = self
