@@ -13,8 +13,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-const N_THREADS: usize = 10;
-
 fn evaluate(tx: mpsc::Sender<EvaluatorPayload>, mut evaluator: Evaluator) {
     loop {
         let update = evaluator.produce_new_best();
@@ -66,14 +64,18 @@ fn print_stats(stats: EvaluatorPayload, real_elapsed: Duration) {
     };
 
     println!(
-        "Elapsed time: {} | {} total in {} threads => {:.2}x speedup | evaluations: {:<10} ~{:5.0}/s |  mutations: {:<10} ~{:6.0}/s | best => {:3.4}",
-        time, total_time, N_THREADS, speedup, e, eval_rate, m, mut_rate, stats.best.fitness
+        "Elapsed time: {} | {} total => {:.2}x speedup | evaluations: {:<10} ~{:5.0}/s |  mutations: {:<10} ~{:6.0}/s | best => {:3.4}",
+        time, total_time, speedup, e, eval_rate, m, mut_rate, stats.best.fitness
     );
 }
 
 // #[tokio::main]
 fn main() {
     tracing_subscriber::fmt().init();
+
+    println!("{}", num_cpus::get() - 1);
+
+    let num_threads = (num_cpus::get() - 1).max(2);
 
     let mut engine = Engine::default();
     engine.raster_mode = Rasterizer::HalfSpace;
@@ -104,7 +106,7 @@ fn main() {
     let (tx, rx) = channel::<EvaluatorPayload>();
 
     // 2. spawn a bunch of worker threads, giving each a sender
-    let workers = (0..N_THREADS)
+    let workers = (0..num_threads)
         .map(|_| {
             let tx = tx.clone();
             // TODO: remove refs to engine, calculate ref_image_data, w, h in main
