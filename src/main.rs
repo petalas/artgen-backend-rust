@@ -23,16 +23,51 @@ fn evaluate(tx: mpsc::Sender<EvaluatorPayload>, mut evaluator: Evaluator) {
     }
 }
 
-fn print_stats(stats: EvaluatorPayload) {
+fn print_stats(stats: EvaluatorPayload, real_elapsed: Duration) {
     let t = stats.elapsed;
+    if t == 0 || real_elapsed.as_millis() == 0 {
+        return;
+    }
+
     let e = stats.evaluations;
     let m = stats.mutations;
-    let sec = t as f64 / 1000.0;
-    let eval_rate = (e as f64 / sec as f64).round() as usize;
-    let mut_rate = (m as f64 / sec as f64).round() as usize;
+
+    let total_sec = t as f64 / 1000.0;
+    let total_min = total_sec / 60.0;
+    let total_h = total_min / 60.0;
+
+    let real_ms = real_elapsed.as_millis() as f64;
+    let real_sec = real_ms / 1000.0;
+    let real_min = real_sec / 60.0;
+    let real_h = real_min / 60.0;
+
+    let eval_rate = e as f64 / (real_ms as f64 / 1000.0);
+    let mut_rate = m as f64 / (real_ms as f64 / 1000.0);
+    let speedup = t as f64 / real_elapsed.as_millis() as f64;
+
+    let time = if real_h > 1.0 {
+        format!("{:4.1}h", real_h)
+    } else {
+        if real_min > 1.0 {
+            format!("{:4.1}m", real_min)
+        } else {
+            format!("{:4.1}s", real_sec)
+        }
+    };
+
+    let total_time = if total_h > 1.0 {
+        format!("{:4.1}h", total_h)
+    } else {
+        if total_min > 1.0 {
+            format!("{:4.1}m", total_min)
+        } else {
+            format!("{:4.1}s", total_sec)
+        }
+    };
+
     println!(
-        "Elapsed time (across {} threads): {}, evaluations {} (~{}/s),  mutations {} (~{}/s) --> {}",
-        N_THREADS, sec, e, eval_rate, m, mut_rate, stats.best.fitness
+        "Elapsed time: {} | {} total in {} threads => {:.2}x speedup | evaluations: {:<10} ~{:5.0}/s |  mutations: {:<10} ~{:6.0}/s | best => {:3.4}",
+        time, total_time, N_THREADS, speedup, e, eval_rate, m, mut_rate, stats.best.fitness
     );
 }
 
@@ -87,11 +122,18 @@ fn main() {
 
     let frametime = Duration::from_millis(TARGET_FRAMETIME);
     let mut event_pump = sdl_context.event_pump().unwrap();
-    let mut last_draw_timestamp = Instant::now();
+    let mut last_draw_timestamp = Instant::now() - frametime;
     let mut stats = EvaluatorPayload::default();
+    let mut real_elapsed = Duration::from_millis(0);
+    let mut t0 = Instant::now();
 
     // start receiving messages over the channel
     while let Ok(update) = rx.recv() {
+        // keep track of real time
+        real_elapsed += t0.elapsed();
+        t0 = Instant::now();
+
+        // cummulative stats from all threads
         stats.elapsed += update.elapsed;
         stats.evaluations += update.evaluations;
         stats.mutations += update.mutations;
@@ -108,7 +150,7 @@ fn main() {
         canvas.copy(&texture, None, None).unwrap();
         canvas.present();
         last_draw_timestamp = Instant::now();
-        print_stats(stats.clone());
+        print_stats(stats.clone(), real_elapsed);
         for event in event_pump.poll_iter() {
             match event {
                 Event::Quit { .. }
