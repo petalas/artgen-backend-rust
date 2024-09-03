@@ -1,12 +1,15 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Duration};
 
 use rand::Rng;
 
-use crate::models::{
-    color::Color,
-    line::Line,
-    point::{FixedPoint, Point},
-    polygon::Polygon,
+use crate::{
+    evaluator::EvaluatorPayload,
+    models::{
+        color::Color,
+        line::Line,
+        point::{FixedPoint, Point},
+        polygon::Polygon,
+    },
 };
 
 pub struct ImageDimensions {
@@ -381,3 +384,51 @@ pub fn translate_color(color: u8) -> f32 {
 // pub fn to_u8_vec(buffer: &Vec<Color>) -> Vec<u8> {
 //     buffer.iter().flat_map(|c| [c.r, c.g, c.b, c.a]).collect()
 // }
+
+pub fn print_stats(stats: EvaluatorPayload, real_elapsed: Duration) {
+    let t = stats.elapsed;
+    if t == 0 || real_elapsed.as_millis() == 0 {
+        return;
+    }
+
+    let e = stats.evaluations;
+    let m = stats.mutations;
+
+    let total_sec = t as f64 / 1000.0;
+    let total_min = total_sec / 60.0;
+    let total_h = total_min / 60.0;
+
+    let real_ms = real_elapsed.as_millis() as f64;
+    let real_sec = real_ms / 1000.0;
+    let real_min = real_sec / 60.0;
+    let real_h = real_min / 60.0;
+
+    let eval_rate = e as f64 / (real_ms as f64 / 1000.0);
+    let mut_rate = m as f64 / (real_ms as f64 / 1000.0);
+    let speedup = t as f64 / real_elapsed.as_millis() as f64;
+
+    let time = if real_h > 1.0 {
+        format!("{:4.1}h", real_h)
+    } else {
+        if real_min > 1.0 {
+            format!("{:4.1}m", real_min)
+        } else {
+            format!("{:4.1}s", real_sec)
+        }
+    };
+
+    let total_time = if total_h > 1.0 {
+        format!("{:4.1}h", total_h)
+    } else {
+        if total_min > 1.0 {
+            format!("{:4.1}m", total_min)
+        } else {
+            format!("{:4.1}s", total_sec)
+        }
+    };
+
+    println!(
+        "Elapsed time: {} | {} total => {:.2}x speedup | evaluations: {:<10} ~{:5.0}/s |  mutations: {:<10} ~{:6.0}/s | best => {:3.4}",
+        time, total_time, speedup, e, eval_rate, m, mut_rate, stats.best.fitness
+    );
+}

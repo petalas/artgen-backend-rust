@@ -3,6 +3,7 @@ use artgen_backend_rust::{
     evaluator::{Evaluator, EvaluatorPayload},
     models::drawing::Drawing,
     settings::{MAX_IMAGE_HEIGHT, MAX_IMAGE_WIDTH, TARGET_FRAMETIME},
+    utils::print_stats,
 };
 
 use sdl2::keyboard::Keycode;
@@ -22,55 +23,6 @@ fn evaluate(work_sender: mpsc::Sender<EvaluatorPayload>, mut evaluator: Evaluato
     }
 }
 
-fn print_stats(stats: EvaluatorPayload, real_elapsed: Duration) {
-    let t = stats.elapsed;
-    if t == 0 || real_elapsed.as_millis() == 0 {
-        return;
-    }
-
-    let e = stats.evaluations;
-    let m = stats.mutations;
-
-    let total_sec = t as f64 / 1000.0;
-    let total_min = total_sec / 60.0;
-    let total_h = total_min / 60.0;
-
-    let real_ms = real_elapsed.as_millis() as f64;
-    let real_sec = real_ms / 1000.0;
-    let real_min = real_sec / 60.0;
-    let real_h = real_min / 60.0;
-
-    let eval_rate = e as f64 / (real_ms as f64 / 1000.0);
-    let mut_rate = m as f64 / (real_ms as f64 / 1000.0);
-    let speedup = t as f64 / real_elapsed.as_millis() as f64;
-
-    let time = if real_h > 1.0 {
-        format!("{:4.1}h", real_h)
-    } else {
-        if real_min > 1.0 {
-            format!("{:4.1}m", real_min)
-        } else {
-            format!("{:4.1}s", real_sec)
-        }
-    };
-
-    let total_time = if total_h > 1.0 {
-        format!("{:4.1}h", total_h)
-    } else {
-        if total_min > 1.0 {
-            format!("{:4.1}m", total_min)
-        } else {
-            format!("{:4.1}s", total_sec)
-        }
-    };
-
-    println!(
-        "Elapsed time: {} | {} total => {:.2}x speedup | evaluations: {:<10} ~{:5.0}/s |  mutations: {:<10} ~{:6.0}/s | best => {:3.4}",
-        time, total_time, speedup, e, eval_rate, m, mut_rate, stats.best.fitness
-    );
-}
-
-// #[tokio::main]
 fn main() {
     tracing_subscriber::fmt().init();
 
@@ -85,17 +37,7 @@ fn main() {
     // let best = Drawing::from_file("ff.json");
     let best = Drawing::new_random();
 
-    // sdl setup on the main thread
-    let sdl_context = sdl2::init().unwrap();
-    let video_subsystem = sdl_context.video().unwrap();
-    let window = video_subsystem
-        .window("polygon renderer", engine.w as u32, engine.h as u32)
-        .position_centered()
-        .build()
-        .unwrap();
-
-    let mut canvas = window.into_canvas().build().unwrap();
-    let texture_creator = canvas.texture_creator();
+    let (sdl_context, mut canvas, texture_creator) = initialize_sdl(engine.w as u32, engine.h as u32);
     let mut texture = texture_creator
         .create_texture_streaming(PixelFormatEnum::ABGR8888, engine.w as u32, engine.h as u32)
         .unwrap();
@@ -129,14 +71,38 @@ fn main() {
     drop(work_sender);
     drop(best_receiver);
 
-    let frametime = Duration::from_millis(TARGET_FRAMETIME);
+    let global_best = best.clone();
+
+    main_loop(
+        &sdl_context,
+        &work_receiver,
+        &best_sender,
+        &mut texture,
+        &mut canvas,
+        &mut engine,
+        global_best,
+    );
+
+    for worker in workers {
+        worker.join().expect("worker panicked");
+    }
+}
+
+fn main_loop(
+    sdl_context: &sdl2::Sdl,
+    work_receiver: &mpsc::Receiver<EvaluatorPayload>,
+    best_sender: &broadcast::Sender<Drawing>,
+    texture: &mut sdl2::render::Texture,
+    canvas: &mut sdl2::render::WindowCanvas,
+    engine: &mut Engine,
+    mut global_best: Drawing,
+) {
     let mut event_pump = sdl_context.event_pump().unwrap();
+    let frametime = Duration::from_millis(TARGET_FRAMETIME);
     let mut last_draw_timestamp = Instant::now() - frametime;
     let mut stats = EvaluatorPayload::default();
     let mut real_elapsed = Duration::from_millis(0);
     let mut t0 = Instant::now();
-
-    let mut global_best = best.clone();
 
     // start receiving messages over the channel
     while let Ok(update) = work_receiver.recv() {
@@ -169,21 +135,45 @@ fn main() {
         canvas.present();
         last_draw_timestamp = Instant::now();
         print_stats(stats.clone(), real_elapsed);
-        for event in event_pump.poll_iter() {
-            match event {
-                Event::Quit { .. }
-                | Event::KeyDown {
-                    keycode: Some(Keycode::Escape),
-                    ..
-                } => {
-                    panic!("exited");
-                }
-                _ => {}
+        exhaust_event_pump(&mut event_pump);
+    }
+}
+
+fn exhaust_event_pump(event_pump: &mut sdl2::EventPump) {
+    // TODO: add pause/resume functionality (when pressing space bar)
+    for event in event_pump.poll_iter() {
+        match event {
+            Event::Quit { .. }
+            | Event::KeyDown {
+                keycode: Some(Keycode::Escape),
+                ..
+            } => {
+                panic!("exited");
             }
+            _ => {}
         }
     }
+}
 
-    for worker in workers {
-        worker.join().expect("worker panicked");
-    }
+// TODO: create a helper method to initialize all the sdl stuff
+fn initialize_sdl(
+    w: u32,
+    h: u32,
+) -> (
+    sdl2::Sdl,
+    sdl2::render::Canvas<sdl2::video::Window>,
+    sdl2::render::TextureCreator<sdl2::video::WindowContext>,
+) {
+    let sdl_context = sdl2::init().unwrap();
+    let video_subsystem = sdl_context.video().unwrap();
+    let window = video_subsystem
+        .window("polygon renderer", w, h)
+        .position_centered()
+        .build()
+        .unwrap();
+
+    let canvas = window.into_canvas().build().unwrap();
+    let texture_creator = canvas.texture_creator();
+
+    (sdl_context, canvas, texture_creator)
 }
