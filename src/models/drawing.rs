@@ -123,7 +123,7 @@ impl Drawing {
 
     pub fn from_file(path: &str) -> Self {
         let file = BufReader::new(File::open(&Path::new(&path)).expect("Failed to open file"));
-        return serde_json::from_reader(file).expect("Failed to parse json");
+        return serde_json::from_reader(file).expect(format!("Failed to read file: {}", path).as_str());
     }
 
     pub fn to_file(&self, path: &str) {

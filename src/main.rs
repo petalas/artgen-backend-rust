@@ -15,6 +15,9 @@ use std::{
 };
 use tokio::sync::broadcast;
 
+const REF_IMAGE_FILENAME: &str = "ff.jpg";
+const BEST_JSON_FILENAME: &str = "best.json";
+
 fn evaluate(work_sender: mpsc::Sender<EvaluatorPayload>, mut evaluator: Evaluator) {
     loop {
         let update = evaluator.produce_new_best();
@@ -23,19 +26,20 @@ fn evaluate(work_sender: mpsc::Sender<EvaluatorPayload>, mut evaluator: Evaluato
     }
 }
 
+fn initialize_engine() -> Engine {
+    let mut engine = Engine::default();
+    engine.raster_mode = Rasterizer::HalfSpace;
+    engine.init(REF_IMAGE_FILENAME, MAX_IMAGE_WIDTH, MAX_IMAGE_HEIGHT);
+    engine
+}
+
 fn main() {
     tracing_subscriber::fmt().init();
 
-    println!("{}", num_cpus::get() - 1);
+    let num_threads = num_cpus::get();
+    let mut engine = initialize_engine();
 
-    let num_threads = (num_cpus::get() - 1).max(2);
-
-    let mut engine = Engine::default();
-    engine.raster_mode = Rasterizer::HalfSpace;
-    engine.init("ff.jpg", MAX_IMAGE_WIDTH, MAX_IMAGE_HEIGHT);
-
-    let best = Drawing::from_file("ff.json");
-    // let best = Drawing::from_file("best.json");
+    let best = Drawing::from_file(BEST_JSON_FILENAME);
     // let best = Drawing::new_random();
 
     let (sdl_context, mut canvas, texture_creator) =
@@ -122,15 +126,16 @@ fn main_loop(
         // broadcast new potentially global best to all workers
         if stats.best.fitness > global_best.fitness {
             global_best = stats.best.clone();
-            best_sender.send(global_best.clone()).unwrap();
-            // TODO: every 10 minutes, save the best to disk
 
-            if last_save_timestamp.elapsed().as_secs() >= 10 {
-                global_best.to_file("best.json");
-                print!("Saved best to disk\n");
+            let since_last_save = last_save_timestamp.elapsed().as_secs();
+            if since_last_save >= 10 {
+                global_best.to_file(BEST_JSON_FILENAME);
                 last_save_timestamp = Instant::now();
             }
         }
+
+        // need to always send the current global best to all workers, not only when it changes
+        best_sender.send(global_best.clone()).unwrap();
 
         // everything below here is optional (display new best if enough time has passed)
         let elapsed = last_draw_timestamp.elapsed();
