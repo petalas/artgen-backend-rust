@@ -34,10 +34,12 @@ fn main() {
     engine.raster_mode = Rasterizer::HalfSpace;
     engine.init("ff.jpg", MAX_IMAGE_WIDTH, MAX_IMAGE_HEIGHT);
 
-    // let best = Drawing::from_file("ff.json");
-    let best = Drawing::new_random();
+    let best = Drawing::from_file("ff.json");
+    // let best = Drawing::from_file("best.json");
+    // let best = Drawing::new_random();
 
-    let (sdl_context, mut canvas, texture_creator) = initialize_sdl(engine.w as u32, engine.h as u32);
+    let (sdl_context, mut canvas, texture_creator) =
+        initialize_sdl(engine.w as u32, engine.h as u32);
     let mut texture = texture_creator
         .create_texture_streaming(PixelFormatEnum::ABGR8888, engine.w as u32, engine.h as u32)
         .unwrap();
@@ -103,6 +105,7 @@ fn main_loop(
     let mut stats = EvaluatorPayload::default();
     let mut real_elapsed = Duration::from_millis(0);
     let mut t0 = Instant::now();
+    let mut last_save_timestamp = Instant::now();
 
     // start receiving messages over the channel
     while let Ok(update) = work_receiver.recv() {
@@ -120,6 +123,13 @@ fn main_loop(
         if stats.best.fitness > global_best.fitness {
             global_best = stats.best.clone();
             best_sender.send(global_best.clone()).unwrap();
+            // TODO: every 10 minutes, save the best to disk
+
+            if last_save_timestamp.elapsed().as_secs() >= 10 {
+                global_best.to_file("best.json");
+                print!("Saved best to disk\n");
+                last_save_timestamp = Instant::now();
+            }
         }
 
         // everything below here is optional (display new best if enough time has passed)

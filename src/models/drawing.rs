@@ -126,6 +126,12 @@ impl Drawing {
         return serde_json::from_reader(file).expect("Failed to parse json");
     }
 
+    pub fn to_file(&self, path: &str) {
+        // TODO: change it so that if the file already exists, it overwrites it
+        let file = File::create(&Path::new(path)).expect("Failed to create file");
+        serde_json::to_writer(file, &self).expect("Failed to write to file");
+    }
+
     // for gpu rendering
     pub fn to_vertices(&self) -> Vec<Vertex> {
         // FIXME: hacky workaround --> 2 white triangles as background seems to fix blending issues
