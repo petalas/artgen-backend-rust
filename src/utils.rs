@@ -58,8 +58,6 @@ pub fn fill_shape(buffer: &mut Vec<u8>, polygon: &Polygon, w: usize, h: usize) {
 }
 
 // Based on https://web.archive.org/web/20050408192410/http://sw-shader.sourceforge.net/rasterizer.html
-// Had to do additional checks otherwise it doesn't work for all triangles
-// Another solution (maybe?) would be to sort points clockwise.
 pub fn fill_triangle(buffer: &mut Vec<u8>, polygon: &Polygon, w: usize, h: usize) {
     let points = &polygon.points;
     assert_eq!(points.len(), 3);

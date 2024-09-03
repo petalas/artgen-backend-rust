@@ -165,11 +165,9 @@ impl Engine {
 
     pub fn calculate_fitness(&mut self, drawing: &mut Drawing, draw_error: bool) {
         if self.raster_mode == Rasterizer::GPU {
-            futures_lite::future::block_on(async move {
-                let (_, _, pixels, error_heatmap) = self.draw_and_evaluate(drawing);
-                self.working_data = pixels;
-                self.error_data = error_heatmap;
-            });
+            let (_, _, pixels, error_heatmap) = self.draw_and_evaluate(drawing);
+            self.working_data = pixels;
+            self.error_data = error_heatmap;
         } else {
             drawing.draw(&mut self.working_data, self.w, self.h, self.raster_mode);
 
