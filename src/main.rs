@@ -12,12 +12,13 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+use tokio::sync::broadcast;
 
-fn evaluate(tx: mpsc::Sender<EvaluatorPayload>, mut evaluator: Evaluator) {
+fn evaluate(work_sender: mpsc::Sender<EvaluatorPayload>, mut evaluator: Evaluator) {
     loop {
         let update = evaluator.produce_new_best();
         evaluator.reset(update.best.clone());
-        let _ = tx.send(update);
+        let _ = work_sender.send(update);
     }
 }
 
@@ -102,25 +103,31 @@ fn main() {
     canvas.clear();
     canvas.present();
 
-    // 1. create a channel so workers & UI thread can communicate
-    let (tx, rx) = channel::<EvaluatorPayload>();
+    // channel to send work to worker threads
+    let (work_sender, work_receiver) = channel::<EvaluatorPayload>();
+
+    // broadcast channel to send out new best to all workers
+    let (best_sender, best_receiver) = broadcast::channel::<Drawing>(1);
 
     // 2. spawn a bunch of worker threads, giving each a sender
     let workers = (0..num_threads)
         .map(|_| {
-            let tx = tx.clone();
+            let ws = work_sender.clone(); // to send new work to threads
+            let br = best_sender.subscribe();
             // TODO: remove refs to engine, calculate ref_image_data, w, h in main
             let evaluator = Evaluator::new(
                 engine.ref_image_data.clone(),
                 engine.w,
                 engine.h,
                 best.clone(),
+                br,
             );
-            thread::spawn(move || evaluate(tx, evaluator))
+            thread::spawn(move || evaluate(ws, evaluator))
         })
         .collect::<Vec<_>>();
 
-    drop(tx);
+    drop(work_sender);
+    drop(best_receiver);
 
     let frametime = Duration::from_millis(TARGET_FRAMETIME);
     let mut event_pump = sdl_context.event_pump().unwrap();
@@ -129,8 +136,10 @@ fn main() {
     let mut real_elapsed = Duration::from_millis(0);
     let mut t0 = Instant::now();
 
+    let mut global_best = best.clone();
+
     // start receiving messages over the channel
-    while let Ok(update) = rx.recv() {
+    while let Ok(update) = work_receiver.recv() {
         // keep track of real time
         real_elapsed += t0.elapsed();
         t0 = Instant::now();
@@ -141,6 +150,13 @@ fn main() {
         stats.mutations += update.mutations;
         stats.best = update.best;
 
+        // broadcast new potentially global best to all workers
+        if stats.best.fitness > global_best.fitness {
+            global_best = stats.best.clone();
+            best_sender.send(global_best.clone()).unwrap();
+        }
+
+        // everything below here is optional (display new best if enough time has passed)
         let elapsed = last_draw_timestamp.elapsed();
         if elapsed.lt(&frametime) {
             continue;

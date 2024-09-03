@@ -1,4 +1,9 @@
-use std::time::Instant;
+use std::{
+    sync::{Arc, RwLock},
+    time::Instant,
+};
+
+use tokio::sync::broadcast::Receiver;
 
 use crate::{
     engine::Rasterizer,
@@ -12,6 +17,7 @@ pub struct EvaluatorPayload {
     pub mutations: usize,
     pub elapsed: usize,
     pub best: Drawing,
+    // pub global_best: Option<Arc<RwLock<Drawing>>>, // does not need to be returned back from workers
     pub working_data: Vec<u8>,
 }
 
@@ -23,10 +29,17 @@ pub struct Evaluator {
     pub ref_image_data: Vec<u8>,
     pub error_data: Vec<u8>,
     pub current_best: Drawing,
+    pub br: Receiver<Drawing>, // receive new best on broadcast channel from main
 }
 
 impl Evaluator {
-    pub fn new(ref_image_data: Vec<u8>, w: usize, h: usize, current_best: Drawing) -> Evaluator {
+    pub fn new(
+        ref_image_data: Vec<u8>,
+        w: usize,
+        h: usize,
+        current_best: Drawing,
+        br: Receiver<Drawing>,
+    ) -> Evaluator {
         let size = w * h * 4;
         assert!(size > 0);
         assert!(ref_image_data.len() == size);
@@ -43,6 +56,7 @@ impl Evaluator {
             working_data,
             error_data,
             current_best,
+            br,
         };
 
         // just in case a random one that was never evaluated was used to init
@@ -112,7 +126,14 @@ impl Evaluator {
         while new_best_fitness <= old_best_fitness {
             evaluations += 1;
             let t0 = Instant::now();
+
+            // attempt to receive new global best on broadcast channel from main
             working_copy = self.current_best.clone();
+            if let Ok(received) = self.br.try_recv() {
+                if received.fitness > working_copy.fitness {
+                    working_copy = received;
+                }
+            }
 
             // ensure we have an actual mutation (probabilistic)
             working_copy.is_dirty = false;
@@ -127,6 +148,7 @@ impl Evaluator {
 
         EvaluatorPayload {
             best: working_copy,
+            // global_best: None,
             evaluations,
             mutations,
             elapsed,
