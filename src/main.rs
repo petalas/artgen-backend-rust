@@ -1,4 +1,3 @@
-#![feature(portable_simd)]
 use artgen_backend_rust::{
     engine::{Engine, Rasterizer},
     evaluator::{Evaluator, EvaluatorPayload},

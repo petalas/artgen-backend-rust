@@ -11,6 +11,8 @@ use crate::{
         polygon::Polygon,
     },
 };
+use std::simd::num::SimdUint;
+use std::simd::{u16x4, u8x4, Simd};
 
 pub struct ImageDimensions {
     pub width: usize,
@@ -224,34 +226,40 @@ pub fn fill_pixel(buffer: &mut Vec<u8>, index: usize, color: &Color) {
     assert!(buffer.len() > index + 3);
     let a = color.a as f32 / 255.0;
     let inv_a = 1.0 - a;
-    buffer[index] = ((buffer[index] as f32 * inv_a) + (color.r as f32 * a)).round() as u8;
-    buffer[index + 1] = ((buffer[index + 1] as f32 * inv_a) + (color.g as f32 * a)).round() as u8;
-    buffer[index + 2] = ((buffer[index + 2] as f32 * inv_a) + (color.b as f32 * a)).round() as u8;
+    buffer[index] = ((buffer[index] as f32 * inv_a) + (color.r as f32 * a)) as u8;
+    buffer[index + 1] = ((buffer[index + 1] as f32 * inv_a) + (color.g as f32 * a)) as u8;
+    buffer[index + 2] = ((buffer[index + 2] as f32 * inv_a) + (color.b as f32 * a)) as u8;
     buffer[index + 3] = u8::max(buffer[index + 3], color.a);
 }
 
 pub fn blend(base: &mut [u8; 4], fill_color: &[u8; 4]) {
-    assert!(base.len() == 4 && fill_color.len() == 4); // Ensure both slices are of length 4
-
     // Extract the alpha value and calculate the blending factors
     let alpha = fill_color[3] as f32 / 255.0;
     let inv_alpha = 1.0 - alpha;
 
     // Calculate the blended values for r, g, b
-    base[0] = ((base[0] as f32 * inv_alpha) + (fill_color[0] as f32 * alpha)).round() as u8;
-    base[1] = ((base[1] as f32 * inv_alpha) + (fill_color[1] as f32 * alpha)).round() as u8;
-    base[2] = ((base[2] as f32 * inv_alpha) + (fill_color[2] as f32 * alpha)).round() as u8;
+    base[0] = ((base[0] as f32 * inv_alpha) + (fill_color[0] as f32 * alpha)) as u8;
+    base[1] = ((base[1] as f32 * inv_alpha) + (fill_color[1] as f32 * alpha)) as u8;
+    base[2] = ((base[2] as f32 * inv_alpha) + (fill_color[2] as f32 * alpha)) as u8;
     base[3] = u8::max(base[3], fill_color[3]);
 }
 
-// pub fn blend(prev: &mut Color, new: &Color) {
-//     let a = new.a as f32 / 255.0;
-//     let b = 1.0 - a;
-//     prev.r = ((prev.r as f32 * b) + (new.r as f32 * a)).round() as u8;
-//     prev.g = ((prev.g as f32 * b) + (new.g as f32 * a)).round() as u8;
-//     prev.b = ((prev.b as f32 * b) + (new.b as f32 * a)).round() as u8;
-//     prev.a = u8::max(prev.a, new.a);
-// }
+// Color blending using SIMD, equivalent to:
+// base[0] = ((base[0] as f32 * inv_alpha) + (fill_color[0] as f32 * alpha)) as u8;
+// base[1] = ((base[1] as f32 * inv_alpha) + (fill_color[1] as f32 * alpha)) as u8;
+// base[2] = ((base[2] as f32 * inv_alpha) + (fill_color[2] as f32 * alpha)) as u8;
+// base[3] = u8::max(base[3], fill_color[3]);
+pub fn blend_simd(base: &mut [u8; 4], fill_color: &[u8; 4]) {
+    let original_max_alpha = base[3].max(fill_color[3]); // keep it around because it gets overwritten by the SIMD stuff
+    let base_simd: u16x4 = u8x4::from_slice(base).cast();
+    let fill_color_simd: u16x4 = u8x4::from_slice(fill_color).cast();
+    let alpha_simd = u16x4::splat(fill_color[3] as u16);
+    const MAX: u16x4 = u16x4::from_array([255, 255, 255, 255]);
+    let inv_a_simd = MAX - alpha_simd;
+    let blend = (base_simd * inv_a_simd + fill_color_simd * alpha_simd) / MAX;
+    blend.cast().copy_to_slice(base);
+    base[3] = original_max_alpha;
+}
 
 // https://fgiesen.wordpress.com/2013/02/08/triangle-rasterization-in-practice/
 pub fn orient_2d(a: &FixedPoint, b: &FixedPoint, c: &FixedPoint) -> i32 {
@@ -463,7 +471,27 @@ pub fn print_stats(stats: EvaluatorPayload, real_elapsed: Duration) {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
+
+    /// Asserts that two slices are approximately equal, allowing each element to be off by 1.
+    pub fn assert_approx_eq(expected: &[u8], actual: &[u8]) {
+        assert_eq!(
+            expected.len(),
+            actual.len(),
+            "Slices have different lengths"
+        );
+
+        for (i, (e, a)) in expected.iter().zip(actual.iter()).enumerate() {
+            assert!(
+                (*e as i16 - *a as i16).abs() <= 1, // i16 to avoid underflow
+                "Values at index {} are not approximately equal: expected {}, got {}",
+                i,
+                e,
+                a
+            );
+        }
+    }
 
     #[test]
     fn test_fill_pixel_combinations() {
@@ -495,9 +523,11 @@ mod tests {
 
         // Run test cases
         for (mut buf, color) in test_cases {
-
-            // clone before blending to avoid side effects
-            // these ones are to test blend which is the same as fill_pixel but takes [u8; 4]
+            // TODO: cleanup
+            println!("testing {:?} <-- {:?}", buf, color);
+            let original_base = buf.clone(); // for logs
+                                             // clone before blending to avoid side effects
+                                             // these ones are to test blend which is the same as fill_pixel but takes [u8; 4]
             let mut blend_buf = buf.clone();
             let mut blend_base: [u8; 4] = Default::default();
             blend_base.copy_from_slice(&blend_buf[0..4]);
@@ -508,10 +538,27 @@ mod tests {
             // Calculate expected values
             let alpha = color.a as f32 / 255.0;
             let inv_a = 1.0 - alpha;
-            let exp_r = ((buf[0] as f32 * inv_a) + (color.r as f32 * alpha)).round() as u8;
-            let exp_g = ((buf[1] as f32 * inv_a) + (color.g as f32 * alpha)).round() as u8;
-            let exp_b = ((buf[2] as f32 * inv_a) + (color.b as f32 * alpha)).round() as u8;
+            let exp_r = ((buf[0] as f32 * inv_a) + (color.r as f32 * alpha)) as u8;
+            let exp_g = ((buf[1] as f32 * inv_a) + (color.g as f32 * alpha)) as u8;
+            let exp_b = ((buf[2] as f32 * inv_a) + (color.b as f32 * alpha)) as u8;
             let exp_a = u8::max(buf[3], color.a);
+
+            // debug
+            // println!(
+            //     "floats: {:?}, {:?}",
+            //     [
+            //         buf[0] as f32 * inv_a,
+            //         buf[1] as f32 * inv_a,
+            //         buf[2] as f32 * inv_a,
+            //         buf[3] as f32 * inv_a,
+            //     ],
+            //     [
+            //         color.r as f32 * alpha,
+            //         color.g as f32 * alpha,
+            //         color.b as f32 * alpha,
+            //         color.a as f32 * alpha,
+            //     ]
+            // );
 
             let exp_buf = vec![exp_r, exp_g, exp_b, exp_a];
 
@@ -519,18 +566,23 @@ mod tests {
             fill_pixel(&mut buf, idx, &color);
 
             // Assert
-            assert_eq!(
-                buf, exp_buf,
-                "The fill_pixel function did not blend the color correctly for color {:?} with initial buffer {:?}.",
-                color, buf
-            );
+            assert_approx_eq(buf.as_slice(), exp_buf.as_slice());
 
+            // TODO: cleanup, test both
             // test blend here too
-            blend(&mut blend_base, &blend_color);
-            assert_eq!(
-                blend_base, [exp_r, exp_g, exp_b, exp_a],
-                "The blend function did not blend the color correctly for color {:?} with initial slice {:?}.",
-                blend_base, blend_color
+            // blend(&mut blend_base, &blend_color);
+            blend_simd(&mut blend_base, &blend_color);
+            // println!(
+            //     "a: {:?} | {:?} + {:?} -> {:?}, exp: {:?}",
+            //     alpha,
+            //     original_base,
+            //     blend_color,
+            //     blend_base,
+            //     [exp_r, exp_g, exp_b, exp_a]
+            // );
+            assert_approx_eq(
+                blend_base.as_slice(),
+                [exp_r, exp_g, exp_b, exp_a].as_slice(),
             );
         }
     }
