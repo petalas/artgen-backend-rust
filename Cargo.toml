@@ -27,11 +27,11 @@ harness = false
 
 [profile.release]
 opt-level = 3
-debug = false
+debug = true
 strip = "none"
 debug-assertions = false
 overflow-checks = false
-lto = true
+lto = false
 panic = 'abort'
 incremental = true
 codegen-units = 1

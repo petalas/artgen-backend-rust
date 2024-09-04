@@ -26,3 +26,8 @@ bench                 fastest       │ slowest       │ median        │ mean
 │  ╰─ Scanline        6.285 ms      │ 7.744 ms      │ 6.832 ms      │ 6.958 ms      │ 100     │ 100
 ╰─ fill_color         454.7 µs      │ 546.3 µs      │ 457.1 µs      │ 461 µs        │ 100     │ 100
 ```
+
+## To look at asm
+
+`cargo install cargo-show-asm --force`
+`cargo-asm --lib utils::fill_pixel`
