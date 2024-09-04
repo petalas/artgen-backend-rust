@@ -59,11 +59,13 @@ impl Point {
         return Point { x, y };
     }
 
-    pub fn translate_to_fixed(&self, w: usize, h: usize) -> FixedPoint {
+    pub fn translate_to_fixed(&self, w: usize, h: usize) -> Result<FixedPoint, &'static str> {
         let x = (self.x * w as f32).round() as i32;
         let y = (self.y * h as f32).round() as i32;
-        assert!(x >= 0 && x <= w as i32 && y >= 0 && y <= h as i32);
-        return FixedPoint { x, y };
+        if x < 0 || x > w as i32 || y < 0 || y > h as i32 {
+            return Err("Point is out of bounds");
+        }
+        Ok(FixedPoint { x, y })
     }
 }
 

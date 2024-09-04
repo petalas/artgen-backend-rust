@@ -64,15 +64,24 @@ pub fn fill_shape(buffer: &mut Vec<u8>, polygon: &Polygon, w: usize, h: usize) {
 // TODO: optimize it by using SIMD to process multiple pixels at once
 // Note: we want to use "portable SIMD" so we compile for any target
 // https://doc.rust-lang.org/std/simd/index.html
-pub fn fill_triangle(buffer: &mut Vec<u8>, polygon: &Polygon, w: usize, h: usize) {
+pub fn fill_triangle(
+    buffer: &mut Vec<u8>,
+    polygon: &Polygon,
+    w: usize,
+    h: usize,
+) -> Result<(), &'static str> {
     let points = &polygon.points;
     assert_eq!(points.len(), 3);
-    let mut v: Vec<FixedPoint> = points.iter().map(|p| p.translate_to_fixed(w, h)).collect();
+    // Initialize the vector with capacity and collect the results
+    let mut v: Vec<FixedPoint> = points
+        .iter()
+        .map(|p| p.translate_to_fixed(w, h))
+        .collect::<Result<Vec<_>, _>>()?;
 
     // ensure correct orientation, swap two points around if needed
     let orient = orient_2d(&v[0], &v[1], &v[2]);
     if orient == 0 {
-        return; // degenerate triangle
+        return Ok(()); // degenerate triangle
     }
 
     if orient > 0 {
@@ -207,6 +216,8 @@ pub fn fill_triangle(buffer: &mut Vec<u8>, polygon: &Polygon, w: usize, h: usize
             }
         }
     }
+
+    Ok(())
 }
 
 pub fn fill_pixel(buffer: &mut Vec<u8>, index: usize, color: &Color) {
@@ -443,37 +454,148 @@ mod tests {
     #[test]
     fn test_fill_pixel_combinations() {
         let test_vals = [0, 128, 255];
+        let mut test_cases = vec![];
 
+        // Generate test cases
         for &r in &test_vals {
             for &g in &test_vals {
                 for &b in &test_vals {
                     for &a in &test_vals {
                         let color = Color { r, g, b, a };
-                        let mut buf = vec![0, 0, 0, 0];
-                        let idx = 0;
 
-                        // Calculate expected values
-                        let alpha = a as f32 / 255.0;
-                        let inv_a = 1.0 - alpha;
-                        let exp_r = ((buf[0] as f32 * inv_a) + (r as f32 * alpha)).round() as u8;
-                        let exp_g = ((buf[1] as f32 * inv_a) + (g as f32 * alpha)).round() as u8;
-                        let exp_b = ((buf[2] as f32 * inv_a) + (b as f32 * alpha)).round() as u8;
-                        let exp_a = u8::max(buf[3], a);
+                        // Generate different starting buffers
+                        let initial_buffers = vec![
+                            vec![0, 0, 0, 0],
+                            vec![128, 128, 128, 128],
+                            vec![255, 255, 255, 255],
+                            vec![r, g, b, a],
+                        ];
 
-                        let exp_buf = vec![exp_r, exp_g, exp_b, exp_a];
-
-                        // Act
-                        fill_pixel(&mut buf, idx, &color);
-
-                        // Assert
-                        assert_eq!(
-                                buf, exp_buf,
-                                "The fill_pixel function did not blend the color correctly for color {:?}.",
-                                color
-                            );
+                        for buf in initial_buffers {
+                            test_cases.push((buf, color));
+                        }
                     }
                 }
             }
+        }
+
+        // Run test cases
+        for (mut buf, color) in test_cases {
+            let idx = 0;
+
+            // Calculate expected values
+            let alpha = color.a as f32 / 255.0;
+            let inv_a = 1.0 - alpha;
+            let exp_r = ((buf[0] as f32 * inv_a) + (color.r as f32 * alpha)).round() as u8;
+            let exp_g = ((buf[1] as f32 * inv_a) + (color.g as f32 * alpha)).round() as u8;
+            let exp_b = ((buf[2] as f32 * inv_a) + (color.b as f32 * alpha)).round() as u8;
+            let exp_a = u8::max(buf[3], color.a);
+
+            let exp_buf = vec![exp_r, exp_g, exp_b, exp_a];
+
+            // Act
+            fill_pixel(&mut buf, idx, &color);
+
+            // Assert
+            assert_eq!(
+                buf, exp_buf,
+                "The fill_pixel function did not blend the color correctly for color {:?} with initial buffer {:?}.",
+                color, buf
+            );
+        }
+    }
+
+    // helper for other tests
+    fn assert_pixel_eq(buffer: &[u8], x: usize, y: usize, width: usize, expected: Color) {
+        let idx = 4 * (y * width + x);
+        assert_eq!(
+            buffer[idx], expected.r,
+            "Red channel mismatch at ({}, {})",
+            x, y
+        );
+        assert_eq!(
+            buffer[idx + 1],
+            expected.g,
+            "Green channel mismatch at ({}, {})",
+            x,
+            y
+        );
+        assert_eq!(
+            buffer[idx + 2],
+            expected.b,
+            "Blue channel mismatch at ({}, {})",
+            x,
+            y
+        );
+        assert_eq!(
+            buffer[idx + 3],
+            expected.a,
+            "Alpha channel mismatch at ({}, {})",
+            x,
+            y
+        );
+    }
+
+    #[test]
+    fn test_fill_triangle_basic() {
+        let mut buffer = vec![0; 16 * 16 * 4]; // 16x16 image with RGBA channels
+        let red_color = Color {
+            r: 255,
+            g: 0,
+            b: 0,
+            a: 255,
+        };
+
+        // First triangle covering the top-left half
+        let polygon1 = Polygon {
+            points: vec![
+                Point { x: 0.0, y: 0.0 },
+                Point { x: 1.0, y: 0.0 },
+                Point { x: 0.0, y: 1.0 },
+            ],
+            color: red_color,
+        };
+        fill_triangle(&mut buffer, &polygon1, 16, 16);
+
+        // Second triangle covering the bottom-right half
+        let polygon2 = Polygon {
+            points: vec![
+                Point { x: 1.0, y: 0.0 },
+                Point { x: 1.0, y: 1.0 },
+                Point { x: 0.0, y: 1.0 },
+            ],
+            color: red_color,
+        };
+        fill_triangle(&mut buffer, &polygon2, 16, 16);
+
+        // Check all pixels to ensure they are filled with red
+        for y in 0..16 {
+            for x in 0..16 {
+                assert_pixel_eq(&buffer, x, y, 16, red_color);
+            }
+        }
+    }
+
+    #[test]
+    fn test_fill_triangle_out_of_bounds() {
+        let mut buffer = vec![0u8; 16 * 16 * 4]; // 16x16 image with RGBA channels
+        let polygon = Polygon {
+            points: vec![
+                Point { x: -1.0, y: -1.0 },
+                Point { x: -0.5, y: -1.0 },
+                Point { x: -1.0, y: -0.5 },
+            ],
+            color: Color {
+                r: 0,
+                g: 255,
+                b: 0,
+                a: 255,
+            }, // Green color
+        };
+        // Attempt to fill the triangle and handle out-of-bounds points
+        if let Err(_) = fill_triangle(&mut buffer, &polygon, 16, 16) {
+            // Check that no pixels are filled since the triangle is out of bounds
+            assert!(buffer.iter().all(|&pixel| pixel == 0u8));
         }
     }
 }
