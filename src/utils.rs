@@ -61,6 +61,9 @@ pub fn fill_shape(buffer: &mut Vec<u8>, polygon: &Polygon, w: usize, h: usize) {
 }
 
 // Based on https://web.archive.org/web/20050408192410/http://sw-shader.sourceforge.net/rasterizer.html
+// TODO: optimize it by using SIMD to process multiple pixels at once
+// Note: we want to use "portable SIMD" so we compile for any target
+// https://doc.rust-lang.org/std/simd/index.html
 pub fn fill_triangle(buffer: &mut Vec<u8>, polygon: &Polygon, w: usize, h: usize) {
     let points = &polygon.points;
     assert_eq!(points.len(), 3);
