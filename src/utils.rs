@@ -230,6 +230,20 @@ pub fn fill_pixel(buffer: &mut Vec<u8>, index: usize, color: &Color) {
     buffer[index + 3] = u8::max(buffer[index + 3], color.a);
 }
 
+pub fn blend(base: &mut [u8; 4], fill_color: &[u8; 4]) {
+    assert!(base.len() == 4 && fill_color.len() == 4); // Ensure both slices are of length 4
+
+    // Extract the alpha value and calculate the blending factors
+    let alpha = fill_color[3] as f32 / 255.0;
+    let inv_alpha = 1.0 - alpha;
+
+    // Calculate the blended values for r, g, b
+    base[0] = ((base[0] as f32 * inv_alpha) + (fill_color[0] as f32 * alpha)).round() as u8;
+    base[1] = ((base[1] as f32 * inv_alpha) + (fill_color[1] as f32 * alpha)).round() as u8;
+    base[2] = ((base[2] as f32 * inv_alpha) + (fill_color[2] as f32 * alpha)).round() as u8;
+    base[3] = u8::max(base[3], fill_color[3]);
+}
+
 // pub fn blend(prev: &mut Color, new: &Color) {
 //     let a = new.a as f32 / 255.0;
 //     let b = 1.0 - a;
