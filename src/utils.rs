@@ -495,6 +495,14 @@ mod tests {
 
         // Run test cases
         for (mut buf, color) in test_cases {
+
+            // clone before blending to avoid side effects
+            // these ones are to test blend which is the same as fill_pixel but takes [u8; 4]
+            let mut blend_buf = buf.clone();
+            let mut blend_base: [u8; 4] = Default::default();
+            blend_base.copy_from_slice(&blend_buf[0..4]);
+            let blend_color: [u8; 4] = [color.r, color.g, color.b, color.a];
+
             let idx = 0;
 
             // Calculate expected values
@@ -515,6 +523,14 @@ mod tests {
                 buf, exp_buf,
                 "The fill_pixel function did not blend the color correctly for color {:?} with initial buffer {:?}.",
                 color, buf
+            );
+
+            // test blend here too
+            blend(&mut blend_base, &blend_color);
+            assert_eq!(
+                blend_base, [exp_r, exp_g, exp_b, exp_a],
+                "The blend function did not blend the color correctly for color {:?} with initial slice {:?}.",
+                blend_base, blend_color
             );
         }
     }
