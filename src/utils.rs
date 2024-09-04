@@ -209,10 +209,10 @@ pub fn fill_triangle(buffer: &mut Vec<u8>, polygon: &Polygon, w: usize, h: usize
 pub fn fill_pixel(buffer: &mut Vec<u8>, index: usize, color: &Color) {
     assert!(buffer.len() > index + 3);
     let a = color.a as f32 / 255.0;
-    let b = 1.0 - a;
-    buffer[index] = ((buffer[index] as f32 * b) + (color.r as f32 * a)).round() as u8;
-    buffer[index + 1] = ((buffer[index + 1] as f32 * b) + (color.g as f32 * a)).round() as u8;
-    buffer[index + 2] = ((buffer[index + 2] as f32 * b) + (color.b as f32 * a)).round() as u8;
+    let inv_a = 1.0 - a;
+    buffer[index] = ((buffer[index] as f32 * inv_a) + (color.r as f32 * a)).round() as u8;
+    buffer[index + 1] = ((buffer[index + 1] as f32 * inv_a) + (color.g as f32 * a)).round() as u8;
+    buffer[index + 2] = ((buffer[index + 2] as f32 * inv_a) + (color.b as f32 * a)).round() as u8;
     buffer[index + 3] = u8::max(buffer[index + 3], color.a);
 }
 
@@ -431,4 +431,46 @@ pub fn print_stats(stats: EvaluatorPayload, real_elapsed: Duration) {
         "Elapsed time: {} | {} total => {:.2}x speedup | evaluations: {:<10} ~{:5.0}/s |  mutations: {:<10} ~{:6.0}/s | best => {:3.4}",
         time, total_time, speedup, e, eval_rate, m, mut_rate, stats.best.fitness
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_fill_pixel_combinations() {
+        let test_vals = [0, 128, 255];
+
+        for &r in &test_vals {
+            for &g in &test_vals {
+                for &b in &test_vals {
+                    for &a in &test_vals {
+                        let color = Color { r, g, b, a };
+                        let mut buf = vec![0, 0, 0, 0];
+                        let idx = 0;
+
+                        // Calculate expected values
+                        let alpha = a as f32 / 255.0;
+                        let inv_a = 1.0 - alpha;
+                        let exp_r = ((buf[0] as f32 * inv_a) + (r as f32 * alpha)).round() as u8;
+                        let exp_g = ((buf[1] as f32 * inv_a) + (g as f32 * alpha)).round() as u8;
+                        let exp_b = ((buf[2] as f32 * inv_a) + (b as f32 * alpha)).round() as u8;
+                        let exp_a = u8::max(buf[3], a);
+
+                        let exp_buf = vec![exp_r, exp_g, exp_b, exp_a];
+
+                        // Act
+                        fill_pixel(&mut buf, idx, &color);
+
+                        // Assert
+                        assert_eq!(
+                                buf, exp_buf,
+                                "The fill_pixel function did not blend the color correctly for color {:?}.",
+                                color
+                            );
+                    }
+                }
+            }
+        }
+    }
 }
