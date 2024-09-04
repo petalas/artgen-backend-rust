@@ -36,6 +36,10 @@ pub const RED: Color = Color {
 };
 
 impl Color {
+    pub fn as_slice(self) -> [u8; 4] {
+        [self.r, self.g, self.b, self.a]
+    }
+
     pub fn new_random() -> Color {
         Color {
             r: randomu8(),
