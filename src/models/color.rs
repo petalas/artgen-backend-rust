@@ -148,6 +148,12 @@ impl From<[u8; 4]> for Color {
     }
 }
 
+impl From<Color> for [u8; 4] {
+    fn from(color: Color) -> [u8; 4] {
+        [color.r, color.g, color.b, color.a]
+    }
+}
+
 impl Default for Color {
     fn default() -> Self {
         Self::new_random()

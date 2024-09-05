@@ -187,8 +187,11 @@ pub fn fill_triangle(
             if a == 0xF && b == 0xF && c == 0xF {
                 for iy in y..(y + q) {
                     for ix in x..(x + q) {
-                        let idx = (4 * iy * w as i32 + 4 * ix) as usize;
-                        fill_pixel(buffer, idx as usize, &polygon.color);
+                        let idx = (iy as usize * w + ix as usize) * 4;
+                        blend_simd(
+                            (&mut buffer[idx..idx + 4]).try_into().unwrap(),
+                            &polygon.color.into(),
+                        );
                     }
                 }
             } else {
@@ -203,8 +206,11 @@ pub fn fill_triangle(
 
                     for ix in x..(x + q) {
                         if CX1 >= 0 && CX2 >= 0 && CX3 >= 0 {
-                            let idx = (4 * iy * w as i32 + 4 * ix) as usize;
-                            fill_pixel(buffer, idx as usize, &polygon.color);
+                            let idx = (iy as usize * w + ix as usize) * 4;
+                            blend_simd(
+                                (&mut buffer[idx..idx + 4]).try_into().unwrap(),
+                                &polygon.color.into(),
+                            );
                         }
                         CX1 -= FDY12;
                         CX2 -= FDY23;
@@ -222,6 +228,7 @@ pub fn fill_triangle(
     Ok(())
 }
 
+// keeping it around for benchmarks
 pub fn fill_pixel(buffer: &mut Vec<u8>, index: usize, color: &Color) {
     assert!(buffer.len() > index + 3);
     let a = color.a as f32 / 255.0;
@@ -232,6 +239,7 @@ pub fn fill_pixel(buffer: &mut Vec<u8>, index: usize, color: &Color) {
     buffer[index + 3] = u8::max(buffer[index + 3], color.a);
 }
 
+// keeping it around for benchmarks
 pub fn blend(base: &mut [u8; 4], fill_color: &[u8; 4]) {
     // Extract the alpha value and calculate the blending factors
     let alpha = fill_color[3] as f32 / 255.0;
@@ -245,11 +253,14 @@ pub fn blend(base: &mut [u8; 4], fill_color: &[u8; 4]) {
 }
 
 // Color blending using SIMD, equivalent to:
+// let alpha = fill_color[3] as f32 / 255.0;
+// let inv_alpha = 1.0 - alpha;
 // base[0] = ((base[0] as f32 * inv_alpha) + (fill_color[0] as f32 * alpha)) as u8;
 // base[1] = ((base[1] as f32 * inv_alpha) + (fill_color[1] as f32 * alpha)) as u8;
 // base[2] = ((base[2] as f32 * inv_alpha) + (fill_color[2] as f32 * alpha)) as u8;
 // base[3] = u8::max(base[3], fill_color[3]);
 pub fn blend_simd(base: &mut [u8; 4], fill_color: &[u8; 4]) {
+    // println!("Before inside blend_simd: {:?}", &base);
     let original_max_alpha = base[3].max(fill_color[3]); // keep it around because it gets overwritten by the SIMD stuff
     let base_simd: u16x4 = u8x4::from_slice(base).cast();
     let fill_color_simd: u16x4 = u8x4::from_slice(fill_color).cast();
@@ -259,6 +270,7 @@ pub fn blend_simd(base: &mut [u8; 4], fill_color: &[u8; 4]) {
     let blend = (base_simd * inv_a_simd + fill_color_simd * alpha_simd) / MAX;
     blend.cast().copy_to_slice(base);
     base[3] = original_max_alpha;
+    // println!("After inside blend_simd: {:?}", &base);
 }
 
 // https://fgiesen.wordpress.com/2013/02/08/triangle-rasterization-in-practice/
@@ -413,14 +425,6 @@ pub fn translate_color(color: u8) -> f32 {
     color as f32 / 255.0
 }
 
-// pub fn to_color_vec(buffer: &Vec<u8>) -> Vec<Color> {
-//     buffer.chunks_exact(4).map(Color::from).collect()
-// }
-
-// pub fn to_u8_vec(buffer: &Vec<Color>) -> Vec<u8> {
-//     buffer.iter().flat_map(|c| [c.r, c.g, c.b, c.a]).collect()
-// }
-
 pub fn print_stats(stats: EvaluatorPayload, real_elapsed: Duration) {
     let t = stats.elapsed;
     if t == 0 || real_elapsed.as_millis() == 0 {
@@ -524,10 +528,11 @@ mod tests {
         // Run test cases
         for (mut buf, color) in test_cases {
             // TODO: cleanup
-            println!("testing {:?} <-- {:?}", buf, color);
+            // println!("testing {:?} <-- {:?}", buf, color);
             let original_base = buf.clone(); // for logs
-                                             // clone before blending to avoid side effects
-                                             // these ones are to test blend which is the same as fill_pixel but takes [u8; 4]
+
+            // clone before blending to avoid side effects
+            // these ones are to test blend which is the same as fill_pixel but takes [u8; 4]
             let mut blend_buf = buf.clone();
             let mut blend_base: [u8; 4] = Default::default();
             blend_base.copy_from_slice(&blend_buf[0..4]);
@@ -543,23 +548,6 @@ mod tests {
             let exp_b = ((buf[2] as f32 * inv_a) + (color.b as f32 * alpha)) as u8;
             let exp_a = u8::max(buf[3], color.a);
 
-            // debug
-            // println!(
-            //     "floats: {:?}, {:?}",
-            //     [
-            //         buf[0] as f32 * inv_a,
-            //         buf[1] as f32 * inv_a,
-            //         buf[2] as f32 * inv_a,
-            //         buf[3] as f32 * inv_a,
-            //     ],
-            //     [
-            //         color.r as f32 * alpha,
-            //         color.g as f32 * alpha,
-            //         color.b as f32 * alpha,
-            //         color.a as f32 * alpha,
-            //     ]
-            // );
-
             let exp_buf = vec![exp_r, exp_g, exp_b, exp_a];
 
             // Act
@@ -572,14 +560,6 @@ mod tests {
             // test blend here too
             // blend(&mut blend_base, &blend_color);
             blend_simd(&mut blend_base, &blend_color);
-            // println!(
-            //     "a: {:?} | {:?} + {:?} -> {:?}, exp: {:?}",
-            //     alpha,
-            //     original_base,
-            //     blend_color,
-            //     blend_base,
-            //     [exp_r, exp_g, exp_b, exp_a]
-            // );
             assert_approx_eq(
                 blend_base.as_slice(),
                 [exp_r, exp_g, exp_b, exp_a].as_slice(),

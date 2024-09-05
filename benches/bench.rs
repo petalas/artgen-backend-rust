@@ -101,7 +101,7 @@ fn color_blend_entire_buffer(bencher: Bencher, implementation: FillImplementatio
                     for x in 0..width {
                         let idx = (y * width + x) * 4;
                         blend_simd(
-                            &mut slice_buf[idx..idx + 4].try_into().unwrap(),
+                            (&mut slice_buf[idx..idx + 4]).try_into().unwrap(),
                             &color_slice,
                         );
                     }
@@ -124,7 +124,7 @@ fn color_blend_entire_buffer(bencher: Bencher, implementation: FillImplementatio
                     for x in 0..width {
                         let idx = (y * width + x) * 4;
                         blend(
-                            &mut slice_buf[idx..idx + 4].try_into().unwrap(),
+                            (&mut slice_buf[idx..idx + 4]).try_into().unwrap(),
                             &color_slice,
                         );
                     }
