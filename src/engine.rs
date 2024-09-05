@@ -82,7 +82,7 @@ pub struct Engine {
 }
 
 impl Engine {
-    pub fn init(&mut self, filepath: &str, max_w: usize, max_h: usize) {
+    pub fn init(&mut self, filepath: &str, min_w: usize, min_h: usize, max_w: usize, max_h: usize) {
         let mut img = ImageReader::open(filepath)
             .expect("Failed to load image")
             .decode()
@@ -91,9 +91,11 @@ impl Engine {
         self.w = img.width() as usize;
         self.h = img.height() as usize;
 
-        // downscale if source image is too large
-        if self.w > max_w || self.h > max_h {
-            img = img.resize(max_w as u32, max_h as u32, Lanczos3);
+        // Resize if the source image is too small or too large
+        if self.w < min_w || self.h < min_h || self.w > max_w || self.h > max_h {
+            let target_w = self.w.clamp(min_w, max_w) as u32;
+            let target_h = self.h.clamp(min_h, max_h) as u32;
+            img = img.resize(target_w, target_h, Lanczos3);
             self.w = img.width() as usize;
             self.h = img.height() as usize;
         }

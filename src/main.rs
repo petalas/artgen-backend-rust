@@ -2,7 +2,9 @@ use artgen_backend_rust::{
     engine::{Engine, Rasterizer},
     evaluator::{Evaluator, EvaluatorPayload},
     models::drawing::Drawing,
-    settings::{MAX_IMAGE_HEIGHT, MAX_IMAGE_WIDTH, TARGET_FRAMETIME},
+    settings::{
+        MAX_IMAGE_HEIGHT, MAX_IMAGE_WIDTH, MIN_IMAGE_HEIGHT, MIN_IMAGE_WIDTH, TARGET_FRAMETIME,
+    },
     utils::print_stats,
 };
 
@@ -31,7 +33,13 @@ fn evaluate(work_sender: mpsc::Sender<EvaluatorPayload>, mut evaluator: Evaluato
 fn initialize_engine(ref_image_filename: &str) -> Engine {
     let mut engine = Engine::default();
     engine.raster_mode = Rasterizer::HalfSpace;
-    engine.init(ref_image_filename, MAX_IMAGE_WIDTH, MAX_IMAGE_HEIGHT);
+    engine.init(
+        ref_image_filename,
+        MIN_IMAGE_WIDTH,
+        MIN_IMAGE_HEIGHT,
+        MAX_IMAGE_WIDTH,
+        MAX_IMAGE_HEIGHT,
+    );
     engine
 }
 
