@@ -27,6 +27,20 @@ bench                 fastest       │ slowest       │ median        │ mean
 ╰─ fill_color         454.7 µs      │ 546.3 µs      │ 457.1 µs      │ 461 µs        │ 100     │ 100
 ```
 
+## To generate a flamegraph
+
+- Make sure you have perf installed if on linux.
+- `cargo install flamegraph`
+- `./flamegraph.sh`
+
+To generate one manually, while the app is running run:
+
+- `perf record --call-graph dwarf -p $(pgrep artgen)` (might have to run with sudo).
+- Ctrl+C after a few seconds.
+- Might have to fix permissions of perf.data if you had to run perf with sudo.
+- `perf script | inferno-collapse-perf | inferno-flamegraph > perf.svg`
+- open perf.svg in a browser
+
 ## To look at asm
 
 `cargo install cargo-show-asm --force`

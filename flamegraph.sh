@@ -1,2 +1,2 @@
 #!/bin/sh
-sudo flamegraph -- ./target/release/argten-backend-rust
+sudo $(which flamegraph) -- ./target/release/artgen-backend-rust

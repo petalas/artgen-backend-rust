@@ -13,6 +13,7 @@ use sdl2::{event::Event, pixels::PixelFormatEnum};
 use std::{
     env,
     path::Path,
+    process::exit,
     sync::mpsc::{self, channel},
     thread,
     time::{Duration, Instant},
@@ -95,7 +96,7 @@ fn main() {
     let (work_sender, work_receiver) = channel::<EvaluatorPayload>();
 
     // broadcast channel to send out new best to all workers
-    let (best_sender, best_receiver) = broadcast::channel::<Drawing>(1);
+    let (best_sender, best_receiver) = broadcast::channel::<Drawing>(num_threads);
 
     // 2. spawn a bunch of worker threads, giving each a sender
     let workers = (0..num_threads)
@@ -205,14 +206,14 @@ fn exhaust_event_pump(event_pump: &mut sdl2::EventPump) {
                 keycode: Some(Keycode::Escape),
                 ..
             } => {
-                panic!("exited");
+                // println!("Exiting, results saved in {:?}");
+                exit(0);
             }
             _ => {}
         }
     }
 }
 
-// TODO: create a helper method to initialize all the sdl stuff
 fn initialize_sdl(
     w: u32,
     h: u32,
