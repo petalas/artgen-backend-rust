@@ -9,14 +9,16 @@ use artgen_backend_rust::{
 use sdl2::keyboard::Keycode;
 use sdl2::{event::Event, pixels::PixelFormatEnum};
 use std::{
+    env,
+    path::Path,
     sync::mpsc::{self, channel},
     thread,
     time::{Duration, Instant},
 };
 use tokio::sync::broadcast;
 
-const REF_IMAGE_FILENAME: &str = "ff.jpg";
-const BEST_JSON_FILENAME: &str = "best.json";
+const DEFAULT_REF_IMAGE_FILENAME: &str = "ff.jpg";
+const DEFAULT_SAVE_PATH: &str = "ff.best.json";
 
 fn evaluate(work_sender: mpsc::Sender<EvaluatorPayload>, mut evaluator: Evaluator) {
     loop {
@@ -26,21 +28,51 @@ fn evaluate(work_sender: mpsc::Sender<EvaluatorPayload>, mut evaluator: Evaluato
     }
 }
 
-fn initialize_engine() -> Engine {
+fn initialize_engine(ref_image_filename: &str) -> Engine {
     let mut engine = Engine::default();
     engine.raster_mode = Rasterizer::HalfSpace;
-    engine.init(REF_IMAGE_FILENAME, MAX_IMAGE_WIDTH, MAX_IMAGE_HEIGHT);
+    engine.init(ref_image_filename, MAX_IMAGE_WIDTH, MAX_IMAGE_HEIGHT);
     engine
 }
 
 fn main() {
     tracing_subscriber::fmt().init();
 
-    let num_threads = num_cpus::get();
-    let mut engine = initialize_engine();
+    let args: Vec<String> = env::args().collect();
 
-    let best = Drawing::from_file(BEST_JSON_FILENAME);
-    // let best = Drawing::new_random();
+    let ref_image_filename = if args.len() > 1 {
+        &args[1]
+    } else {
+        DEFAULT_REF_IMAGE_FILENAME
+    };
+
+    let json_filename = if args.len() > 1 {
+        format!(
+            "{}.best.json",
+            Path::new(ref_image_filename)
+                .file_stem()
+                .unwrap()
+                .to_str()
+                .unwrap()
+        )
+    } else {
+        DEFAULT_SAVE_PATH.to_string()
+    };
+
+    println!("Using {:?} -> {:?}", ref_image_filename, json_filename);
+
+    let num_threads = num_cpus::get();
+    let mut engine = initialize_engine(ref_image_filename);
+
+    let best = if Path::new(&json_filename).exists() {
+        Drawing::from_file(&json_filename)
+    } else {
+        println!(
+            "Could not find saved best for {:?}, starting from scratch...",
+            json_filename
+        );
+        Drawing::new_random()
+    };
 
     let (sdl_context, mut canvas, texture_creator) =
         initialize_sdl(engine.w as u32, engine.h as u32);
@@ -87,6 +119,7 @@ fn main() {
         &mut canvas,
         &mut engine,
         global_best,
+        &json_filename,
     );
 
     for worker in workers {
@@ -102,6 +135,7 @@ fn main_loop(
     canvas: &mut sdl2::render::WindowCanvas,
     engine: &mut Engine,
     mut global_best: Drawing,
+    json_filename: &str,
 ) {
     let mut event_pump = sdl_context.event_pump().unwrap();
     let frametime = Duration::from_millis(TARGET_FRAMETIME);
@@ -129,7 +163,7 @@ fn main_loop(
 
             let since_last_save = last_save_timestamp.elapsed().as_secs();
             if since_last_save >= 10 {
-                global_best.to_file(BEST_JSON_FILENAME);
+                global_best.to_file(json_filename);
                 last_save_timestamp = Instant::now();
             }
         }

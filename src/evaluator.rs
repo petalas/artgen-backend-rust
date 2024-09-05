@@ -121,9 +121,9 @@ impl Evaluator {
         let mut elapsed: usize = 0;
         let mut working_copy = self.current_best.clone();
         let mut new_best_fitness = 0f32;
-        let old_best_fitness = self.current_best.fitness;
+        // let mut old_best_fitness = self.current_best.fitness;
 
-        while new_best_fitness <= old_best_fitness {
+        while new_best_fitness <= self.current_best.fitness {
             evaluations += 1;
             let t0 = Instant::now();
 
@@ -132,6 +132,7 @@ impl Evaluator {
             if let Ok(received) = self.br.try_recv() {
                 if received.fitness > working_copy.fitness {
                     working_copy = received;
+                    self.current_best = working_copy.clone();
                 }
             }
 
