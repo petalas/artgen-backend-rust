@@ -4,8 +4,8 @@ pub const DEBUG_TIMERS: bool = false;
 pub const MIN_IMAGE_WIDTH: usize = 256;
 pub const MIN_IMAGE_HEIGHT: usize = 256;
 
-pub const MAX_IMAGE_WIDTH: usize = 512;
-pub const MAX_IMAGE_HEIGHT: usize = 512;
+pub const MAX_IMAGE_WIDTH: usize = 384;
+pub const MAX_IMAGE_HEIGHT: usize = 384;
 
 pub const DISPLAY_W: u32 = 1024;
 pub const DISPLAY_H: u32 = 1024;
