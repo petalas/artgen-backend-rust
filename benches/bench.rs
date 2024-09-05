@@ -32,7 +32,7 @@ fn calculate_fitness(bencher: Bencher, rm: Rasterizer) {
 
     let mut engine = Engine::default();
     engine.raster_mode = rm;
-    engine.init("ff.jpg", w, h);
+    engine.init("ff.jpg", w, h, w, h);
     let mut d = Drawing::from_file("ff.json");
 
     bencher.bench_local(move || {

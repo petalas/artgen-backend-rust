@@ -1,8 +1,8 @@
 pub const DEBUG_TIMERS: bool = false;
 
 
-pub const MIN_IMAGE_WIDTH: usize = 384;
-pub const MIN_IMAGE_HEIGHT: usize = 384;
+pub const MIN_IMAGE_WIDTH: usize = 128;
+pub const MIN_IMAGE_HEIGHT: usize = 128;
 
 pub const MAX_IMAGE_WIDTH: usize = 384;
 pub const MAX_IMAGE_HEIGHT: usize = 384;
