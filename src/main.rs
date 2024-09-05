@@ -3,7 +3,8 @@ use artgen_backend_rust::{
     evaluator::{Evaluator, EvaluatorPayload},
     models::drawing::Drawing,
     settings::{
-        MAX_IMAGE_HEIGHT, MAX_IMAGE_WIDTH, MIN_IMAGE_HEIGHT, MIN_IMAGE_WIDTH, TARGET_FRAMETIME,
+        DISPLAY_H, DISPLAY_W, MAX_IMAGE_HEIGHT, MAX_IMAGE_WIDTH, MIN_IMAGE_HEIGHT, MIN_IMAGE_WIDTH,
+        TARGET_FRAMETIME,
     },
     utils::print_stats,
 };
@@ -83,10 +84,9 @@ fn main() {
         Drawing::new_random()
     };
 
-    let (sdl_context, mut canvas, texture_creator) =
-        initialize_sdl(engine.w as u32, engine.h as u32);
+    let (sdl_context, mut canvas, texture_creator) = initialize_sdl(DISPLAY_W, DISPLAY_H);
     let mut texture = texture_creator
-        .create_texture_streaming(PixelFormatEnum::ABGR8888, engine.w as u32, engine.h as u32)
+        .create_texture_streaming(PixelFormatEnum::ABGR8888, DISPLAY_W, DISPLAY_H)
         .unwrap();
 
     canvas.clear();
@@ -126,7 +126,6 @@ fn main() {
         &best_sender,
         &mut texture,
         &mut canvas,
-        &mut engine,
         global_best,
         &json_filename,
     );
@@ -142,7 +141,6 @@ fn main_loop(
     best_sender: &broadcast::Sender<Drawing>,
     texture: &mut sdl2::render::Texture,
     canvas: &mut sdl2::render::WindowCanvas,
-    engine: &mut Engine,
     mut global_best: Drawing,
     json_filename: &str,
 ) {
@@ -186,10 +184,21 @@ fn main_loop(
             continue;
         }
 
+        // draw upscaled image
+        let mut upscale_buf = vec![0u8; DISPLAY_W as usize * DISPLAY_H as usize * 4];
+        global_best.draw(
+            &mut upscale_buf,
+            DISPLAY_W as usize,
+            DISPLAY_H as usize,
+            Rasterizer::HalfSpace,
+        );
+
         texture
-            .update(None, &update.working_data, engine.w * 4)
+            .update(None, &upscale_buf, DISPLAY_W as usize * 4)
             .unwrap();
         canvas.copy(&texture, None, None).unwrap();
+
+        // Present the canvas to display the upscaled image
         canvas.present();
         last_draw_timestamp = Instant::now();
         print_stats(stats.clone(), real_elapsed);
