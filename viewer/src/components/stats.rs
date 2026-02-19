@@ -46,8 +46,15 @@ pub fn Stats(state: RwSignal<ViewerState>) -> impl IntoView {
                 <div class="stat-label">"Improvements"</div>
             </div>
             <div class="stat-item">
-                <div class="stat-value">{move || state.get().polygons.to_string()}</div>
-                <div class="stat-label">"Polygons"</div>
+                <div class="stat-value">{move || {
+                    let s = state.get();
+                    if s.elapsed_secs > 0 {
+                        format!("{:.1}", s.improvements as f64 / s.elapsed_secs as f64)
+                    } else {
+                        "0".to_string()
+                    }
+                }}</div>
+                <div class="stat-label">"Improv/sec"</div>
             </div>
             <div class="stat-item">
                 <div class="stat-value">{move || format_time(state.get().elapsed_secs)}</div>
