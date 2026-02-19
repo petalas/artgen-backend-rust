@@ -1,5 +1,6 @@
 use leptos::prelude::*;
 
+use crate::components::project_selector::ProjectSelector;
 use crate::ws::ViewerState;
 
 #[component]
@@ -34,7 +35,7 @@ pub fn Header(state: RwSignal<ViewerState>) -> impl IntoView {
     view! {
         <header class="app-header">
             <div class="header-left">
-                <h1>"artgen GPU Evolution"</h1>
+                <ProjectSelector state={state} />
             </div>
             <div class="header-center">
                 <span class="similarity-label">"Similarity: "</span>

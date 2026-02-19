@@ -23,6 +23,10 @@ web-sys = { version = "0.3", features = [
     "ErrorEvent",
     "CloseEvent",
     "BinaryType",
+    "FileReader",
+    "FileList",
+    "File",
+    "HtmlInputElement",
 ] }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"

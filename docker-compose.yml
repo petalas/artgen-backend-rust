@@ -15,4 +15,4 @@ services:
       - ./output:/data
     devices:
       - /dev/dxg:/dev/dxg
-    command: ["ff.jpg", "--gpu", "--headless"]
+    command: ["--gpu", "--headless"]

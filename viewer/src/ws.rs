@@ -4,6 +4,15 @@ use leptos::prelude::*;
 use wasm_bindgen::prelude::*;
 use web_sys::{MessageEvent, WebSocket};
 
+#[allow(dead_code)]
+#[derive(Clone, Debug, Default)]
+pub struct ProjectInfo {
+    pub name: String,
+    pub has_best: bool,
+    pub fitness: Option<f64>,
+    pub polygons: Option<u32>,
+}
+
 #[derive(Clone, Debug)]
 pub struct ViewerState {
     pub reference_image_b64: String,
@@ -20,6 +29,10 @@ pub struct ViewerState {
     pub drawing_json: Option<String>,
     pub image_width: u32,
     pub image_height: u32,
+    // Project management
+    pub projects: Vec<ProjectInfo>,
+    pub active_project: Option<String>,
+    pub project_error: Option<String>,
 }
 
 impl Default for ViewerState {
@@ -39,6 +52,9 @@ impl Default for ViewerState {
             drawing_json: None,
             image_width: 0,
             image_height: 0,
+            projects: vec![],
+            active_project: None,
+            project_error: None,
         }
     }
 }
@@ -52,6 +68,14 @@ pub fn send_ws_command(cmd_type: &str) {
         if let Some(ws) = ws.borrow().as_ref() {
             let msg = serde_json::json!({ "type": cmd_type });
             ws.send_with_str(&msg.to_string()).ok();
+        }
+    });
+}
+
+pub fn send_ws_json(value: &serde_json::Value) {
+    WS_HANDLE.with(|ws| {
+        if let Some(ws) = ws.borrow().as_ref() {
+            ws.send_with_str(&value.to_string()).ok();
         }
     });
 }
@@ -129,6 +153,22 @@ fn schedule_reconnect(state: RwSignal<ViewerState>) {
     .forget();
 }
 
+fn parse_project_list(data: &serde_json::Value) -> Vec<ProjectInfo> {
+    data["projects"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .map(|p| ProjectInfo {
+                    name: p["name"].as_str().unwrap_or("").to_string(),
+                    has_best: p["hasBest"].as_bool().unwrap_or(false),
+                    fitness: p["fitness"].as_f64(),
+                    polygons: p["polygons"].as_u64().map(|n| n as u32),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn handle_message(data: &serde_json::Value, state: RwSignal<ViewerState>) {
     let msg_type = data["type"].as_str().unwrap_or("");
 
@@ -172,6 +212,11 @@ fn handle_message(data: &serde_json::Value, state: RwSignal<ViewerState>) {
                 if let Some(dj) = data["drawingJson"].as_str() {
                     s.drawing_json = Some(dj.to_string());
                 }
+                if let Some(ap) = data["activeProject"].as_str() {
+                    s.active_project = Some(ap.to_string());
+                } else if data["activeProject"].is_null() {
+                    s.active_project = None;
+                }
             }
             "update" => {
                 if let Some(img) = data["image"].as_str() {
@@ -183,6 +228,34 @@ fn handle_message(data: &serde_json::Value, state: RwSignal<ViewerState>) {
             }
             "stats" => {
                 // stats-only update, no image data
+            }
+            "project_list" => {
+                s.projects = parse_project_list(data);
+                if let Some(ap) = data["activeProject"].as_str() {
+                    s.active_project = Some(ap.to_string());
+                } else if data["activeProject"].is_null() {
+                    s.active_project = None;
+                }
+            }
+            "project_switched" => {
+                // Treat like init — update images and active project
+                if let Some(ref_img) = data["referenceImage"].as_str() {
+                    s.reference_image_b64 = ref_img.to_string();
+                }
+                if let Some(img) = data["image"].as_str() {
+                    s.generated_image_b64 = img.to_string();
+                }
+                if let Some(dj) = data["drawingJson"].as_str() {
+                    s.drawing_json = Some(dj.to_string());
+                }
+                if let Some(ap) = data["project"].as_str() {
+                    s.active_project = Some(ap.to_string());
+                }
+            }
+            "project_error" => {
+                if let Some(err) = data["error"].as_str() {
+                    s.project_error = Some(err.to_string());
+                }
             }
             _ => {}
         }

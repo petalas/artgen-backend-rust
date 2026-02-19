@@ -3,6 +3,7 @@ use artgen_backend_rust::{
     evaluator::{Evaluator, EvaluatorPayload},
     gpu_evolver::GpuEvolver,
     models::drawing::Drawing,
+    projects,
     settings::{
         DISPLAY_H, DISPLAY_W, MAX_IMAGE_HEIGHT, MAX_IMAGE_WIDTH, MIN_IMAGE_HEIGHT, MIN_IMAGE_WIDTH,
         TARGET_FRAMETIME,
@@ -55,6 +56,22 @@ fn initialize_engine(ref_image_filename: &str) -> Engine {
     engine
 }
 
+/// Initialize an Engine from raw RGBA data + dimensions (for project mode).
+fn initialize_engine_from_rgba(rgba: &[u8], w: usize, h: usize) -> Engine {
+    let mut engine = Engine {
+        raster_mode: Rasterizer::HalfSpace,
+        ..Default::default()
+    };
+    engine.w = w;
+    engine.h = h;
+    let size = w * h * 4;
+    engine.ref_image_data = rgba.to_vec();
+    engine.working_data = vec![0u8; size];
+    engine.error_data = vec![0u8; size];
+    engine.initialized = true;
+    engine
+}
+
 fn main() {
     tracing_subscriber::fmt().init();
 
@@ -66,6 +83,15 @@ fn main() {
     // Filter out flags to get positional args
     let positional: Vec<&String> = args.iter().skip(1).filter(|a| !a.starts_with("--")).collect();
 
+    if use_gpu && headless {
+        // Project management mode — image arg is optional
+        let legacy_image = positional.first().map(|s| s.as_str());
+        println!("Starting GPU evolution pipeline (headless, project management mode)...");
+        gpu_main_loop_headless(legacy_image);
+        return;
+    }
+
+    // Legacy mode: require image arg
     let ref_image_filename = if !positional.is_empty() {
         positional[0].as_str()
     } else {
@@ -98,12 +124,6 @@ fn main() {
         );
         Drawing::new_random()
     };
-
-    if use_gpu && headless {
-        println!("Starting GPU evolution pipeline (headless)...");
-        gpu_main_loop_headless(&engine, best, &json_filename);
-        return;
-    }
 
     let (sdl_context, mut canvas, texture_creator) = initialize_sdl(DISPLAY_W, DISPLAY_H);
     let mut texture = texture_creator
@@ -270,6 +290,10 @@ struct WsState {
     drawing_json: String,
     image_width: u32,
     image_height: u32,
+    // Project management
+    active_project: Option<String>,
+    project_list_generation: u64,
+    switch_request: Option<String>,
 }
 
 type SharedWsState = Arc<(Mutex<WsState>, Condvar)>;
@@ -299,9 +323,26 @@ fn ws_server(state: SharedWsState) {
     }
 }
 
+fn build_project_list_msg(active_project: &Option<String>) -> serde_json::Value {
+    let project_list = projects::list_projects();
+    serde_json::json!({
+        "type": "project_list",
+        "projects": project_list,
+        "activeProject": active_project,
+    })
+}
+
 fn ws_handle_client(stream: std::net::TcpStream, state: SharedWsState) {
     let peer = stream.peer_addr().ok();
-    let mut ws = match tungstenite::accept(stream) {
+
+    // Configure WebSocket to accept large frames (up to 20MB for image uploads)
+    let config = tungstenite::protocol::WebSocketConfig {
+        max_message_size: Some(20 * 1024 * 1024),
+        max_frame_size: Some(20 * 1024 * 1024),
+        ..Default::default()
+    };
+
+    let mut ws = match tungstenite::accept_with_config(stream, Some(config)) {
         Ok(ws) => ws,
         Err(e) => {
             eprintln!("[WS] Handshake error: {}", e);
@@ -311,15 +352,19 @@ fn ws_handle_client(stream: std::net::TcpStream, state: SharedWsState) {
 
     println!("[WS] Client connected: {:?}", peer);
 
-    let (lock, cvar) = &*state;
+    let (lock, _cvar) = &*state;
 
-    // Send init message (blocking mode)
+    // Send init message + project list (blocking mode)
     let mut last_gen;
     let mut last_image_gen;
+    let mut last_project_list_gen;
     {
         let s = lock.lock().unwrap();
         last_gen = s.generation;
         last_image_gen = s.image_generation;
+        last_project_list_gen = s.project_list_generation;
+
+        // Send init message
         let msg = serde_json::json!({
             "type": "init",
             "referenceImage": BASE64.encode(&s.ref_png),
@@ -334,12 +379,23 @@ fn ws_handle_client(stream: std::net::TcpStream, state: SharedWsState) {
             "drawingJson": s.drawing_json,
             "imageWidth": s.image_width,
             "imageHeight": s.image_height,
+            "activeProject": s.active_project,
         });
         if ws
             .send(tungstenite::Message::Text(msg.to_string().into()))
             .is_err()
         {
             println!("[WS] Client disconnected during init: {:?}", peer);
+            return;
+        }
+
+        // Send project list
+        let pl_msg = build_project_list_msg(&s.active_project);
+        if ws
+            .send(tungstenite::Message::Text(pl_msg.to_string().into()))
+            .is_err()
+        {
+            println!("[WS] Client disconnected during project_list: {:?}", peer);
             return;
         }
     }
@@ -355,16 +411,16 @@ fn ws_handle_client(stream: std::net::TcpStream, state: SharedWsState) {
             match ws.read() {
                 Ok(tungstenite::Message::Text(text)) => {
                     if let Ok(cmd) = serde_json::from_str::<serde_json::Value>(&*text) {
-                        match cmd["type"].as_str() {
-                            Some("pause") | Some("resume") => {
-                                let pause = cmd["type"].as_str() == Some("pause");
-                                let mut s = lock.lock().unwrap();
-                                s.paused = pause;
-                                s.generation += 1;
-                                cvar.notify_all();
-                                println!("[WS] {} by {:?}", if pause { "Paused" } else { "Resumed" }, peer);
+                        let reply = handle_ws_command(&cmd, &state, &peer);
+                        if let Some(reply_msg) = reply {
+                            // Send reply in blocking mode
+                            ws.get_ref().set_nonblocking(false).ok();
+                            let result = ws.send(tungstenite::Message::Text(reply_msg.to_string().into()));
+                            ws.get_ref().set_nonblocking(true).ok();
+                            if result.is_err() {
+                                println!("[WS] Client disconnected: {:?}", peer);
+                                return;
                             }
-                            _ => {}
                         }
                     }
                 }
@@ -385,8 +441,27 @@ fn ws_handle_client(stream: std::net::TcpStream, state: SharedWsState) {
             }
         }
 
-        // 2. Check for new state to send
-        let cur_gen = lock.lock().unwrap().generation;
+        // 2. Check for state changes
+        let (cur_gen, cur_pl_gen) = {
+            let s = lock.lock().unwrap();
+            (s.generation, s.project_list_generation)
+        };
+
+        // Send project list update if changed
+        if cur_pl_gen != last_project_list_gen {
+            last_project_list_gen = cur_pl_gen;
+            let pl_msg = {
+                let s = lock.lock().unwrap();
+                build_project_list_msg(&s.active_project)
+            };
+            ws.get_ref().set_nonblocking(false).ok();
+            let result = ws.send(tungstenite::Message::Text(pl_msg.to_string().into()));
+            ws.get_ref().set_nonblocking(true).ok();
+            if result.is_err() {
+                break;
+            }
+        }
+
         if cur_gen == last_gen {
             thread::sleep(Duration::from_millis(50));
             continue;
@@ -439,38 +514,153 @@ fn ws_handle_client(stream: std::net::TcpStream, state: SharedWsState) {
     println!("[WS] Client disconnected: {:?}", peer);
 }
 
-fn gpu_main_loop_headless(engine: &Engine, initial_best: Drawing, json_filename: &str) {
-    let mut evolver = futures_lite::future::block_on(GpuEvolver::new(
-        &engine.ref_image_data,
-        engine.w as u32,
-        engine.h as u32,
-        &initial_best,
-    ));
-
-    let w = engine.w;
-    let h = engine.h;
-    let mut render_buf = vec![0u8; w * h * 4];
-    let png_path = json_filename.replace(".best.json", ".best.png");
-
-    // Encode reference image as PNG for WS clients
-    let ref_png = encode_rgba_as_png(&engine.ref_image_data, w, h);
-
-    // Encode and save initial best as PNG
-    initial_best.draw(&mut render_buf, w, h, Rasterizer::HalfSpace);
-    let initial_png = encode_rgba_as_png(&render_buf, w, h);
-    if let Err(e) = std::fs::write(&png_path, &initial_png) {
-        eprintln!("Failed to save PNG: {}", e);
-    } else {
-        println!("[GPU] Saved preview: {}", png_path);
+/// Handle a WS command from a client. Returns an optional reply to send back to the client.
+fn handle_ws_command(
+    cmd: &serde_json::Value,
+    state: &SharedWsState,
+    peer: &Option<std::net::SocketAddr>,
+) -> Option<serde_json::Value> {
+    let (lock, cvar) = &**state;
+    match cmd["type"].as_str() {
+        Some("pause") | Some("resume") => {
+            let pause = cmd["type"].as_str() == Some("pause");
+            let mut s = lock.lock().unwrap();
+            s.paused = pause;
+            s.generation += 1;
+            cvar.notify_all();
+            println!(
+                "[WS] {} by {:?}",
+                if pause { "Paused" } else { "Resumed" },
+                peer
+            );
+            None
+        }
+        Some("create_project") => {
+            let name = cmd["name"].as_str().unwrap_or("");
+            let ref_image_b64 = cmd["referenceImage"].as_str().unwrap_or("");
+            let image_bytes = match BASE64.decode(ref_image_b64) {
+                Ok(b) => b,
+                Err(e) => {
+                    return Some(serde_json::json!({
+                        "type": "project_error",
+                        "error": format!("Invalid base64: {}", e),
+                    }));
+                }
+            };
+            match projects::create_project(name, &image_bytes) {
+                Ok(_info) => {
+                    println!("[WS] Project '{}' created by {:?}", name, peer);
+                    let mut s = lock.lock().unwrap();
+                    s.project_list_generation += 1;
+                    // Auto-switch if no active project
+                    if s.active_project.is_none() {
+                        s.switch_request = Some(name.to_string());
+                    }
+                    s.generation += 1;
+                    cvar.notify_all();
+                    None
+                }
+                Err(e) => Some(serde_json::json!({
+                    "type": "project_error",
+                    "error": e,
+                })),
+            }
+        }
+        Some("delete_project") => {
+            let name = cmd["name"].as_str().unwrap_or("");
+            match projects::delete_project(name) {
+                Ok(()) => {
+                    println!("[WS] Project '{}' deleted by {:?}", name, peer);
+                    let mut s = lock.lock().unwrap();
+                    s.project_list_generation += 1;
+                    // If we deleted the active project, switch to another or idle
+                    if s.active_project.as_deref() == Some(name) {
+                        let remaining = projects::list_projects();
+                        s.switch_request = remaining.first().map(|p| p.name.clone());
+                        if s.switch_request.is_none() {
+                            // No projects left — go idle
+                            s.active_project = None;
+                        }
+                    }
+                    s.generation += 1;
+                    cvar.notify_all();
+                    None
+                }
+                Err(e) => Some(serde_json::json!({
+                    "type": "project_error",
+                    "error": e,
+                })),
+            }
+        }
+        Some("reset_project") => {
+            let name = cmd["name"].as_str().unwrap_or("");
+            match projects::reset_project(name) {
+                Ok(()) => {
+                    println!("[WS] Project '{}' reset by {:?}", name, peer);
+                    let mut s = lock.lock().unwrap();
+                    s.project_list_generation += 1;
+                    // If active, trigger reload
+                    if s.active_project.as_deref() == Some(name) {
+                        s.switch_request = Some(name.to_string());
+                    }
+                    s.generation += 1;
+                    cvar.notify_all();
+                    None
+                }
+                Err(e) => Some(serde_json::json!({
+                    "type": "project_error",
+                    "error": e,
+                })),
+            }
+        }
+        Some("switch_project") => {
+            let name = cmd["name"].as_str().unwrap_or("");
+            println!("[WS] Switch to project '{}' requested by {:?}", name, peer);
+            let mut s = lock.lock().unwrap();
+            s.switch_request = Some(name.to_string());
+            s.generation += 1;
+            cvar.notify_all();
+            None
+        }
+        Some("import_drawing") => {
+            let name = cmd["name"].as_str().unwrap_or("");
+            let drawing_json = cmd["drawingJson"].as_str().unwrap_or("");
+            match projects::import_drawing(name, drawing_json.as_bytes()) {
+                Ok(()) => {
+                    println!("[WS] Drawing imported into '{}' by {:?}", name, peer);
+                    let mut s = lock.lock().unwrap();
+                    s.project_list_generation += 1;
+                    // If active, trigger reload
+                    if s.active_project.as_deref() == Some(name) {
+                        s.switch_request = Some(name.to_string());
+                    }
+                    s.generation += 1;
+                    cvar.notify_all();
+                    None
+                }
+                Err(e) => Some(serde_json::json!({
+                    "type": "project_error",
+                    "error": e,
+                })),
+            }
+        }
+        _ => None,
     }
+}
+
+fn gpu_main_loop_headless(legacy_image: Option<&str>) {
+    projects::ensure_projects_dir();
+
+    // Legacy migration
+    let migrated_project = projects::migrate_legacy(legacy_image);
 
     // Create shared state for WS server
     let ws_state: SharedWsState = Arc::new((
         Mutex::new(WsState {
-            ref_png,
-            best_png: initial_png,
-            fitness: initial_best.fitness,
-            polygons: initial_best.polygons.len(),
+            ref_png: vec![],
+            best_png: vec![],
+            fitness: 0.0,
+            polygons: 0,
             improvements: 0,
             evals_per_sec: 0.0,
             total_evals: 0,
@@ -478,9 +668,12 @@ fn gpu_main_loop_headless(engine: &Engine, initial_best: Drawing, json_filename:
             generation: 0,
             image_generation: 0,
             paused: false,
-            drawing_json: serde_json::to_string(&initial_best).unwrap(),
-            image_width: w as u32,
-            image_height: h as u32,
+            drawing_json: String::new(),
+            image_width: 0,
+            image_height: 0,
+            active_project: None,
+            project_list_generation: 0,
+            switch_request: migrated_project,
         }),
         Condvar::new(),
     ));
@@ -489,104 +682,222 @@ fn gpu_main_loop_headless(engine: &Engine, initial_best: Drawing, json_filename:
     let ws_clone = ws_state.clone();
     thread::spawn(move || ws_server(ws_clone));
 
-    let mut global_best = initial_best;
-    let mut last_save_timestamp = Instant::now();
-    let mut last_stats_timestamp = Instant::now();
-    let mut improvements = 0u64;
-    let mut batches = 0u64;
-
+    // Outer loop: manage project switching
     loop {
-        // Check if paused
-        if ws_state.0.lock().unwrap().paused {
-            thread::sleep(Duration::from_millis(50));
-            // Still send stats while paused
-            if last_stats_timestamp.elapsed().as_secs() >= 2 {
-                {
-                    let (lock, cvar) = &*ws_state;
-                    let mut s = lock.lock().unwrap();
-                    s.evals_per_sec = evolver.evals_per_sec();
-                    s.total_evals = evolver.total_evaluations();
-                    s.elapsed_secs = evolver.elapsed().as_secs();
-                    s.fitness = global_best.fitness;
-                    s.polygons = global_best.polygons.len();
-                    s.improvements = improvements;
-                    s.generation += 1;
-                    cvar.notify_all();
-                }
-                print_gpu_stats(&evolver, &global_best);
-                last_stats_timestamp = Instant::now();
+        // Determine which project to activate
+        let project_name = loop {
+            let switch = ws_state.0.lock().unwrap().switch_request.take();
+            if let Some(name) = switch {
+                break name;
             }
+            // No switch request — idle
+            thread::sleep(Duration::from_millis(100));
+        };
+
+        // Load project reference image
+        let ref_path = projects::project_reference_path(&project_name);
+        if !ref_path.exists() {
+            eprintln!("[Projects] Reference image not found for '{}', skipping", project_name);
             continue;
         }
 
-        batches += 1;
-        if let Some(new_best) = evolver.run_batch() {
-            if new_best.fitness > global_best.fitness {
-                improvements += 1;
-                let delta = new_best.fitness - global_best.fitness;
-                println!(
-                    "[GPU] improvement #{}: {:.4} -> {:.4} (+{:.6}) | polygons: {} | batch: {}",
-                    improvements,
-                    global_best.fitness,
-                    new_best.fitness,
-                    delta,
-                    new_best.polygons.len(),
-                    batches,
-                );
-                global_best = new_best;
+        let ref_image_bytes = match std::fs::read(&ref_path) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("[Projects] Failed to read reference for '{}': {}", project_name, e);
+                continue;
+            }
+        };
 
-                // Render and encode PNG for WS + disk save
-                global_best.draw(&mut render_buf, w, h, Rasterizer::HalfSpace);
-                let png = encode_rgba_as_png(&render_buf, w, h);
+        let (rgba, w, h) = match projects::load_and_normalize_image(&ref_image_bytes) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("[Projects] Failed to normalize image for '{}': {}", project_name, e);
+                continue;
+            }
+        };
 
-                // Update WS state
+        let engine = initialize_engine_from_rgba(&rgba, w, h);
+
+        // Load best drawing or start fresh
+        let best_path = projects::project_best_json_path(&project_name);
+        let initial_best = if best_path.exists() {
+            let best_str = best_path.to_str().unwrap_or("");
+            println!("[Projects] Loading existing best for '{}'", project_name);
+            Drawing::from_file(best_str)
+        } else {
+            println!("[Projects] Starting fresh for '{}'", project_name);
+            Drawing::new_random()
+        };
+
+        let json_filename = best_path.to_string_lossy().to_string();
+        let png_path = projects::project_best_png_path(&project_name).to_string_lossy().to_string();
+
+        // Initialize GPU evolver
+        let mut evolver = futures_lite::future::block_on(GpuEvolver::new(
+            &engine.ref_image_data,
+            engine.w as u32,
+            engine.h as u32,
+            &initial_best,
+        ));
+
+        let mut render_buf = vec![0u8; w * h * 4];
+
+        // Encode reference image as PNG for WS clients
+        let ref_png = encode_rgba_as_png(&engine.ref_image_data, w, h);
+
+        // Encode initial best as PNG
+        initial_best.draw(&mut render_buf, w, h, Rasterizer::HalfSpace);
+        let initial_png = encode_rgba_as_png(&render_buf, w, h);
+        if let Err(e) = std::fs::write(&png_path, &initial_png) {
+            eprintln!("Failed to save PNG: {}", e);
+        }
+
+        // Update WS state with new project info
+        {
+            let (lock, cvar) = &*ws_state;
+            let mut s = lock.lock().unwrap();
+            s.ref_png = ref_png;
+            s.best_png = initial_png;
+            s.fitness = initial_best.fitness;
+            s.polygons = initial_best.polygons.len();
+            s.improvements = 0;
+            s.evals_per_sec = 0.0;
+            s.total_evals = 0;
+            s.elapsed_secs = 0;
+            s.paused = false;
+            s.drawing_json = serde_json::to_string(&initial_best).unwrap_or_default();
+            s.image_width = w as u32;
+            s.image_height = h as u32;
+            s.active_project = Some(project_name.clone());
+            s.generation += 1;
+            s.image_generation += 1;
+            s.project_list_generation += 1;
+            cvar.notify_all();
+        }
+
+        println!("[Projects] Active project: '{}'", project_name);
+
+        let mut global_best = initial_best;
+        let mut last_save_timestamp = Instant::now();
+        let mut last_stats_timestamp = Instant::now();
+        let mut improvements = 0u64;
+        let mut batches = 0u64;
+
+        // Inner loop: evolution for current project
+        loop {
+            // Check for switch request
+            {
+                let s = ws_state.0.lock().unwrap();
+                if s.switch_request.is_some() {
+                    // Save current state before switching
+                    global_best.to_file(&json_filename);
+                    global_best.draw(&mut render_buf, w, h, Rasterizer::HalfSpace);
+                    let png = encode_rgba_as_png(&render_buf, w, h);
+                    std::fs::write(&png_path, &png).ok();
+                    println!("[Projects] Saving and switching from '{}'", project_name);
+                    break; // break inner loop, outer loop will handle the switch
+                }
+                // Check if active project was cleared (deleted)
+                if s.active_project.is_none() {
+                    global_best.to_file(&json_filename);
+                    println!("[Projects] Project deleted, going idle");
+                    break;
+                }
+            }
+
+            // Check if paused
+            if ws_state.0.lock().unwrap().paused {
+                thread::sleep(Duration::from_millis(50));
+                // Still send stats while paused
+                if last_stats_timestamp.elapsed().as_secs() >= 2 {
+                    {
+                        let (lock, cvar) = &*ws_state;
+                        let mut s = lock.lock().unwrap();
+                        s.evals_per_sec = evolver.evals_per_sec();
+                        s.total_evals = evolver.total_evaluations();
+                        s.elapsed_secs = evolver.elapsed().as_secs();
+                        s.fitness = global_best.fitness;
+                        s.polygons = global_best.polygons.len();
+                        s.improvements = improvements;
+                        s.generation += 1;
+                        cvar.notify_all();
+                    }
+                    print_gpu_stats(&evolver, &global_best);
+                    last_stats_timestamp = Instant::now();
+                }
+                continue;
+            }
+
+            batches += 1;
+            if let Some(new_best) = evolver.run_batch() {
+                if new_best.fitness > global_best.fitness {
+                    improvements += 1;
+                    let delta = new_best.fitness - global_best.fitness;
+                    println!(
+                        "[GPU] improvement #{}: {:.4} -> {:.4} (+{:.6}) | polygons: {} | batch: {}",
+                        improvements,
+                        global_best.fitness,
+                        new_best.fitness,
+                        delta,
+                        new_best.polygons.len(),
+                        batches,
+                    );
+                    global_best = new_best;
+
+                    // Render and encode PNG for WS + disk save
+                    global_best.draw(&mut render_buf, w, h, Rasterizer::HalfSpace);
+                    let png = encode_rgba_as_png(&render_buf, w, h);
+
+                    // Update WS state
+                    {
+                        let (lock, cvar) = &*ws_state;
+                        let mut s = lock.lock().unwrap();
+                        s.best_png = png.clone();
+                        s.fitness = global_best.fitness;
+                        s.polygons = global_best.polygons.len();
+                        s.improvements = improvements;
+                        s.evals_per_sec = evolver.evals_per_sec();
+                        s.total_evals = evolver.total_evaluations();
+                        s.elapsed_secs = evolver.elapsed().as_secs();
+                        s.drawing_json = serde_json::to_string(&global_best).unwrap();
+                        s.generation += 1;
+                        s.image_generation += 1;
+                        cvar.notify_all();
+                    }
+
+                    // Save to disk periodically
+                    let since_last_save = last_save_timestamp.elapsed().as_secs();
+                    if since_last_save >= 10 {
+                        global_best.to_file(&json_filename);
+                        if let Err(e) = std::fs::write(&png_path, &png) {
+                            eprintln!("Failed to save PNG: {}", e);
+                        } else {
+                            println!("[GPU] Saved preview: {}", png_path);
+                        }
+                        last_save_timestamp = Instant::now();
+                    }
+                }
+            }
+
+            if last_stats_timestamp.elapsed().as_secs() >= 2 {
+                // Update WS state with latest stats
                 {
                     let (lock, cvar) = &*ws_state;
                     let mut s = lock.lock().unwrap();
-                    s.best_png = png.clone();
-                    s.fitness = global_best.fitness;
-                    s.polygons = global_best.polygons.len();
-                    s.improvements = improvements;
                     s.evals_per_sec = evolver.evals_per_sec();
                     s.total_evals = evolver.total_evaluations();
                     s.elapsed_secs = evolver.elapsed().as_secs();
-                    s.drawing_json = serde_json::to_string(&global_best).unwrap();
+                    s.fitness = global_best.fitness;
+                    s.polygons = global_best.polygons.len();
+                    s.improvements = improvements;
                     s.generation += 1;
-                    s.image_generation += 1;
                     cvar.notify_all();
                 }
 
-                // Save to disk periodically
-                let since_last_save = last_save_timestamp.elapsed().as_secs();
-                if since_last_save >= 10 {
-                    global_best.to_file(json_filename);
-                    if let Err(e) = std::fs::write(&png_path, &png) {
-                        eprintln!("Failed to save PNG: {}", e);
-                    } else {
-                        println!("[GPU] Saved preview: {}", png_path);
-                    }
-                    last_save_timestamp = Instant::now();
-                }
+                print_gpu_stats(&evolver, &global_best);
+                last_stats_timestamp = Instant::now();
             }
-        }
-
-        if last_stats_timestamp.elapsed().as_secs() >= 2 {
-            // Update WS state with latest stats
-            {
-                let (lock, cvar) = &*ws_state;
-                let mut s = lock.lock().unwrap();
-                s.evals_per_sec = evolver.evals_per_sec();
-                s.total_evals = evolver.total_evaluations();
-                s.elapsed_secs = evolver.elapsed().as_secs();
-                s.fitness = global_best.fitness;
-                s.polygons = global_best.polygons.len();
-                s.improvements = improvements;
-                s.generation += 1;
-                cvar.notify_all();
-            }
-
-            print_gpu_stats(&evolver, &global_best);
-            last_stats_timestamp = Instant::now();
         }
     }
 }
