@@ -20,14 +20,28 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
     sh -s -- -y --default-toolchain nightly
 ENV PATH="/root/.cargo/bin:${PATH}"
 
-# Build the project
 WORKDIR /app
+
+# --- Layer 1: Cache dependency compilation ---
+# Copy only manifests and lockfile, build with dummy source
 COPY Cargo.toml Cargo.lock* rust-toolchain.toml ./
+COPY viewer/Cargo.toml viewer/Cargo.toml
+RUN mkdir -p src && \
+    echo "fn main() {}" > src/main.rs && \
+    echo "" > src/lib.rs && \
+    mkdir -p benches && \
+    echo "fn main() {}" > benches/bench.rs && \
+    mkdir -p viewer/src && \
+    echo "fn main() {}" > viewer/src/main.rs && \
+    cargo build --release -p artgen-backend-rust 2>/dev/null; \
+    rm -rf src benches viewer/src
+
+# --- Layer 2: Build actual source (only this layer rebuilds on code changes) ---
 COPY src/ src/
 COPY benches/ benches/
-COPY viewer/Cargo.toml viewer/Cargo.toml
-RUN mkdir -p viewer/src && echo "fn main() {}" > viewer/src/main.rs
-RUN cargo build --release -p artgen-backend-rust
+RUN find src benches -name '*.rs' -exec touch {} + && \
+    mkdir -p viewer/src && echo "fn main() {}" > viewer/src/main.rs && \
+    cargo build --release -p artgen-backend-rust
 
 # --- Runtime stage ---
 FROM nvidia/cuda:12.8.1-runtime-ubuntu24.04

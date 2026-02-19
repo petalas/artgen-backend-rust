@@ -286,6 +286,7 @@ struct WsState {
     elapsed_secs: u64,
     generation: u64,
     image_generation: u64,
+    ref_image_generation: u64, // bumped when reference image changes (project switch)
     paused: bool,
     drawing_json: String,
     image_width: u32,
@@ -356,14 +357,22 @@ fn ws_handle_client(stream: std::net::TcpStream, state: SharedWsState) {
 
     let (lock, _cvar) = &*state;
 
+    // Throttle: stats at ~30fps, images at ~5fps (large base64 payloads)
+    let stats_interval = Duration::from_millis(33);
+    let image_interval = Duration::from_millis(200);
+    let mut last_send_time = Instant::now();
+    let mut last_image_send_time = Instant::now();
+
     // Send init message + project list (blocking mode)
     let mut last_gen;
     let mut last_image_gen;
+    let mut last_ref_image_gen;
     let mut last_project_list_gen;
     {
         let s = lock.lock().unwrap();
         last_gen = s.generation;
         last_image_gen = s.image_generation;
+        last_ref_image_gen = s.ref_image_generation;
         last_project_list_gen = s.project_list_generation;
 
         // Send init message
@@ -443,43 +452,42 @@ fn ws_handle_client(stream: std::net::TcpStream, state: SharedWsState) {
             }
         }
 
-        // 2. Check for state changes
-        let (cur_gen, cur_pl_gen) = {
-            let s = lock.lock().unwrap();
-            (s.generation, s.project_list_generation)
-        };
-
-        // Send project list update if changed
-        if cur_pl_gen != last_project_list_gen {
-            last_project_list_gen = cur_pl_gen;
-            let pl_msg = {
-                let s = lock.lock().unwrap();
-                build_project_list_msg(&s.active_project)
-            };
-            ws.get_ref().set_nonblocking(false).ok();
-            let result = ws.send(tungstenite::Message::Text(pl_msg.to_string().into()));
-            ws.get_ref().set_nonblocking(true).ok();
-            if result.is_err() {
-                break;
-            }
+        // 2. Throttle: sleep to cap at ~30 stats updates/sec
+        let since_last_send = last_send_time.elapsed();
+        if since_last_send < stats_interval {
+            thread::sleep(stats_interval - since_last_send);
         }
+        last_send_time = Instant::now();
 
-        if cur_gen == last_gen {
-            thread::sleep(Duration::from_millis(50));
-            continue;
-        }
-
-        // 3. Build message while holding lock, then drop before sending
+        // 3. Read current state and send appropriate message
         let msg_string = {
             let s = lock.lock().unwrap();
-            let has_new_image = s.image_generation > last_image_gen;
-            last_gen = s.generation;
 
-            let msg = if has_new_image {
+            // Project list changed (small message, send immediately)
+            if s.project_list_generation != last_project_list_gen {
+                last_project_list_gen = s.project_list_generation;
+                let pl_msg = build_project_list_msg(&s.active_project);
+                drop(s);
+                ws.get_ref().set_nonblocking(false).ok();
+                let result = ws.send(tungstenite::Message::Text(pl_msg.to_string().into()));
+                ws.get_ref().set_nonblocking(true).ok();
+                if result.is_err() {
+                    break;
+                }
+                continue;
+            }
+
+            // Reference image changed (project switch — always send immediately)
+            if s.ref_image_generation != last_ref_image_gen {
+                last_ref_image_gen = s.ref_image_generation;
+                last_gen = s.generation;
                 last_image_gen = s.image_generation;
-                serde_json::json!({
-                    "type": "update",
+                last_image_send_time = Instant::now();
+                let msg = serde_json::json!({
+                    "type": "project_switched",
+                    "referenceImage": BASE64.encode(&s.ref_png),
                     "image": BASE64.encode(&s.best_png),
+                    "project": s.active_project,
                     "fitness": s.fitness,
                     "polygons": s.polygons,
                     "improvements": s.improvements,
@@ -488,20 +496,49 @@ fn ws_handle_client(stream: std::net::TcpStream, state: SharedWsState) {
                     "elapsed": s.elapsed_secs,
                     "paused": s.paused,
                     "drawingJson": s.drawing_json,
-                })
+                    "imageWidth": s.image_width,
+                    "imageHeight": s.image_height,
+                });
+                msg.to_string()
+            } else if s.generation == last_gen {
+                // Nothing changed — skip send
+                continue;
             } else {
-                serde_json::json!({
-                    "type": "stats",
-                    "fitness": s.fitness,
-                    "polygons": s.polygons,
-                    "improvements": s.improvements,
-                    "evalsPerSec": s.evals_per_sec,
-                    "totalEvals": s.total_evals,
-                    "elapsed": s.elapsed_secs,
-                    "paused": s.paused,
-                })
-            };
-            msg.to_string()
+                // Stats or image update
+                // Images are large (~100KB base64), throttle separately to ~5fps
+                let has_new_image = s.image_generation > last_image_gen
+                    && last_image_send_time.elapsed() >= image_interval;
+                last_gen = s.generation;
+
+                let msg = if has_new_image {
+                    last_image_gen = s.image_generation;
+                    last_image_send_time = Instant::now();
+                    serde_json::json!({
+                        "type": "update",
+                        "image": BASE64.encode(&s.best_png),
+                        "fitness": s.fitness,
+                        "polygons": s.polygons,
+                        "improvements": s.improvements,
+                        "evalsPerSec": s.evals_per_sec,
+                        "totalEvals": s.total_evals,
+                        "elapsed": s.elapsed_secs,
+                        "paused": s.paused,
+                        "drawingJson": s.drawing_json,
+                    })
+                } else {
+                    serde_json::json!({
+                        "type": "stats",
+                        "fitness": s.fitness,
+                        "polygons": s.polygons,
+                        "improvements": s.improvements,
+                        "evalsPerSec": s.evals_per_sec,
+                        "totalEvals": s.total_evals,
+                        "elapsed": s.elapsed_secs,
+                        "paused": s.paused,
+                    })
+                };
+                msg.to_string()
+            }
         };
 
         // Send in blocking mode to ensure delivery
@@ -690,7 +727,8 @@ fn gpu_main_loop_headless(legacy_image: Option<&str>) {
             elapsed_secs: 0,
             generation: 0,
             image_generation: 0,
-            paused: false,
+            ref_image_generation: 0,
+            paused: true,
             drawing_json: String::new(),
             image_width: 0,
             image_height: 0,
@@ -823,8 +861,10 @@ fn gpu_main_loop_headless(legacy_image: Option<&str>) {
             s.image_width = w as u32;
             s.image_height = h as u32;
             s.active_project = Some(project_name.clone());
+            s.paused = true;
             s.generation += 1;
             s.image_generation += 1;
+            s.ref_image_generation += 1;
             s.project_list_generation += 1;
             cvar.notify_all();
         }
@@ -834,10 +874,13 @@ fn gpu_main_loop_headless(legacy_image: Option<&str>) {
         let mut global_best = initial_best;
         let mut last_save_timestamp = Instant::now();
         let mut last_stats_timestamp = Instant::now();
+        let mut last_image_render = Instant::now();
+        let image_render_interval = Duration::from_millis(200); // render at ~5fps
         let mut improvements = 0u64;
         let mut batches = 0u64;
+        let mut image_dirty = false; // true when global_best changed but not yet rendered
         let mut paused_duration = Duration::ZERO;
-        let mut pause_start: Option<Instant> = None;
+        let mut pause_start: Option<Instant> = Some(Instant::now()); // starts paused
 
         // Inner loop: evolution for current project
         loop {
@@ -879,35 +922,39 @@ fn gpu_main_loop_headless(legacy_image: Option<&str>) {
                 }
             }
 
-            // Check if paused
+            // Check if paused — sleep and skip evolution, stats are frozen
             if ws_state.0.lock().unwrap().paused {
-                // Record when we entered pause
                 if pause_start.is_none() {
                     pause_start = Some(Instant::now());
-                }
-                thread::sleep(Duration::from_millis(50));
-                // Still send stats while paused (but don't update elapsed)
-                if last_stats_timestamp.elapsed().as_secs() >= 2 {
-                    let active_elapsed = evolver.elapsed() - paused_duration
-                        - pause_start.map(|t| t.elapsed()).unwrap_or(Duration::ZERO);
+                    // Flush any pending image render before freezing
+                    if image_dirty {
+                        image_dirty = false;
+                        global_best.draw(&mut render_buf, w, h, Rasterizer::HalfSpace);
+                        let png = encode_rgba_as_png(&render_buf, w, h);
+                        let (lock, cvar) = &*ws_state;
+                        let mut s = lock.lock().unwrap();
+                        s.best_png = png;
+                        s.drawing_json = serde_json::to_string(&global_best).unwrap();
+                        s.image_generation += 1;
+                        cvar.notify_all();
+                    }
+                    // Push final stats snapshot so client has accurate frozen values
+                    let active_elapsed = evolver.elapsed() - paused_duration;
                     let active_secs = active_elapsed.as_secs_f64();
                     let evals = evolver.total_evaluations();
                     let evals_per_sec = if active_secs > 0.0 { evals as f64 / active_secs } else { 0.0 };
-                    {
-                        let (lock, cvar) = &*ws_state;
-                        let mut s = lock.lock().unwrap();
-                        s.evals_per_sec = evals_per_sec;
-                        s.total_evals = evals;
-                        s.elapsed_secs = active_elapsed.as_secs();
-                        s.fitness = global_best.fitness;
-                        s.polygons = global_best.polygons.len();
-                        s.improvements = improvements;
-                        s.generation += 1;
-                        cvar.notify_all();
-                    }
-                    print_gpu_stats_active(&evolver, &global_best, active_elapsed);
-                    last_stats_timestamp = Instant::now();
+                    let (lock, cvar) = &*ws_state;
+                    let mut s = lock.lock().unwrap();
+                    s.evals_per_sec = evals_per_sec;
+                    s.total_evals = evals;
+                    s.elapsed_secs = active_elapsed.as_secs();
+                    s.fitness = global_best.fitness;
+                    s.polygons = global_best.polygons.len();
+                    s.improvements = improvements;
+                    s.generation += 1;
+                    cvar.notify_all();
                 }
+                thread::sleep(Duration::from_millis(50));
                 continue;
             }
 
@@ -931,52 +978,56 @@ fn gpu_main_loop_headless(legacy_image: Option<&str>) {
                         batches,
                     );
                     global_best = new_best;
-
-                    // Render and encode PNG for WS + disk save
-                    global_best.draw(&mut render_buf, w, h, Rasterizer::HalfSpace);
-                    let png = encode_rgba_as_png(&render_buf, w, h);
-
-                    // Update WS state
-                    {
-                        let active_elapsed = evolver.elapsed() - paused_duration;
-                        let active_secs = active_elapsed.as_secs_f64();
-                        let evals = evolver.total_evaluations();
-                        let evals_per_sec = if active_secs > 0.0 { evals as f64 / active_secs } else { 0.0 };
-                        let (lock, cvar) = &*ws_state;
-                        let mut s = lock.lock().unwrap();
-                        s.best_png = png.clone();
-                        s.fitness = global_best.fitness;
-                        s.polygons = global_best.polygons.len();
-                        s.improvements = improvements;
-                        s.evals_per_sec = evals_per_sec;
-                        s.total_evals = evals;
-                        s.elapsed_secs = active_elapsed.as_secs();
-                        s.drawing_json = serde_json::to_string(&global_best).unwrap();
-                        s.generation += 1;
-                        s.image_generation += 1;
-                        cvar.notify_all();
-                    }
-
-                    // Save to disk periodically
-                    let since_last_save = last_save_timestamp.elapsed().as_secs();
-                    if since_last_save >= 10 {
-                        global_best.to_file(&json_filename);
-                        if let Err(e) = std::fs::write(&png_path, &png) {
-                            eprintln!("Failed to save PNG: {}", e);
-                        } else {
-                            println!("[GPU] Saved preview: {}", png_path);
-                        }
-                        last_save_timestamp = Instant::now();
-                    }
+                    image_dirty = true;
                 }
             }
 
+            // Render image + update WS at ~5fps (avoids wasting CPU on PNGs that won't be sent)
+            if image_dirty && last_image_render.elapsed() >= image_render_interval {
+                image_dirty = false;
+                last_image_render = Instant::now();
+
+                global_best.draw(&mut render_buf, w, h, Rasterizer::HalfSpace);
+                let png = encode_rgba_as_png(&render_buf, w, h);
+
+                {
+                    let active_elapsed = evolver.elapsed() - paused_duration;
+                    let active_secs = active_elapsed.as_secs_f64();
+                    let evals = evolver.total_evaluations();
+                    let evals_per_sec = if active_secs > 0.0 { evals as f64 / active_secs } else { 0.0 };
+                    let (lock, cvar) = &*ws_state;
+                    let mut s = lock.lock().unwrap();
+                    s.best_png = png.clone();
+                    s.fitness = global_best.fitness;
+                    s.polygons = global_best.polygons.len();
+                    s.improvements = improvements;
+                    s.evals_per_sec = evals_per_sec;
+                    s.total_evals = evals;
+                    s.elapsed_secs = active_elapsed.as_secs();
+                    s.drawing_json = serde_json::to_string(&global_best).unwrap();
+                    s.generation += 1;
+                    s.image_generation += 1;
+                    cvar.notify_all();
+                }
+
+                // Save to disk periodically
+                if last_save_timestamp.elapsed().as_secs() >= 10 {
+                    global_best.to_file(&json_filename);
+                    if let Err(e) = std::fs::write(&png_path, &png) {
+                        eprintln!("Failed to save PNG: {}", e);
+                    } else {
+                        println!("[GPU] Saved preview: {}", png_path);
+                    }
+                    last_save_timestamp = Instant::now();
+                }
+            }
+
+            // Push lightweight stats periodically (no image)
             if last_stats_timestamp.elapsed().as_secs() >= 2 {
                 let active_elapsed = evolver.elapsed() - paused_duration;
                 let active_secs = active_elapsed.as_secs_f64();
                 let evals = evolver.total_evaluations();
                 let evals_per_sec = if active_secs > 0.0 { evals as f64 / active_secs } else { 0.0 };
-                // Update WS state with latest stats
                 {
                     let (lock, cvar) = &*ws_state;
                     let mut s = lock.lock().unwrap();
