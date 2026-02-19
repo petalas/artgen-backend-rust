@@ -53,8 +53,9 @@ impl GpuPipeline {
         assert_eq!(reference_rgba.len(), (image_width * image_height * 4) as usize);
 
         // --- Device + Queue ---
+        // Use Vulkan only — EGL/OpenGL conflicts with SDL2's display context
         let instance = Instance::new(InstanceDescriptor {
-            backends: Backends::all(),
+            backends: Backends::VULKAN,
             ..Default::default()
         });
 
@@ -69,9 +70,14 @@ impl GpuPipeline {
 
         println!("GPU adapter: {:?}", adapter.get_info().name);
 
+        // Calculate the largest buffer we actually need (render_targets)
+        let max_buffer_needed = (chain_count as u64) * (image_width as u64) * (image_height as u64) * 4;
+        // Round up to nearest MB + margin
+        let max_buffer_size = ((max_buffer_needed / (1024 * 1024)) + 2) * 1024 * 1024;
+
         let required_limits = Limits {
-            max_storage_buffer_binding_size: 256 * 1024 * 1024, // 256 MB
-            max_buffer_size: 256 * 1024 * 1024,
+            max_storage_buffer_binding_size: max_buffer_size as u32,
+            max_buffer_size,
             max_compute_workgroups_per_dimension: 65535,
             max_compute_invocations_per_workgroup: 256,
             ..Limits::downlevel_defaults()
