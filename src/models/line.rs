@@ -64,13 +64,13 @@ impl<'a> Line<'a> {
 
     pub fn intersection_point(&self, row: usize) -> Option<Point> {
         if !self.intersects(row) {
-            return None;
+            None
         } else {
             let x = self.x_intercept(row);
-            return Some(Point {
+            Some(Point {
                 x: x.round(),
                 y: row as f32,
-            });
+            })
         }
     }
 }

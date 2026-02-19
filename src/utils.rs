@@ -12,7 +12,7 @@ use crate::{
     },
 };
 use std::simd::num::SimdUint;
-use std::simd::{u16x4, u8x4, Simd};
+use std::simd::{u16x4, u8x4};
 
 pub struct ImageDimensions {
     pub width: usize,
@@ -28,7 +28,7 @@ pub fn randomf32() -> f32 {
 }
 
 pub fn randomf32_clamped(min: f32, max: f32) -> f32 {
-    return rand::thread_rng().gen_range(min..max);
+    rand::thread_rng().gen_range(min..max)
 }
 
 pub fn calculate_aspect_ratio_fit(
@@ -39,7 +39,7 @@ pub fn calculate_aspect_ratio_fit(
 ) -> ImageDimensions {
     let w = src_width as f32;
     let h = src_height as f32;
-    let ratio: f32 = (max_w as f32 / w as f32).min(max_h as f32 / h as f32);
+    let ratio: f32 = (max_w as f32 / w).min(max_h as f32 / h);
     ImageDimensions {
         width: (w * ratio).round() as usize,
         height: (h * ratio).round() as usize,
@@ -48,7 +48,7 @@ pub fn calculate_aspect_ratio_fit(
 
 // based on scanline fill
 // https://www.cs.ucdavis.edu/~ma/ECS175_S00/Notes/0413_a.pdf
-pub fn fill_shape(buffer: &mut Vec<u8>, polygon: &Polygon, w: usize, h: usize) {
+pub fn fill_shape(buffer: &mut [u8], polygon: &Polygon, w: usize, h: usize) {
     let points = &polygon.points;
     let pixel_coords: Vec<Point> = points.iter().map(|p| p.translate(w, h)).collect();
     let sides = sides(&pixel_coords);
@@ -58,7 +58,7 @@ pub fn fill_shape(buffer: &mut Vec<u8>, polygon: &Polygon, w: usize, h: usize) {
         let y = p.y as usize;
         let idx = 4 * y * w + 4 * x;
         assert!(buffer.len() > idx);
-        fill_pixel(buffer, idx as usize, &polygon.color);
+        fill_pixel(buffer, idx, &polygon.color);
     });
 }
 
@@ -66,8 +66,9 @@ pub fn fill_shape(buffer: &mut Vec<u8>, polygon: &Polygon, w: usize, h: usize) {
 // TODO: optimize it by using SIMD to process multiple pixels at once
 // Note: we want to use "portable SIMD" so we compile for any target
 // https://doc.rust-lang.org/std/simd/index.html
+#[allow(non_snake_case)]
 pub fn fill_triangle(
-    buffer: &mut Vec<u8>,
+    buffer: &mut [u8],
     polygon: &Polygon,
     w: usize,
     h: usize,
@@ -123,16 +124,12 @@ pub fn fill_triangle(
     let mut miny = (i32::min(i32::min(Y1, Y2), Y3) + 0xF) >> 4;
     let maxy = (i32::max(i32::max(Y1, Y2), Y3) + 0xF) >> 4;
 
-    // println!("minx={}, maxx={}, miny={}, maxy={}", minx, maxx, miny, maxy);
-
     // Block size, standard 8x8 (must be power of two)
     let q = 8;
 
     // Start in corner of 8x8 block
     minx &= !(q - 1);
     miny &= !(q - 1);
-
-    // println!("minx {}, miny {}", minx, miny);
 
     // Constant part of half-edge functions
     let mut C1 = DY12 * X1 - DX12 * Y1;
@@ -164,19 +161,19 @@ pub fn fill_triangle(
             let a10 = (C1 + DX12 * y0 - DY12 * x1 > 0) as i32;
             let a01 = (C1 + DX12 * y1 - DY12 * x0 > 0) as i32;
             let a11 = (C1 + DX12 * y1 - DY12 * x1 > 0) as i32;
-            let a = (a00 << 0) | (a10 << 1) | (a01 << 2) | (a11 << 3);
+            let a = a00 | (a10 << 1) | (a01 << 2) | (a11 << 3);
 
             let b00 = (C2 + DX23 * y0 - DY23 * x0 > 0) as i32;
             let b10 = (C2 + DX23 * y0 - DY23 * x1 > 0) as i32;
             let b01 = (C2 + DX23 * y1 - DY23 * x0 > 0) as i32;
             let b11 = (C2 + DX23 * y1 - DY23 * x1 > 0) as i32;
-            let b = (b00 << 0) | (b10 << 1) | (b01 << 2) | (b11 << 3);
+            let b = b00 | (b10 << 1) | (b01 << 2) | (b11 << 3);
 
             let c00 = (C3 + DX31 * y0 - DY31 * x0 > 0) as i32;
             let c10 = (C3 + DX31 * y0 - DY31 * x1 > 0) as i32;
             let c01 = (C3 + DX31 * y1 - DY31 * x0 > 0) as i32;
             let c11 = (C3 + DX31 * y1 - DY31 * x1 > 0) as i32;
-            let c = (c00 << 0) | (c10 << 1) | (c01 << 2) | (c11 << 3);
+            let c = c00 | (c10 << 1) | (c01 << 2) | (c11 << 3);
 
             // Skip block when outside an edge
             if a == 0x0 || b == 0x0 || c == 0x0 {
@@ -229,7 +226,7 @@ pub fn fill_triangle(
 }
 
 // keeping it around for benchmarks
-pub fn fill_pixel(buffer: &mut Vec<u8>, index: usize, color: &Color) {
+pub fn fill_pixel(buffer: &mut [u8], index: usize, color: &Color) {
     assert!(buffer.len() > index + 3);
     let a = color.a as f32 / 255.0;
     let inv_a = 1.0 - a;
@@ -260,7 +257,6 @@ pub fn blend(base: &mut [u8; 4], fill_color: &[u8; 4]) {
 // base[2] = ((base[2] as f32 * inv_alpha) + (fill_color[2] as f32 * alpha)) as u8;
 // base[3] = u8::max(base[3], fill_color[3]);
 pub fn blend_simd(base: &mut [u8; 4], fill_color: &[u8; 4]) {
-    // println!("Before inside blend_simd: {:?}", &base);
     let original_max_alpha = base[3].max(fill_color[3]); // keep it around because it gets overwritten by the SIMD stuff
     let base_simd: u16x4 = u8x4::from_slice(base).cast();
     let fill_color_simd: u16x4 = u8x4::from_slice(fill_color).cast();
@@ -270,17 +266,16 @@ pub fn blend_simd(base: &mut [u8; 4], fill_color: &[u8; 4]) {
     let blend = (base_simd * inv_a_simd + fill_color_simd * alpha_simd) / MAX;
     blend.cast().copy_to_slice(base);
     base[3] = original_max_alpha;
-    // println!("After inside blend_simd: {:?}", &base);
 }
 
 // https://fgiesen.wordpress.com/2013/02/08/triangle-rasterization-in-practice/
 pub fn orient_2d(a: &FixedPoint, b: &FixedPoint, c: &FixedPoint) -> i32 {
-    return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+    (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
 }
 
 /// Returns all lines looping back to the first one
 /// [A, B, C] -> [AB, BC, CA]
-fn sides(points: &Vec<Point>) -> Vec<Line> {
+fn sides<'a>(points: &'a [Point]) -> Vec<Line<'a>> {
     let l = points.len();
     assert!(l > 1);
     (0..l)
@@ -330,13 +325,12 @@ fn get_points_inside(sides: Vec<Line>) -> Vec<Point> {
             }
             // TODO: change x = x+ dx/dy to integer arithmetic
             // https://www.cs.ucdavis.edu/~ma/ECS175_S00/Notes/0413_a.pdf
-            line.next_x_to_fill = line.next_x_to_fill + line.inverse_slope;
+            line.next_x_to_fill += line.inverse_slope;
         });
 
         intersection_points.sort(); // dedup only works on sequential items
 
         if intersection_points.len() > 1 {
-            // console::log_1(&format!("intersection_points {:?}", intersection_points).into());
             let mut i = 0;
             while i < intersection_points.len() - 1 {
                 points.append(&mut points_between(
@@ -360,7 +354,7 @@ struct BoundingRect {
     min_y: usize,
 }
 
-fn get_bounding_rect(sides: &Vec<Line>) -> BoundingRect {
+fn get_bounding_rect(sides: &[Line]) -> BoundingRect {
     let max_x = sides
         .iter()
         .map(|s| s.max_x)
@@ -377,7 +371,7 @@ fn get_bounding_rect(sides: &Vec<Line>) -> BoundingRect {
         .iter()
         .map(|s| s.min_x)
         .min()
-        .expect("Expected valid min_y");
+        .expect("Expected valid min_x");
 
     let min_y = sides
         .iter()
@@ -385,40 +379,36 @@ fn get_bounding_rect(sides: &Vec<Line>) -> BoundingRect {
         .min()
         .expect("Expected valid min_y");
 
-    return BoundingRect {
-        max_x: max_x,
-        max_y: max_y,
-        min_x: min_x,
-        min_y: min_y,
-    };
+    BoundingRect {
+        max_x,
+        max_y,
+        min_x,
+        min_y,
+    }
 }
 
 fn points_between(a: &Point, b: &Point) -> Vec<Point> {
-    // console::log_1(&format!("points_between {:?} <--> {:?}", a, b).into());
     assert_eq!(a.y, b.y);
     if a.x == b.x {
-        return vec![a.clone()];
+        return vec![*a];
     }
     if a.x - b.x == 1.0 {
-        return vec![a.clone(), b.clone()];
+        return vec![*a, *b];
     }
 
     let min = a.x.min(b.x);
     let max = a.x.max(b.x);
 
-    let p = (min as usize..max as usize)
+    (min as usize..max as usize)
         .map(|x| Point {
             x: x as f32,
             y: a.y,
         })
-        .collect();
-
-    // console::log_1(&format!("{:?}", p).into());
-    return p;
+        .collect()
 }
 
 pub fn translate_coord(number: f32) -> f32 {
-    return number * 2.0 - 1.0;
+    number * 2.0 - 1.0
 }
 
 pub fn translate_color(color: u8) -> f32 {
@@ -443,28 +433,24 @@ pub fn print_stats(stats: EvaluatorPayload, real_elapsed: Duration) {
     let real_min = real_sec / 60.0;
     let real_h = real_min / 60.0;
 
-    let eval_rate = e as f64 / (real_ms as f64 / 1000.0);
-    let mut_rate = m as f64 / (real_ms as f64 / 1000.0);
+    let eval_rate = e as f64 / (real_ms / 1000.0);
+    let mut_rate = m as f64 / (real_ms / 1000.0);
     let speedup = t as f64 / real_elapsed.as_millis() as f64;
 
     let time = if real_h > 1.0 {
         format!("{:4.1}h", real_h)
+    } else if real_min > 1.0 {
+        format!("{:4.1}m", real_min)
     } else {
-        if real_min > 1.0 {
-            format!("{:4.1}m", real_min)
-        } else {
-            format!("{:4.1}s", real_sec)
-        }
+        format!("{:4.1}s", real_sec)
     };
 
     let total_time = if total_h > 1.0 {
         format!("{:4.1}h", total_h)
+    } else if total_min > 1.0 {
+        format!("{:4.1}m", total_min)
     } else {
-        if total_min > 1.0 {
-            format!("{:4.1}m", total_min)
-        } else {
-            format!("{:4.1}s", total_sec)
-        }
+        format!("{:4.1}s", total_sec)
     };
 
     println!(
@@ -527,15 +513,10 @@ mod tests {
 
         // Run test cases
         for (mut buf, color) in test_cases {
-            // TODO: cleanup
-            // println!("testing {:?} <-- {:?}", buf, color);
-            let original_base = buf.clone(); // for logs
-
             // clone before blending to avoid side effects
             // these ones are to test blend which is the same as fill_pixel but takes [u8; 4]
-            let mut blend_buf = buf.clone();
             let mut blend_base: [u8; 4] = Default::default();
-            blend_base.copy_from_slice(&blend_buf[0..4]);
+            blend_base.copy_from_slice(&buf[0..4]);
             let blend_color: [u8; 4] = [color.r, color.g, color.b, color.a];
 
             let idx = 0;
@@ -556,9 +537,7 @@ mod tests {
             // Assert
             assert_approx_eq(buf.as_slice(), exp_buf.as_slice());
 
-            // TODO: cleanup, test both
             // test blend here too
-            // blend(&mut blend_base, &blend_color);
             blend_simd(&mut blend_base, &blend_color);
             assert_approx_eq(
                 blend_base.as_slice(),
@@ -617,7 +596,7 @@ mod tests {
             ],
             color: red_color,
         };
-        fill_triangle(&mut buffer, &polygon1, 16, 16);
+        let _ = fill_triangle(&mut buffer, &polygon1, 16, 16);
 
         // Second triangle covering the bottom-right half
         let polygon2 = Polygon {
@@ -628,7 +607,7 @@ mod tests {
             ],
             color: red_color,
         };
-        fill_triangle(&mut buffer, &polygon2, 16, 16);
+        let _ = fill_triangle(&mut buffer, &polygon2, 16, 16);
 
         // Check all pixels to ensure they are filled with red
         for y in 0..16 {
@@ -655,7 +634,7 @@ mod tests {
             }, // Green color
         };
         // Attempt to fill the triangle and handle out-of-bounds points
-        if let Err(_) = fill_triangle(&mut buffer, &polygon, 16, 16) {
+        if fill_triangle(&mut buffer, &polygon, 16, 16).is_err() {
             // Check that no pixels are filled since the triangle is out of bounds
             assert!(buffer.iter().all(|&pixel| pixel == 0u8));
         }

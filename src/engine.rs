@@ -10,12 +10,16 @@ use wgpu::{
     RenderPipeline, SubmissionIndex, Texture,
 };
 
-#[repr(C)]
-#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct Vertex {
-    pub position: [f32; 4],
-    pub color: [f32; 4],
+#[allow(dead_code)]
+mod vertex {
+    #[repr(C)]
+    #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+    pub struct Vertex {
+        pub position: [f32; 4],
+        pub color: [f32; 4],
+    }
 }
+pub use vertex::Vertex;
 
 use crate::{
     buffer_dimensions::BufferDimensions,
@@ -100,7 +104,7 @@ impl Engine {
             self.h = img.height() as usize;
         }
 
-        let size = (self.w * self.h * 4) as usize;
+        let size = self.w * self.h * 4;
         assert!(size > 0);
 
         self.ref_image_data = img.into_rgba8().as_bytes().to_vec();
@@ -157,7 +161,7 @@ impl Engine {
         // FIXME: just use atomics for stats?
         futures_lite::future::block_on(async {
             let _ = self.stats_semaphore.acquire().await;
-            let mut stats = self.stats.blocking_read().clone();
+            let mut stats = *self.stats.blocking_read();
             stats.generated += generated;
             stats.improvements += improvements;
             stats.ticks += ticks;
@@ -179,7 +183,7 @@ impl Engine {
 
             let mut error = 0.0;
             for i in 0..num_pixels {
-                let r = (i * 4) as usize;
+                let r = i * 4;
                 let g = r + 1;
                 let b = g + 1;
                 let a = b + 1; // don't need to involve alpha in error calc
@@ -278,7 +282,7 @@ impl Engine {
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: None,
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: view,
+                    view,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::WHITE), // WHY DOES DRAWING WHITE TRIANGLES ON TOP OF THIS DO ANYTHING?
@@ -290,7 +294,7 @@ impl Engine {
                 occlusion_query_set: None,
             });
 
-            rpass.set_pipeline(&self.render_pipeline.as_ref().expect("no render_pipeline?"));
+            rpass.set_pipeline(self.render_pipeline.as_ref().expect("no render_pipeline?"));
             // rpass.set_bind_group(0, &self.bind_group, &[]);
             rpass.set_vertex_buffer(0, vertex_buffer.slice(..));
             rpass.draw(0..vertices.len() as u32, 0..vertices.len() as u32);
@@ -306,7 +310,7 @@ impl Engine {
                     .expect("no drawing_texture?")
                     .as_image_copy(),
                 wgpu::ImageCopyBuffer {
-                    buffer: &self
+                    buffer: self
                         .drawing_output_buffer
                         .as_ref()
                         .expect("no drawing_output_buffer?"),
@@ -342,14 +346,14 @@ impl Engine {
             timestamp_writes: None,
         });
         cpass.set_pipeline(
-            &self
+            self
                 .compute_pipeline
                 .as_ref()
                 .expect("no compute_pipeline?"),
         );
         cpass.set_bind_group(
             0,
-            &self
+            self
                 .compute_bind_group
                 .as_ref()
                 .expect("no compute_bind_group?"),
@@ -359,12 +363,12 @@ impl Engine {
         drop(cpass);
 
         encoder.copy_buffer_to_buffer(
-            &self
+            self
                 .error_source_buffer
                 .as_ref()
                 .expect("no error_source_buffer?"),
             0,
-            &self
+            self
                 .error_output_buffer
                 .as_ref()
                 .expect("no error_output_buffer?"),
@@ -380,12 +384,12 @@ impl Engine {
 
     pub fn draw_and_evaluate(&self, drawing: &mut Drawing) -> (f32, f32, Vec<u8>, Vec<u8>) {
         // step 1 - render pipeline --> draw our triangles to a texture
-        let draw_si = self.draw(&drawing);
+        let draw_si = self.draw(drawing);
         let dob = self
             .drawing_output_buffer
             .as_ref()
             .expect("no drawing_output_buffer?");
-        let best_drawing_bytes = self.get_bytes(&dob, draw_si);
+        let best_drawing_bytes = self.get_bytes(dob, draw_si);
 
         // Step 2 - compute pipeline --> diff drawing texture vs source texture
         let ce_si = self.calculate_error(self.w as u32, self.h as u32);
@@ -396,7 +400,7 @@ impl Engine {
             .error_output_buffer
             .as_ref()
             .expect("no drawing_output_buffer?");
-        let error_buffer = self.get_bytes(&eob, ce_si);
+        let error_buffer = self.get_bytes(eob, ce_si);
 
         let (error, error_heatmap) = calculate_error_from_gpu(&error_buffer);
         let max_total_error: f32 = MAX_ERROR_PER_PIXEL * self.w as f32 * self.h as f32;
@@ -419,16 +423,16 @@ impl Engine {
             .expect("no device?")
             .poll(wgpu::MaintainBase::WaitForSubmissionIndex(si));
 
-        if let Ok(_) = receiver.recv() {
+        if receiver.recv().is_ok() {
             let padded_buffer = buffer_slice.get_mapped_range();
             let vec = padded_buffer.to_vec();
             drop(padded_buffer); // avoid --> "You cannot unmap a buffer that still has accessible mapped views."
             output_buffer.unmap(); // avoid --> Buffer ObjectId { id: Some(1) } is already mapped' (breaks looping logic)
-            return vec;
+            vec
         } else {
             // should we ever end up here?
             output_buffer.unmap(); // probably makes no difference but just to be safe
-            return vec![];
+            vec![]
         }
     }
 
@@ -593,11 +597,11 @@ impl Engine {
         let dimensions = (self.w as u32, self.h as u32);
         assert!(self.ref_image_data.len() == self.w * self.h * 4);
         let source_texture_wrapper = TextureWrapper::from_bytes(
-            &self.device.as_mut().expect("no device?"),
-            &self.queue.as_mut().expect("no queue?"),
-            &self.ref_image_data.as_slice(),
+            self.device.as_mut().expect("no device?"),
+            self.queue.as_mut().expect("no queue?"),
+            self.ref_image_data.as_slice(),
             dimensions,
-            &"source",
+            "source",
         )
         .expect("Failed to create source_texture");
 
@@ -656,8 +660,10 @@ impl Engine {
             attributes: &vertex_attr_array![0 => Float32x4, 1 => Float32x4],
         };
 
-        let mut primitive = wgpu::PrimitiveState::default();
-        primitive.cull_mode = None;
+        let primitive = wgpu::PrimitiveState {
+            cull_mode: None,
+            ..Default::default()
+        };
 
         let blend_state: BlendState = BlendState {
             color: wgpu::BlendComponent {
@@ -695,7 +701,7 @@ impl Engine {
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
                 }),
-                primitive: primitive,
+                primitive,
                 depth_stencil: None,
                 multisample: wgpu::MultisampleState::default(),
                 multiview: None,
@@ -746,7 +752,7 @@ impl Engine {
 
 // we are now calculating sqrt(((re * re) + (ge * ge) + (be * be))) on the gpu
 // error_buffer is raw bytes straight out of the gpu so need to convert chunks of 4 back into f32
-fn calculate_error_from_gpu(error_buffer: &Vec<u8>) -> (f32, Vec<u8>) {
+fn calculate_error_from_gpu(error_buffer: &[u8]) -> (f32, Vec<u8>) {
     let error_buffer_f32: Vec<f32> = error_buffer
         .chunks_exact(4)
         .map(|c| f32::from_ne_bytes(c.try_into().unwrap()))
@@ -773,7 +779,7 @@ fn calculate_error_from_gpu(error_buffer: &Vec<u8>) -> (f32, Vec<u8>) {
 
 impl Default for Engine {
     fn default() -> Self {
-        let runtime = Builder::new_multi_thread()
+        let _runtime = Builder::new_multi_thread()
             .worker_threads(4)
             .enable_all()
             .build()

@@ -29,7 +29,7 @@ impl Polygon {
             .map(|_| {
                 let x = randomf32_clamped(origin.x - d, origin.x + d).clamp(0.0, 1.0);
                 let y = randomf32_clamped(origin.y - d, origin.y + d).clamp(0.0, 1.0);
-                return Point { x, y };
+                Point { x, y }
             })
             .collect();
         Polygon {
@@ -64,15 +64,15 @@ impl Polygon {
 
     pub fn mutate(&mut self) -> bool {
         let mut mutated = false;
-        if rand::thread_rng().gen::<f32>() < OFFSET_POLYGON_PROBABILITY {
-            if self.offset_polygon() {
-                mutated = true;
-            }
+        if rand::thread_rng().gen::<f32>() < OFFSET_POLYGON_PROBABILITY
+            && self.offset_polygon()
+        {
+            mutated = true;
         }
-        if rand::thread_rng().gen::<f32>() < REMOVE_POINT_PROBABILITY {
-            if self.remove_point() {
-                mutated = true;
-            }
+        if rand::thread_rng().gen::<f32>() < REMOVE_POINT_PROBABILITY
+            && self.remove_point()
+        {
+            mutated = true;
         }
 
         if self.color.mutate() {

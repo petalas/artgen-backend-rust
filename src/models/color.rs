@@ -87,42 +87,35 @@ impl Color {
             mutation_happened = true;
         }
         ////
-        if randomf32() < LIGHTEN_COLOR_PROB {
-            if self.r < u8::MAX && self.g < u8::MAX && self.b < u8::MAX {
-                self.r += 1;
-                self.g += 1;
-                self.b += 1;
-                mutation_happened = true;
-            }
+        if randomf32() < LIGHTEN_COLOR_PROB
+            && self.r < u8::MAX && self.g < u8::MAX && self.b < u8::MAX
+        {
+            self.r += 1;
+            self.g += 1;
+            self.b += 1;
+            mutation_happened = true;
         }
-        if randomf32() < DARKEN_COLOR_PROB {
-            if self.r > u8::MIN && self.g > u8::MIN && self.b > u8::MIN {
-                self.r -= 1;
-                self.g -= 1;
-                self.b -= 1;
-                mutation_happened = true;
-            }
+        if randomf32() < DARKEN_COLOR_PROB
+            && self.r > u8::MIN && self.g > u8::MIN && self.b > u8::MIN
+        {
+            self.r -= 1;
+            self.g -= 1;
+            self.b -= 1;
+            mutation_happened = true;
         }
 
         mutation_happened
     }
 
     // increment or decrement with 50% chance while avoiding overflows and underflows
-    fn micro_adjust(mut val: u8) -> u8 {
-        val = if randomf32() > 0.5 {
-            if val < u8::MAX {
-                val + 1
-            } else {
-                val - 1
-            }
+    fn micro_adjust(val: u8) -> u8 {
+        if randomf32() > 0.5 {
+            if val < u8::MAX { val + 1 } else { val - 1 }
+        } else if val > u8::MIN {
+            val - 1
         } else {
-            if val > u8::MIN {
-                val - 1
-            } else {
-                val + 1
-            }
-        };
-        val
+            val + 1
+        }
     }
 }
 

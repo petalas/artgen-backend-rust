@@ -14,7 +14,7 @@ impl TextureWrapper {
         dimensions: (u32, u32),
         label: &str,
     ) -> Result<Self> {
-        Self::from_image(device, queue, &bytes, dimensions, Some(label))
+        Self::from_image(device, queue, bytes, dimensions, Some(label))
     }
 
     pub fn from_image(
@@ -50,7 +50,7 @@ impl TextureWrapper {
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
             },
-            &rgba,
+            rgba,
             wgpu::ImageDataLayout {
                 offset: 0,
                 bytes_per_row: Some(4 * dimensions.0),

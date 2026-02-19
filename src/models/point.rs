@@ -8,7 +8,7 @@ use crate::{
     utils::{randomf32, randomf32_clamped},
 };
 
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, PartialOrd)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
 pub struct Point {
     pub x: f32,
     pub y: f32,
@@ -56,7 +56,7 @@ impl Point {
         let x = (self.x * w as f32).round();
         let y = (self.y * h as f32).round();
         assert!(x >= 0.0 && x <= w as f32 && y >= 0.0 && y <= h as f32);
-        return Point { x, y };
+        Point { x, y }
     }
 
     pub fn translate_to_fixed(&self, w: usize, h: usize) -> Result<FixedPoint, &'static str> {
@@ -71,15 +71,22 @@ impl Point {
 
 impl Eq for Point {}
 
+impl PartialOrd for Point {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 impl Ord for Point {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        if self.x < other.x {
-            return std::cmp::Ordering::Less;
-        }
-        if self.y < other.y {
-            return std::cmp::Ordering::Less;
-        }
-        return std::cmp::Ordering::Equal;
+        self.x
+            .partial_cmp(&other.x)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(
+                self.y
+                    .partial_cmp(&other.y)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            )
     }
 }
 

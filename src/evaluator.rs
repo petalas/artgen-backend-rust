@@ -1,7 +1,4 @@
-use std::{
-    sync::{Arc, RwLock},
-    time::Instant,
-};
+use std::time::Instant;
 
 use tokio::sync::broadcast::Receiver;
 
@@ -82,7 +79,7 @@ impl Evaluator {
 
             let mut error = 0.0;
             for i in 0..num_pixels {
-                let r = (i * 4) as usize;
+                let r = i * 4;
                 let g = r + 1;
                 let b = g + 1;
                 let a = b + 1; // don't need to involve alpha in error calc

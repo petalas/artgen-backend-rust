@@ -33,8 +33,10 @@ fn evaluate(work_sender: mpsc::Sender<EvaluatorPayload>, mut evaluator: Evaluato
 }
 
 fn initialize_engine(ref_image_filename: &str) -> Engine {
-    let mut engine = Engine::default();
-    engine.raster_mode = Rasterizer::HalfSpace;
+    let mut engine = Engine {
+        raster_mode: Rasterizer::HalfSpace,
+        ..Default::default()
+    };
     engine.init(
         ref_image_filename,
         MIN_IMAGE_WIDTH,
@@ -72,7 +74,7 @@ fn main() {
     println!("Using {:?} -> {:?}", ref_image_filename, json_filename);
 
     let num_threads = num_cpus::get();
-    let mut engine = initialize_engine(ref_image_filename);
+    let engine = initialize_engine(ref_image_filename);
 
     let best = if Path::new(&json_filename).exists() {
         Drawing::from_file(&json_filename)
@@ -196,7 +198,7 @@ fn main_loop(
         texture
             .update(None, &upscale_buf, DISPLAY_W as usize * 4)
             .unwrap();
-        canvas.copy(&texture, None, None).unwrap();
+        canvas.copy(texture, None, None).unwrap();
 
         // Present the canvas to display the upscaled image
         canvas.present();
