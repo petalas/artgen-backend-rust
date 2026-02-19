@@ -29,6 +29,10 @@ fn format_time(secs: u64) -> String {
 pub fn Stats(state: RwSignal<ViewerState>) -> impl IntoView {
     view! {
         <div class="stats-section">
+            <div class="stat-item stat-item-highlight">
+                <div class="stat-value stat-value-similarity">{move || format!("{:.4}%", state.get().fitness)}</div>
+                <div class="stat-label">"Similarity"</div>
+            </div>
             <div class="stat-item">
                 <div class="stat-value">{move || format!("{:.0}", state.get().evals_per_sec)}</div>
                 <div class="stat-label">"Evals/sec"</div>

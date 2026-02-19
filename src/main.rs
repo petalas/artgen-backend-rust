@@ -294,6 +294,8 @@ struct WsState {
     active_project: Option<String>,
     project_list_generation: u64,
     switch_request: Option<String>,
+    reset_active: bool,   // skip saving on switch when true (reset deletes best.json)
+    pending_delete: Option<String>, // project dir to delete after inner loop breaks
 }
 
 type SharedWsState = Arc<(Mutex<WsState>, Condvar)>;
@@ -568,50 +570,71 @@ fn handle_ws_command(
         }
         Some("delete_project") => {
             let name = cmd["name"].as_str().unwrap_or("");
-            match projects::delete_project(name) {
-                Ok(()) => {
-                    println!("[WS] Project '{}' deleted by {:?}", name, peer);
-                    let mut s = lock.lock().unwrap();
-                    s.project_list_generation += 1;
-                    // If we deleted the active project, switch to another or idle
-                    if s.active_project.as_deref() == Some(name) {
-                        let remaining = projects::list_projects();
-                        s.switch_request = remaining.first().map(|p| p.name.clone());
-                        if s.switch_request.is_none() {
-                            // No projects left — go idle
-                            s.active_project = None;
-                        }
-                    }
-                    s.generation += 1;
-                    cvar.notify_all();
-                    None
+            let mut s = lock.lock().unwrap();
+            let is_active = s.active_project.as_deref() == Some(name);
+
+            if is_active {
+                // Active project: defer deletion until the inner loop breaks.
+                // Set switch_request so the loop exits, then delete from the outer loop.
+                let remaining: Vec<_> = projects::list_projects()
+                    .into_iter()
+                    .filter(|p| p.name != name)
+                    .collect();
+                s.switch_request = remaining.first().map(|p| p.name.clone());
+                // Store name to delete after inner loop breaks
+                s.pending_delete = Some(name.to_string());
+                if s.switch_request.is_none() {
+                    s.active_project = None;
                 }
-                Err(e) => Some(serde_json::json!({
-                    "type": "project_error",
-                    "error": e,
-                })),
+                s.project_list_generation += 1;
+                s.generation += 1;
+                cvar.notify_all();
+                println!("[WS] Project '{}' (active) delete requested by {:?}", name, peer);
+                None
+            } else {
+                drop(s); // release lock before I/O
+                match projects::delete_project(name) {
+                    Ok(()) => {
+                        println!("[WS] Project '{}' deleted by {:?}", name, peer);
+                        let mut s = lock.lock().unwrap();
+                        s.project_list_generation += 1;
+                        s.generation += 1;
+                        cvar.notify_all();
+                        None
+                    }
+                    Err(e) => Some(serde_json::json!({
+                        "type": "project_error",
+                        "error": e,
+                    })),
+                }
             }
         }
         Some("reset_project") => {
             let name = cmd["name"].as_str().unwrap_or("");
-            match projects::reset_project(name) {
-                Ok(()) => {
-                    println!("[WS] Project '{}' reset by {:?}", name, peer);
-                    let mut s = lock.lock().unwrap();
-                    s.project_list_generation += 1;
-                    // If active, trigger reload
-                    if s.active_project.as_deref() == Some(name) {
-                        s.switch_request = Some(name.to_string());
-                    }
-                    s.generation += 1;
-                    cvar.notify_all();
-                    None
-                }
-                Err(e) => Some(serde_json::json!({
+            // Validate project exists
+            let dir = std::path::Path::new("projects").join(name);
+            if !dir.exists() {
+                return Some(serde_json::json!({
                     "type": "project_error",
-                    "error": e,
-                })),
+                    "error": format!("Project '{}' does not exist", name),
+                }));
             }
+            println!("[WS] Project '{}' reset requested by {:?}", name, peer);
+            let mut s = lock.lock().unwrap();
+            s.project_list_generation += 1;
+            // If active, trigger reload and auto-pause
+            // File deletion happens in the evolution loop (race-free)
+            if s.active_project.as_deref() == Some(name) {
+                s.switch_request = Some(name.to_string());
+                s.reset_active = true;
+                s.paused = true;
+            } else {
+                // Not active — safe to delete files directly
+                projects::reset_project(name).ok();
+            }
+            s.generation += 1;
+            cvar.notify_all();
+            None
         }
         Some("switch_project") => {
             let name = cmd["name"].as_str().unwrap_or("");
@@ -674,6 +697,8 @@ fn gpu_main_loop_headless(legacy_image: Option<&str>) {
             active_project: None,
             project_list_generation: 0,
             switch_request: migrated_project,
+            reset_active: false,
+            pending_delete: None,
         }),
         Condvar::new(),
     ));
@@ -684,8 +709,37 @@ fn gpu_main_loop_headless(legacy_image: Option<&str>) {
 
     // Outer loop: manage project switching
     loop {
+        // Handle deferred project deletion (after inner loop has stopped)
+        {
+            let mut s = ws_state.0.lock().unwrap();
+            if let Some(name) = s.pending_delete.take() {
+                drop(s); // release lock before I/O
+                if let Err(e) = projects::delete_project(&name) {
+                    eprintln!("[Projects] Failed to delete '{}': {}", name, e);
+                }
+                println!("[Projects] Deleted project '{}'", name);
+                let mut s = ws_state.0.lock().unwrap();
+                s.project_list_generation += 1;
+                s.generation += 1;
+            }
+        }
+
         // Determine which project to activate
         let project_name = loop {
+            // Handle deferred deletes while idle too
+            {
+                let mut s = ws_state.0.lock().unwrap();
+                if let Some(name) = s.pending_delete.take() {
+                    drop(s);
+                    if let Err(e) = projects::delete_project(&name) {
+                        eprintln!("[Projects] Failed to delete '{}': {}", name, e);
+                    }
+                    println!("[Projects] Deleted project '{}'", name);
+                    let mut s = ws_state.0.lock().unwrap();
+                    s.project_list_generation += 1;
+                    s.generation += 1;
+                }
+            }
             let switch = ws_state.0.lock().unwrap().switch_request.take();
             if let Some(name) = switch {
                 break name;
@@ -765,7 +819,6 @@ fn gpu_main_loop_headless(legacy_image: Option<&str>) {
             s.evals_per_sec = 0.0;
             s.total_evals = 0;
             s.elapsed_secs = 0;
-            s.paused = false;
             s.drawing_json = serde_json::to_string(&initial_best).unwrap_or_default();
             s.image_width = w as u32;
             s.image_height = h as u32;
@@ -783,50 +836,84 @@ fn gpu_main_loop_headless(legacy_image: Option<&str>) {
         let mut last_stats_timestamp = Instant::now();
         let mut improvements = 0u64;
         let mut batches = 0u64;
+        let mut paused_duration = Duration::ZERO;
+        let mut pause_start: Option<Instant> = None;
 
         // Inner loop: evolution for current project
         loop {
             // Check for switch request
             {
-                let s = ws_state.0.lock().unwrap();
+                let mut s = ws_state.0.lock().unwrap();
                 if s.switch_request.is_some() {
-                    // Save current state before switching
-                    global_best.to_file(&json_filename);
-                    global_best.draw(&mut render_buf, w, h, Rasterizer::HalfSpace);
-                    let png = encode_rgba_as_png(&render_buf, w, h);
-                    std::fs::write(&png_path, &png).ok();
-                    println!("[Projects] Saving and switching from '{}'", project_name);
+                    let deleting = s.pending_delete.is_some();
+                    if s.reset_active {
+                        // Reset: delete best files now (race-free since we hold the lock
+                        // and are about to break — no more periodic saves can happen)
+                        s.reset_active = false;
+                        std::fs::remove_file(&json_filename).ok();
+                        std::fs::remove_file(&png_path).ok();
+                        println!("[Projects] Resetting '{}'", project_name);
+                    } else if deleting {
+                        // About to delete this project — don't save
+                        println!("[Projects] Stopping '{}' (pending delete)", project_name);
+                    } else {
+                        // Normal switch: save current state
+                        drop(s); // release lock before I/O
+                        global_best.to_file(&json_filename);
+                        global_best.draw(&mut render_buf, w, h, Rasterizer::HalfSpace);
+                        let png = encode_rgba_as_png(&render_buf, w, h);
+                        std::fs::write(&png_path, &png).ok();
+                        println!("[Projects] Saving and switching from '{}'", project_name);
+                    }
                     break; // break inner loop, outer loop will handle the switch
                 }
-                // Check if active project was cleared (deleted)
+                // Check if active project was cleared (no projects left)
                 if s.active_project.is_none() {
-                    global_best.to_file(&json_filename);
-                    println!("[Projects] Project deleted, going idle");
+                    if s.pending_delete.is_none() {
+                        // Only save if we're not about to delete
+                        drop(s);
+                        global_best.to_file(&json_filename);
+                    }
+                    println!("[Projects] Going idle");
                     break;
                 }
             }
 
             // Check if paused
             if ws_state.0.lock().unwrap().paused {
+                // Record when we entered pause
+                if pause_start.is_none() {
+                    pause_start = Some(Instant::now());
+                }
                 thread::sleep(Duration::from_millis(50));
-                // Still send stats while paused
+                // Still send stats while paused (but don't update elapsed)
                 if last_stats_timestamp.elapsed().as_secs() >= 2 {
+                    let active_elapsed = evolver.elapsed() - paused_duration
+                        - pause_start.map(|t| t.elapsed()).unwrap_or(Duration::ZERO);
+                    let active_secs = active_elapsed.as_secs_f64();
+                    let evals = evolver.total_evaluations();
+                    let evals_per_sec = if active_secs > 0.0 { evals as f64 / active_secs } else { 0.0 };
                     {
                         let (lock, cvar) = &*ws_state;
                         let mut s = lock.lock().unwrap();
-                        s.evals_per_sec = evolver.evals_per_sec();
-                        s.total_evals = evolver.total_evaluations();
-                        s.elapsed_secs = evolver.elapsed().as_secs();
+                        s.evals_per_sec = evals_per_sec;
+                        s.total_evals = evals;
+                        s.elapsed_secs = active_elapsed.as_secs();
                         s.fitness = global_best.fitness;
                         s.polygons = global_best.polygons.len();
                         s.improvements = improvements;
                         s.generation += 1;
                         cvar.notify_all();
                     }
-                    print_gpu_stats(&evolver, &global_best);
+                    print_gpu_stats_active(&evolver, &global_best, active_elapsed);
                     last_stats_timestamp = Instant::now();
                 }
                 continue;
+            }
+
+            // Accumulate paused time when resuming
+            if let Some(start) = pause_start.take() {
+                paused_duration += start.elapsed();
             }
 
             batches += 1;
@@ -851,15 +938,19 @@ fn gpu_main_loop_headless(legacy_image: Option<&str>) {
 
                     // Update WS state
                     {
+                        let active_elapsed = evolver.elapsed() - paused_duration;
+                        let active_secs = active_elapsed.as_secs_f64();
+                        let evals = evolver.total_evaluations();
+                        let evals_per_sec = if active_secs > 0.0 { evals as f64 / active_secs } else { 0.0 };
                         let (lock, cvar) = &*ws_state;
                         let mut s = lock.lock().unwrap();
                         s.best_png = png.clone();
                         s.fitness = global_best.fitness;
                         s.polygons = global_best.polygons.len();
                         s.improvements = improvements;
-                        s.evals_per_sec = evolver.evals_per_sec();
-                        s.total_evals = evolver.total_evaluations();
-                        s.elapsed_secs = evolver.elapsed().as_secs();
+                        s.evals_per_sec = evals_per_sec;
+                        s.total_evals = evals;
+                        s.elapsed_secs = active_elapsed.as_secs();
                         s.drawing_json = serde_json::to_string(&global_best).unwrap();
                         s.generation += 1;
                         s.image_generation += 1;
@@ -881,13 +972,17 @@ fn gpu_main_loop_headless(legacy_image: Option<&str>) {
             }
 
             if last_stats_timestamp.elapsed().as_secs() >= 2 {
+                let active_elapsed = evolver.elapsed() - paused_duration;
+                let active_secs = active_elapsed.as_secs_f64();
+                let evals = evolver.total_evaluations();
+                let evals_per_sec = if active_secs > 0.0 { evals as f64 / active_secs } else { 0.0 };
                 // Update WS state with latest stats
                 {
                     let (lock, cvar) = &*ws_state;
                     let mut s = lock.lock().unwrap();
-                    s.evals_per_sec = evolver.evals_per_sec();
-                    s.total_evals = evolver.total_evaluations();
-                    s.elapsed_secs = evolver.elapsed().as_secs();
+                    s.evals_per_sec = evals_per_sec;
+                    s.total_evals = evals;
+                    s.elapsed_secs = active_elapsed.as_secs();
                     s.fitness = global_best.fitness;
                     s.polygons = global_best.polygons.len();
                     s.improvements = improvements;
@@ -895,7 +990,7 @@ fn gpu_main_loop_headless(legacy_image: Option<&str>) {
                     cvar.notify_all();
                 }
 
-                print_gpu_stats(&evolver, &global_best);
+                print_gpu_stats_active(&evolver, &global_best, active_elapsed);
                 last_stats_timestamp = Instant::now();
             }
         }
@@ -913,6 +1008,20 @@ fn print_gpu_stats(evolver: &GpuEvolver, best: &Drawing) {
         evals,
         evals_per_sec,
         elapsed_secs,
+    );
+}
+
+fn print_gpu_stats_active(evolver: &GpuEvolver, best: &Drawing, active_elapsed: Duration) {
+    let evals = evolver.total_evaluations();
+    let active_secs = active_elapsed.as_secs_f64();
+    let evals_per_sec = if active_secs > 0.0 { evals as f64 / active_secs } else { 0.0 };
+    println!(
+        "[GPU] fitness: {:.4} | polygons: {} | evals: {} | evals/s: {:.0} | elapsed: {}s",
+        best.fitness,
+        best.polygons.len(),
+        evals,
+        evals_per_sec,
+        active_elapsed.as_secs(),
     );
 }
 

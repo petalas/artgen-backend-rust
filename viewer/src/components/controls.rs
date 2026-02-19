@@ -2,7 +2,7 @@ use leptos::prelude::*;
 use wasm_bindgen::prelude::*;
 
 use crate::models::Drawing;
-use crate::ws::{send_ws_command, ViewerState};
+use crate::ws::{send_ws_command, send_ws_json, ViewerState};
 
 fn download_blob(content: &str, filename: &str, mime_type: &str) {
     let window = web_sys::window().expect("no window");
@@ -70,8 +70,19 @@ pub fn Controls(state: RwSignal<ViewerState>) -> impl IntoView {
         }
     };
 
+    let on_reset = move |_| {
+        let s = state.get();
+        if let Some(name) = &s.active_project {
+            send_ws_json(&serde_json::json!({
+                "type": "reset_project",
+                "name": name,
+            }));
+        }
+    };
+
     let has_drawing = move || state.get().drawing_json.is_some();
     let is_connected = move || state.get().connected;
+    let has_active_project = move || state.get().active_project.is_some();
 
     view! {
         <div class="controls-section">
@@ -81,6 +92,13 @@ pub fn Controls(state: RwSignal<ViewerState>) -> impl IntoView {
                 disabled={move || !is_connected()}
             >
                 {pause_label}
+            </button>
+            <button
+                class="btn btn-danger"
+                on:click={on_reset}
+                disabled={move || !is_connected() || !has_active_project()}
+            >
+                "RESET"
             </button>
             <button
                 class="btn btn-primary"

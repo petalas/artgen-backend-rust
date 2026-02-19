@@ -121,8 +121,16 @@ impl Drawing {
     }
 
     pub fn to_file(&self, path: &str) {
-        let file = File::create(Path::new(path)).expect("Failed to create file");
-        serde_json::to_writer(file, &self).expect("Failed to write to file");
+        let file = match File::create(Path::new(path)) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("[Drawing] Failed to create file '{}': {}", path, e);
+                return;
+            }
+        };
+        if let Err(e) = serde_json::to_writer(file, &self) {
+            eprintln!("[Drawing] Failed to write to '{}': {}", path, e);
+        }
     }
 
     // for gpu rendering
