@@ -267,6 +267,9 @@ struct WsState {
     generation: u64,
     image_generation: u64,
     paused: bool,
+    drawing_json: String,
+    image_width: u32,
+    image_height: u32,
 }
 
 type SharedWsState = Arc<(Mutex<WsState>, Condvar)>;
@@ -328,6 +331,9 @@ fn ws_handle_client(stream: std::net::TcpStream, state: SharedWsState) {
             "totalEvals": s.total_evals,
             "elapsed": s.elapsed_secs,
             "paused": s.paused,
+            "drawingJson": s.drawing_json,
+            "imageWidth": s.image_width,
+            "imageHeight": s.image_height,
         });
         if ws
             .send(tungstenite::Message::Text(msg.to_string().into()))
@@ -404,6 +410,7 @@ fn ws_handle_client(stream: std::net::TcpStream, state: SharedWsState) {
                     "totalEvals": s.total_evals,
                     "elapsed": s.elapsed_secs,
                     "paused": s.paused,
+                    "drawingJson": s.drawing_json,
                 })
             } else {
                 serde_json::json!({
@@ -471,6 +478,9 @@ fn gpu_main_loop_headless(engine: &Engine, initial_best: Drawing, json_filename:
             generation: 0,
             image_generation: 0,
             paused: false,
+            drawing_json: serde_json::to_string(&initial_best).unwrap(),
+            image_width: w as u32,
+            image_height: h as u32,
         }),
         Condvar::new(),
     ));
@@ -540,6 +550,7 @@ fn gpu_main_loop_headless(engine: &Engine, initial_best: Drawing, json_filename:
                     s.evals_per_sec = evolver.evals_per_sec();
                     s.total_evals = evolver.total_evaluations();
                     s.elapsed_secs = evolver.elapsed().as_secs();
+                    s.drawing_json = serde_json::to_string(&global_best).unwrap();
                     s.generation += 1;
                     s.image_generation += 1;
                     cvar.notify_all();

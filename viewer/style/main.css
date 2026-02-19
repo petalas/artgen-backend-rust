@@ -1,0 +1,271 @@
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    background: #fafafa;
+    color: #333;
+    font-family: 'Ubuntu', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    min-height: 100vh;
+}
+
+.app {
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
+}
+
+/* Header */
+.app-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 24px;
+    background: #fff;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.08);
+    z-index: 10;
+}
+
+.header-left h1 {
+    font-size: 18px;
+    font-weight: 500;
+    color: #333;
+}
+
+.header-center {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.similarity-label {
+    font-size: 14px;
+    color: #888;
+}
+
+.similarity-value {
+    font-size: 18px;
+    font-weight: 700;
+    color: #2e7d32;
+}
+
+.header-right {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.status-text {
+    font-size: 13px;
+    color: #888;
+}
+
+.status-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: #f44336;
+}
+
+.status-dot.connected {
+    background: #4caf50;
+}
+
+.status-dot.connecting {
+    background: #ff9800;
+}
+
+.status-dot.disconnected {
+    background: #f44336;
+}
+
+/* Main Content */
+.main-content {
+    flex: 1;
+    padding: 20px 24px;
+    max-width: 1200px;
+    margin: 0 auto;
+    width: 100%;
+}
+
+/* Image Row */
+.image-row {
+    display: flex;
+    gap: 16px;
+    margin-bottom: 20px;
+}
+
+.image-container {
+    flex: 1;
+    background: #fff;
+    border-radius: 8px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+    overflow: hidden;
+}
+
+.card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 14px;
+    border-bottom: 1px solid #eee;
+}
+
+.card-title {
+    font-size: 14px;
+    font-weight: 500;
+    color: #333;
+}
+
+.card-subtitle {
+    font-size: 12px;
+    color: #999;
+}
+
+.panel-image {
+    width: 100%;
+    display: block;
+    image-rendering: pixelated;
+    background: #f0f0f0;
+}
+
+.panel-canvas {
+    width: 100%;
+    display: block;
+    image-rendering: pixelated;
+    background: #f0f0f0;
+}
+
+.heatmap-gradient {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 14px;
+    font-size: 11px;
+    color: #888;
+}
+
+.gradient-bar {
+    flex: 1;
+    height: 8px;
+    border-radius: 4px;
+    background: linear-gradient(to right, #fff, #f44336);
+    border: 1px solid #ddd;
+}
+
+/* Stats Section */
+.stats-section {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 20px;
+    padding: 16px;
+    background: #fff;
+    border-radius: 8px;
+    border: 2px solid #4caf50;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+}
+
+.stat-item {
+    flex: 1;
+    text-align: center;
+}
+
+.stat-value {
+    font-size: 22px;
+    font-weight: 700;
+    color: #333;
+}
+
+.stat-label {
+    font-size: 11px;
+    color: #888;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-top: 2px;
+}
+
+/* Controls */
+.controls-section {
+    display: flex;
+    gap: 12px;
+    justify-content: center;
+}
+
+.btn {
+    padding: 10px 24px;
+    border: none;
+    border-radius: 6px;
+    font-family: 'Ubuntu', sans-serif;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.2s, transform 0.1s, opacity 0.2s;
+    letter-spacing: 0.5px;
+}
+
+.btn:hover {
+    transform: translateY(-1px);
+}
+
+.btn:active {
+    transform: translateY(0);
+}
+
+.btn:disabled {
+    opacity: 0.4;
+    cursor: default;
+    transform: none;
+}
+
+.btn-primary {
+    background: #1976d2;
+    color: #fff;
+}
+
+.btn-primary:hover:not(:disabled) {
+    background: #1565c0;
+}
+
+.btn-warning {
+    background: #ff9800;
+    color: #fff;
+}
+
+.btn-warning:hover:not(:disabled) {
+    background: #f57c00;
+}
+
+.btn-success {
+    background: #4caf50;
+    color: #fff;
+}
+
+.btn-success:hover:not(:disabled) {
+    background: #388e3c;
+}
+
+/* Responsive */
+@media (max-width: 600px) {
+    .image-row {
+        flex-direction: column;
+    }
+
+    .stats-section {
+        flex-wrap: wrap;
+    }
+
+    .stat-item {
+        min-width: 40%;
+    }
+
+    .app-header {
+        flex-direction: column;
+        gap: 8px;
+    }
+
+    .controls-section {
+        flex-direction: column;
+    }
+}

@@ -25,7 +25,9 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock* rust-toolchain.toml ./
 COPY src/ src/
 COPY benches/ benches/
-RUN cargo build --release
+COPY viewer/Cargo.toml viewer/Cargo.toml
+RUN mkdir -p viewer/src && echo "fn main() {}" > viewer/src/main.rs
+RUN cargo build --release -p artgen-backend-rust
 
 # --- Runtime stage ---
 FROM nvidia/cuda:12.8.1-runtime-ubuntu24.04
