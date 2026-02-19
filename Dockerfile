@@ -1,40 +1,53 @@
 FROM nvidia/cuda:12.8.1-devel-ubuntu24.04 AS builder
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    build-essential \
-    pkg-config \
-    libsdl2-dev \
-    libvulkan-dev \
-    && rm -rf /var/lib/apt/lists/*
+# Install build dependencies + kisak-mesa PPA for dozen (Vulkan-on-D3D12) driver
+RUN apt-get update -qq && \
+    apt-get install -y -qq --no-install-recommends \
+        software-properties-common \
+        curl \
+        build-essential \
+        pkg-config \
+        libsdl2-dev \
+        libvulkan-dev \
+        ca-certificates && \
+    add-apt-repository -y ppa:kisak/kisak-mesa && \
+    apt-get update -qq && \
+    apt-get install -y -qq --no-install-recommends mesa-vulkan-drivers && \
+    rm -rf /var/lib/apt/lists/*
 
 # Install Rust nightly
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+    sh -s -- -y --default-toolchain nightly
 ENV PATH="/root/.cargo/bin:${PATH}"
 
+# Build the project
 WORKDIR /app
 COPY Cargo.toml Cargo.lock* rust-toolchain.toml ./
 COPY src/ src/
 COPY benches/ benches/
-
 RUN cargo build --release
 
+# --- Runtime stage ---
 FROM nvidia/cuda:12.8.1-runtime-ubuntu24.04
 
-# libnvidia-gl provides the Vulkan ICD (nvidia_icd.json + libGLX_nvidia.so)
-# The NVIDIA Container Toolkit overrides these with host-matched driver libs at runtime.
-# Pin to a version close to the host driver — the container toolkit will handle mismatches.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libsdl2-2.0-0 \
-    libvulkan1 \
-    libnvidia-gl-590 \
-    && rm -rf /var/lib/apt/lists/*
+RUN apt-get update -qq && \
+    apt-get install -y -qq --no-install-recommends \
+        software-properties-common \
+        libsdl2-2.0-0 \
+        libvulkan1 && \
+    add-apt-repository -y ppa:kisak/kisak-mesa && \
+    apt-get update -qq && \
+    apt-get install -y -qq --no-install-recommends mesa-vulkan-drivers && \
+    rm -rf /var/lib/apt/lists/*
 
-ENV NVIDIA_VISIBLE_DEVICES=all
-ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics
+# Configure WSL lib path for d3d12
+RUN echo '/usr/lib/wsl/lib' > /etc/ld.so.conf.d/wsl.conf && ldconfig 2>/dev/null || true
 
-WORKDIR /app
-COPY --from=builder /app/target/release/artgen-backend-rust .
+COPY --from=builder /app/target/release/artgen-backend-rust /usr/local/bin/artgen
 
-ENTRYPOINT ["./artgen-backend-rust"]
-CMD ["--gpu", "--headless"]
+# Use only the dozen (Vulkan-on-D3D12) ICD to access the discrete GPU
+ENV VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/dzn_icd.json
+ENV NVIDIA_DRIVER_CAPABILITIES=all
+
+WORKDIR /data
+ENTRYPOINT ["artgen"]
