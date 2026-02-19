@@ -54,6 +54,7 @@ fn main() {
     let args: Vec<String> = env::args().collect();
 
     let use_gpu = args.iter().any(|a| a == "--gpu");
+    let headless = args.iter().any(|a| a == "--headless");
 
     // Filter out flags to get positional args
     let positional: Vec<&String> = args.iter().skip(1).filter(|a| !a.starts_with("--")).collect();
@@ -90,6 +91,12 @@ fn main() {
         );
         Drawing::new_random()
     };
+
+    if use_gpu && headless {
+        println!("Starting GPU evolution pipeline (headless)...");
+        gpu_main_loop_headless(&engine, best, &json_filename);
+        return;
+    }
 
     let (sdl_context, mut canvas, texture_creator) = initialize_sdl(DISPLAY_W, DISPLAY_H);
     let mut texture = texture_creator
@@ -235,20 +242,60 @@ fn gpu_main_loop(
 
         // Print stats periodically
         if last_stats_timestamp.elapsed().as_secs() >= 2 {
-            let evals = evolver.total_evaluations();
-            let evals_per_sec = evolver.evals_per_sec();
-            let elapsed_secs = evolver.elapsed().as_secs();
-            println!(
-                "[GPU] fitness: {:.4} | polygons: {} | evals: {} | evals/s: {:.0} | elapsed: {}s",
-                global_best.fitness,
-                global_best.polygons.len(),
-                evals,
-                evals_per_sec,
-                elapsed_secs,
-            );
+            print_gpu_stats(&evolver, &global_best);
             last_stats_timestamp = Instant::now();
         }
     }
+}
+
+fn gpu_main_loop_headless(
+    engine: &Engine,
+    initial_best: Drawing,
+    json_filename: &str,
+) {
+    let mut evolver = futures_lite::future::block_on(GpuEvolver::new(
+        &engine.ref_image_data,
+        engine.w as u32,
+        engine.h as u32,
+        &initial_best,
+    ));
+
+    let mut global_best = initial_best;
+    let mut last_save_timestamp = Instant::now();
+    let mut last_stats_timestamp = Instant::now();
+
+    loop {
+        if let Some(new_best) = evolver.run_batch() {
+            if new_best.fitness > global_best.fitness {
+                global_best = new_best;
+
+                let since_last_save = last_save_timestamp.elapsed().as_secs();
+                if since_last_save >= 10 {
+                    global_best.to_file(json_filename);
+                    last_save_timestamp = Instant::now();
+                }
+            }
+        }
+
+        if last_stats_timestamp.elapsed().as_secs() >= 2 {
+            print_gpu_stats(&evolver, &global_best);
+            last_stats_timestamp = Instant::now();
+        }
+    }
+}
+
+fn print_gpu_stats(evolver: &GpuEvolver, best: &Drawing) {
+    let evals = evolver.total_evaluations();
+    let evals_per_sec = evolver.evals_per_sec();
+    let elapsed_secs = evolver.elapsed().as_secs();
+    println!(
+        "[GPU] fitness: {:.4} | polygons: {} | evals: {} | evals/s: {:.0} | elapsed: {}s",
+        best.fitness,
+        best.polygons.len(),
+        evals,
+        evals_per_sec,
+        elapsed_secs,
+    );
 }
 
 fn main_loop(

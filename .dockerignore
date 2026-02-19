@@ -1,0 +1,6 @@
+target/
+*.best.json
+*.jpg
+*.png
+.git/
+docs/

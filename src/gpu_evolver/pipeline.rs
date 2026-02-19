@@ -53,22 +53,35 @@ impl GpuPipeline {
         assert_eq!(reference_rgba.len(), (image_width * image_height * 4) as usize);
 
         // --- Device + Queue ---
-        // Use Vulkan only — EGL/OpenGL conflicts with SDL2's display context
+        // Exclude GL/GLES — EGL conflicts with SDL2's display context.
+        // Allow noncompliant adapters for WSL2 dozen (Vulkan-on-D3D12) driver.
         let instance = Instance::new(InstanceDescriptor {
-            backends: Backends::VULKAN,
+            backends: Backends::VULKAN | Backends::DX12,
+            flags: wgpu::InstanceFlags::default()
+                | wgpu::InstanceFlags::ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER,
             ..Default::default()
         });
 
-        let adapter = instance
-            .request_adapter(&RequestAdapterOptions {
-                power_preference: PowerPreference::HighPerformance,
-                compatible_surface: None,
-                force_fallback_adapter: false,
+        // Enumerate all adapters and prefer discrete GPU
+        let adapters: Vec<_> = instance.enumerate_adapters(Backends::VULKAN | Backends::DX12);
+        println!("Found {} GPU adapter(s):", adapters.len());
+        for (i, a) in adapters.iter().enumerate() {
+            let info = a.get_info();
+            println!("  [{}] {} ({:?}, {:?})", i, info.name, info.device_type, info.backend);
+        }
+
+        let adapter = adapters
+            .into_iter()
+            .max_by_key(|a| match a.get_info().device_type {
+                DeviceType::DiscreteGpu => 4,
+                DeviceType::IntegratedGpu => 3,
+                DeviceType::VirtualGpu => 2,
+                DeviceType::Cpu => 1,
+                DeviceType::Other => 0,
             })
-            .await
             .expect("Failed to find a suitable GPU adapter");
 
-        println!("GPU adapter: {:?}", adapter.get_info().name);
+        println!("Selected GPU adapter: {:?}", adapter.get_info().name);
 
         // Calculate the largest buffer we actually need (render_targets)
         let max_buffer_needed = (chain_count as u64) * (image_width as u64) * (image_height as u64) * 4;
