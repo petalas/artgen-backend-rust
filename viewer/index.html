@@ -1,41 +1,253 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-  <title>artgen - GPU Evolution Viewer</title>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>artgen GPU Evolution</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { background: #1a1a1a; color: #ccc; font-family: monospace; display: flex; flex-direction: column; align-items: center; height: 100vh; }
-    h1 { margin: 16px 0 8px; font-size: 18px; color: #888; }
-    #container { flex: 1; display: flex; align-items: center; justify-content: center; }
-    img { max-width: 90vw; max-height: 80vh; image-rendering: pixelated; border: 1px solid #333; }
-    #status { padding: 8px; color: #666; font-size: 12px; }
+    body {
+      background: #111;
+      color: #e0e0e0;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+    header {
+      text-align: center;
+      padding: 16px;
+      border-bottom: 1px solid #333;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      gap: 16px;
+    }
+    header h1 {
+      font-size: 20px;
+      color: #aaa;
+      font-weight: 400;
+    }
+    .pause-btn {
+      background: #333;
+      color: #ccc;
+      border: 1px solid #555;
+      border-radius: 4px;
+      padding: 6px 16px;
+      font-family: inherit;
+      font-size: 13px;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .pause-btn:hover { background: #444; }
+    .pause-btn:disabled { opacity: 0.4; cursor: default; }
+    .pause-btn.paused { background: #2a4a2a; border-color: #4c4; color: #4c4; }
+    .images {
+      flex: 1;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      gap: 16px;
+      padding: 16px;
+    }
+    .image-panel {
+      flex: 1;
+      max-width: 50%;
+      text-align: center;
+    }
+    .image-panel label {
+      display: block;
+      margin-bottom: 8px;
+      color: #666;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+    .image-panel img {
+      width: 100%;
+      max-height: 70vh;
+      object-fit: contain;
+      image-rendering: pixelated;
+      border: 1px solid #333;
+      background: #000;
+    }
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      gap: 8px;
+      padding: 16px;
+      border-top: 1px solid #333;
+      background: #0a0a0a;
+    }
+    .stat {
+      padding: 8px 12px;
+    }
+    .stat .value {
+      font-size: 20px;
+      font-weight: bold;
+      color: #fff;
+    }
+    .stat .label {
+      font-size: 11px;
+      color: #666;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .status-bar {
+      padding: 8px 16px;
+      border-top: 1px solid #222;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      color: #666;
+    }
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #f44;
+    }
+    .status-dot.connected { background: #4c4; }
+    .status-dot.connecting { background: #fa4; }
+
+    @media (max-width: 600px) {
+      .images { flex-direction: column; }
+      .image-panel { max-width: 100%; }
+    }
   </style>
 </head>
 <body>
-  <h1>artgen GPU Evolution</h1>
-  <div id="container"><img id="preview" src="" alt="waiting for first image..."></div>
-  <div id="status">waiting...</div>
+  <header>
+    <h1>artgen GPU Evolution</h1>
+    <button class="pause-btn" id="pause-btn" disabled>Pause</button>
+  </header>
+  <div class="images">
+    <div class="image-panel">
+      <label>Reference</label>
+      <img id="ref-img" alt="Reference image">
+    </div>
+    <div class="image-panel">
+      <label>Generated</label>
+      <img id="gen-img" alt="Generated image">
+    </div>
+  </div>
+  <div class="stats">
+    <div class="stat">
+      <div class="value" id="fitness">&mdash;</div>
+      <div class="label">Fitness</div>
+    </div>
+    <div class="stat">
+      <div class="value" id="polygons">&mdash;</div>
+      <div class="label">Polygons</div>
+    </div>
+    <div class="stat">
+      <div class="value" id="evals-per-sec">&mdash;</div>
+      <div class="label">Evals/sec</div>
+    </div>
+    <div class="stat">
+      <div class="value" id="total-evals">&mdash;</div>
+      <div class="label">Total Evals</div>
+    </div>
+    <div class="stat">
+      <div class="value" id="improvements">&mdash;</div>
+      <div class="label">Improvements</div>
+    </div>
+    <div class="stat">
+      <div class="value" id="elapsed">&mdash;</div>
+      <div class="label">Elapsed</div>
+    </div>
+  </div>
+  <div class="status-bar">
+    <div class="status-dot" id="status-dot"></div>
+    <span id="status-text">Connecting...</span>
+  </div>
   <script>
-    const img = document.getElementById('preview');
-    const status = document.getElementById('status');
-    let refreshCount = 0;
+    const refImg = document.getElementById('ref-img');
+    const genImg = document.getElementById('gen-img');
+    const statusDot = document.getElementById('status-dot');
+    const statusText = document.getElementById('status-text');
+    const pauseBtn = document.getElementById('pause-btn');
 
-    function refresh() {
-      const t = Date.now();
-      const newImg = new Image();
-      newImg.onload = () => {
-        img.src = newImg.src;
-        refreshCount++;
-        status.textContent = `refreshed #${refreshCount} at ${new Date().toLocaleTimeString()}`;
-      };
-      newImg.onerror = () => {
-        status.textContent = `waiting for PNG... (${new Date().toLocaleTimeString()})`;
-      };
-      newImg.src = `/data/ff.best.png?t=${t}`;
+    var paused = false;
+    var ws = null;
+
+    function formatNumber(n) {
+      if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+      if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+      return n.toLocaleString();
     }
 
-    refresh();
-    setInterval(refresh, 2000);
+    function formatTime(secs) {
+      if (secs < 60) return secs + 's';
+      if (secs < 3600) return Math.floor(secs / 60) + 'm ' + (secs % 60) + 's';
+      var h = Math.floor(secs / 3600);
+      var m = Math.floor((secs % 3600) / 60);
+      return h + 'h ' + m + 'm';
+    }
+
+    function updateStats(data) {
+      document.getElementById('fitness').textContent = (data.fitness * 100).toFixed(4) + '%';
+      document.getElementById('polygons').textContent = data.polygons;
+      document.getElementById('evals-per-sec').textContent = formatNumber(Math.round(data.evalsPerSec));
+      document.getElementById('total-evals').textContent = formatNumber(data.totalEvals);
+      document.getElementById('improvements').textContent = formatNumber(data.improvements);
+      document.getElementById('elapsed').textContent = formatTime(data.elapsed);
+    }
+
+    function setPaused(val) {
+      paused = val;
+      pauseBtn.textContent = paused ? 'Resume' : 'Pause';
+      pauseBtn.className = 'pause-btn' + (paused ? ' paused' : '');
+    }
+
+    function setStatus(state, text) {
+      statusDot.className = 'status-dot ' + state;
+      statusText.textContent = text;
+    }
+
+    pauseBtn.onclick = function() {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      ws.send(JSON.stringify({ type: paused ? 'resume' : 'pause' }));
+    };
+
+    function connect() {
+      setStatus('connecting', 'Connecting...');
+      pauseBtn.disabled = true;
+      ws = new WebSocket('ws://' + window.location.hostname + ':9001');
+
+      ws.onopen = function() {
+        setStatus('connected', 'Connected');
+        pauseBtn.disabled = false;
+      };
+
+      ws.onmessage = function(event) {
+        var data = JSON.parse(event.data);
+        if (data.paused !== undefined) setPaused(data.paused);
+        if (data.type === 'init') {
+          refImg.src = 'data:image/png;base64,' + data.referenceImage;
+          genImg.src = 'data:image/png;base64,' + data.image;
+          updateStats(data);
+        } else if (data.type === 'update') {
+          genImg.src = 'data:image/png;base64,' + data.image;
+          updateStats(data);
+        } else if (data.type === 'stats') {
+          updateStats(data);
+        }
+      };
+
+      ws.onclose = function() {
+        setStatus('', 'Disconnected. Reconnecting...');
+        pauseBtn.disabled = true;
+        setTimeout(connect, 1000);
+      };
+
+      ws.onerror = function() {
+        ws.close();
+      };
+    }
+
+    connect();
   </script>
 </body>
 </html>

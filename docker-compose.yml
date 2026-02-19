@@ -1,6 +1,8 @@
 services:
   gpu:
     build: .
+    ports:
+      - "9001:9001"
     deploy:
       resources:
         reservations:
@@ -18,10 +20,9 @@ services:
   viewer:
     image: nginx:alpine
     ports:
-      - "8080:80"
+      - "8081:80"
     volumes:
       - ./viewer/index.html:/usr/share/nginx/html/index.html:ro
       - ./viewer/nginx.conf:/etc/nginx/conf.d/default.conf:ro
-      - ./output:/data:ro
     depends_on:
       - gpu
