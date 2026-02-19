@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>artgen - GPU Evolution Viewer</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #1a1a1a; color: #ccc; font-family: monospace; display: flex; flex-direction: column; align-items: center; height: 100vh; }
+    h1 { margin: 16px 0 8px; font-size: 18px; color: #888; }
+    #container { flex: 1; display: flex; align-items: center; justify-content: center; }
+    img { max-width: 90vw; max-height: 80vh; image-rendering: pixelated; border: 1px solid #333; }
+    #status { padding: 8px; color: #666; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <h1>artgen GPU Evolution</h1>
+  <div id="container"><img id="preview" src="" alt="waiting for first image..."></div>
+  <div id="status">waiting...</div>
+  <script>
+    const img = document.getElementById('preview');
+    const status = document.getElementById('status');
+    let refreshCount = 0;
+
+    function refresh() {
+      const t = Date.now();
+      const newImg = new Image();
+      newImg.onload = () => {
+        img.src = newImg.src;
+        refreshCount++;
+        status.textContent = `refreshed #${refreshCount} at ${new Date().toLocaleTimeString()}`;
+      };
+      newImg.onerror = () => {
+        status.textContent = `waiting for PNG... (${new Date().toLocaleTimeString()})`;
+      };
+      newImg.src = `/data/ff.best.png?t=${t}`;
+    }
+
+    refresh();
+    setInterval(refresh, 2000);
+  </script>
+</body>
+</html>

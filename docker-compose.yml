@@ -1,0 +1,27 @@
+services:
+  gpu:
+    build: .
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    volumes:
+      - /usr/lib/wsl:/usr/lib/wsl:ro
+      - ./output:/data
+    devices:
+      - /dev/dxg:/dev/dxg
+    command: ["ff.jpg", "--gpu", "--headless"]
+
+  viewer:
+    image: nginx:alpine
+    ports:
+      - "8080:80"
+    volumes:
+      - ./viewer/index.html:/usr/share/nginx/html/index.html:ro
+      - ./viewer/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./output:/data:ro
+    depends_on:
+      - gpu
