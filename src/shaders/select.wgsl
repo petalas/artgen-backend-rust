@@ -91,14 +91,16 @@ fn select_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let current_fitness_bits = chain_states[chain_id].fitness_bits;
     let current_fitness = bitcast<f32>(current_fitness_bits);
 
+    // Always advance the RNG state — even if the candidate is rejected,
+    // the next iteration must use a different random stream.
+    chain_states[chain_id].rng_state = working_states[chain_id].rng_state;
+
     if fitness > current_fitness {
-        // Accept: copy working → chain_state (keep RNG state from chain_state)
-        let saved_rng = chain_states[chain_id].rng_state;
+        // Accept: copy working → chain_state
         chain_states[chain_id].polygon_count = working_states[chain_id].polygon_count;
         chain_states[chain_id].fitness_bits = fitness_bits;
         chain_states[chain_id]._pad0 = 0u;
         chain_states[chain_id]._pad1 = 0u;
-        chain_states[chain_id].rng_state = saved_rng;
 
         let pc = working_states[chain_id].polygon_count;
         for (var i = 0u; i < pc; i++) {

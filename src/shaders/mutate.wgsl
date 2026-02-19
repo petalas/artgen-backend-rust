@@ -58,7 +58,6 @@ struct Params {
 // --- PCG32 RNG ---
 // PCG-XSH-RR: high-quality, fast, minimal state
 fn pcg_step(state: ptr<function, vec4<u32>>) -> u32 {
-    let old_state = (*state).x | ((*state).y << 0u);
     let s64_lo = (*state).x;
     let s64_hi = (*state).y;
     let inc_lo = (*state).z;
@@ -86,8 +85,16 @@ fn pcg_step(state: ptr<function, vec4<u32>>) -> u32 {
     (*state).x = add_lo;
     (*state).y = add_hi;
 
-    // XSH-RR output function on old state
-    let xorshifted = ((old_state >> 18u) ^ old_state) >> 27u;
+    // XSH-RR output function on old 64-bit state (emulated with 32-bit ops)
+    // Step 1: 64-bit right shift by 18
+    let shifted18_lo = (s64_lo >> 18u) | (s64_hi << 14u);
+    let shifted18_hi = s64_hi >> 18u;
+    // Step 2: XOR with original state
+    let xor_lo = shifted18_lo ^ s64_lo;
+    let xor_hi = shifted18_hi ^ s64_hi;
+    // Step 3: 64-bit right shift by 27 → take lower 32 bits
+    let xorshifted = (xor_lo >> 27u) | (xor_hi << 5u);
+    // Step 4: rotation amount = top 5 bits of 64-bit state = hi >> 27
     let rot = s64_hi >> 27u;
     return (xorshifted >> rot) | (xorshifted << ((32u - rot) & 31u));
 }

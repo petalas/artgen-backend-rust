@@ -19,6 +19,7 @@ pub struct GpuEvolver {
     iteration: u32,
     total_evaluations: u64,
     start_time: Instant,
+    best_fitness_bits: u32, // track best fitness across batches for control flag reset
 }
 
 impl GpuEvolver {
@@ -62,6 +63,7 @@ impl GpuEvolver {
             iteration: 0,
             total_evaluations: 0,
             start_time: Instant::now(),
+            best_fitness_bits: 0,
         }
     }
 
@@ -76,11 +78,12 @@ impl GpuEvolver {
         params.iteration_number = self.iteration;
         p.queue.write_buffer(&p.params_buf, 0, bytemuck::bytes_of(&params));
 
-        // Reset control flags before batch
+        // Reset control flags before batch — preserve best_fitness_bits so atomicMax
+        // only triggers new_best_found when fitness actually improves over last known best
         let control_reset = ControlFlags {
             new_best_found: 0,
             best_chain_id: 0,
-            best_fitness_bits: 0,
+            best_fitness_bits: self.best_fitness_bits,
             _pad: 0,
         };
         p.queue.write_buffer(&p.control_flags_buf, 0, bytemuck::bytes_of(&control_reset));
@@ -178,6 +181,7 @@ impl GpuEvolver {
         let control = self.read_control_flags();
 
         if control.new_best_found != 0 {
+            self.best_fitness_bits = control.best_fitness_bits;
             let drawing = self.readback_best(control.best_chain_id);
             Some(drawing)
         } else {
