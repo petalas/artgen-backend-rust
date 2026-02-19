@@ -1,6 +1,7 @@
 use artgen_backend_rust::{
     engine::{Engine, Rasterizer},
     evaluator::{Evaluator, EvaluatorPayload},
+    gpu_evolver::GpuEvolver,
     models::drawing::Drawing,
     settings::{
         DISPLAY_H, DISPLAY_W, MAX_IMAGE_HEIGHT, MAX_IMAGE_WIDTH, MIN_IMAGE_HEIGHT, MIN_IMAGE_WIDTH,
@@ -52,13 +53,18 @@ fn main() {
 
     let args: Vec<String> = env::args().collect();
 
-    let ref_image_filename = if args.len() > 1 {
-        &args[1]
+    let use_gpu = args.iter().any(|a| a == "--gpu");
+
+    // Filter out flags to get positional args
+    let positional: Vec<&String> = args.iter().skip(1).filter(|a| !a.starts_with("--")).collect();
+
+    let ref_image_filename = if !positional.is_empty() {
+        positional[0].as_str()
     } else {
         DEFAULT_REF_IMAGE_FILENAME
     };
 
-    let json_filename = if args.len() > 1 {
+    let json_filename = if !positional.is_empty() {
         format!(
             "{}.best.json",
             Path::new(ref_image_filename)
@@ -73,7 +79,6 @@ fn main() {
 
     println!("Using {:?} -> {:?}", ref_image_filename, json_filename);
 
-    let num_threads = num_cpus::get();
     let engine = initialize_engine(ref_image_filename);
 
     let best = if Path::new(&json_filename).exists() {
@@ -94,18 +99,49 @@ fn main() {
     canvas.clear();
     canvas.present();
 
+    if use_gpu {
+        println!("Starting GPU evolution pipeline...");
+        gpu_main_loop(
+            &sdl_context,
+            &mut texture,
+            &mut canvas,
+            &engine,
+            best,
+            &json_filename,
+        );
+    } else {
+        cpu_main(
+            &sdl_context,
+            &mut texture,
+            &mut canvas,
+            &engine,
+            best,
+            &json_filename,
+        );
+    }
+}
+
+fn cpu_main(
+    sdl_context: &sdl2::Sdl,
+    texture: &mut sdl2::render::Texture,
+    canvas: &mut sdl2::render::WindowCanvas,
+    engine: &Engine,
+    best: Drawing,
+    json_filename: &str,
+) {
+    let num_threads = num_cpus::get();
+
     // channel to send work to worker threads
     let (work_sender, work_receiver) = channel::<EvaluatorPayload>();
 
     // broadcast channel to send out new best to all workers
     let (best_sender, best_receiver) = broadcast::channel::<Drawing>(num_threads);
 
-    // 2. spawn a bunch of worker threads, giving each a sender
+    // spawn a bunch of worker threads, giving each a sender
     let workers = (0..num_threads)
         .map(|_| {
-            let ws = work_sender.clone(); // to send new work to threads
+            let ws = work_sender.clone();
             let br = best_sender.subscribe();
-            // TODO: remove refs to engine, calculate ref_image_data, w, h in main
             let evaluator = Evaluator::new(
                 engine.ref_image_data.clone(),
                 engine.w,
@@ -123,17 +159,95 @@ fn main() {
     let global_best = best.clone();
 
     main_loop(
-        &sdl_context,
+        sdl_context,
         &work_receiver,
         &best_sender,
-        &mut texture,
-        &mut canvas,
+        texture,
+        canvas,
         global_best,
-        &json_filename,
+        json_filename,
     );
 
     for worker in workers {
         worker.join().expect("worker panicked");
+    }
+}
+
+fn gpu_main_loop(
+    sdl_context: &sdl2::Sdl,
+    texture: &mut sdl2::render::Texture,
+    canvas: &mut sdl2::render::WindowCanvas,
+    engine: &Engine,
+    initial_best: Drawing,
+    json_filename: &str,
+) {
+    let mut event_pump = sdl_context.event_pump().unwrap();
+    let frametime = Duration::from_millis(TARGET_FRAMETIME);
+
+    // Initialize GPU evolver
+    let mut evolver = futures_lite::future::block_on(GpuEvolver::new(
+        &engine.ref_image_data,
+        engine.w as u32,
+        engine.h as u32,
+        &initial_best,
+    ));
+
+    let mut global_best = initial_best;
+    let mut last_draw_timestamp = Instant::now() - frametime;
+    let mut last_save_timestamp = Instant::now();
+    let mut last_stats_timestamp = Instant::now();
+
+    loop {
+        // Run a batch of GPU iterations
+        if let Some(new_best) = evolver.run_batch() {
+            if new_best.fitness > global_best.fitness {
+                global_best = new_best;
+
+                let since_last_save = last_save_timestamp.elapsed().as_secs();
+                if since_last_save >= 10 {
+                    global_best.to_file(json_filename);
+                    last_save_timestamp = Instant::now();
+                }
+            }
+        }
+
+        // Display at ~30fps
+        let elapsed = last_draw_timestamp.elapsed();
+        if elapsed >= frametime {
+            // Draw upscaled image
+            let mut upscale_buf = vec![0u8; DISPLAY_W as usize * DISPLAY_H as usize * 4];
+            global_best.draw(
+                &mut upscale_buf,
+                DISPLAY_W as usize,
+                DISPLAY_H as usize,
+                Rasterizer::HalfSpace,
+            );
+
+            texture
+                .update(None, &upscale_buf, DISPLAY_W as usize * 4)
+                .unwrap();
+            canvas.copy(texture, None, None).unwrap();
+            canvas.present();
+            last_draw_timestamp = Instant::now();
+
+            exhaust_event_pump(&mut event_pump);
+        }
+
+        // Print stats periodically
+        if last_stats_timestamp.elapsed().as_secs() >= 2 {
+            let evals = evolver.total_evaluations();
+            let evals_per_sec = evolver.evals_per_sec();
+            let elapsed_secs = evolver.elapsed().as_secs();
+            println!(
+                "[GPU] fitness: {:.4} | polygons: {} | evals: {} | evals/s: {:.0} | elapsed: {}s",
+                global_best.fitness,
+                global_best.polygons.len(),
+                evals,
+                evals_per_sec,
+                elapsed_secs,
+            );
+            last_stats_timestamp = Instant::now();
+        }
     }
 }
 

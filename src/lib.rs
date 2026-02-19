@@ -7,3 +7,4 @@ pub mod utils;
 pub mod buffer_dimensions;
 pub mod texture_wrapper;
 pub mod evaluator;
+pub mod gpu_evolver;

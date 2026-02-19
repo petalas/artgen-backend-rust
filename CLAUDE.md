@@ -23,6 +23,8 @@ This project uses a routing table (below) to map file patterns to docs you must 
 | `src/shader.wgsl`, `src/error.compute2.wgsl` | GPU shaders — vertex/fragment passthrough + compute error diff (workgroup 8x8) |
 | `src/settings.rs` | Global constants (image dims, mutation probabilities, alpha range, polygon limits) |
 | `src/main.rs` | SDL2 display, worker thread spawning (`num_cpus`), broadcast channel for new best, CLI args |
+| `src/gpu_evolver/**` | GPU compute-only evolution pipeline — `buffers.rs` (bytemuck structs, Drawing↔GPU conversion), `pipeline.rs` (wgpu device/buffers/bind groups/compute pipelines), `mod.rs` (GpuEvolver orchestration, batch submission, readback) |
+| `src/shaders/*.wgsl` | GPU compute shaders — `mutate.wgsl` (PCG RNG + all mutations), `rasterize.wgsl` (half-space triangle per pixel), `error_reduce.wgsl` (error + workgroup reduction), `select.wgsl` (selection + migration) |
 | `src/texture_wrapper.rs`, `src/buffer_dimensions.rs` | wgpu texture/buffer helpers (row alignment padding) |
 | `benches/**` | Benchmarks use `divan` crate, not `criterion` |
 | `Cargo.toml`, `build.sh`, `rust-toolchain.toml` | Build config — uses nightly (`portable_simd` feature) |
