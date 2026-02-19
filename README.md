@@ -27,6 +27,28 @@ bench                 fastest       │ slowest       │ median        │ mean
 ╰─ fill_color         454.7 µs      │ 546.3 µs      │ 457.1 µs      │ 461 µs        │ 100     │ 100
 ```
 
+## GPU mode with live viewer (Docker)
+
+Start the GPU evolution service (requires NVIDIA GPU):
+
+```
+docker compose up
+```
+
+In a separate terminal, start the viewer dev server:
+
+```
+cd viewer && trunk serve
+```
+
+Open `http://localhost:8080` to see live evolution progress. The viewer auto-rebuilds and reloads on source changes.
+
+### Requirements
+
+- Docker with NVIDIA Container Toolkit
+- [trunk](https://trunkrs.dev/) (`cargo install trunk`)
+- `rustup target add wasm32-unknown-unknown`
+
 ## To generate a flamegraph
 
 - Make sure you have perf installed if on linux.

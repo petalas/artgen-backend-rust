@@ -6,7 +6,7 @@ use crate::ws::ViewerState;
 pub fn Header(state: RwSignal<ViewerState>) -> impl IntoView {
     let fitness_pct = move || {
         let s = state.get();
-        format!("{:.4}%", s.fitness * 100.0)
+        format!("{:.4}%", s.fitness)
     };
 
     let status_class = move || {
