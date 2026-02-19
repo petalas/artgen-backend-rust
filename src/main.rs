@@ -267,13 +267,23 @@ fn gpu_main_loop_headless(
     let mut global_best = initial_best;
     let mut last_save_timestamp = Instant::now();
     let mut last_stats_timestamp = Instant::now();
+    let mut improvements = 0u64;
+    let mut batches = 0u64;
 
     // Save initial state as PNG
     save_drawing_as_png(&global_best, &mut render_buf, w, h, json_filename);
 
     loop {
+        batches += 1;
         if let Some(new_best) = evolver.run_batch() {
             if new_best.fitness > global_best.fitness {
+                improvements += 1;
+                let delta = new_best.fitness - global_best.fitness;
+                println!(
+                    "[GPU] improvement #{}: {:.4} -> {:.4} (+{:.6}) | polygons: {} | batch: {}",
+                    improvements, global_best.fitness, new_best.fitness, delta,
+                    new_best.polygons.len(), batches,
+                );
                 global_best = new_best;
 
                 let since_last_save = last_save_timestamp.elapsed().as_secs();

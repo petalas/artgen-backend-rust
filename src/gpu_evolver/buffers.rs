@@ -132,9 +132,11 @@ pub fn drawing_to_gpu(drawing: &Drawing, seed: u64) -> GpuDrawingState {
     // Initialize RNG state from seed (PCG-style: state and increment)
     state.rng_state[0] = seed as u32;
     state.rng_state[1] = (seed >> 32) as u32;
-    // Use different bits for increment (must be odd)
-    state.rng_state[2] = seed.wrapping_mul(6364136223846793005) as u32;
-    state.rng_state[3] = ((seed.wrapping_mul(6364136223846793005)) >> 32) as u32 | 1;
+    // Use different bits for increment (must be odd for full PCG period)
+    // The | 1 must be on the LOW word (bit 0 of the full 64-bit increment)
+    let inc = seed.wrapping_mul(6364136223846793005);
+    state.rng_state[2] = inc as u32 | 1;
+    state.rng_state[3] = (inc >> 32) as u32;
 
     state.fitness_bits = 0; // will be computed on GPU
 
