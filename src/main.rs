@@ -260,9 +260,16 @@ fn gpu_main_loop_headless(
         &initial_best,
     ));
 
+    let w = engine.w;
+    let h = engine.h;
+    let mut render_buf = vec![0u8; w * h * 4];
+
     let mut global_best = initial_best;
     let mut last_save_timestamp = Instant::now();
     let mut last_stats_timestamp = Instant::now();
+
+    // Save initial state as PNG
+    save_drawing_as_png(&global_best, &mut render_buf, w, h, json_filename);
 
     loop {
         if let Some(new_best) = evolver.run_batch() {
@@ -272,6 +279,7 @@ fn gpu_main_loop_headless(
                 let since_last_save = last_save_timestamp.elapsed().as_secs();
                 if since_last_save >= 10 {
                     global_best.to_file(json_filename);
+                    save_drawing_as_png(&global_best, &mut render_buf, w, h, json_filename);
                     last_save_timestamp = Instant::now();
                 }
             }
@@ -280,6 +288,18 @@ fn gpu_main_loop_headless(
         if last_stats_timestamp.elapsed().as_secs() >= 2 {
             print_gpu_stats(&evolver, &global_best);
             last_stats_timestamp = Instant::now();
+        }
+    }
+}
+
+fn save_drawing_as_png(drawing: &Drawing, buf: &mut [u8], w: usize, h: usize, json_filename: &str) {
+    drawing.draw(buf, w, h, Rasterizer::HalfSpace);
+    let png_path = json_filename.replace(".best.json", ".best.png");
+    if let Some(img) = image::RgbaImage::from_raw(w as u32, h as u32, buf.to_vec()) {
+        if let Err(e) = img.save(&png_path) {
+            eprintln!("Failed to save PNG: {}", e);
+        } else {
+            println!("[GPU] Saved preview: {}", png_path);
         }
     }
 }
