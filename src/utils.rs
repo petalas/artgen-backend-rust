@@ -118,18 +118,18 @@ pub fn fill_triangle(
     let FDY23 = DY23 << 4;
     let FDY31 = DY31 << 4;
 
-    // Bounding rectangle
+    // Bounding rectangle, clamped to image bounds
     let mut minx = (i32::min(i32::min(X1, X2), X3) + 0xF) >> 4;
-    let maxx = (i32::max(i32::max(X1, X2), X3) + 0xF) >> 4;
+    let maxx = ((i32::max(i32::max(X1, X2), X3) + 0xF) >> 4).min(w as i32);
     let mut miny = (i32::min(i32::min(Y1, Y2), Y3) + 0xF) >> 4;
-    let maxy = (i32::max(i32::max(Y1, Y2), Y3) + 0xF) >> 4;
+    let maxy = ((i32::max(i32::max(Y1, Y2), Y3) + 0xF) >> 4).min(h as i32);
 
     // Block size, standard 8x8 (must be power of two)
     let q = 8;
 
     // Start in corner of 8x8 block
-    minx &= !(q - 1);
-    miny &= !(q - 1);
+    minx = minx & !(q - 1);
+    miny = miny & !(q - 1);
 
     // Constant part of half-edge functions
     let mut C1 = DY12 * X1 - DX12 * Y1;
@@ -180,10 +180,14 @@ pub fn fill_triangle(
                 continue;
             }
 
+            // Clamp block extent to image bounds
+            let block_maxx = (x + q).min(w as i32);
+            let block_maxy = (y + q).min(h as i32);
+
             // Accept whole block when totally covered
             if a == 0xF && b == 0xF && c == 0xF {
-                for iy in y..(y + q) {
-                    for ix in x..(x + q) {
+                for iy in y..block_maxy {
+                    for ix in x..block_maxx {
                         let idx = (iy as usize * w + ix as usize) * 4;
                         blend_simd(
                             (&mut buffer[idx..idx + 4]).try_into().unwrap(),
@@ -196,12 +200,12 @@ pub fn fill_triangle(
                 let mut CY2 = C2 + DX23 * y0 - DY23 * x0;
                 let mut CY3 = C3 + DX31 * y0 - DY31 * x0;
 
-                for iy in y..(y + q) {
+                for iy in y..block_maxy {
                     let mut CX1 = CY1;
                     let mut CX2 = CY2;
                     let mut CX3 = CY3;
 
-                    for ix in x..(x + q) {
+                    for ix in x..block_maxx {
                         if CX1 >= 0 && CX2 >= 0 && CX3 >= 0 {
                             let idx = (iy as usize * w + ix as usize) * 4;
                             blend_simd(

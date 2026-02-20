@@ -113,40 +113,61 @@ fn read_best_summary(path: &Path) -> (Option<f32>, Option<usize>) {
     (fitness, polygons)
 }
 
+/// Round down to the nearest even number (minimum 2).
+fn round_even(v: usize) -> usize {
+    (v & !1).max(2)
+}
+
 /// Decode raw image bytes, resize to engine bounds, return RGBA pixels + dimensions.
 ///
 /// If `max_dimension` is Some(n), resize so the longest side = n (maintaining aspect ratio).
 /// Otherwise fall back to clamping between MIN/MAX image settings.
+/// All output dimensions are rounded to even numbers for GPU/rasterizer compatibility.
 pub fn load_and_normalize_image(raw_bytes: &[u8], max_dimension: Option<u32>) -> Result<(Vec<u8>, usize, usize), String> {
     let img = image::load_from_memory(raw_bytes).map_err(|e| format!("Failed to decode image: {}", e))?;
 
-    let mut w = img.width() as usize;
-    let mut h = img.height() as usize;
+    let orig_w = img.width() as usize;
+    let orig_h = img.height() as usize;
 
-    let resized = if let Some(max_dim) = max_dimension {
+    let (target_w, target_h) = if let Some(max_dim) = max_dimension {
         let max_dim = max_dim.clamp(64, 1024) as usize;
-        let longest = w.max(h);
+        let longest = orig_w.max(orig_h);
         if longest != max_dim {
-            let target_w = (w * max_dim / longest) as u32;
-            let target_h = (h * max_dim / longest) as u32;
-            let r = img.resize(target_w, target_h, Lanczos3);
-            w = r.width() as usize;
-            h = r.height() as usize;
-            r
+            let tw = round_even(orig_w * max_dim / longest);
+            let th = round_even(orig_h * max_dim / longest);
+            (tw, th)
         } else {
-            img
+            (round_even(orig_w), round_even(orig_h))
         }
-    } else if w < MIN_IMAGE_WIDTH || h < MIN_IMAGE_HEIGHT || w > MAX_IMAGE_WIDTH || h > MAX_IMAGE_HEIGHT {
-        let target_w = w.clamp(MIN_IMAGE_WIDTH, MAX_IMAGE_WIDTH) as u32;
-        let target_h = h.clamp(MIN_IMAGE_HEIGHT, MAX_IMAGE_HEIGHT) as u32;
-        let r = img.resize(target_w, target_h, Lanczos3);
-        w = r.width() as usize;
-        h = r.height() as usize;
-        r
+    } else if orig_w < MIN_IMAGE_WIDTH || orig_h < MIN_IMAGE_HEIGHT || orig_w > MAX_IMAGE_WIDTH || orig_h > MAX_IMAGE_HEIGHT {
+        // Scale to fit within MIN..MAX bounds, preserving aspect ratio
+        let longest = orig_w.max(orig_h);
+        let shortest = orig_w.min(orig_h);
+        let max_bound = MAX_IMAGE_WIDTH.min(MAX_IMAGE_HEIGHT);
+        let min_bound = MIN_IMAGE_WIDTH.min(MIN_IMAGE_HEIGHT);
+        let target_longest = if longest > max_bound {
+            max_bound
+        } else if shortest < min_bound {
+            // Scale up so shortest side = min_bound
+            longest * min_bound / shortest
+        } else {
+            longest
+        };
+        let tw = round_even(orig_w * target_longest / longest);
+        let th = round_even(orig_h * target_longest / longest);
+        (tw, th)
+    } else {
+        (round_even(orig_w), round_even(orig_h))
+    };
+
+    let resized = if target_w != orig_w || target_h != orig_h {
+        img.resize_exact(target_w as u32, target_h as u32, Lanczos3)
     } else {
         img
     };
 
+    let w = resized.width() as usize;
+    let h = resized.height() as usize;
     let rgba = resized.into_rgba8();
     Ok((rgba.as_bytes().to_vec(), w, h))
 }
