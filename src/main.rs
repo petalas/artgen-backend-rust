@@ -1,4 +1,5 @@
 use artgen_backend_rust::{
+    benchmark::{BenchmarkRequest, BenchmarkResult, BenchmarkSample},
     engine::{Engine, Rasterizer},
     evaluator::{Evaluator, EvaluatorPayload},
     gpu_evolver::GpuEvolver,
@@ -74,7 +75,9 @@ fn initialize_engine_from_rgba(rgba: &[u8], w: usize, h: usize) -> Engine {
 }
 
 fn main() {
-    tracing_subscriber::fmt().init();
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn,artgen_backend_rust=info"));
+    tracing_subscriber::fmt().with_env_filter(filter).init();
 
     let args: Vec<String> = env::args().collect();
 
@@ -372,6 +375,11 @@ struct WsState {
     mutation_params: MutationParams,
     // GPU stats
     gpu_stats: Option<GpuStatsWs>,
+    // Benchmark
+    benchmark_request: Option<BenchmarkRequest>,
+    benchmark_results: Vec<BenchmarkResult>,
+    benchmark_active: bool,
+    benchmark_events: Vec<serde_json::Value>, // queued events for WS clients
 }
 
 type SharedWsState = Arc<(Mutex<WsState>, Condvar)>;
@@ -539,7 +547,7 @@ fn ws_handle_client(stream: std::net::TcpStream, state: SharedWsState) {
 
         // 3. Read current state and send appropriate message
         let msg_string = {
-            let s = lock.lock().unwrap();
+            let mut s = lock.lock().unwrap();
 
             // Project list changed (small message, send immediately)
             if s.project_list_generation != last_project_list_gen {
@@ -550,6 +558,25 @@ fn ws_handle_client(stream: std::net::TcpStream, state: SharedWsState) {
                 let result = ws.send(tungstenite::Message::Text(pl_msg.to_string().into()));
                 ws.get_ref().set_nonblocking(true).ok();
                 if result.is_err() {
+                    break;
+                }
+                continue;
+            }
+
+            // Drain benchmark events (small messages, send immediately)
+            if !s.benchmark_events.is_empty() {
+                let events: Vec<serde_json::Value> = s.benchmark_events.drain(..).collect();
+                drop(s);
+                ws.get_ref().set_nonblocking(false).ok();
+                let mut failed = false;
+                for evt in events {
+                    if ws.send(tungstenite::Message::Text(evt.to_string().into())).is_err() {
+                        failed = true;
+                        break;
+                    }
+                }
+                ws.get_ref().set_nonblocking(true).ok();
+                if failed {
                     break;
                 }
                 continue;
@@ -779,6 +806,24 @@ fn handle_ws_command(
             println!("[WS] Mutation params reset by {:?}", peer);
             None
         }
+        Some("start_benchmark") => {
+            if let Ok(req) = serde_json::from_value::<BenchmarkRequest>(cmd.clone()) {
+                let mut s = lock.lock().unwrap();
+                s.benchmark_request = Some(req);
+                s.generation += 1;
+                cvar.notify_all();
+                println!("[WS] Benchmark requested by {:?}", peer);
+            }
+            None
+        }
+        Some("clear_benchmarks") => {
+            let mut s = lock.lock().unwrap();
+            s.benchmark_results.clear();
+            s.generation += 1;
+            cvar.notify_all();
+            println!("[WS] Benchmarks cleared by {:?}", peer);
+            None
+        }
         Some("import_drawing") => {
             let name = cmd["name"].as_str().unwrap_or("");
             let drawing_json = cmd["drawingJson"].as_str().unwrap_or("");
@@ -883,6 +928,183 @@ fn build_gpu_stats(evolver: &GpuEvolver, island_count: u32) -> GpuStatsWs {
     }
 }
 
+fn run_benchmark(
+    ws_state: &SharedWsState,
+    evolver: &mut GpuEvolver,
+    req: &BenchmarkRequest,
+    global_best: &mut Drawing,
+    improvements: &mut u64,
+    w: usize,
+    h: usize,
+    render_buf: &mut [u8],
+) {
+    // Parse snapshot drawing
+    let drawing: Drawing = match serde_json::from_str(&req.drawing_json) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("[Benchmark] Failed to parse drawing: {}", e);
+            return;
+        }
+    };
+
+    let start_fitness = drawing.fitness;
+    let mut bench_params = req.params.clone();
+    bench_params.sanitize();
+
+    // Reinitialize chains from snapshot
+    evolver.reinit_chains(&drawing);
+
+    // Signal benchmark started
+    {
+        let (lock, cvar) = &**ws_state;
+        let mut s = lock.lock().unwrap();
+        s.benchmark_active = true;
+        s.benchmark_events.push(serde_json::json!({
+            "type": "benchmark_started",
+            "label": req.label,
+        }));
+        s.generation += 1;
+        cvar.notify_all();
+    }
+    println!("[Benchmark] Started: '{}' ({}s, {} chains, {} islands)",
+        req.label, req.duration_secs, bench_params.chain_count, bench_params.island_count);
+
+    let bench_start = Instant::now();
+    let duration = Duration::from_secs(req.duration_secs as u64);
+    let mut samples: Vec<BenchmarkSample> = vec![];
+    let mut bench_improvements = 0u64;
+    let mut last_sample = Instant::now();
+    let mut bench_best = drawing.clone();
+    let sample_interval = Duration::from_secs(1);
+    let image_render_interval = Duration::from_millis(200);
+    let mut last_image_render = Instant::now();
+
+    loop {
+        let elapsed = bench_start.elapsed();
+        if elapsed >= duration {
+            break;
+        }
+
+        // Check for abort (switch_request)
+        if ws_state.0.lock().unwrap().switch_request.is_some() {
+            println!("[Benchmark] Aborted due to switch request");
+            break;
+        }
+
+        // Run evolution batch with benchmark params
+        if let Some(new_best) = evolver.run_batch(&bench_params) {
+            if new_best.fitness > bench_best.fitness {
+                bench_improvements += 1;
+                bench_best = new_best;
+            }
+        }
+
+        // Collect sample every second
+        if last_sample.elapsed() >= sample_interval {
+            let elapsed_secs = elapsed.as_secs_f32();
+            let chain_fitness = evolver.chain_fitness();
+            let best_f = chain_fitness.iter().cloned().fold(0.0f32, f32::max);
+            let worst_f = chain_fitness.iter().cloned().fold(f32::MAX, f32::min);
+            let avg_f = chain_fitness.iter().sum::<f32>() / chain_fitness.len().max(1) as f32;
+            let total_evals = evolver.total_evaluations();
+            let evals_per_sec = if elapsed_secs > 0.0 { total_evals as f64 / elapsed_secs as f64 } else { 0.0 };
+
+            samples.push(BenchmarkSample {
+                elapsed_secs,
+                best_fitness: best_f,
+                avg_fitness: avg_f,
+                worst_fitness: worst_f,
+                improvements: bench_improvements,
+                total_evals,
+                evals_per_sec,
+            });
+
+            // Send progress via WS state
+            {
+                let (lock, cvar) = &**ws_state;
+                let mut s = lock.lock().unwrap();
+                s.fitness = bench_best.fitness;
+                s.polygons = bench_best.polygons.len();
+                s.improvements = *improvements + bench_improvements;
+                s.evals_per_sec = evals_per_sec;
+                s.total_evals = total_evals;
+                s.elapsed_secs = elapsed_secs as u64;
+                s.benchmark_events.push(serde_json::json!({
+                    "type": "benchmark_progress",
+                    "label": req.label,
+                    "elapsedSecs": elapsed_secs,
+                    "durationSecs": req.duration_secs,
+                    "bestFitness": best_f,
+                    "improvements": bench_improvements,
+                }));
+                s.generation += 1;
+                cvar.notify_all();
+            }
+
+            last_sample = Instant::now();
+        }
+
+        // Render image periodically so clients see visual progress
+        if bench_best.fitness > global_best.fitness && last_image_render.elapsed() >= image_render_interval {
+            bench_best.draw(render_buf, w, h, Rasterizer::HalfSpace);
+            let png = encode_rgba_as_png(render_buf, w, h);
+            let (lock, cvar) = &**ws_state;
+            let mut s = lock.lock().unwrap();
+            s.best_png = png;
+            s.drawing_json = serde_json::to_string(&bench_best).unwrap();
+            s.image_generation += 1;
+            cvar.notify_all();
+            last_image_render = Instant::now();
+        }
+    }
+
+    // Build result
+    let total_elapsed = bench_start.elapsed();
+    let total_evals = evolver.total_evaluations();
+    let result = BenchmarkResult {
+        label: req.label.clone(),
+        start_fitness,
+        final_fitness: bench_best.fitness,
+        total_improvements: bench_improvements,
+        total_evals,
+        duration_secs: req.duration_secs,
+        improvements_per_sec: if total_elapsed.as_secs_f64() > 0.0 {
+            bench_improvements as f64 / total_elapsed.as_secs_f64()
+        } else {
+            0.0
+        },
+        samples,
+        chain_count: bench_params.chain_count,
+        island_count: bench_params.island_count,
+    };
+
+    println!(
+        "[Benchmark] Complete: '{}' | {:.4} -> {:.4} | {} improvements | {} evals",
+        result.label, result.start_fitness, result.final_fitness,
+        result.total_improvements, result.total_evals,
+    );
+
+    // Update global best if benchmark found something better
+    if bench_best.fitness > global_best.fitness {
+        *improvements += bench_improvements;
+        *global_best = bench_best;
+    }
+
+    // Store result and signal completion
+    {
+        let (lock, cvar) = &**ws_state;
+        let mut s = lock.lock().unwrap();
+        s.benchmark_events.push(serde_json::json!({
+            "type": "benchmark_complete",
+            "result": serde_json::to_value(&result).unwrap(),
+        }));
+        s.benchmark_results.push(result);
+        s.benchmark_active = false;
+        s.generation += 1;
+        cvar.notify_all();
+    }
+}
+
 fn gpu_main_loop_headless(legacy_image: Option<&str>) {
     projects::ensure_projects_dir();
 
@@ -914,6 +1136,10 @@ fn gpu_main_loop_headless(legacy_image: Option<&str>) {
             pending_delete: None,
             mutation_params: MutationParams::default(),
             gpu_stats: None,
+            benchmark_request: None,
+            benchmark_results: vec![],
+            benchmark_active: false,
+            benchmark_events: vec![],
         }),
         Condvar::new(),
     ));
@@ -1102,6 +1328,20 @@ fn gpu_main_loop_headless(legacy_image: Option<&str>) {
                     }
                     println!("[Projects] Going idle");
                     break;
+                }
+            }
+
+            // Check for benchmark request (runs even when paused)
+            let bench_req = ws_state.0.lock().unwrap().benchmark_request.take();
+            if let Some(req) = bench_req {
+                // Accumulate paused time before benchmark
+                if let Some(start) = pause_start.take() {
+                    paused_duration += start.elapsed();
+                }
+                run_benchmark(&ws_state, &mut evolver, &req, &mut global_best, &mut improvements, w, h, &mut render_buf);
+                // After benchmark, stay paused if we were paused
+                if ws_state.0.lock().unwrap().paused {
+                    pause_start = Some(Instant::now());
                 }
             }
 

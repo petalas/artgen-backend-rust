@@ -826,6 +826,286 @@ body {
     font-family: 'Ubuntu Mono', monospace;
 }
 
+/* Benchmark Page */
+.benchmark-page {
+    max-width: 900px;
+    margin: 0 auto;
+}
+
+.bench-section {
+    background: #fff;
+    border-radius: 8px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+    padding: 16px;
+    margin-bottom: 16px;
+}
+
+.bench-section-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: #333;
+    margin-bottom: 12px;
+}
+
+.bench-snapshot-form {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 12px;
+}
+
+.bench-snapshot-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.bench-snapshot-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 12px;
+    background: #fafafa;
+    border: 1px solid #f0f0f0;
+    border-radius: 6px;
+}
+
+.bench-snapshot-info {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.bench-snapshot-name {
+    font-size: 14px;
+    font-weight: 500;
+    color: #333;
+}
+
+.bench-snapshot-meta {
+    font-size: 12px;
+    color: #888;
+    font-family: 'Ubuntu Mono', monospace;
+}
+
+.bench-config-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 12px;
+}
+
+.bench-config-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.bench-config-label {
+    font-size: 13px;
+    color: #555;
+    min-width: 80px;
+}
+
+.bench-select {
+    flex: 1;
+    padding: 6px 10px;
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    font-family: 'Ubuntu', sans-serif;
+    font-size: 13px;
+    outline: none;
+    background: #fff;
+}
+
+.bench-select:focus {
+    border-color: #1976d2;
+}
+
+.bench-radio-group {
+    display: flex;
+    gap: 12px;
+}
+
+.bench-radio-label {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 13px;
+    color: #555;
+    cursor: pointer;
+}
+
+.bench-checkbox-label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    color: #555;
+    cursor: pointer;
+}
+
+.bench-config-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+}
+
+.bench-progress {
+    margin-bottom: 12px;
+    padding: 10px 14px;
+    background: #e3f2fd;
+    border: 1px solid #bbdefb;
+    border-radius: 6px;
+}
+
+.bench-progress-header {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 6px;
+}
+
+.bench-progress-label {
+    font-size: 13px;
+    font-weight: 500;
+    color: #1565c0;
+}
+
+.bench-progress-stats {
+    font-size: 12px;
+    color: #1976d2;
+    font-family: 'Ubuntu Mono', monospace;
+}
+
+.bench-progress-bar-bg {
+    height: 8px;
+    background: #bbdefb;
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+.bench-progress-bar-fill {
+    height: 100%;
+    background: #1976d2;
+    border-radius: 4px;
+    transition: width 0.3s ease;
+}
+
+.bench-progress-time {
+    font-size: 11px;
+    color: #64b5f6;
+    text-align: right;
+    margin-top: 4px;
+    font-family: 'Ubuntu Mono', monospace;
+}
+
+.bench-queue-empty {
+    padding: 16px;
+    text-align: center;
+    color: #999;
+    font-size: 13px;
+}
+
+.bench-queue-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-bottom: 8px;
+}
+
+.bench-queue-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 10px;
+    background: #fafafa;
+    border: 1px solid #f0f0f0;
+    border-radius: 4px;
+}
+
+.bench-queue-label {
+    font-size: 13px;
+    font-weight: 500;
+    color: #333;
+    flex: 1;
+}
+
+.bench-queue-meta {
+    font-size: 12px;
+    color: #888;
+    font-family: 'Ubuntu Mono', monospace;
+}
+
+.bench-queue-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+    margin-top: 8px;
+}
+
+.benchmark-chart-canvas {
+    width: 100%;
+    height: auto;
+    border: 1px solid #eee;
+    border-radius: 6px;
+    margin-bottom: 12px;
+}
+
+.bench-results-table-wrap {
+    overflow-x: auto;
+}
+
+.bench-results-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+}
+
+.bench-results-table th {
+    padding: 6px 10px;
+    text-align: left;
+    font-weight: 600;
+    color: #888;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    border-bottom: 2px solid #eee;
+}
+
+.bench-results-table td {
+    padding: 8px 10px;
+    border-bottom: 1px solid #f0f0f0;
+    font-family: 'Ubuntu Mono', monospace;
+    color: #555;
+}
+
+.bench-results-table tr:hover td {
+    background: #fafafa;
+}
+
+.bench-color-dot {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+}
+
+.bench-cell-label {
+    font-weight: 500;
+    color: #333 !important;
+    font-family: 'Ubuntu', sans-serif !important;
+}
+
+.bench-cell-fitness {
+    font-weight: 600;
+    color: #2e7d32 !important;
+}
+
+.bench-results-actions {
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 12px;
+}
+
 /* Responsive */
 @media (max-width: 600px) {
     .image-row {

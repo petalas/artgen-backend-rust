@@ -114,8 +114,9 @@ fn MutationPanelBody(state: RwSignal<ViewerState>) -> impl IntoView {
                 <ProbSlider state={state} label="Crossover prob" field="crossover_prob"/>
                 <DeltaSlider state={state} label="Spatial weight" field="spatial_crossover_weight" min=0.0 max=1.0 step=0.05/>
                 <IntSlider state={state} label="Tournament size" get={|mp| mp.tournament_size as i64} set={|mp, v| { mp.tournament_size = v as u32; }} min=1 max=16 step=1/>
-                <IntSlider state={state} label="Islands" get={|mp| mp.island_count as i64} set={|mp, v| { mp.island_count = v as u32; }} min=1 max=64 step=1/>
-                <IntSlider state={state} label="Inter-island interval" get={|mp| mp.inter_island_interval as i64} set={|mp, v| { mp.inter_island_interval = v as u32; }} min=50 max=10000 step=50/>
+                <Pow2Slider state={state} label="Islands" get={|mp| mp.island_count} set={|mp, v| { mp.island_count = v; }} min_exp=0 max_exp=5/>
+                <IntSlider state={state} label="Inter-island interval" get={|mp| mp.inter_island_interval as i64} set={|mp, v| { mp.inter_island_interval = v as u32; }} min=0 max=10000 step=50/>
+                <Pow2Slider state={state} label="Chains" get={|mp| mp.chain_count} set={|mp, v| { mp.chain_count = v; }} min_exp=4 max_exp=9/>
             </div>
             <div class="mutation-section">
                 <div class="mutation-section-title">"Alpha"</div>
@@ -234,6 +235,45 @@ fn IntSlider(
                 max={max.to_string()}
                 step={step.to_string()}
                 prop:value={move || get(&state.get().mutation_params).to_string()}
+                on:input={on_input}
+            />
+            <span class="mutation-value">{move || get(&state.get().mutation_params).to_string()}</span>
+        </div>
+    }
+}
+
+/// Power-of-2 slider: exponent maps to 2^exp.
+#[component]
+fn Pow2Slider(
+    state: RwSignal<ViewerState>,
+    #[prop(into)] label: String,
+    get: fn(&MutationParams) -> u32,
+    set: fn(&mut MutationParams, u32),
+    min_exp: u32,
+    max_exp: u32,
+) -> impl IntoView {
+    let on_input = move |ev: web_sys::Event| {
+        let target = ev.target().unwrap();
+        let input: web_sys::HtmlInputElement = target.dyn_into().unwrap();
+        let exp: u32 = input.value().parse().unwrap_or(min_exp);
+        let val = 1u32 << exp;
+        state.update(|s| set(&mut s.mutation_params, val));
+        send_params(&state.get_untracked().mutation_params);
+    };
+
+    view! {
+        <div class="mutation-row">
+            <label class="mutation-label">{label}</label>
+            <input
+                type="range"
+                class="mutation-slider"
+                min={min_exp.to_string()}
+                max={max_exp.to_string()}
+                step="1"
+                prop:value={move || {
+                    let v = get(&state.get().mutation_params).max(1);
+                    v.ilog2().clamp(min_exp, max_exp).to_string()
+                }}
                 on:input={on_input}
             />
             <span class="mutation-value">{move || get(&state.get().mutation_params).to_string()}</span>

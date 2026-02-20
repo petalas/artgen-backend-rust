@@ -7,7 +7,7 @@ use wgpu::*;
 
 use crate::models::drawing::Drawing;
 use crate::mutation_params::MutationParams;
-use crate::settings::{GPU_CHAIN_COUNT, GPU_ITERATIONS_PER_BATCH, GPU_MIGRATION_INTERVAL};
+use crate::settings::{GPU_MAX_CHAIN_COUNT, GPU_DEFAULT_CHAIN_COUNT, GPU_ITERATIONS_PER_BATCH, GPU_MIGRATION_INTERVAL};
 
 use buffers::{
     default_gpu_params, gpu_params_from, drawing_to_gpu, gpu_to_drawing, ControlFlags, GpuDrawingState,
@@ -72,6 +72,7 @@ pub struct GpuEvolver {
     best_fitness_bits: u32, // track best fitness across batches for control flag reset
     pass_timings: PassTimings,
     chain_fitness: Vec<f32>,
+    active_chain_count: u32, // runtime chain count (≤ pipeline.chain_count)
 }
 
 impl GpuEvolver {
@@ -81,19 +82,20 @@ impl GpuEvolver {
         image_height: u32,
         initial_drawing: &Drawing,
     ) -> Self {
-        let chain_count = GPU_CHAIN_COUNT;
-        let params = default_gpu_params(image_width, image_height, GPU_MIGRATION_INTERVAL, chain_count);
+        let max_chains = GPU_MAX_CHAIN_COUNT;
+        let active_chains = GPU_DEFAULT_CHAIN_COUNT;
+        let params = default_gpu_params(image_width, image_height, GPU_MIGRATION_INTERVAL, active_chains);
 
-        // Create initial chain states — all start from the same drawing but with different RNG seeds
-        let initial_states: Vec<GpuDrawingState> = (0..chain_count)
+        // Create initial chain states for max capacity — all start from the same drawing but with different RNG seeds
+        let initial_states: Vec<GpuDrawingState> = (0..max_chains)
             .map(|i| {
-                let seed = 0xDEAD_BEEF_u64.wrapping_add(i as u64 * 0x9E3779B97F4A7C15);
+                let seed = 0xDEAD_BEEF_u64.wrapping_add((i as u64).wrapping_mul(0x9E3779B97F4A7C15));
                 drawing_to_gpu(initial_drawing, seed)
             })
             .collect();
 
         let pipeline = GpuPipeline::new(
-            chain_count,
+            max_chains,
             image_width,
             image_height,
             reference_rgba,
@@ -102,24 +104,26 @@ impl GpuEvolver {
         )
         .await;
 
-        let actual_chains = pipeline.chain_count;
-        if actual_chains < chain_count {
+        let actual_max = pipeline.chain_count;
+        if actual_max < max_chains {
             println!(
-                "GPU chain count capped: {} → {} (adapter max_storage_buffer_binding_size limit)",
-                chain_count, actual_chains,
+                "GPU max chain count capped: {} → {} (adapter max_storage_buffer_binding_size limit)",
+                max_chains, actual_max,
             );
         }
+        let active_chains = active_chains.min(actual_max);
         let wg_x = (image_width + 15) / 16;
         let wg_y = (image_height + 15) / 16;
         println!(
-            "GPU evolver initialized: {} chains, {}x{} image, {:.1} MB GPU memory, rasterize dispatch {}x{}x{} (16x16 workgroups, 12KB shared poly prefetch)",
-            actual_chains,
+            "GPU evolver initialized: {} active chains (max {}), {}x{} image, {:.1} MB GPU memory, rasterize dispatch {}x{}x{}",
+            active_chains,
+            actual_max,
             image_width,
             image_height,
-            estimate_gpu_memory(actual_chains, image_width, image_height) as f64 / (1024.0 * 1024.0),
+            estimate_gpu_memory(actual_max, image_width, image_height) as f64 / (1024.0 * 1024.0),
             wg_x,
             wg_y,
-            actual_chains,
+            active_chains,
         );
 
         Self {
@@ -129,7 +133,8 @@ impl GpuEvolver {
             start_time: Instant::now(),
             best_fitness_bits: 0,
             pass_timings: PassTimings::default(),
-            chain_fitness: vec![0.0; actual_chains as usize],
+            chain_fitness: vec![0.0; actual_max as usize],
+            active_chain_count: active_chains,
         }
     }
 
@@ -138,9 +143,11 @@ impl GpuEvolver {
     pub fn run_batch(&mut self, mutation_params: &MutationParams) -> Option<Drawing> {
         let p = &self.pipeline;
         let iterations = GPU_ITERATIONS_PER_BATCH;
+        let active = mutation_params.chain_count.min(p.chain_count);
+        self.active_chain_count = active;
 
         // Update iteration number in params
-        let mut params = gpu_params_from(mutation_params, p.image_width, p.image_height, GPU_MIGRATION_INTERVAL, p.chain_count);
+        let mut params = gpu_params_from(mutation_params, p.image_width, p.image_height, GPU_MIGRATION_INTERVAL, active);
         params.iteration_number = self.iteration;
         p.queue.write_buffer(&p.params_buf, 0, bytemuck::bytes_of(&params));
 
@@ -155,7 +162,7 @@ impl GpuEvolver {
         p.queue.write_buffer(&p.control_flags_buf, 0, bytemuck::bytes_of(&control_reset));
 
         // Reset error accumulators
-        let zeros = vec![0u8; p.chain_count as usize * 4];
+        let zeros = vec![0u8; active as usize * 4];
         p.queue.write_buffer(&p.error_accumulators_buf, 0, &zeros);
 
         // Encode N iterations × 5 passes into one command buffer
@@ -184,7 +191,7 @@ impl GpuEvolver {
                 });
                 pass.set_pipeline(&p.mutate_pipeline);
                 pass.set_bind_group(0, &p.mutate_bind_group, &[]);
-                pass.dispatch_workgroups(p.chain_count, 1, 1);
+                pass.dispatch_workgroups(active, 1, 1);
             }
 
             // Pass 2: Rasterize + Error (fused, W/16 × H/16 × K workgroups, tiled polygon prefetch)
@@ -199,7 +206,7 @@ impl GpuEvolver {
                 });
                 pass.set_pipeline(&p.rasterize_error_pipeline);
                 pass.set_bind_group(0, &p.rasterize_error_bind_group, &[]);
-                pass.dispatch_workgroups(wg_x, wg_y, p.chain_count);
+                pass.dispatch_workgroups(wg_x, wg_y, active);
             }
 
             // Pass 3: Select (K workgroups of size 1)
@@ -214,7 +221,7 @@ impl GpuEvolver {
                 });
                 pass.set_pipeline(&p.select_pipeline);
                 pass.set_bind_group(0, &p.select_bind_group, &[]);
-                pass.dispatch_workgroups(p.chain_count, 1, 1);
+                pass.dispatch_workgroups(active, 1, 1);
             }
 
             // Pass 4: Migration — inter-island (rare, global ring) or intra-island (frequent, island ring)
@@ -232,7 +239,7 @@ impl GpuEvolver {
                 });
                 pass.set_pipeline(&p.migrate_inter_pipeline);
                 pass.set_bind_group(0, &p.migrate_bind_group, &[]);
-                pass.dispatch_workgroups(p.chain_count, 1, 1);
+                pass.dispatch_workgroups(active, 1, 1);
                 if is_last_iter(i) {
                     migrate_ran = true;
                 }
@@ -248,7 +255,7 @@ impl GpuEvolver {
                 });
                 pass.set_pipeline(&p.migrate_intra_pipeline);
                 pass.set_bind_group(0, &p.migrate_bind_group, &[]);
-                pass.dispatch_workgroups(p.chain_count, 1, 1);
+                pass.dispatch_workgroups(active, 1, 1);
                 if is_last_iter(i) {
                     migrate_ran = true;
                 }
@@ -278,8 +285,8 @@ impl GpuEvolver {
             std::mem::size_of::<ControlFlags>() as u64,
         );
 
-        // Copy fitness_packed to staging for readback
-        let fitness_size = (p.chain_count as u64) * 4;
+        // Copy fitness_packed to staging for readback (only active chains)
+        let fitness_size = (active as u64) * 4;
         encoder.copy_buffer_to_buffer(
             &p.fitness_packed_buf,
             0,
@@ -292,7 +299,7 @@ impl GpuEvolver {
         p.queue.submit(std::iter::once(encoder.finish()));
 
         self.iteration += iterations;
-        self.total_evaluations += iterations as u64 * p.chain_count as u64;
+        self.total_evaluations += iterations as u64 * active as u64;
 
         // Poll for completion and read control flags
         let control = self.read_control_flags();
@@ -401,7 +408,8 @@ impl GpuEvolver {
 
     fn read_chain_fitness(&mut self) {
         let p = &self.pipeline;
-        let slice = p.fitness_staging_buf.slice(..);
+        let active = self.active_chain_count as usize;
+        let slice = p.fitness_staging_buf.slice(..((active * 4) as u64));
         let (tx, rx) = std::sync::mpsc::channel();
         slice.map_async(MapMode::Read, move |result| {
             tx.send(result).unwrap();
@@ -418,11 +426,43 @@ impl GpuEvolver {
         p.fitness_staging_buf.unmap();
     }
 
+    /// Reinitialize all chains from a given drawing (for benchmarks).
+    /// Resets iteration counters, timings, and fitness tracking.
+    pub fn reinit_chains(&mut self, drawing: &Drawing) {
+        let chain_count = self.pipeline.chain_count;
+        let states: Vec<GpuDrawingState> = (0..chain_count)
+            .map(|i| {
+                let seed = 0xDEAD_BEEF_u64
+                    .wrapping_add((i as u64).wrapping_mul(0x9E3779B97F4A7C15))
+                    .wrapping_add((self.iteration as u64).wrapping_mul(0x517CC1B727220A95));
+                drawing_to_gpu(drawing, seed)
+            })
+            .collect();
+        let bytes: Vec<u8> = states
+            .iter()
+            .flat_map(|s| bytemuck::bytes_of(s).to_vec())
+            .collect();
+        self.pipeline
+            .queue
+            .write_buffer(&self.pipeline.chain_states_buf, 0, &bytes);
+
+        self.iteration = 0;
+        self.total_evaluations = 0;
+        self.best_fitness_bits = 0;
+        self.start_time = Instant::now();
+        self.pass_timings = PassTimings::default();
+        self.chain_fitness.fill(0.0);
+    }
+
     pub fn chain_fitness(&self) -> &[f32] {
-        &self.chain_fitness
+        &self.chain_fitness[..self.active_chain_count as usize]
     }
 
     pub fn chain_count(&self) -> u32 {
+        self.active_chain_count
+    }
+
+    pub fn max_chain_count(&self) -> u32 {
         self.pipeline.chain_count
     }
 

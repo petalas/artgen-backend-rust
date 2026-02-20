@@ -4,6 +4,7 @@ use leptos::prelude::*;
 use wasm_bindgen::prelude::*;
 use web_sys::{MessageEvent, WebSocket};
 
+use crate::benchmark::{BenchmarkProgress, BenchmarkRequest, BenchmarkResult, BenchmarkSnapshot};
 use crate::mutation_params::MutationParams;
 
 #[derive(Clone, Debug, Default)]
@@ -70,6 +71,12 @@ pub struct ViewerState {
     pub mutation_params: MutationParams,
     // GPU stats
     pub gpu_stats: Option<GpuStats>,
+    // Benchmark
+    pub benchmark_snapshots: Vec<BenchmarkSnapshot>,
+    pub benchmark_results: Vec<BenchmarkResult>,
+    pub benchmark_active: bool,
+    pub benchmark_progress: Option<BenchmarkProgress>,
+    pub benchmark_queue: Vec<BenchmarkRequest>,
 }
 
 impl Default for ViewerState {
@@ -94,6 +101,11 @@ impl Default for ViewerState {
             project_error: None,
             mutation_params: MutationParams::default(),
             gpu_stats: None,
+            benchmark_snapshots: vec![],
+            benchmark_results: vec![],
+            benchmark_active: false,
+            benchmark_progress: None,
+            benchmark_queue: vec![],
         }
     }
 }
@@ -367,7 +379,60 @@ fn handle_message(data: &serde_json::Value, state: RwSignal<ViewerState>) {
                     s.project_error = Some(err.to_string());
                 }
             }
+            "benchmark_started" => {
+                s.benchmark_active = true;
+                let label = data["label"].as_str().unwrap_or("").to_string();
+                s.benchmark_progress = Some(BenchmarkProgress {
+                    label,
+                    elapsed_secs: 0.0,
+                    duration_secs: 0,
+                    best_fitness: 0.0,
+                    improvements: 0,
+                });
+            }
+            "benchmark_progress" => {
+                s.benchmark_progress = Some(BenchmarkProgress {
+                    label: data["label"].as_str().unwrap_or("").to_string(),
+                    elapsed_secs: data["elapsedSecs"].as_f64().unwrap_or(0.0) as f32,
+                    duration_secs: data["durationSecs"].as_u64().unwrap_or(0) as u32,
+                    best_fitness: data["bestFitness"].as_f64().unwrap_or(0.0) as f32,
+                    improvements: data["improvements"].as_u64().unwrap_or(0),
+                });
+            }
+            "benchmark_complete" => {
+                s.benchmark_active = false;
+                s.benchmark_progress = None;
+                if let Ok(result) = serde_json::from_value::<BenchmarkResult>(data["result"].clone()) {
+                    s.benchmark_results.push(result);
+                }
+                // Process next queued benchmark if any
+                if !s.benchmark_queue.is_empty() {
+                    let next = s.benchmark_queue.remove(0);
+                    // We need to send it after the update closure completes
+                    // Store it back and handle after update
+                    s.benchmark_queue.insert(0, next);
+                }
+            }
             _ => {}
         }
     });
+
+    // After state update: if benchmark just completed and queue has items, send next
+    let should_send_next = state.with_untracked(|s| {
+        !s.benchmark_active && !s.benchmark_queue.is_empty() && msg_type == "benchmark_complete"
+    });
+    if should_send_next {
+        let next = state.with_untracked(|s| s.benchmark_queue.first().cloned());
+        if let Some(req) = next {
+            state.update(|s| { s.benchmark_queue.remove(0); });
+            let msg = serde_json::json!({
+                "type": "start_benchmark",
+                "drawingJson": req.drawing_json,
+                "params": req.params,
+                "durationSecs": req.duration_secs,
+                "label": req.label,
+            });
+            send_ws_json(&msg);
+        }
+    }
 }

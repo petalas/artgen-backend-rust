@@ -38,6 +38,7 @@ pub fn Header(
 
     let go_evolution = move |_| page.set("evolution".into());
     let go_projects = move |_| page.set("projects".into());
+    let go_benchmark = move |_| page.set("benchmark".into());
 
     view! {
         <header class="app-header">
@@ -56,6 +57,13 @@ pub fn Header(
                         on:click={go_projects}
                     >
                         "Projects"
+                    </a>
+                    <a
+                        class="nav-link"
+                        class:active={move || page.get() == "benchmark"}
+                        on:click={go_benchmark}
+                    >
+                        "Benchmark"
                     </a>
                 </nav>
             </div>

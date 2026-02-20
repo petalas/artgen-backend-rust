@@ -39,6 +39,9 @@ pub struct MutationParams {
     pub tournament_size: u32,
     pub island_count: u32,
     pub inter_island_interval: u32,
+
+    // Chain count (runtime-configurable, capped to GPU buffer allocation)
+    pub chain_count: u32,
 }
 
 impl MutationParams {
@@ -71,12 +74,15 @@ impl MutationParams {
         self.new_point_max_distance = self.new_point_max_distance.max(0.0);
         self.offset_polygon_magnitude = self.offset_polygon_magnitude.max(0.0);
 
+        // Chain count: clamp to [1, GPU_MAX_CHAIN_COUNT]
+        self.chain_count = self.chain_count.clamp(1, settings::GPU_MAX_CHAIN_COUNT);
+
         // Crossover & island parameters
         self.crossover_prob = self.crossover_prob.clamp(0.0, 1.0);
         self.spatial_crossover_weight = self.spatial_crossover_weight.clamp(0.0, 1.0);
         self.tournament_size = self.tournament_size.clamp(1, 16);
-        // Snap island_count to nearest divisor of GPU_CHAIN_COUNT
-        let chain_count = settings::GPU_CHAIN_COUNT;
+        // Snap island_count to nearest divisor of chain_count
+        let chain_count = self.chain_count;
         self.island_count = self.island_count.clamp(1, chain_count);
         if self.island_count > 1 {
             // Find nearest divisor of chain_count
@@ -107,7 +113,7 @@ impl MutationParams {
             }
             self.island_count = best;
         }
-        self.inter_island_interval = self.inter_island_interval.clamp(1, 10000);
+        self.inter_island_interval = self.inter_island_interval.min(10000); // 0 = disabled
     }
 }
 
@@ -137,6 +143,7 @@ impl Default for MutationParams {
             tournament_size: settings::TOURNAMENT_SIZE,
             island_count: settings::ISLAND_COUNT,
             inter_island_interval: settings::INTER_ISLAND_INTERVAL,
+            chain_count: settings::GPU_DEFAULT_CHAIN_COUNT,
         }
     }
 }

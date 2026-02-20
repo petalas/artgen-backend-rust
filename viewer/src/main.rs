@@ -1,4 +1,5 @@
 mod app;
+mod benchmark;
 mod canvas_renderer;
 mod components;
 mod heatmap;

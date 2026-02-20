@@ -1,5 +1,6 @@
 use leptos::prelude::*;
 
+use crate::components::benchmark_page::BenchmarkPage;
 use crate::components::controls::Controls;
 use crate::components::gpu_stats_panel::GpuStatsPanel;
 use crate::components::header::Header;
@@ -22,9 +23,14 @@ pub fn App() -> impl IntoView {
             <Header state={state} page={page}/>
             <main class="main-content">
                 {move || {
-                    if page.get() == "projects" {
+                    let current_page = page.get();
+                    if current_page == "projects" {
                         view! {
                             <ProjectsPage state={state} page={page}/>
+                        }.into_any()
+                    } else if current_page == "benchmark" {
+                        view! {
+                            <BenchmarkPage state={state}/>
                         }.into_any()
                     } else {
                         view! {

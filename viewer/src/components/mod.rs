@@ -1,3 +1,5 @@
+pub mod benchmark_chart;
+pub mod benchmark_page;
 pub mod controls;
 pub mod gpu_stats_panel;
 pub mod header;
