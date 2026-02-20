@@ -120,6 +120,7 @@ fn build_benchmark_params(
     lambda: u32,
     isolate_islands: bool,
     single_mutation_mode: bool,
+    adaptive_mutation: bool,
 ) -> crate::mutation_params::MutationParams {
     let mut params = state.mutation_params.clone();
     params.chain_count = chain_count;
@@ -129,16 +130,18 @@ fn build_benchmark_params(
         params.inter_island_interval = 0;
     }
     params.single_mutation_mode = single_mutation_mode;
+    params.adaptive_mutation = adaptive_mutation;
     params
 }
 
-fn auto_label(chain_count: u32, island_count: u32, lambda: u32, isolate_islands: bool, single_mutation_mode: bool) -> String {
+fn auto_label(chain_count: u32, island_count: u32, lambda: u32, isolate_islands: bool, single_mutation_mode: bool, adaptive_mutation: bool) -> String {
     let mode = if single_mutation_mode { "single" } else { "multi" };
     let lambda_str = if lambda > 1 { format!("-{}\u{03BB}", lambda) } else { String::new() };
+    let adaptive_str = if adaptive_mutation { "-adaptive" } else { "" };
     if isolate_islands {
-        format!("{}c{}-{}i-isolated-{}", chain_count, lambda_str, island_count, mode)
+        format!("{}c{}-{}i-isolated-{}{}", chain_count, lambda_str, island_count, mode, adaptive_str)
     } else {
-        format!("{}c{}-{}i-{}", chain_count, lambda_str, island_count, mode)
+        format!("{}c{}-{}i-{}{}", chain_count, lambda_str, island_count, mode, adaptive_str)
     }
 }
 
@@ -169,6 +172,7 @@ fn ConfigureSection(state: RwSignal<ViewerState>) -> impl IntoView {
     let lambda_exp = RwSignal::new(0u32); // 2^0 = 1 (default lambda=1)
     let isolate_islands = RwSignal::new(false);
     let single_mutation = RwSignal::new(false);
+    let adaptive_mutation = RwSignal::new(false);
 
     let add_to_queue = move |_| {
         let s = state.get();
@@ -179,9 +183,10 @@ fn ConfigureSection(state: RwSignal<ViewerState>) -> impl IntoView {
         let lam = lambda_from_exp(lambda_exp.get());
         let iso = isolate_islands.get();
         let sm = single_mutation.get();
-        let params = build_benchmark_params(&s, cc, ic, lam, iso, sm);
+        let am = adaptive_mutation.get();
+        let params = build_benchmark_params(&s, cc, ic, lam, iso, sm, am);
         let lbl = label.get();
-        let base = if lbl.trim().is_empty() { auto_label(cc, ic, lam, iso, sm) } else { lbl.trim().to_string() };
+        let base = if lbl.trim().is_empty() { auto_label(cc, ic, lam, iso, sm, am) } else { lbl.trim().to_string() };
         let lbl = deduplicate_label(&base, &s);
         let req = BenchmarkRequest {
             drawing_json: snap.drawing_json.clone(),
@@ -202,9 +207,10 @@ fn ConfigureSection(state: RwSignal<ViewerState>) -> impl IntoView {
         let lam = lambda_from_exp(lambda_exp.get());
         let iso = isolate_islands.get();
         let sm = single_mutation.get();
-        let params = build_benchmark_params(&s, cc, ic, lam, iso, sm);
+        let am = adaptive_mutation.get();
+        let params = build_benchmark_params(&s, cc, ic, lam, iso, sm, am);
         let lbl = label.get();
-        let base = if lbl.trim().is_empty() { auto_label(cc, ic, lam, iso, sm) } else { lbl.trim().to_string() };
+        let base = if lbl.trim().is_empty() { auto_label(cc, ic, lam, iso, sm, am) } else { lbl.trim().to_string() };
         let lbl = deduplicate_label(&base, &s);
         let msg = serde_json::json!({
             "type": "start_benchmark",
@@ -354,6 +360,19 @@ fn ConfigureSection(state: RwSignal<ViewerState>) -> impl IntoView {
                             }}
                         />
                         "Single mutation per iteration"
+                    </label>
+                </div>
+                <div class="bench-config-row">
+                    <label class="bench-config-label">"Adaptive"</label>
+                    <label class="bench-checkbox-label">
+                        <input
+                            type="checkbox"
+                            prop:checked={move || adaptive_mutation.get()}
+                            on:change={move |_| {
+                                adaptive_mutation.set(!adaptive_mutation.get_untracked());
+                            }}
+                        />
+                        "Adaptive mutation scale (\u{03BB}>1 offspring only)"
                     </label>
                 </div>
                 <div class="bench-config-row">

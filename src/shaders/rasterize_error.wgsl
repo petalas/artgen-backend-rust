@@ -68,7 +68,7 @@ struct Params {
     chain_count_param: u32,
     single_mutation_mode: u32,
     lambda: u32,
-    _pad8: u32,
+    adaptive_mutation: u32,
 }
 
 @group(0) @binding(0) var<storage, read>       working_states:     array<DrawingState>;

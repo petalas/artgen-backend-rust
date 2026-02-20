@@ -42,6 +42,9 @@ pub struct MutationParams {
 
     // Mutation mode
     pub single_mutation_mode: bool,
+
+    // Adaptive mutation scale (only applies to offspring indices 1..λ-1)
+    pub adaptive_mutation: bool,
 }
 
 impl Default for MutationParams {
@@ -73,6 +76,7 @@ impl Default for MutationParams {
             chain_count: 16,
             lambda: 1,
             single_mutation_mode: true,
+            adaptive_mutation: false,
         }
     }
 }

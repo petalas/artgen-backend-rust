@@ -53,3 +53,4 @@ pub const ISLAND_COUNT: u32 = 1;
 pub const INTER_ISLAND_INTERVAL: u32 = 500;
 
 pub const SINGLE_MUTATION_MODE: bool = true;
+pub const ADAPTIVE_MUTATION: bool = false;

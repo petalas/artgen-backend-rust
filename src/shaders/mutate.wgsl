@@ -74,7 +74,7 @@ struct Params {
     chain_count_param: u32,
     single_mutation_mode: u32,
     lambda: u32,
-    _pad8: u32,
+    adaptive_mutation: u32,
 }
 
 @group(0) @binding(0) var<storage, read>       chain_states:   array<DrawingState>;
@@ -465,8 +465,12 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
     // Load per-offspring RNG from working_states (persistent across iterations)
     var rng = working_states[offspring_id].rng_state;
 
-    // Read adaptive mutation scale from parent
-    let mutation_scale = chain_states[chain_id].mutation_scale;
+    // Adaptive mutation scale: only for offspring 1..λ-1 when enabled
+    // Offspring 0 always uses scale 1.0 so (1+1) behavior is unchanged
+    var mutation_scale = 1.0;
+    if params.adaptive_mutation == 1u && offspring_local_idx > 0u {
+        mutation_scale = chain_states[chain_id].mutation_scale;
+    }
 
     // --- Crossover path ---
     let island_size = params.chain_count_param / max(params.island_count, 1u);

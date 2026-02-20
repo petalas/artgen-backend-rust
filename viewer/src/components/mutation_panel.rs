@@ -133,6 +133,21 @@ fn MutationPanelBody(state: RwSignal<ViewerState>) -> impl IntoView {
                         "Single mutation per iteration"
                     </label>
                 </div>
+                <div class="mutation-row">
+                    <label class="bench-checkbox-label">
+                        <input
+                            type="checkbox"
+                            prop:checked={move || state.get().mutation_params.adaptive_mutation}
+                            on:change={move |_| {
+                                state.update(|s| {
+                                    s.mutation_params.adaptive_mutation = !s.mutation_params.adaptive_mutation;
+                                });
+                                send_params(&state.get_untracked().mutation_params);
+                            }}
+                        />
+                        "Adaptive mutation scale (\u{03BB}>1 offspring only)"
+                    </label>
+                </div>
             </div>
             <div class="mutation-section">
                 <div class="mutation-section-title">"Polygons"</div>

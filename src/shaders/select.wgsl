@@ -55,7 +55,7 @@ struct Params {
     chain_count_param: u32,
     single_mutation_mode: u32,
     lambda: u32,
-    _pad8: u32,
+    adaptive_mutation: u32,
 }
 
 fn unpack_vertex(word: u32) -> vec2<f32> {
@@ -134,34 +134,35 @@ fn select_main(@builtin(global_invocation_id) gid: vec3<u32>,
         let should_accept = dominated || neutral;
 
         if should_accept {
-            // Adaptive mutation scale: increase on acceptance
-            // Boost ×1.2 per accept, cap at 2.0
-            let new_scale = min(chain_states[chain_id].mutation_scale * 1.2, 2.0);
-
             chain_states[chain_id].polygon_count = working_states[best_offspring_id].polygon_count;
             chain_states[chain_id].fitness_bits = fitness_bits;
-            chain_states[chain_id].mutation_scale = new_scale;
             chain_states[chain_id].stagnation_counter = 0u;
             shared_accept = 1u;
             shared_copy_count = working_states[best_offspring_id].polygon_count;
             shared_best_offspring_id = best_offspring_id;
-        } else {
-            // Adaptive mutation scale: gentle decay on rejection
-            // pow(0.99, 1/λ) — at 5% acceptance rate, geometric mean ≈ 1.0 (stable)
-            // Higher acceptance → scale grows toward cap; lower → shrinks toward floor
-            let decay = pow(0.99, 1.0 / f32(lambda));
-            let new_scale = max(chain_states[chain_id].mutation_scale * decay, 0.2);
-            chain_states[chain_id].mutation_scale = new_scale;
 
-            // Stagnation counter
-            let stagnation = chain_states[chain_id].stagnation_counter + 1u;
-            let stagnation_threshold = 10000u / lambda;
-            if stagnation > stagnation_threshold {
-                // Burst: reset scale to explore
-                chain_states[chain_id].mutation_scale = 1.5;
-                chain_states[chain_id].stagnation_counter = 0u;
-            } else {
-                chain_states[chain_id].stagnation_counter = stagnation;
+            // Adaptive mutation scale: only update when enabled
+            if params.adaptive_mutation == 1u {
+                let new_scale = min(chain_states[chain_id].mutation_scale * 1.2, 2.0);
+                chain_states[chain_id].mutation_scale = new_scale;
+            }
+        } else {
+            if params.adaptive_mutation == 1u {
+                // Gentle decay on rejection
+                // pow(0.99, 1/λ) — at 5% acceptance rate, geometric mean ≈ 1.0 (stable)
+                let decay = pow(0.99, 1.0 / f32(lambda));
+                let new_scale = max(chain_states[chain_id].mutation_scale * decay, 0.2);
+                chain_states[chain_id].mutation_scale = new_scale;
+
+                // Stagnation counter
+                let stagnation = chain_states[chain_id].stagnation_counter + 1u;
+                let stagnation_threshold = 10000u / lambda;
+                if stagnation > stagnation_threshold {
+                    chain_states[chain_id].mutation_scale = 1.5;
+                    chain_states[chain_id].stagnation_counter = 0u;
+                } else {
+                    chain_states[chain_id].stagnation_counter = stagnation;
+                }
             }
 
             shared_accept = 0u;
