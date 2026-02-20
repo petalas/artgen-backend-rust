@@ -117,7 +117,7 @@ All pipelines use `cache: None`, forcing full WGSL→SPIR-V→ISA recompilation 
 
 ---
 
-## Tier 4 — Ambitious / Future (high impact, high effort)
+## Tier 4 — Ambitious / Future (high impact, high effort) — REVISIT LATER
 
 ### 4.1 CPU-GPU co-evolution
 **Source:** CPU-GPU hybrid
