@@ -64,6 +64,22 @@ impl PassTimings {
     }
 }
 
+/// Tracks state for a previously submitted batch whose staging buffers
+/// have map_async issued but haven't been polled/read yet.
+struct PendingBatch {
+    staging_idx: usize,
+    migrate_ran: bool,
+    collect_timestamps: bool,
+    active_chain_count: u32,
+}
+
+/// Receivers for the map_async callbacks on staging buffers.
+struct PendingMapReceivers {
+    control_rx: std::sync::mpsc::Receiver<Result<(), BufferAsyncError>>,
+    timestamp_rx: Option<std::sync::mpsc::Receiver<Result<(), BufferAsyncError>>>,
+    fitness_rx: std::sync::mpsc::Receiver<Result<(), BufferAsyncError>>,
+}
+
 pub struct GpuEvolver {
     pipeline: GpuPipeline,
     iteration: u32,
@@ -73,6 +89,9 @@ pub struct GpuEvolver {
     pass_timings: PassTimings,
     chain_fitness: Vec<f32>,
     active_chain_count: u32, // runtime chain count (≤ pipeline.chain_count)
+    staging_idx: usize,      // alternates 0/1 for double-buffered staging
+    pending_batch: Option<PendingBatch>,
+    pending_map_receivers: Option<PendingMapReceivers>,
 }
 
 impl GpuEvolver {
@@ -135,19 +154,37 @@ impl GpuEvolver {
             pass_timings: PassTimings::default(),
             chain_fitness: vec![0.0; actual_max as usize],
             active_chain_count: active_chains,
+            staging_idx: 0,
+            pending_batch: None,
+            pending_map_receivers: None,
         }
     }
 
-    /// Run a batch of N iterations on the GPU.
-    /// Returns `Some(Drawing)` if a new global best was found, `None` otherwise.
-    /// When `collect_timestamps` is false, skips GPU timestamp resolve/readback for lower overhead.
+    /// Run a batch of N iterations on the GPU using double-buffered staging.
+    ///
+    /// Returns the PREVIOUS batch's result (one batch behind). The first call
+    /// always returns `None`. This overlap lets the GPU work on batch N+1
+    /// while the CPU reads back batch N's results.
+    ///
+    /// Returns `Some(Drawing)` if the previous batch found a new global best.
     pub fn run_batch(&mut self, mutation_params: &MutationParams, collect_timestamps: bool) -> Option<Drawing> {
+        // 1. If there's a pending batch from the last call, finish reading its results
+        let prev_result = if let Some(pending) = self.pending_batch.take() {
+            Some(self.finish_pending_readback(&pending))
+        } else {
+            None
+        };
+
         let p = &self.pipeline;
         let iterations = GPU_ITERATIONS_PER_BATCH;
         let active = mutation_params.chain_count.min(p.chain_count);
         self.active_chain_count = active;
 
-        // Update iteration number in params
+        // 2. Pick which staging set to use for THIS batch's copies
+        let write_idx = self.staging_idx;
+        self.staging_idx = 1 - self.staging_idx;
+
+        // 3. Update iteration number in params
         let mut params = gpu_params_from(mutation_params, p.image_width, p.image_height, GPU_MIGRATION_INTERVAL, active);
         params.iteration_number = self.iteration;
         p.queue.write_buffer(&p.params_buf, 0, bytemuck::bytes_of(&params));
@@ -166,7 +203,7 @@ impl GpuEvolver {
         // resets them via atomicExchange after each iteration. They're
         // zero-initialized once at buffer creation and in reinit_chains().
 
-        // Encode N iterations × 5 passes into one command buffer
+        // 4. Encode N iterations x 5 passes into one command buffer
         let mut encoder = p.device.create_command_encoder(&CommandEncoderDescriptor {
             label: Some("gpu_evolver_batch"),
         });
@@ -195,7 +232,7 @@ impl GpuEvolver {
                 pass.dispatch_workgroups(active, 1, 1);
             }
 
-            // Pass 2: Rasterize + Error (fused, W/16 × H/16 × K workgroups, tiled polygon prefetch)
+            // Pass 2: Rasterize + Error (fused, W/16 x H/16 x K workgroups, tiled polygon prefetch)
             {
                 let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
                     label: Some("rasterize_error"),
@@ -267,64 +304,66 @@ impl GpuEvolver {
             // so they're already reset. No extra work needed.
         }
 
-        // Resolve timestamp queries into resolve buffer, then copy to staging
+        // 5. Resolve timestamp queries into resolve buffer, then copy to staging[write_idx]
         if collect_timestamps {
             encoder.resolve_query_set(&p.timestamp_query_set, 0..8, &p.timestamp_resolve_buf, 0);
             encoder.copy_buffer_to_buffer(
                 &p.timestamp_resolve_buf,
                 0,
-                &p.timestamp_staging_buf,
+                &p.timestamp_staging_bufs[write_idx],
                 0,
                 8 * 8,
             );
         }
 
-        // Copy control flags to staging for readback
+        // Copy control flags to staging[write_idx] for readback
         encoder.copy_buffer_to_buffer(
             &p.control_flags_buf,
             0,
-            &p.control_staging_buf,
+            &p.control_staging_bufs[write_idx],
             0,
             std::mem::size_of::<ControlFlags>() as u64,
         );
 
-        // Copy fitness_packed to staging for readback (only active chains)
+        // Copy fitness_packed to staging[write_idx] for readback (only active chains)
         let fitness_size = (active as u64) * 4;
         encoder.copy_buffer_to_buffer(
             &p.fitness_packed_buf,
             0,
-            &p.fitness_staging_buf,
+            &p.fitness_staging_bufs[write_idx],
             0,
             fitness_size,
         );
 
-        // Submit
+        // 6. Submit — GPU starts working on this batch
         p.queue.submit(std::iter::once(encoder.finish()));
 
         self.iteration += iterations;
         self.total_evaluations += iterations as u64 * active as u64;
 
-        // Map staging buffers, poll once, read all results
-        let control = self.read_batch_results(migrate_ran, collect_timestamps);
+        // 7. Issue map_async on staging set [write_idx] — starts the async map
+        //    but don't poll yet (that happens at the start of the NEXT run_batch call)
+        self.start_async_map(write_idx, collect_timestamps, active);
 
-        if control.new_best_found != 0 {
-            self.best_fitness_bits = control.best_fitness_bits;
-            let drawing = self.readback_chain(control.best_chain_id);
-            Some(drawing)
-        } else {
-            None
-        }
+        // 8. Store pending batch info so next call can read results
+        self.pending_batch = Some(PendingBatch {
+            staging_idx: write_idx,
+            migrate_ran,
+            collect_timestamps,
+            active_chain_count: active,
+        });
+
+        // 9. Return the PREVIOUS batch's result (one batch behind)
+        prev_result.flatten()
     }
 
-    /// Map staging buffers, poll once for GPU completion, then read all results.
-    /// When `collect_timestamps` is false, skips the timestamp staging buffer entirely.
-    fn read_batch_results(&mut self, migrate_ran: bool, collect_timestamps: bool) -> ControlFlags {
+    /// Issue map_async on the staging buffers at the given index.
+    /// Stores the receiver channels so finish_pending_readback can poll them.
+    fn start_async_map(&mut self, idx: usize, collect_timestamps: bool, active: u32) {
         let p = &self.pipeline;
-        let active = self.active_chain_count as usize;
 
-        // Map staging buffers before polling
-        let control_slice = p.control_staging_buf.slice(..);
-        let fitness_slice = p.fitness_staging_buf.slice(..((active * 4) as u64));
+        let control_slice = p.control_staging_bufs[idx].slice(..);
+        let fitness_slice = p.fitness_staging_bufs[idx].slice(..((active as u64) * 4));
 
         let (tx1, rx1) = std::sync::mpsc::channel();
         let (tx3, rx3) = std::sync::mpsc::channel();
@@ -332,7 +371,7 @@ impl GpuEvolver {
         control_slice.map_async(MapMode::Read, move |r| { tx1.send(r).unwrap(); });
 
         let ts_rx = if collect_timestamps {
-            let timestamp_slice = p.timestamp_staging_buf.slice(..);
+            let timestamp_slice = p.timestamp_staging_bufs[idx].slice(..);
             let (tx2, rx2) = std::sync::mpsc::channel();
             timestamp_slice.map_async(MapMode::Read, move |r| { tx2.send(r).unwrap(); });
             Some(rx2)
@@ -342,23 +381,43 @@ impl GpuEvolver {
 
         fitness_slice.map_async(MapMode::Read, move |r| { tx3.send(r).unwrap(); });
 
-        // Single poll waits for GPU completion — all maps resolve together
+        self.pending_map_receivers = Some(PendingMapReceivers {
+            control_rx: rx1,
+            timestamp_rx: ts_rx,
+            fitness_rx: rx3,
+        });
+    }
+
+    /// Poll the device, wait for all pending GPU work to complete, then read
+    /// the mapped staging buffers from a previously submitted batch.
+    /// Returns `Some(Drawing)` if that batch found a new global best.
+    fn finish_pending_readback(&mut self, pending: &PendingBatch) -> Option<Drawing> {
+        let receivers = self.pending_map_receivers.take()
+            .expect("finish_pending_readback called without pending map receivers");
+
+        let p = &self.pipeline;
+        let idx = pending.staging_idx;
+        let active = pending.active_chain_count as usize;
+
+        // Single poll waits for ALL pending GPU work — both the previous batch's
+        // map_async and any newly submitted command buffer
         p.device.poll(Maintain::Wait);
 
-        rx1.recv().unwrap().expect("Failed to map control staging buffer");
-        if let Some(rx2) = &ts_rx {
-            rx2.recv().unwrap().expect("Failed to map timestamp staging buffer");
+        receivers.control_rx.recv().unwrap().expect("Failed to map control staging buffer");
+        if let Some(ref ts_rx) = receivers.timestamp_rx {
+            ts_rx.recv().unwrap().expect("Failed to map timestamp staging buffer");
         }
-        rx3.recv().unwrap().expect("Failed to map fitness staging buffer");
+        receivers.fitness_rx.recv().unwrap().expect("Failed to map fitness staging buffer");
 
         // Read control flags
+        let control_slice = p.control_staging_bufs[idx].slice(..);
         let control_data = control_slice.get_mapped_range();
         let flags: ControlFlags = *bytemuck::from_bytes(&control_data);
         drop(control_data);
 
         // Read timestamps (only if collected)
-        if ts_rx.is_some() {
-            let ts_data = p.timestamp_staging_buf.slice(..).get_mapped_range();
+        if pending.collect_timestamps {
+            let ts_data = p.timestamp_staging_bufs[idx].slice(..).get_mapped_range();
             let timestamps: &[u64] = bytemuck::cast_slice(&ts_data);
             let period = p.timestamp_period as f64;
             let duration = |begin_idx: usize, end_idx: usize| -> f64 {
@@ -368,15 +427,16 @@ impl GpuEvolver {
             self.pass_timings.rasterize_error_ns += duration(2, 3);
             self.pass_timings.select_ns += duration(4, 5);
             self.pass_timings.sample_count += 1;
-            if migrate_ran {
+            if pending.migrate_ran {
                 self.pass_timings.migrate_ns += duration(6, 7);
                 self.pass_timings.migrate_sample_count += 1;
             }
             drop(ts_data);
-            p.timestamp_staging_buf.unmap();
+            p.timestamp_staging_bufs[idx].unmap();
         }
 
         // Read chain fitness
+        let fitness_slice = p.fitness_staging_bufs[idx].slice(..((active as u64) * 4));
         let fitness_data = fitness_slice.get_mapped_range();
         let packed: &[u32] = bytemuck::cast_slice(&fitness_data);
         for (i, &bits) in packed.iter().enumerate() {
@@ -385,10 +445,27 @@ impl GpuEvolver {
         drop(fitness_data);
 
         // Unmap
-        p.control_staging_buf.unmap();
-        p.fitness_staging_buf.unmap();
+        p.control_staging_bufs[idx].unmap();
+        p.fitness_staging_bufs[idx].unmap();
 
-        flags
+        if flags.new_best_found != 0 {
+            self.best_fitness_bits = flags.best_fitness_bits;
+            let drawing = self.readback_chain(flags.best_chain_id);
+            Some(drawing)
+        } else {
+            None
+        }
+    }
+
+    /// Flush any pending batch results immediately. Call this before operations
+    /// that need the GPU state to be fully resolved (e.g., reinit_chains).
+    /// Returns `Some(Drawing)` if the pending batch found a new global best.
+    pub fn flush_pending(&mut self) -> Option<Drawing> {
+        if let Some(pending) = self.pending_batch.take() {
+            self.finish_pending_readback(&pending)
+        } else {
+            None
+        }
     }
 
     pub fn readback_chain(&self, chain_id: u32) -> Drawing {
@@ -486,7 +563,11 @@ impl GpuEvolver {
 
     /// Reinitialize all chains from a given drawing (for benchmarks).
     /// Resets iteration counters, timings, and fitness tracking.
+    /// Flushes any pending batch results first to ensure clean GPU state.
     pub fn reinit_chains(&mut self, drawing: &Drawing) {
+        // Flush any in-flight batch before reinitializing
+        self.flush_pending();
+
         let chain_count = self.pipeline.chain_count;
         let states: Vec<GpuDrawingState> = (0..chain_count)
             .map(|i| {
@@ -570,6 +651,7 @@ fn estimate_gpu_memory(chain_count: u32, w: u32, h: u32) -> usize {
     let error_accumulators = k * 4;
     let control = 16;
     let params = std::mem::size_of::<GpuParams>();
-    let staging = GPU_DRAWING_STATE_SIZE + 16;
+    // Double-buffered staging: 2x control (16B each) + 2x fitness (k*4 each) + 2x timestamp (64B each) + readback
+    let staging = GPU_DRAWING_STATE_SIZE + 2 * 16 + 2 * (k * 4) + 2 * 64;
     chain_states + working_states + reference + error_accumulators + control + params + staging
 }

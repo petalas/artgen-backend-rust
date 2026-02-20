@@ -18,9 +18,9 @@ pub struct GpuPipeline {
     pub control_flags_buf: Buffer,
     pub params_buf: Buffer,
     pub readback_staging_buf: Buffer,
-    pub control_staging_buf: Buffer,
+    pub control_staging_bufs: [Buffer; 2],
     pub fitness_packed_buf: Buffer,
-    pub fitness_staging_buf: Buffer,
+    pub fitness_staging_bufs: [Buffer; 2],
 
     // Compute pipelines
     pub mutate_pipeline: ComputePipeline,
@@ -38,7 +38,7 @@ pub struct GpuPipeline {
     // Timestamp profiling
     pub timestamp_query_set: QuerySet,
     pub timestamp_resolve_buf: Buffer,
-    pub timestamp_staging_buf: Buffer,
+    pub timestamp_staging_bufs: [Buffer; 2],
     pub timestamp_period: f32,
 
     // Config
@@ -218,12 +218,14 @@ impl GpuPipeline {
             mapped_at_creation: false,
         });
 
-        // Control staging (for polling new_best_found)
-        let control_staging_buf = device.create_buffer(&BufferDescriptor {
-            label: Some("control_staging"),
-            size: std::mem::size_of::<ControlFlags>() as u64,
-            usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
+        // Control staging (for polling new_best_found) — double-buffered
+        let control_staging_bufs = std::array::from_fn(|i| {
+            device.create_buffer(&BufferDescriptor {
+                label: Some(if i == 0 { "control_staging_0" } else { "control_staging_1" }),
+                size: std::mem::size_of::<ControlFlags>() as u64,
+                usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
         });
 
         // Fitness packed buffer (u32 per chain — for CPU readback of all chain fitness values)
@@ -235,11 +237,13 @@ impl GpuPipeline {
             mapped_at_creation: false,
         });
 
-        let fitness_staging_buf = device.create_buffer(&BufferDescriptor {
-            label: Some("fitness_staging"),
-            size: fitness_packed_size as u64,
-            usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
+        let fitness_staging_bufs = std::array::from_fn(|i| {
+            device.create_buffer(&BufferDescriptor {
+                label: Some(if i == 0 { "fitness_staging_0" } else { "fitness_staging_1" }),
+                size: fitness_packed_size as u64,
+                usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
         });
 
         // --- Timestamp query profiling ---
@@ -256,11 +260,13 @@ impl GpuPipeline {
             mapped_at_creation: false,
         });
 
-        let timestamp_staging_buf = device.create_buffer(&BufferDescriptor {
-            label: Some("timestamp_staging"),
-            size: 8 * 8,
-            usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
+        let timestamp_staging_bufs = std::array::from_fn(|i| {
+            device.create_buffer(&BufferDescriptor {
+                label: Some(if i == 0 { "timestamp_staging_0" } else { "timestamp_staging_1" }),
+                size: 8 * 8,
+                usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
         });
 
         let timestamp_period = queue.get_timestamp_period();
@@ -555,9 +561,9 @@ impl GpuPipeline {
             control_flags_buf,
             params_buf,
             readback_staging_buf,
-            control_staging_buf,
+            control_staging_bufs,
             fitness_packed_buf,
-            fitness_staging_buf,
+            fitness_staging_bufs,
             mutate_pipeline,
             rasterize_error_pipeline,
             select_pipeline,
@@ -565,7 +571,7 @@ impl GpuPipeline {
             migrate_inter_pipeline,
             timestamp_query_set,
             timestamp_resolve_buf,
-            timestamp_staging_buf,
+            timestamp_staging_bufs,
             timestamp_period,
             mutate_bind_group,
             rasterize_error_bind_group,
