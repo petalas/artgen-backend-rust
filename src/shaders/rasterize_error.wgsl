@@ -3,6 +3,11 @@
 // Each thread rasterizes all polygons at its pixel, computes L1 error against reference,
 // then workgroup-reduces the error and thread 0 atomicAdds to per-offspring accumulator.
 // Polygons are cooperatively loaded into shared memory in tiles of 768 (16 bytes each).
+//
+// Reduction uses subgroupAdd() to collapse each subgroup (warp) into a single value,
+// then subgroup leaders write to shared memory for a final small reduction by thread 0.
+
+enable subgroups;
 
 struct Polygon {
     data: vec4<u32>,   // [color_packed, v0_packed, v1_packed, v2_packed] — 16 bytes
@@ -77,7 +82,7 @@ struct Params {
 var<push_constant>                             params:             Params;
 
 var<workgroup> shared_polys: array<Polygon, 768>;   // 768 × 16 = 12,288 bytes
-var<workgroup> shared_errors: array<u32, 256>;      // 16×16 = 256 threads
+var<workgroup> shared_errors: array<u32, 256>;      // one slot per subgroup leader (max 256 if subgroup_size=1)
 
 // Half-space edge function: positive if point (px,py) is on the left side of edge (ax,ay)->(bx,by)
 fn edge_fn(ax: f32, ay: f32, bx: f32, by: f32, px: f32, py: f32) -> f32 {
@@ -88,6 +93,8 @@ fn edge_fn(ax: f32, ay: f32, bx: f32, by: f32, px: f32, py: f32) -> f32 {
 fn main(
     @builtin(global_invocation_id) gid: vec3<u32>,
     @builtin(local_invocation_index) local_idx: u32,
+    @builtin(subgroup_invocation_id) subgroup_lane: u32,
+    @builtin(subgroup_size) subgroup_sz: u32,
 ) {
     let px = gid.x;
     let py = gid.y;
@@ -191,22 +198,23 @@ fn main(
         }
     }
 
-    // Store in shared memory for workgroup reduction
-    shared_errors[local_idx] = pixel_error;
+    // Subgroup reduction: each subgroup sums its lanes via register shuffles (zero shared memory traffic)
+    let subgroup_sum = subgroupAdd(pixel_error);
+
+    // Subgroup leaders (lane 0 of each subgroup) write their partial sum to shared memory
+    let subgroup_id = local_idx / subgroup_sz;
+    if subgroup_lane == 0u {
+        shared_errors[subgroup_id] = subgroup_sum;
+    }
     workgroupBarrier();
 
-    // Binary reduction: 256 -> 128 -> 64 -> 32 -> 16 -> 8 -> 4 -> 2 -> 1
-    var stride = 128u;
-    while stride > 0u {
-        if local_idx < stride {
-            shared_errors[local_idx] += shared_errors[local_idx + stride];
-        }
-        workgroupBarrier();
-        stride >>= 1u;
-    }
-
-    // Thread 0 adds workgroup sum to chain's accumulator
+    // Thread 0 sums all subgroup partial results and does the final atomicAdd
     if local_idx == 0u {
-        atomicAdd(&error_accumulators[chain_id], shared_errors[0]);
+        let num_subgroups = (256u + subgroup_sz - 1u) / subgroup_sz;
+        var total = 0u;
+        for (var i = 0u; i < num_subgroups; i++) {
+            total += shared_errors[i];
+        }
+        atomicAdd(&error_accumulators[chain_id], total);
     }
 }

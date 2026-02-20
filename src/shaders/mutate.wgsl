@@ -1,5 +1,6 @@
-// Mutation compute shader — one thread per chain
-// Copies chain_states[i] → working_states[i], then applies probabilistic mutations.
+// Mutation compute shader — one workgroup per chain, one thread per offspring
+// Cooperatively loads parent into shared memory, then each thread copies to its
+// offspring slot and applies probabilistic mutations.
 // Single-pass: tries all mutations once, then forces a vertex micro-nudge if none fired.
 
 struct Polygon {
@@ -80,6 +81,15 @@ struct Params {
 @group(0) @binding(0) var<storage, read>       chain_states:   array<DrawingState>;
 @group(0) @binding(1) var<storage, read_write>  working_states: array<DrawingState>;
 var<push_constant>                              params:         Params;
+
+// Shared memory for cooperative parent loading.
+// All threads in a workgroup collaboratively load the parent chain's polygon data
+// here, then each thread copies from shared memory to its offspring slot.
+// This avoids lambda redundant global memory reads of the same ~16KB parent.
+var<workgroup> shared_parent_poly_count: u32;
+var<workgroup> shared_parent_fitness_bits: u32;
+var<workgroup> shared_parent_mutation_scale: f32;
+var<workgroup> shared_parent_polygons: array<Polygon, 1000>;
 
 // --- PCG32 RNG ---
 // PCG-XSH-RR: high-quality, fast, minimal state
@@ -194,15 +204,16 @@ fn tournament_select(rng: ptr<function, vec4<u32>>, chain_id: u32, chain_count: 
 }
 
 /// Spatial crossover writing to offspring slot.
-fn crossover_spatial_offspring(rng: ptr<function, vec4<u32>>, chain_id: u32, parent_b: u32, offspring_id: u32) {
+/// Parent A is read from shared memory (cooperatively loaded), parent B from global.
+fn crossover_spatial_offspring(rng: ptr<function, vec4<u32>>, parent_b: u32, offspring_id: u32) {
     let use_y_axis = rand_f32(rng) > 0.5;
     let split_pos = rand_f32(rng);
-    let count_a = min(chain_states[chain_id].polygon_count, params.max_polygons);
+    let count_a = min(shared_parent_poly_count, params.max_polygons);
     let count_b = min(chain_states[parent_b].polygon_count, params.max_polygons);
     var out_count = 0u;
     for (var i = 0u; i < count_a; i++) {
         if out_count >= params.max_polygons { break; }
-        let poly = chain_states[chain_id].polygons[i];
+        let poly = shared_parent_polygons[i];
         let c = centroid(poly);
         let coord = select(c.x, c.y, use_y_axis);
         if coord < split_pos {
@@ -222,13 +233,14 @@ fn crossover_spatial_offspring(rng: ptr<function, vec4<u32>>, chain_id: u32, par
     }
     working_states[offspring_id].polygon_count = max(out_count, 1u);
     if out_count == 0u {
-        working_states[offspring_id].polygons[0] = chain_states[chain_id].polygons[0];
+        working_states[offspring_id].polygons[0] = shared_parent_polygons[0];
     }
 }
 
 /// Uniform crossover writing to offspring slot.
-fn crossover_uniform_offspring(rng: ptr<function, vec4<u32>>, chain_id: u32, parent_b: u32, offspring_id: u32) {
-    let count_a = min(chain_states[chain_id].polygon_count, params.max_polygons);
+/// Parent A is read from shared memory (cooperatively loaded), parent B from global.
+fn crossover_uniform_offspring(rng: ptr<function, vec4<u32>>, parent_b: u32, offspring_id: u32) {
+    let count_a = min(shared_parent_poly_count, params.max_polygons);
     let count_b = min(chain_states[parent_b].polygon_count, params.max_polygons);
     let max_count = max(count_a, count_b);
     var out_count = 0u;
@@ -239,20 +251,20 @@ fn crossover_uniform_offspring(rng: ptr<function, vec4<u32>>, chain_id: u32, par
         let pick_a = rand_f32(rng) < 0.5;
         if have_a && have_b {
             if pick_a {
-                working_states[offspring_id].polygons[out_count] = chain_states[chain_id].polygons[i];
+                working_states[offspring_id].polygons[out_count] = shared_parent_polygons[i];
             } else {
                 working_states[offspring_id].polygons[out_count] = chain_states[parent_b].polygons[i];
             }
             out_count++;
         } else if have_a {
-            if pick_a { working_states[offspring_id].polygons[out_count] = chain_states[chain_id].polygons[i]; out_count++; }
+            if pick_a { working_states[offspring_id].polygons[out_count] = shared_parent_polygons[i]; out_count++; }
         } else if have_b {
             if !pick_a { working_states[offspring_id].polygons[out_count] = chain_states[parent_b].polygons[i]; out_count++; }
         }
     }
     working_states[offspring_id].polygon_count = max(out_count, 1u);
     if out_count == 0u {
-        working_states[offspring_id].polygons[0] = chain_states[chain_id].polygons[0];
+        working_states[offspring_id].polygons[0] = shared_parent_polygons[0];
     }
 }
 
@@ -459,8 +471,29 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
         return;
     }
 
+    // --- Cooperative parent load into shared memory ---
+    // All lambda threads collaborate to load the parent's polygon data once,
+    // instead of each thread independently reading ~16KB from global memory.
+    let poly_count = min(chain_states[chain_id].polygon_count, params.max_polygons);
+    let lambda = params.lambda;
+
+    // Thread 0 loads the scalar header fields
+    if offspring_local_idx == 0u {
+        shared_parent_poly_count = poly_count;
+        shared_parent_fitness_bits = chain_states[chain_id].fitness_bits;
+        shared_parent_mutation_scale = chain_states[chain_id].mutation_scale;
+    }
+
+    // All threads cooperatively load polygons in stripes
+    for (var i = offspring_local_idx; i < poly_count; i += lambda) {
+        shared_parent_polygons[i] = chain_states[chain_id].polygons[i];
+    }
+
+    workgroupBarrier();
+    // --- Parent data is now in shared memory ---
+
     // Compute offspring buffer index
-    let offspring_id = chain_id * params.lambda + offspring_local_idx;
+    let offspring_id = chain_id * lambda + offspring_local_idx;
 
     // Load per-offspring RNG from working_states (persistent across iterations)
     var rng = working_states[offspring_id].rng_state;
@@ -469,7 +502,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
     // Offspring 0 always uses scale 1.0 so (1+1) behavior is unchanged
     var mutation_scale = 1.0;
     if params.adaptive_mutation == 1u && offspring_local_idx > 0u {
-        mutation_scale = chain_states[chain_id].mutation_scale;
+        mutation_scale = shared_parent_mutation_scale;
     }
 
     // --- Crossover path ---
@@ -477,16 +510,16 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
     if params.crossover_prob > 0.0 && rand_f32(&rng) < params.crossover_prob && island_size >= 2u {
         let parent_b = tournament_select(&rng, chain_id, chain_count);
 
-        // Initialize working state header
-        working_states[offspring_id].fitness_bits = chain_states[chain_id].fitness_bits;
+        // Initialize working state header from shared memory
+        working_states[offspring_id].fitness_bits = shared_parent_fitness_bits;
         working_states[offspring_id].mutation_scale = mutation_scale;
         working_states[offspring_id].stagnation_counter = 0u;
 
-        // Crossover writes to working_states[offspring_id] instead of working_states[chain_id]
+        // Crossover reads parent A from shared memory, parent B from global
         if rand_f32(&rng) < params.spatial_crossover_weight {
-            crossover_spatial_offspring(&rng, chain_id, parent_b, offspring_id);
+            crossover_spatial_offspring(&rng, parent_b, offspring_id);
         } else {
-            crossover_uniform_offspring(&rng, chain_id, parent_b, offspring_id);
+            crossover_uniform_offspring(&rng, parent_b, offspring_id);
         }
 
         // Clamp alphas on crossover offspring
@@ -506,16 +539,15 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
 
     // --- Normal mutation path ---
 
-    // Copy parent to offspring slot
-    let poly_count = min(chain_states[chain_id].polygon_count, params.max_polygons);
+    // Copy parent to offspring slot from shared memory (not global)
     working_states[offspring_id].polygon_count = poly_count;
-    working_states[offspring_id].fitness_bits = chain_states[chain_id].fitness_bits;
+    working_states[offspring_id].fitness_bits = shared_parent_fitness_bits;
     working_states[offspring_id].mutation_scale = mutation_scale;
     working_states[offspring_id].stagnation_counter = 0u;
 
-    // Copy polygons as-is (all mutation paths already clamp alpha)
+    // Copy polygons from shared memory
     for (var i = 0u; i < poly_count; i++) {
-        working_states[offspring_id].polygons[i] = chain_states[chain_id].polygons[i];
+        working_states[offspring_id].polygons[i] = shared_parent_polygons[i];
     }
 
     // Apply mutation
