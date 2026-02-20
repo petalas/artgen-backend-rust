@@ -1,9 +1,63 @@
+use std::path::PathBuf;
+
 use wgpu::*;
 use wgpu::util::DeviceExt;
 
 use super::buffers::{
     ControlFlags, GpuDrawingState, GpuParams, GPU_DRAWING_STATE_SIZE,
 };
+
+/// Directory where pipeline cache files are stored.
+fn cache_dir() -> PathBuf {
+    // Use a `.cache` subdirectory next to the executable, falling back to current dir
+    let base = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    base.join(".cache")
+}
+
+/// Load pipeline cache data from disk for the given adapter, if available.
+fn load_pipeline_cache_data(adapter_info: &AdapterInfo) -> Option<Vec<u8>> {
+    let key = wgpu::util::pipeline_cache_key(adapter_info)?;
+    let path = cache_dir().join(&key);
+    match std::fs::read(&path) {
+        Ok(data) => {
+            println!("Loaded pipeline cache from {} ({} bytes)", path.display(), data.len());
+            Some(data)
+        }
+        Err(_) => None,
+    }
+}
+
+/// Save pipeline cache data to disk for the given adapter.
+fn save_pipeline_cache_data(adapter_info: &AdapterInfo, cache: &PipelineCache) {
+    let key = match wgpu::util::pipeline_cache_key(adapter_info) {
+        Some(k) => k,
+        None => return,
+    };
+    let dir = cache_dir();
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!("Failed to create pipeline cache directory {}: {}", dir.display(), e);
+        return;
+    }
+    if let Some(data) = cache.get_data() {
+        let path = dir.join(&key);
+        let temp_path = path.with_extension("tmp");
+        // Atomic write: write to temp file, then rename
+        match std::fs::write(&temp_path, &data) {
+            Ok(()) => {
+                if let Err(e) = std::fs::rename(&temp_path, &path) {
+                    eprintln!("Failed to rename pipeline cache file: {}", e);
+                    // Clean up temp file on rename failure
+                    let _ = std::fs::remove_file(&temp_path);
+                } else {
+                    println!("Saved pipeline cache to {} ({} bytes)", path.display(), data.len());
+                }
+            }
+            Err(e) => {
+                eprintln!("Failed to write pipeline cache: {}", e);
+            }
+        }
+    }
+}
 
 pub struct GpuPipeline {
     pub device: Device,
@@ -88,7 +142,8 @@ impl GpuPipeline {
             })
             .expect("Failed to find a suitable GPU adapter");
 
-        println!("Selected GPU adapter: {:?}", adapter.get_info().name);
+        let adapter_info = adapter.get_info();
+        println!("Selected GPU adapter: {:?}", adapter_info.name);
 
         // Cap chain_count to fit within the adapter's max storage buffer binding size.
         // Largest buffer is chain_states or working_states (chain_count × GPU_DRAWING_STATE_SIZE).
@@ -111,15 +166,45 @@ impl GpuPipeline {
             ..Limits::downlevel_defaults()
         };
 
+        // Request PIPELINE_CACHE feature if the adapter supports it (Vulkan only)
+        let adapter_features = adapter.features();
+        let pipeline_cache_supported = adapter_features.contains(Features::PIPELINE_CACHE);
+        let mut required_features = Features::TIMESTAMP_QUERY;
+        if pipeline_cache_supported {
+            required_features |= Features::PIPELINE_CACHE;
+            println!("Pipeline cache feature supported — enabling shader cache");
+        } else {
+            println!("Pipeline cache feature not supported — shaders will recompile each launch");
+        }
+
         let (device, queue) = adapter
             .request_device(&DeviceDescriptor {
                 label: Some("gpu_evolver_device"),
-                required_features: Features::TIMESTAMP_QUERY,
+                required_features,
                 required_limits,
                 memory_hints: MemoryHints::Performance,
             }, None)
             .await
             .expect("Failed to create GPU device");
+
+        // --- Pipeline cache ---
+        // Load cached shader binaries from disk to speed up pipeline creation.
+        // If the cache file doesn't exist, is corrupt, or the adapter doesn't support
+        // caching, we gracefully fall back to an empty cache (fallback: true).
+        let pipeline_cache = if pipeline_cache_supported {
+            let cache_data = load_pipeline_cache_data(&adapter_info);
+            // SAFETY: cache data (if Some) was previously returned from PipelineCache::get_data()
+            // and saved to disk. fallback=true ensures corrupt/incompatible data creates an empty cache.
+            Some(unsafe {
+                device.create_pipeline_cache(&PipelineCacheDescriptor {
+                    label: Some("artgen_pipeline_cache"),
+                    data: cache_data.as_deref(),
+                    fallback: true,
+                })
+            })
+        } else {
+            None
+        };
 
         // --- Buffer sizes ---
         let chain_states_size = (chain_count as usize) * GPU_DRAWING_STATE_SIZE;
@@ -452,7 +537,7 @@ impl GpuPipeline {
             module: &mutate_shader,
             entry_point: "main",
             compilation_options: Default::default(),
-            cache: None,
+            cache: pipeline_cache.as_ref(),
         });
 
         let rasterize_error_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
@@ -466,7 +551,7 @@ impl GpuPipeline {
             module: &rasterize_error_shader,
             entry_point: "main",
             compilation_options: Default::default(),
-            cache: None,
+            cache: pipeline_cache.as_ref(),
         });
 
         let select_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
@@ -480,7 +565,7 @@ impl GpuPipeline {
             module: &select_shader,
             entry_point: "select_main",
             compilation_options: Default::default(),
-            cache: None,
+            cache: pipeline_cache.as_ref(),
         });
 
         let migrate_intra_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
@@ -489,7 +574,7 @@ impl GpuPipeline {
             module: &select_shader,
             entry_point: "migrate_intra_main",
             compilation_options: Default::default(),
-            cache: None,
+            cache: pipeline_cache.as_ref(),
         });
 
         let migrate_inter_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
@@ -498,8 +583,13 @@ impl GpuPipeline {
             module: &select_shader,
             entry_point: "migrate_inter_main",
             compilation_options: Default::default(),
-            cache: None,
+            cache: pipeline_cache.as_ref(),
         });
+
+        // Save compiled pipeline cache to disk after all pipelines are created
+        if let Some(ref cache) = pipeline_cache {
+            save_pipeline_cache_data(&adapter_info, cache);
+        }
 
         // --- Bind groups ---
         let mutate_bind_group = device.create_bind_group(&BindGroupDescriptor {

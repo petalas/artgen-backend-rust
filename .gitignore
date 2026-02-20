@@ -3,3 +3,4 @@ output/
 projects/
 viewer/dist/
 *.best.json
+.cache/
