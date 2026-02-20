@@ -238,8 +238,7 @@ fn gpu_main_loop(
     let default_params = MutationParams::default();
     loop {
         // Run a batch of GPU iterations
-        let collect_ts = last_stats_timestamp.elapsed().as_secs() >= 2;
-        if let Some(new_best) = evolver.run_batch(&default_params, collect_ts) {
+        if let Some(new_best) = evolver.run_batch(&default_params, true) {
             if new_best.fitness > global_best.fitness {
                 global_best = new_best;
 
@@ -1409,8 +1408,7 @@ fn gpu_main_loop_headless(legacy_image: Option<&str>) {
 
             batches += 1;
             let mp = ws_state.0.lock().unwrap().mutation_params.clone();
-            let collect_ts = last_stats_timestamp.elapsed().as_secs() >= 2;
-            if let Some(new_best) = evolver.run_batch(&mp, collect_ts) {
+            if let Some(new_best) = evolver.run_batch(&mp, true) {
                 if new_best.fitness > global_best.fitness {
                     improvements += 1;
                     let delta = new_best.fitness - global_best.fitness;
