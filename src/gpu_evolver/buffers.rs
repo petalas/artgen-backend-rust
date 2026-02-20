@@ -5,7 +5,7 @@ use crate::models::drawing::Drawing;
 use crate::models::point::Point;
 use crate::models::polygon::Polygon;
 use crate::mutation_params::MutationParams;
-use crate::settings::{MAX_POLYGONS_PER_IMAGE, MIN_ALPHA, MAX_ALPHA};
+use crate::settings::MAX_POLYGONS_PER_IMAGE;
 
 /// GPU polygon: a single triangle with color.
 /// 48 bytes, matching WGSL struct alignment.
@@ -192,16 +192,12 @@ pub fn gpu_to_drawing(state: &GpuDrawingState) -> Drawing {
 
     for i in 0..count {
         let gp = &state.polygons[i];
+        // GPU is the source of truth for alpha range — no hardcoded clamping
         let color = Color {
             r: (gp.color[0] * 255.0).round().clamp(0.0, 255.0) as u8,
             g: (gp.color[1] * 255.0).round().clamp(0.0, 255.0) as u8,
             b: (gp.color[2] * 255.0).round().clamp(0.0, 255.0) as u8,
             a: (gp.color[3] * 255.0).round().clamp(0.0, 255.0) as u8,
-        };
-        // Clamp alpha to valid range
-        let color = Color {
-            a: color.a.clamp(MIN_ALPHA, MAX_ALPHA),
-            ..color
         };
         let points = vec![
             Point { x: gp.v0[0], y: gp.v0[1] },

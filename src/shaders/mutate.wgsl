@@ -155,9 +155,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Load RNG state into registers
     var rng = chain_states[chain_id].rng_state;
 
-    // Copy polygons
+    // Copy polygons, clamping alpha to current range
     for (var i = 0u; i < poly_count; i++) {
-        working_states[chain_id].polygons[i] = chain_states[chain_id].polygons[i];
+        var poly = chain_states[chain_id].polygons[i];
+        poly.color.w = clamp(poly.color.w, params.min_alpha_norm, params.max_alpha_norm);
+        working_states[chain_id].polygons[i] = poly;
     }
 
     // Mutate until dirty

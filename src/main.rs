@@ -689,7 +689,8 @@ fn handle_ws_command(
             None
         }
         Some("update_params") => {
-            if let Ok(params) = serde_json::from_value::<MutationParams>(cmd["params"].clone()) {
+            if let Ok(mut params) = serde_json::from_value::<MutationParams>(cmd["params"].clone()) {
+                params.sanitize();
                 let mut s = lock.lock().unwrap();
                 s.mutation_params = params;
                 println!("[WS] Mutation params updated by {:?}", peer);

@@ -34,6 +34,38 @@ pub struct MutationParams {
     pub max_polygons: u32,
 }
 
+impl MutationParams {
+    /// Enforce constraints: min <= max, values within valid bounds.
+    pub fn sanitize(&mut self) {
+        // Alpha: min <= max, both within 0..=255 (guaranteed by u8)
+        if self.min_alpha > self.max_alpha {
+            self.min_alpha = self.max_alpha;
+        }
+
+        // Polygons: min <= max, max capped at buffer limit (1000)
+        self.max_polygons = self.max_polygons.min(settings::MAX_POLYGONS_PER_IMAGE as u32);
+        self.min_polygons = self.min_polygons.max(1).min(self.max_polygons);
+
+        // Probabilities: clamp to [0, 1]
+        self.add_polygon_prob = self.add_polygon_prob.clamp(0.0, 1.0);
+        self.remove_polygon_prob = self.remove_polygon_prob.clamp(0.0, 1.0);
+        self.reorder_polygon_prob = self.reorder_polygon_prob.clamp(0.0, 1.0);
+        self.offset_polygon_prob = self.offset_polygon_prob.clamp(0.0, 1.0);
+        self.move_point_prob = self.move_point_prob.clamp(0.0, 1.0);
+        self.remove_point_prob = self.remove_point_prob.clamp(0.0, 1.0);
+        self.micro_adjust_prob = self.micro_adjust_prob.clamp(0.0, 1.0);
+        self.change_color_prob = self.change_color_prob.clamp(0.0, 1.0);
+        self.lighten_color_prob = self.lighten_color_prob.clamp(0.0, 1.0);
+        self.darken_color_prob = self.darken_color_prob.clamp(0.0, 1.0);
+
+        // Deltas: non-negative
+        self.move_point_max_delta = self.move_point_max_delta.max(0.0);
+        self.micro_adjust_delta = self.micro_adjust_delta.max(0.0);
+        self.new_point_max_distance = self.new_point_max_distance.max(0.0);
+        self.offset_polygon_magnitude = self.offset_polygon_magnitude.max(0.0);
+    }
+}
+
 impl Default for MutationParams {
     fn default() -> Self {
         Self {
