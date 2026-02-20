@@ -371,6 +371,8 @@ struct WsState {
     switch_request: Option<String>,
     reset_active: bool,   // skip saving on switch when true (reset deletes best.json)
     pending_delete: Option<String>, // project dir to delete after inner loop breaks
+    // Resolution control (0 = use native clamped resolution)
+    target_resolution: u32,
     // Mutation parameters (runtime-configurable)
     mutation_params: MutationParams,
     // GPU stats
@@ -477,6 +479,7 @@ fn ws_handle_client(stream: std::net::TcpStream, state: SharedWsState) {
             "activeProject": s.active_project,
             "mutationParams": s.mutation_params,
             "gpuStats": gpu_stats_json,
+            "targetResolution": s.target_resolution,
         });
         if ws
             .send(tungstenite::Message::Text(msg.to_string().into()))
@@ -604,6 +607,7 @@ fn ws_handle_client(stream: std::net::TcpStream, state: SharedWsState) {
                     "imageWidth": s.image_width,
                     "imageHeight": s.image_height,
                     "mutationParams": s.mutation_params,
+                    "targetResolution": s.target_resolution,
                 });
                 msg.to_string()
             } else if s.generation == last_gen {
@@ -843,6 +847,25 @@ fn handle_ws_command(
             s.generation += 1;
             cvar.notify_all();
             println!("[WS] Benchmarks cleared by {:?}", peer);
+            None
+        }
+        Some("update_resolution") => {
+            let resolution = cmd["resolution"].as_u64().unwrap_or(0) as u32;
+            if resolution != 0 && !(64..=1024).contains(&resolution) {
+                return Some(serde_json::json!({
+                    "type": "project_error",
+                    "error": "Resolution must be between 64 and 1024",
+                }));
+            }
+            let mut s = lock.lock().unwrap();
+            s.target_resolution = resolution;
+            // Trigger self-switch to reload at new resolution
+            if let Some(name) = s.active_project.clone() {
+                s.switch_request = Some(name);
+            }
+            s.generation += 1;
+            cvar.notify_all();
+            println!("[WS] Resolution set to {} by {:?}", resolution, peer);
             None
         }
         Some("import_drawing") => {
@@ -1154,6 +1177,7 @@ fn gpu_main_loop_headless(legacy_image: Option<&str>) {
             switch_request: migrated_project,
             reset_active: false,
             pending_delete: None,
+            target_resolution: 256,
             mutation_params: MutationParams::default(),
             gpu_stats: None,
             benchmark_request: None,
@@ -1209,14 +1233,16 @@ fn gpu_main_loop_headless(legacy_image: Option<&str>) {
             thread::sleep(Duration::from_millis(100));
         };
 
-        // Load project reference image
+        // Load project reference image — prefer original (full quality) for resolution changes
+        let original_path = projects::project_original_path(&project_name);
         let ref_path = projects::project_reference_path(&project_name);
-        if !ref_path.exists() {
+        let image_path = if original_path.exists() { &original_path } else { &ref_path };
+        if !image_path.exists() {
             eprintln!("[Projects] Reference image not found for '{}', skipping", project_name);
             continue;
         }
 
-        let ref_image_bytes = match std::fs::read(&ref_path) {
+        let ref_image_bytes = match std::fs::read(image_path) {
             Ok(b) => b,
             Err(e) => {
                 eprintln!("[Projects] Failed to read reference for '{}': {}", project_name, e);
@@ -1224,7 +1250,9 @@ fn gpu_main_loop_headless(legacy_image: Option<&str>) {
             }
         };
 
-        let (rgba, w, h) = match projects::load_and_normalize_image(&ref_image_bytes) {
+        let target_res = ws_state.0.lock().unwrap().target_resolution;
+        let max_dim = if target_res > 0 { Some(target_res) } else { None };
+        let (rgba, w, h) = match projects::load_and_normalize_image(&ref_image_bytes, max_dim) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("[Projects] Failed to normalize image for '{}': {}", project_name, e);

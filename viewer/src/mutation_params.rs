@@ -65,10 +65,10 @@ impl Default for MutationParams {
             crossover_prob: 0.1,
             spatial_crossover_weight: 0.7,
             tournament_size: 3,
-            island_count: 8,
+            island_count: 1,
             inter_island_interval: 500,
-            chain_count: 128,
-            single_mutation_mode: false,
+            chain_count: 16,
+            single_mutation_mode: true,
         }
     }
 }

@@ -2,7 +2,9 @@ use leptos::prelude::*;
 
 use crate::benchmark::{BenchmarkRequest, BenchmarkResult, BenchmarkSnapshot};
 use crate::components::benchmark_chart::{color_for_index, BenchmarkChart};
-use crate::ws::{send_ws_json, ViewerState};
+use wasm_bindgen::JsCast;
+
+use crate::ws::{send_ws_json, send_ws_loading, ViewerState};
 
 #[component]
 pub fn BenchmarkPage(state: RwSignal<ViewerState>) -> impl IntoView {
@@ -326,6 +328,39 @@ fn ConfigureSection(state: RwSignal<ViewerState>) -> impl IntoView {
                         />
                         "Single mutation per iteration"
                     </label>
+                </div>
+                <div class="bench-config-row">
+                    <label class="bench-config-label">"Resolution"</label>
+                    <select
+                        class="resolution-select"
+                        prop:value={move || state.get().target_resolution.to_string()}
+                        on:change={move |ev: web_sys::Event| {
+                            let target = ev.target().unwrap();
+                            let select: web_sys::HtmlSelectElement = target.dyn_into().unwrap();
+                            let val: u32 = select.value().parse().unwrap_or(0);
+                            send_ws_loading(state, &serde_json::json!({
+                                "type": "update_resolution",
+                                "resolution": val,
+                            }));
+                        }}
+                        disabled={move || state.get().engine_loading}
+                    >
+                        {[0u32, 64, 128, 256, 384, 512, 768, 1024].into_iter().map(|r| {
+                            let label = if r == 0 { "Auto (256-512)".to_string() } else { format!("{}px", r) };
+                            let val = r.to_string();
+                            view! {
+                                <option value={val.clone()} selected={move || state.get().target_resolution == r}>{label}</option>
+                            }
+                        }).collect::<Vec<_>>()}
+                    </select>
+                    <span class="mutation-value">{move || {
+                        let s = state.get();
+                        if s.image_width > 0 && s.image_height > 0 {
+                            format!("{}x{}", s.image_width, s.image_height)
+                        } else {
+                            String::new()
+                        }
+                    }}</span>
                 </div>
             </div>
             <div class="bench-config-actions">

@@ -9,9 +9,9 @@ pub fn Header(
 ) -> impl IntoView {
     let status_class = move || {
         let s = state.get();
-        if s.connected {
+        if s.connected && s.init_received && !s.engine_loading {
             "status-dot connected"
-        } else if s.connecting {
+        } else if s.connecting || (s.connected && (!s.init_received || s.engine_loading)) {
             "status-dot connecting"
         } else {
             "status-dot disconnected"
@@ -20,12 +20,16 @@ pub fn Header(
 
     let status_text = move || {
         let s = state.get();
-        if s.connected {
-            "Connected"
+        if !s.connected && !s.connecting {
+            "Disconnected"
         } else if s.connecting {
             "Connecting..."
+        } else if !s.init_received {
+            "Initializing..."
+        } else if s.engine_loading {
+            "Loading..."
         } else {
-            "Disconnected"
+            "Connected"
         }
     };
 

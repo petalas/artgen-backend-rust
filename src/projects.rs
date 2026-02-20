@@ -29,6 +29,10 @@ pub fn project_reference_path(name: &str) -> PathBuf {
     project_dir(name).join("reference.png")
 }
 
+pub fn project_original_path(name: &str) -> PathBuf {
+    project_dir(name).join("reference.original")
+}
+
 pub fn project_best_json_path(name: &str) -> PathBuf {
     project_dir(name).join("best.json")
 }
@@ -110,13 +114,29 @@ fn read_best_summary(path: &Path) -> (Option<f32>, Option<usize>) {
 }
 
 /// Decode raw image bytes, resize to engine bounds, return RGBA pixels + dimensions.
-pub fn load_and_normalize_image(raw_bytes: &[u8]) -> Result<(Vec<u8>, usize, usize), String> {
+///
+/// If `max_dimension` is Some(n), resize so the longest side = n (maintaining aspect ratio).
+/// Otherwise fall back to clamping between MIN/MAX image settings.
+pub fn load_and_normalize_image(raw_bytes: &[u8], max_dimension: Option<u32>) -> Result<(Vec<u8>, usize, usize), String> {
     let img = image::load_from_memory(raw_bytes).map_err(|e| format!("Failed to decode image: {}", e))?;
 
     let mut w = img.width() as usize;
     let mut h = img.height() as usize;
 
-    let resized = if w < MIN_IMAGE_WIDTH || h < MIN_IMAGE_HEIGHT || w > MAX_IMAGE_WIDTH || h > MAX_IMAGE_HEIGHT {
+    let resized = if let Some(max_dim) = max_dimension {
+        let max_dim = max_dim.clamp(64, 1024) as usize;
+        let longest = w.max(h);
+        if longest != max_dim {
+            let target_w = (w * max_dim / longest) as u32;
+            let target_h = (h * max_dim / longest) as u32;
+            let r = img.resize(target_w, target_h, Lanczos3);
+            w = r.width() as usize;
+            h = r.height() as usize;
+            r
+        } else {
+            img
+        }
+    } else if w < MIN_IMAGE_WIDTH || h < MIN_IMAGE_HEIGHT || w > MAX_IMAGE_WIDTH || h > MAX_IMAGE_HEIGHT {
         let target_w = w.clamp(MIN_IMAGE_WIDTH, MAX_IMAGE_WIDTH) as u32;
         let target_h = h.clamp(MIN_IMAGE_HEIGHT, MAX_IMAGE_HEIGHT) as u32;
         let r = img.resize(target_w, target_h, Lanczos3);
@@ -140,7 +160,7 @@ pub fn create_project(name: &str, image_bytes: &[u8]) -> Result<ProjectInfo, Str
     }
 
     // Decode and normalize before creating any dirs, so we fail early on bad images
-    let (rgba, w, h) = load_and_normalize_image(image_bytes)?;
+    let (rgba, w, h) = load_and_normalize_image(image_bytes, None)?;
 
     std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create project directory: {}", e))?;
 

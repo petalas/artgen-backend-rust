@@ -2,7 +2,7 @@ use leptos::prelude::*;
 use wasm_bindgen::prelude::*;
 use web_sys::HtmlInputElement;
 
-use crate::ws::{send_ws_json, ViewerState};
+use crate::ws::{send_ws_json, send_ws_loading, ViewerState};
 
 #[component]
 pub fn ProjectsPage(
@@ -15,9 +15,10 @@ pub fn ProjectsPage(
     let projects = move || state.get().projects;
     let active_project = move || state.get().active_project;
     let project_error = move || state.get().project_error;
+    let is_loading = move || state.get().engine_loading;
 
     let on_switch = move |name: String| {
-        send_ws_json(&serde_json::json!({
+        send_ws_loading(state, &serde_json::json!({
             "type": "switch_project",
             "name": name,
         }));
@@ -25,14 +26,14 @@ pub fn ProjectsPage(
     };
 
     let on_delete = move |name: String| {
-        send_ws_json(&serde_json::json!({
+        send_ws_loading(state, &serde_json::json!({
             "type": "delete_project",
             "name": name,
         }));
     };
 
     let on_reset = move |name: String| {
-        send_ws_json(&serde_json::json!({
+        send_ws_loading(state, &serde_json::json!({
             "type": "reset_project",
             "name": name,
         }));
@@ -97,7 +98,7 @@ pub fn ProjectsPage(
 
             let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
 
-            send_ws_json(&serde_json::json!({
+            send_ws_loading(state, &serde_json::json!({
                 "type": "create_project",
                 "name": name,
                 "referenceImage": b64,
@@ -270,6 +271,7 @@ pub fn ProjectsPage(
                                             <button
                                                 class="btn-icon"
                                                 title="Rename project"
+                                                disabled={move || is_loading()}
                                                 on:click={move |_| on_rename_start(name_rename.clone())}
                                             >
                                                 "\u{270E}"
@@ -277,6 +279,7 @@ pub fn ProjectsPage(
                                             <button
                                                 class="btn-icon"
                                                 title="Reset progress"
+                                                disabled={move || is_loading()}
                                                 on:click={move |_| on_reset(name_reset.clone())}
                                             >
                                                 "\u{21BB}"
@@ -284,7 +287,7 @@ pub fn ProjectsPage(
                                             <button
                                                 class="btn-icon btn-icon-danger"
                                                 title="Delete project"
-                                                disabled={is_active}
+                                                disabled={move || is_active || is_loading()}
                                                 on:click={move |_| on_delete(name_delete.clone())}
                                             >
                                                 "\u{2715}"

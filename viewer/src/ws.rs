@@ -63,6 +63,11 @@ pub struct ViewerState {
     pub drawing_json: Option<String>,
     pub image_width: u32,
     pub image_height: u32,
+    // Engine state tracking
+    pub engine_loading: bool,
+    pub init_received: bool,
+    // Resolution control
+    pub target_resolution: u32,
     // Project management
     pub projects: Vec<ProjectInfo>,
     pub active_project: Option<String>,
@@ -96,6 +101,9 @@ impl Default for ViewerState {
             drawing_json: None,
             image_width: 0,
             image_height: 0,
+            engine_loading: false,
+            init_received: false,
+            target_resolution: 256,
             projects: vec![],
             active_project: None,
             project_error: None,
@@ -129,6 +137,12 @@ pub fn send_ws_json(value: &serde_json::Value) {
             ws.send_with_str(&value.to_string()).ok();
         }
     });
+}
+
+/// Send a WS command and set engine_loading = true on the viewer state.
+pub fn send_ws_loading(state: RwSignal<ViewerState>, value: &serde_json::Value) {
+    state.update(|s| s.engine_loading = true);
+    send_ws_json(value);
 }
 
 pub fn connect_ws(state: RwSignal<ViewerState>) {
@@ -178,6 +192,8 @@ pub fn connect_ws(state: RwSignal<ViewerState>) {
         state_close.update(|s| {
             s.connected = false;
             s.connecting = false;
+            s.init_received = false;
+            s.engine_loading = false;
         });
         WS_HANDLE.with(|h| h.borrow_mut().take());
         schedule_reconnect(state_close);
@@ -310,6 +326,8 @@ fn handle_message(data: &serde_json::Value, state: RwSignal<ViewerState>) {
 
         match msg_type {
             "init" => {
+                s.init_received = true;
+                s.engine_loading = false;
                 if let Some(ref_img) = data["referenceImage"].as_str() {
                     s.reference_image_b64 = ref_img.to_string();
                 }
@@ -329,6 +347,9 @@ fn handle_message(data: &serde_json::Value, state: RwSignal<ViewerState>) {
                 }
                 if let Some(gs) = parse_gpu_stats(data) {
                     s.gpu_stats = Some(gs);
+                }
+                if let Some(res) = data["targetResolution"].as_u64() {
+                    s.target_resolution = res as u32;
                 }
             }
             "update" => {
@@ -357,6 +378,8 @@ fn handle_message(data: &serde_json::Value, state: RwSignal<ViewerState>) {
                 }
             }
             "project_switched" => {
+                s.init_received = true;
+                s.engine_loading = false;
                 // Treat like init — update images and active project
                 if let Some(ref_img) = data["referenceImage"].as_str() {
                     s.reference_image_b64 = ref_img.to_string();
@@ -373,8 +396,12 @@ fn handle_message(data: &serde_json::Value, state: RwSignal<ViewerState>) {
                 if let Ok(mp) = serde_json::from_value::<MutationParams>(data["mutationParams"].clone()) {
                     s.mutation_params = mp;
                 }
+                if let Some(res) = data["targetResolution"].as_u64() {
+                    s.target_resolution = res as u32;
+                }
             }
             "project_error" => {
+                s.engine_loading = false;
                 if let Some(err) = data["error"].as_str() {
                     s.project_error = Some(err.to_string());
                 }

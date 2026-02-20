@@ -2,7 +2,7 @@ use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
 use crate::mutation_params::MutationParams;
-use crate::ws::{send_ws_json, ViewerState};
+use crate::ws::{send_ws_json, send_ws_loading, ViewerState};
 
 /// Format a probability as "1 in N" string.
 fn format_prob(p: f32) -> String {
@@ -72,13 +72,50 @@ pub fn MutationPanel(state: RwSignal<ViewerState>) -> impl IntoView {
 
 #[component]
 fn MutationPanelBody(state: RwSignal<ViewerState>) -> impl IntoView {
+    let controls_disabled = move || {
+        let s = state.get();
+        !s.connected || s.engine_loading || !s.init_received
+    };
+
     let on_reset = move |_| {
         send_ws_json(&serde_json::json!({ "type": "reset_params" }));
         state.update(|s| s.mutation_params = MutationParams::default());
     };
 
+    let on_resolution_change = move |ev: web_sys::Event| {
+        let target = ev.target().unwrap();
+        let select: web_sys::HtmlSelectElement = target.dyn_into().unwrap();
+        let val: u32 = select.value().parse().unwrap_or(0);
+        send_ws_loading(state, &serde_json::json!({
+            "type": "update_resolution",
+            "resolution": val,
+        }));
+    };
+
+    let resolution_presets: Vec<u32> = vec![0, 64, 128, 256, 384, 512, 768, 1024];
+
     view! {
         <div class="mutation-panel-body">
+            <div class="mutation-section">
+                <div class="mutation-section-title">"Resolution"</div>
+                <div class="mutation-row">
+                    <label class="mutation-label">"Internal resolution"</label>
+                    <select
+                        class="resolution-select"
+                        disabled={controls_disabled}
+                        on:change={on_resolution_change}
+                        prop:value={move || state.get().target_resolution.to_string()}
+                    >
+                        {resolution_presets.into_iter().map(|r| {
+                            let label = if r == 0 { "Auto (256-512)".to_string() } else { format!("{}px", r) };
+                            let val = r.to_string();
+                            view! {
+                                <option value={val.clone()} selected={move || state.get().target_resolution == r}>{label}</option>
+                            }
+                        }).collect::<Vec<_>>()}
+                    </select>
+                </div>
+            </div>
             <div class="mutation-section">
                 <div class="mutation-section-title">"Mode"</div>
                 <div class="mutation-row">
@@ -142,7 +179,7 @@ fn MutationPanelBody(state: RwSignal<ViewerState>) -> impl IntoView {
                 <IntSlider state={state} label="Max alpha" get={|mp| mp.max_alpha as i64} set={|mp, v| { mp.max_alpha = v as u8; if mp.min_alpha > mp.max_alpha { mp.min_alpha = mp.max_alpha; } }} min=0 max=255 step=1/>
             </div>
             <div class="mutation-section mutation-section-actions">
-                <button class="btn btn-secondary" on:click={on_reset}>"Reset to Defaults"</button>
+                <button class="btn btn-secondary" disabled={controls_disabled} on:click={on_reset}>"Reset to Defaults"</button>
             </div>
         </div>
     }

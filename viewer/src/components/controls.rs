@@ -2,7 +2,7 @@ use leptos::prelude::*;
 use wasm_bindgen::prelude::*;
 
 use crate::models::Drawing;
-use crate::ws::{send_ws_command, send_ws_json, ViewerState};
+use crate::ws::{send_ws_command, send_ws_loading, ViewerState};
 
 fn download_blob(content: &str, filename: &str, mime_type: &str) {
     let window = web_sys::window().expect("no window");
@@ -73,44 +73,50 @@ pub fn Controls(state: RwSignal<ViewerState>) -> impl IntoView {
     let on_reset = move |_| {
         let s = state.get();
         if let Some(name) = &s.active_project {
-            send_ws_json(&serde_json::json!({
+            send_ws_loading(state, &serde_json::json!({
                 "type": "reset_project",
                 "name": name,
             }));
         }
     };
 
-    let has_drawing = move || state.get().drawing_json.is_some();
-    let is_connected = move || state.get().connected;
-    let has_active_project = move || state.get().active_project.is_some();
+    let is_unavailable = move || {
+        let s = state.get();
+        !s.connected || s.engine_loading || !s.init_received || s.active_project.is_none()
+    };
+
+    let export_disabled = move || {
+        let s = state.get();
+        s.drawing_json.is_none() || s.engine_loading
+    };
 
     view! {
         <div class="controls-section">
             <button
                 class={pause_class}
                 on:click={on_pause}
-                disabled={move || !is_connected()}
+                disabled={is_unavailable}
             >
                 {pause_label}
             </button>
             <button
                 class="btn btn-danger"
                 on:click={on_reset}
-                disabled={move || !is_connected() || !has_active_project()}
+                disabled={is_unavailable}
             >
                 "RESET"
             </button>
             <button
                 class="btn btn-primary"
                 on:click={on_export_json}
-                disabled={move || !has_drawing()}
+                disabled={export_disabled}
             >
                 "EXPORT JSON"
             </button>
             <button
                 class="btn btn-primary"
                 on:click={on_export_svg}
-                disabled={move || !has_drawing()}
+                disabled={export_disabled}
             >
                 "EXPORT SVG"
             </button>

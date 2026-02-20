@@ -96,39 +96,51 @@ pub fn ImageRow(state: RwSignal<ViewerState>) -> impl IntoView {
         }
     };
 
+    let show_overlay = move || {
+        let s = state.get();
+        (s.connected && !s.init_received) || s.engine_loading
+    };
+
     view! {
-        <div class="image-row">
-            <div class="image-container">
-                <div class="card-header">
-                    <span class="card-title">"Original"</span>
-                    <span class="card-subtitle">{dimensions_text}</span>
+        <div class="image-row-wrapper">
+            <div class="image-row">
+                <div class="image-container">
+                    <div class="card-header">
+                        <span class="card-title">"Original"</span>
+                        <span class="card-subtitle">{dimensions_text}</span>
+                    </div>
+                    <img class="panel-image" src={ref_src} alt="Reference image"/>
                 </div>
-                <img class="panel-image" src={ref_src} alt="Reference image"/>
-            </div>
 
-            <div class="image-container">
-                <div class="card-header">
-                    <span class="card-title">"Generated"</span>
-                    <span class="card-subtitle">{move || {
-                        let s = state.get();
-                        format!("{} polygons \u{00B7} {}", s.polygons, render_size_text())
-                    }}</span>
+                <div class="image-container">
+                    <div class="card-header">
+                        <span class="card-title">"Generated"</span>
+                        <span class="card-subtitle">{move || {
+                            let s = state.get();
+                            format!("{} polygons \u{00B7} {}", s.polygons, render_size_text())
+                        }}</span>
+                    </div>
+                    <canvas class="panel-canvas" node_ref={gen_canvas_ref}></canvas>
                 </div>
-                <canvas class="panel-canvas" node_ref={gen_canvas_ref}></canvas>
-            </div>
 
-            <div class="image-container">
-                <div class="card-header">
-                    <span class="card-title">"Error Heatmap"</span>
-                    <span class="card-subtitle">{move || format!("Error: {}", error_label())}</span>
-                </div>
-                <canvas class="panel-canvas" node_ref={heatmap_canvas_ref}></canvas>
-                <div class="heatmap-gradient">
-                    <span>"0%"</span>
-                    <div class="gradient-bar"></div>
-                    <span>"100%"</span>
+                <div class="image-container">
+                    <div class="card-header">
+                        <span class="card-title">"Error Heatmap"</span>
+                        <span class="card-subtitle">{move || format!("Error: {}", error_label())}</span>
+                    </div>
+                    <canvas class="panel-canvas" node_ref={heatmap_canvas_ref}></canvas>
+                    <div class="heatmap-gradient">
+                        <span>"0%"</span>
+                        <div class="gradient-bar"></div>
+                        <span>"100%"</span>
+                    </div>
                 </div>
             </div>
+            {move || show_overlay().then(|| view! {
+                <div class="loading-overlay">
+                    <div class="spinner"></div>
+                </div>
+            })}
         </div>
     }
 }
