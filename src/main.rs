@@ -309,6 +309,7 @@ struct GpuStatsWs {
     island_stats: Vec<IslandStats>,
     island_count: u32,
     island_drawings: Vec<Drawing>,
+    rasterize_wg: [u32; 2],
 }
 
 impl GpuStatsWs {
@@ -345,6 +346,7 @@ impl GpuStatsWs {
             "islandStats": islands,
             "islandCount": self.island_count,
             "islandDrawings": island_drawings,
+            "rasterizeWg": self.rasterize_wg,
         })
     }
 }
@@ -968,6 +970,7 @@ fn build_gpu_stats(evolver: &GpuEvolver, island_count: u32) -> GpuStatsWs {
         island_stats,
         island_count: effective_islands,
         island_drawings,
+        rasterize_wg: evolver.rasterize_wg(),
     }
 }
 

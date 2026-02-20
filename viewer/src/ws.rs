@@ -36,6 +36,7 @@ pub struct GpuStats {
     pub island_stats: Vec<IslandStats>,
     pub island_count: u32,
     pub island_drawings: Vec<crate::models::Drawing>,
+    pub rasterize_wg: [u32; 2],
 }
 
 #[allow(dead_code)]
@@ -281,6 +282,19 @@ fn parse_gpu_stats(data: &serde_json::Value) -> Option<GpuStats> {
                 .collect()
         })
         .unwrap_or_default();
+    let rasterize_wg = gs["rasterizeWg"]
+        .as_array()
+        .and_then(|arr| {
+            if arr.len() == 2 {
+                Some([
+                    arr[0].as_u64().unwrap_or(16) as u32,
+                    arr[1].as_u64().unwrap_or(16) as u32,
+                ])
+            } else {
+                None
+            }
+        })
+        .unwrap_or([16, 16]);
     Some(GpuStats {
         chain_count: gs["chainCount"].as_u64().unwrap_or(0) as u32,
         memory_mb: gs["memoryMb"].as_f64().unwrap_or(0.0) as f32,
@@ -289,6 +303,7 @@ fn parse_gpu_stats(data: &serde_json::Value) -> Option<GpuStats> {
         island_stats,
         island_count,
         island_drawings,
+        rasterize_wg,
     })
 }
 

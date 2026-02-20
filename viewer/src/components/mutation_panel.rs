@@ -188,6 +188,30 @@ fn MutationPanelBody(state: RwSignal<ViewerState>) -> impl IntoView {
                 <IntSlider state={state} label="Inter-island interval" get={|mp| mp.inter_island_interval as i64} set={|mp, v| { mp.inter_island_interval = v as u32; }} min=0 max=10000 step=50/>
                 <Pow2Slider state={state} label="Chains" get={|mp| mp.chain_count} set={|mp, v| { mp.chain_count = v; }} min_exp=0 max_exp=10/>
                 <Pow2Slider state={state} label="Lambda (\u{03BB})" get={|mp| mp.lambda} set={|mp, v| { mp.lambda = v; }} min_exp=0 max_exp=6/>
+                <div class="mutation-row">
+                    <label class="mutation-label">"Rasterize WG"</label>
+                    <select
+                        class="resolution-select"
+                        prop:value={move || {
+                            let wg = state.get().mutation_params.rasterize_wg;
+                            format!("{}x{}", wg[0], wg[1])
+                        }}
+                        on:change={move |ev: web_sys::Event| {
+                            let target = ev.target().unwrap();
+                            let select: web_sys::HtmlSelectElement = target.dyn_into().unwrap();
+                            let val = select.value();
+                            let parts: Vec<u32> = val.split('x').filter_map(|s| s.parse().ok()).collect();
+                            if parts.len() == 2 {
+                                state.update(|s| s.mutation_params.rasterize_wg = [parts[0], parts[1]]);
+                                send_params(&state.get_untracked().mutation_params);
+                            }
+                        }}
+                    >
+                        <option value="16x16">"16x16 (256 threads)"</option>
+                        <option value="16x8">"16x8 (128 threads)"</option>
+                        <option value="8x8">"8x8 (64 threads)"</option>
+                    </select>
+                </div>
             </div>
             <div class="mutation-section">
                 <div class="mutation-section-title">"Alpha"</div>

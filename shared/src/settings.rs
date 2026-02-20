@@ -40,3 +40,7 @@ pub const INTER_ISLAND_INTERVAL: u32 = 500;
 // Mutation mode defaults
 pub const SINGLE_MUTATION_MODE: bool = true;
 pub const ADAPTIVE_MUTATION: bool = true;
+
+// Rasterize workgroup size defaults
+pub const RASTERIZE_WG_X_DEFAULT: u32 = 16;
+pub const RASTERIZE_WG_Y_DEFAULT: u32 = 16;

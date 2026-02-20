@@ -2,6 +2,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::settings;
 
+fn default_rasterize_wg() -> [u32; 2] {
+    [settings::RASTERIZE_WG_X_DEFAULT, settings::RASTERIZE_WG_Y_DEFAULT]
+}
+
 /// Runtime-configurable mutation parameters.
 /// Sent over WebSocket as JSON (camelCase) and used to build `GpuParams`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -51,6 +55,11 @@ pub struct MutationParams {
 
     // Adaptive mutation scale (only applies to offspring indices 1..λ-1)
     pub adaptive_mutation: bool,
+
+    // Rasterize workgroup size: [wg_x, wg_y] (e.g. [16,16], [16,8], [8,8])
+    // Affects SM occupancy vs shared memory tradeoff. Default: [16,16] = 256 threads.
+    #[serde(default = "default_rasterize_wg")]
+    pub rasterize_wg: [u32; 2],
 }
 
 impl MutationParams {
@@ -128,6 +137,12 @@ impl MutationParams {
             self.island_count = best;
         }
         self.inter_island_interval = self.inter_island_interval.min(10000); // 0 = disabled
+
+        // Rasterize workgroup size: must be one of the supported configurations
+        let valid_wg_sizes: &[[u32; 2]] = &[[16, 16], [16, 8], [8, 8]];
+        if !valid_wg_sizes.contains(&self.rasterize_wg) {
+            self.rasterize_wg = [settings::RASTERIZE_WG_X_DEFAULT, settings::RASTERIZE_WG_Y_DEFAULT];
+        }
     }
 }
 
@@ -161,6 +176,7 @@ impl Default for MutationParams {
             lambda: settings::GPU_DEFAULT_LAMBDA,
             single_mutation_mode: settings::SINGLE_MUTATION_MODE,
             adaptive_mutation: settings::ADAPTIVE_MUTATION,
+            rasterize_wg: [settings::RASTERIZE_WG_X_DEFAULT, settings::RASTERIZE_WG_Y_DEFAULT],
         }
     }
 }

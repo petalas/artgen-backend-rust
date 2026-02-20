@@ -155,10 +155,11 @@ impl GpuEvolver {
         // Initialize offspring RNG states in working_states buffer
         init_offspring_rng(&pipeline, 0);
 
-        let wg_x = (image_width + 15) / 16;
-        let wg_y = (image_height + 15) / 16;
+        let rwg = pipeline.rasterize_wg;
+        let wg_x = (image_width + rwg[0] - 1) / rwg[0];
+        let wg_y = (image_height + rwg[1] - 1) / rwg[1];
         println!(
-            "GPU evolver initialized: {} active chains (max {}), offspring capacity {}, {}x{} image, {:.1} MB GPU memory, rasterize dispatch {}x{}x{}",
+            "GPU evolver initialized: {} active chains (max {}), offspring capacity {}, {}x{} image, {:.1} MB GPU memory, rasterize dispatch {}x{}x{} (wg {}x{})",
             active_chains,
             actual_max,
             pipeline.offspring_capacity,
@@ -168,6 +169,8 @@ impl GpuEvolver {
             wg_x,
             wg_y,
             active_chains,
+            rwg[0],
+            rwg[1],
         );
 
         Self {
@@ -199,6 +202,9 @@ impl GpuEvolver {
         } else {
             None
         };
+
+        // Check if rasterize workgroup size needs to change (between batches)
+        self.pipeline.set_rasterize_wg(mutation_params.rasterize_wg);
 
         let p = &self.pipeline;
         let iterations = GPU_ITERATIONS_PER_BATCH;
@@ -233,8 +239,9 @@ impl GpuEvolver {
             label: Some("gpu_evolver_batch"),
         });
 
-        let wg_x = (p.image_width + 15) / 16;
-        let wg_y = (p.image_height + 15) / 16;
+        let rwg = p.rasterize_wg;
+        let wg_x = (p.image_width + rwg[0] - 1) / rwg[0];
+        let wg_y = (p.image_height + rwg[1] - 1) / rwg[1];
         let lambda = mutation_params.lambda;
 
         // Runtime check: active * lambda must fit in offspring_capacity
@@ -720,6 +727,10 @@ impl GpuEvolver {
         } else {
             0.0
         }
+    }
+
+    pub fn rasterize_wg(&self) -> [u32; 2] {
+        self.pipeline.rasterize_wg
     }
 }
 

@@ -114,6 +114,14 @@ fn exp_from_islands(islands: u32) -> u32 { islands.max(1).ilog2() }
 // Lambda: exponent 0..6 → 1,2,4,8,16,32,64
 fn lambda_from_exp(exp: u32) -> u32 { 1u32 << exp }
 
+// Workgroup size options: index -> [wg_x, wg_y]
+const WG_OPTIONS: &[[u32; 2]] = &[[16, 16], [16, 8], [8, 8]];
+
+fn wg_label(wg: &[u32; 2]) -> String {
+    let threads = wg[0] * wg[1];
+    format!("{}x{} ({})", wg[0], wg[1], threads)
+}
+
 fn build_benchmark_params(
     state: &ViewerState,
     chain_count: u32,
@@ -122,6 +130,7 @@ fn build_benchmark_params(
     isolate_islands: bool,
     single_mutation_mode: bool,
     adaptive_mutation: bool,
+    rasterize_wg: [u32; 2],
 ) -> crate::mutation_params::MutationParams {
     let mut params = state.mutation_params.clone();
     params.chain_count = chain_count;
@@ -132,17 +141,23 @@ fn build_benchmark_params(
     }
     params.single_mutation_mode = single_mutation_mode;
     params.adaptive_mutation = adaptive_mutation;
+    params.rasterize_wg = rasterize_wg;
     params
 }
 
-fn auto_label(chain_count: u32, island_count: u32, lambda: u32, isolate_islands: bool, single_mutation_mode: bool, adaptive_mutation: bool) -> String {
+fn auto_label(chain_count: u32, island_count: u32, lambda: u32, isolate_islands: bool, single_mutation_mode: bool, adaptive_mutation: bool, rasterize_wg: [u32; 2]) -> String {
     let mode = if single_mutation_mode { "single" } else { "multi" };
     let lambda_str = if lambda > 1 { format!("-{}\u{03BB}", lambda) } else { String::new() };
     let adaptive_str = if adaptive_mutation { "-adaptive" } else { "" };
-    if isolate_islands {
-        format!("{}c{}-{}i-isolated-{}{}", chain_count, lambda_str, island_count, mode, adaptive_str)
+    let wg_str = if rasterize_wg != [16, 16] {
+        format!("-wg{}x{}", rasterize_wg[0], rasterize_wg[1])
     } else {
-        format!("{}c{}-{}i-{}{}", chain_count, lambda_str, island_count, mode, adaptive_str)
+        String::new()
+    };
+    if isolate_islands {
+        format!("{}c{}-{}i-isolated-{}{}{}", chain_count, lambda_str, island_count, mode, adaptive_str, wg_str)
+    } else {
+        format!("{}c{}-{}i-{}{}{}", chain_count, lambda_str, island_count, mode, adaptive_str, wg_str)
     }
 }
 
@@ -174,6 +189,7 @@ fn ConfigureSection(state: RwSignal<ViewerState>) -> impl IntoView {
     let isolate_islands = RwSignal::new(false);
     let single_mutation = RwSignal::new(false);
     let adaptive_mutation = RwSignal::new(true);
+    let rasterize_wg_idx = RwSignal::new(0usize); // index into WG_OPTIONS, default 0 = 16x16
 
     let add_to_queue = move |_| {
         let s = state.get();
@@ -185,9 +201,10 @@ fn ConfigureSection(state: RwSignal<ViewerState>) -> impl IntoView {
         let iso = isolate_islands.get();
         let sm = single_mutation.get();
         let am = adaptive_mutation.get();
-        let params = build_benchmark_params(&s, cc, ic, lam, iso, sm, am);
+        let wg = WG_OPTIONS[rasterize_wg_idx.get()];
+        let params = build_benchmark_params(&s, cc, ic, lam, iso, sm, am, wg);
         let lbl = label.get();
-        let base = if lbl.trim().is_empty() { auto_label(cc, ic, lam, iso, sm, am) } else { lbl.trim().to_string() };
+        let base = if lbl.trim().is_empty() { auto_label(cc, ic, lam, iso, sm, am, wg) } else { lbl.trim().to_string() };
         let lbl = deduplicate_label(&base, &s);
         let req = BenchmarkRequest {
             drawing_json: snap.drawing_json.clone(),
@@ -209,9 +226,10 @@ fn ConfigureSection(state: RwSignal<ViewerState>) -> impl IntoView {
         let iso = isolate_islands.get();
         let sm = single_mutation.get();
         let am = adaptive_mutation.get();
-        let params = build_benchmark_params(&s, cc, ic, lam, iso, sm, am);
+        let wg = WG_OPTIONS[rasterize_wg_idx.get()];
+        let params = build_benchmark_params(&s, cc, ic, lam, iso, sm, am, wg);
         let lbl = label.get();
-        let base = if lbl.trim().is_empty() { auto_label(cc, ic, lam, iso, sm, am) } else { lbl.trim().to_string() };
+        let base = if lbl.trim().is_empty() { auto_label(cc, ic, lam, iso, sm, am, wg) } else { lbl.trim().to_string() };
         let lbl = deduplicate_label(&base, &s);
         let msg = serde_json::json!({
             "type": "start_benchmark",
@@ -377,6 +395,30 @@ fn ConfigureSection(state: RwSignal<ViewerState>) -> impl IntoView {
                     </label>
                 </div>
                 <div class="bench-config-row">
+                    <label class="bench-config-label">"Workgroup"</label>
+                    <select
+                        class="bench-select"
+                        prop:value={move || rasterize_wg_idx.get().to_string()}
+                        on:change={move |ev| {
+                            if let Ok(v) = event_target_value(&ev).parse::<usize>() {
+                                rasterize_wg_idx.set(v);
+                            }
+                        }}
+                    >
+                        {WG_OPTIONS.iter().enumerate().map(|(i, wg)| {
+                            let label_text = wg_label(wg);
+                            let val = i.to_string();
+                            view! {
+                                <option value={val}>{label_text}</option>
+                            }
+                        }).collect::<Vec<_>>()}
+                    </select>
+                    <span class="mutation-value">{move || {
+                        let wg = WG_OPTIONS[rasterize_wg_idx.get()];
+                        format!("{} threads", wg[0] * wg[1])
+                    }}</span>
+                </div>
+                <div class="bench-config-row">
                     <label class="bench-config-label">"Resolution"</label>
                     <select
                         class="resolution-select"
@@ -520,7 +562,9 @@ fn QueueSection(state: RwSignal<ViewerState>) -> impl IntoView {
                                 <div class="bench-queue-item">
                                     <span class="bench-queue-label">{req.label.clone()}</span>
                                     <span class="bench-queue-meta">
-                                        {format!("{}s | {}c {}\u{03BB} {}i", req.duration_secs, req.params.chain_count, req.params.lambda, req.params.island_count)}
+                                        {format!("{}s | {}c {}\u{03BB} {}i{}", req.duration_secs, req.params.chain_count, req.params.lambda, req.params.island_count,
+                                            if req.params.rasterize_wg != [16, 16] { format!(" wg{}x{}", req.params.rasterize_wg[0], req.params.rasterize_wg[1]) } else { String::new() }
+                                        )}
                                     </span>
                                     <button class="btn-icon btn-icon-danger" on:click={rm} title="Remove">
                                         "\u{2715}"
