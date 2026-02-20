@@ -6,6 +6,27 @@ use web_sys::{MessageEvent, WebSocket};
 
 use crate::mutation_params::MutationParams;
 
+#[derive(Clone, Debug, Default)]
+pub struct GpuTimings {
+    pub mutate_ms: f32,
+    pub mutate_pct: f32,
+    pub rasterize_error_ms: f32,
+    pub rasterize_error_pct: f32,
+    pub select_ms: f32,
+    pub select_pct: f32,
+    pub migrate_ms: f32,
+    pub migrate_pct: f32,
+    pub total_ms: f32,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct GpuStats {
+    pub chain_count: u32,
+    pub memory_mb: f32,
+    pub timings: GpuTimings,
+    pub chain_fitness: Vec<f32>, // sorted desc
+}
+
 #[allow(dead_code)]
 #[derive(Clone, Debug, Default)]
 pub struct ProjectInfo {
@@ -37,6 +58,8 @@ pub struct ViewerState {
     pub project_error: Option<String>,
     // Mutation parameters
     pub mutation_params: MutationParams,
+    // GPU stats
+    pub gpu_stats: Option<GpuStats>,
 }
 
 impl Default for ViewerState {
@@ -60,6 +83,7 @@ impl Default for ViewerState {
             active_project: None,
             project_error: None,
             mutation_params: MutationParams::default(),
+            gpu_stats: None,
         }
     }
 }
@@ -174,6 +198,38 @@ fn parse_project_list(data: &serde_json::Value) -> Vec<ProjectInfo> {
         .unwrap_or_default()
 }
 
+fn parse_gpu_stats(data: &serde_json::Value) -> Option<GpuStats> {
+    let gs = &data["gpuStats"];
+    if gs.is_null() {
+        return None;
+    }
+    let timings = if let Some(t) = gs["timings"].as_object() {
+        GpuTimings {
+            mutate_ms: t.get("mutateMs").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+            mutate_pct: t.get("mutatePct").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+            rasterize_error_ms: t.get("rasterizeErrorMs").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+            rasterize_error_pct: t.get("rasterizeErrorPct").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+            select_ms: t.get("selectMs").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+            select_pct: t.get("selectPct").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+            migrate_ms: t.get("migrateMs").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+            migrate_pct: t.get("migratePct").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+            total_ms: t.get("totalMs").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+        }
+    } else {
+        GpuTimings::default()
+    };
+    let chain_fitness = gs["chainFitness"]
+        .as_array()
+        .map(|arr| arr.iter().filter_map(|v| v.as_f64().map(|f| f as f32)).collect())
+        .unwrap_or_default();
+    Some(GpuStats {
+        chain_count: gs["chainCount"].as_u64().unwrap_or(0) as u32,
+        memory_mb: gs["memoryMb"].as_f64().unwrap_or(0.0) as f32,
+        timings,
+        chain_fitness,
+    })
+}
+
 fn handle_message(data: &serde_json::Value, state: RwSignal<ViewerState>) {
     let msg_type = data["type"].as_str().unwrap_or("");
 
@@ -225,6 +281,9 @@ fn handle_message(data: &serde_json::Value, state: RwSignal<ViewerState>) {
                 if let Ok(mp) = serde_json::from_value::<MutationParams>(data["mutationParams"].clone()) {
                     s.mutation_params = mp;
                 }
+                if let Some(gs) = parse_gpu_stats(data) {
+                    s.gpu_stats = Some(gs);
+                }
             }
             "update" => {
                 if let Some(img) = data["image"].as_str() {
@@ -233,9 +292,15 @@ fn handle_message(data: &serde_json::Value, state: RwSignal<ViewerState>) {
                 if let Some(dj) = data["drawingJson"].as_str() {
                     s.drawing_json = Some(dj.to_string());
                 }
+                if let Some(gs) = parse_gpu_stats(data) {
+                    s.gpu_stats = Some(gs);
+                }
             }
             "stats" => {
                 // stats-only update, no image data
+                if let Some(gs) = parse_gpu_stats(data) {
+                    s.gpu_stats = Some(gs);
+                }
             }
             "project_list" => {
                 s.projects = parse_project_list(data);

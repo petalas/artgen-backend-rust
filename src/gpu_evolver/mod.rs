@@ -71,6 +71,7 @@ pub struct GpuEvolver {
     start_time: Instant,
     best_fitness_bits: u32, // track best fitness across batches for control flag reset
     pass_timings: PassTimings,
+    chain_fitness: Vec<f32>,
 }
 
 impl GpuEvolver {
@@ -108,12 +109,17 @@ impl GpuEvolver {
                 chain_count, actual_chains,
             );
         }
+        let wg_x = (image_width + 15) / 16;
+        let wg_y = (image_height + 15) / 16;
         println!(
-            "GPU evolver initialized: {} chains, {}x{} image, {:.1} MB GPU memory",
+            "GPU evolver initialized: {} chains, {}x{} image, {:.1} MB GPU memory, rasterize dispatch {}x{}x{} (16x16 workgroups, 12KB shared poly prefetch)",
             actual_chains,
             image_width,
             image_height,
             estimate_gpu_memory(actual_chains, image_width, image_height) as f64 / (1024.0 * 1024.0),
+            wg_x,
+            wg_y,
+            actual_chains,
         );
 
         Self {
@@ -123,6 +129,7 @@ impl GpuEvolver {
             start_time: Instant::now(),
             best_fitness_bits: 0,
             pass_timings: PassTimings::default(),
+            chain_fitness: vec![0.0; actual_chains as usize],
         }
     }
 
@@ -156,8 +163,8 @@ impl GpuEvolver {
             label: Some("gpu_evolver_batch"),
         });
 
-        let wg_x = (p.image_width + 7) / 8;
-        let wg_y = (p.image_height + 7) / 8;
+        let wg_x = (p.image_width + 15) / 16;
+        let wg_y = (p.image_height + 15) / 16;
 
         let is_last_iter = |i: u32| i == iterations - 1;
         let mut migrate_ran = false;
@@ -180,7 +187,7 @@ impl GpuEvolver {
                 pass.dispatch_workgroups(p.chain_count, 1, 1);
             }
 
-            // Pass 2: Rasterize + Error (fused, W/8 × H/8 × K workgroups)
+            // Pass 2: Rasterize + Error (fused, W/16 × H/16 × K workgroups, tiled polygon prefetch)
             {
                 let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
                     label: Some("rasterize_error"),
@@ -253,6 +260,16 @@ impl GpuEvolver {
             std::mem::size_of::<ControlFlags>() as u64,
         );
 
+        // Copy fitness_packed to staging for readback
+        let fitness_size = (p.chain_count as u64) * 4;
+        encoder.copy_buffer_to_buffer(
+            &p.fitness_packed_buf,
+            0,
+            &p.fitness_staging_buf,
+            0,
+            fitness_size,
+        );
+
         // Submit
         p.queue.submit(std::iter::once(encoder.finish()));
 
@@ -264,6 +281,9 @@ impl GpuEvolver {
 
         // Read timestamp results (device already polled by read_control_flags)
         self.read_timestamps(migrate_ran);
+
+        // Read chain fitness values
+        self.read_chain_fitness();
 
         if control.new_best_found != 0 {
             self.best_fitness_bits = control.best_fitness_bits;
@@ -359,6 +379,38 @@ impl GpuEvolver {
 
         drop(data);
         p.timestamp_staging_buf.unmap();
+    }
+
+    fn read_chain_fitness(&mut self) {
+        let p = &self.pipeline;
+        let slice = p.fitness_staging_buf.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(MapMode::Read, move |result| {
+            tx.send(result).unwrap();
+        });
+        p.device.poll(Maintain::Wait);
+        rx.recv().unwrap().expect("Failed to map fitness staging buffer");
+
+        let data = slice.get_mapped_range();
+        let packed: &[u32] = bytemuck::cast_slice(&data);
+        for (i, &bits) in packed.iter().enumerate() {
+            self.chain_fitness[i] = f32::from_bits(bits);
+        }
+        drop(data);
+        p.fitness_staging_buf.unmap();
+    }
+
+    pub fn chain_fitness(&self) -> &[f32] {
+        &self.chain_fitness
+    }
+
+    pub fn chain_count(&self) -> u32 {
+        self.pipeline.chain_count
+    }
+
+    pub fn estimated_memory_bytes(&self) -> u64 {
+        let p = &self.pipeline;
+        estimate_gpu_memory(p.chain_count, p.image_width, p.image_height) as u64
     }
 
     pub fn pass_timings(&self) -> &PassTimings {

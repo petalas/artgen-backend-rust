@@ -1,8 +1,8 @@
 // Fused rasterize + error compute shader — one thread per pixel per chain
-// Dispatch: (W/8, H/8, K) workgroups of size (8, 8, 1)
+// Dispatch: (W/16, H/16, K) workgroups of size (16, 16, 1)
 // Each thread rasterizes all polygons at its pixel, computes L1 error against reference,
 // then workgroup-reduces the error and thread 0 atomicAdds to per-chain accumulator.
-// This eliminates the render_targets buffer entirely — pixel values stay in registers.
+// Polygons are cooperatively loaded into shared memory in tiles of 256.
 
 struct Polygon {
     color: vec4<f32>,
@@ -58,14 +58,15 @@ struct Params {
 @group(0) @binding(2) var<storage, read_write> error_accumulators: array<atomic<u32>>;
 @group(0) @binding(3) var<uniform>             params:             Params;
 
-var<workgroup> shared_errors: array<u32, 64>;  // 8x8 = 64 threads
+var<workgroup> shared_polys: array<Polygon, 256>;   // 256 × 48 = 12,288 bytes
+var<workgroup> shared_errors: array<u32, 256>;      // 16×16 = 256 threads
 
 // Half-space edge function: positive if point (px,py) is on the left side of edge (ax,ay)->(bx,by)
 fn edge_fn(ax: f32, ay: f32, bx: f32, by: f32, px: f32, py: f32) -> f32 {
     return (bx - ax) * (py - ay) - (by - ay) * (px - ax);
 }
 
-@compute @workgroup_size(8, 8, 1)
+@compute @workgroup_size(16, 16, 1)
 fn main(
     @builtin(global_invocation_id) gid: vec3<u32>,
     @builtin(local_invocation_index) local_idx: u32,
@@ -92,40 +93,55 @@ fn main(
             var b = 255.0;
 
             let poly_count = working_states[chain_id].polygon_count;
+            let tile_count = (poly_count + 255u) / 256u;
 
-            for (var i = 0u; i < poly_count; i++) {
-                let poly = working_states[chain_id].polygons[i];
+            for (var tile = 0u; tile < tile_count; tile++) {
+                let tile_base = tile * 256u;
+                let load_idx = tile_base + local_idx;
 
-                // AABB culling: skip polygons whose bounding box doesn't contain this pixel
-                let bb_min_x = min(poly.v0.x, min(poly.v1.x, poly.v2.x));
-                let bb_max_x = max(poly.v0.x, max(poly.v1.x, poly.v2.x));
-                let bb_min_y = min(poly.v0.y, min(poly.v1.y, poly.v2.y));
-                let bb_max_y = max(poly.v0.y, max(poly.v1.y, poly.v2.y));
-
-                if fx < bb_min_x || fx > bb_max_x || fy < bb_min_y || fy > bb_max_y {
-                    continue;
+                // Cooperative load: each thread loads one polygon into shared memory
+                if load_idx < poly_count {
+                    shared_polys[local_idx] = working_states[chain_id].polygons[load_idx];
                 }
+                workgroupBarrier();
 
-                // Half-space triangle test (3 edge evaluations)
-                let e0 = edge_fn(poly.v0.x, poly.v0.y, poly.v1.x, poly.v1.y, fx, fy);
-                let e1 = edge_fn(poly.v1.x, poly.v1.y, poly.v2.x, poly.v2.y, fx, fy);
-                let e2 = edge_fn(poly.v2.x, poly.v2.y, poly.v0.x, poly.v0.y, fx, fy);
+                // Each thread tests its pixel against all polygons in this tile
+                let tile_end = min(256u, poly_count - tile_base);
+                for (var i = 0u; i < tile_end; i++) {
+                    let poly = shared_polys[i];
 
-                // Inside if all same sign (handle both CW and CCW winding)
-                let all_pos = e0 >= 0.0 && e1 >= 0.0 && e2 >= 0.0;
-                let all_neg = e0 <= 0.0 && e1 <= 0.0 && e2 <= 0.0;
+                    // AABB culling: skip polygons whose bounding box doesn't contain this pixel
+                    let bb_min_x = min(poly.v0.x, min(poly.v1.x, poly.v2.x));
+                    let bb_max_x = max(poly.v0.x, max(poly.v1.x, poly.v2.x));
+                    let bb_min_y = min(poly.v0.y, min(poly.v1.y, poly.v2.y));
+                    let bb_max_y = max(poly.v0.y, max(poly.v1.y, poly.v2.y));
 
-                if all_pos || all_neg {
-                    // Alpha blend: out = src * alpha + dst * (1 - alpha)
-                    let alpha = poly.color.w;
-                    let inv_alpha = 1.0 - alpha;
-                    let src_r = poly.color.x * 255.0;
-                    let src_g = poly.color.y * 255.0;
-                    let src_b = poly.color.z * 255.0;
-                    r = r * inv_alpha + src_r * alpha;
-                    g = g * inv_alpha + src_g * alpha;
-                    b = b * inv_alpha + src_b * alpha;
+                    if fx < bb_min_x || fx > bb_max_x || fy < bb_min_y || fy > bb_max_y {
+                        continue;
+                    }
+
+                    // Half-space triangle test (3 edge evaluations)
+                    let e0 = edge_fn(poly.v0.x, poly.v0.y, poly.v1.x, poly.v1.y, fx, fy);
+                    let e1 = edge_fn(poly.v1.x, poly.v1.y, poly.v2.x, poly.v2.y, fx, fy);
+                    let e2 = edge_fn(poly.v2.x, poly.v2.y, poly.v0.x, poly.v0.y, fx, fy);
+
+                    // Inside if all same sign (handle both CW and CCW winding)
+                    let all_pos = e0 >= 0.0 && e1 >= 0.0 && e2 >= 0.0;
+                    let all_neg = e0 <= 0.0 && e1 <= 0.0 && e2 <= 0.0;
+
+                    if all_pos || all_neg {
+                        // Alpha blend: out = src * alpha + dst * (1 - alpha)
+                        let alpha = poly.color.w;
+                        let inv_alpha = 1.0 - alpha;
+                        let src_r = poly.color.x * 255.0;
+                        let src_g = poly.color.y * 255.0;
+                        let src_b = poly.color.z * 255.0;
+                        r = r * inv_alpha + src_r * alpha;
+                        g = g * inv_alpha + src_g * alpha;
+                        b = b * inv_alpha + src_b * alpha;
+                    }
                 }
+                workgroupBarrier();
             }
 
             // Clamp rendered values
@@ -152,8 +168,8 @@ fn main(
     shared_errors[local_idx] = pixel_error;
     workgroupBarrier();
 
-    // Binary reduction: 64 -> 32 -> 16 -> 8 -> 4 -> 2 -> 1
-    var stride = 32u;
+    // Binary reduction: 256 -> 128 -> 64 -> 32 -> 16 -> 8 -> 4 -> 2 -> 1
+    var stride = 128u;
     while stride > 0u {
         if local_idx < stride {
             shared_errors[local_idx] += shared_errors[local_idx + stride];

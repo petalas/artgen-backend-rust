@@ -1,6 +1,7 @@
 use leptos::prelude::*;
 
 use crate::components::controls::Controls;
+use crate::components::gpu_stats_panel::GpuStatsPanel;
 use crate::components::header::Header;
 use crate::components::image_row::ImageRow;
 use crate::components::mutation_panel::MutationPanel;
@@ -30,6 +31,7 @@ pub fn App() -> impl IntoView {
                             <ImageRow state={state}/>
                             <Stats state={state}/>
                             <Controls state={state}/>
+                            <GpuStatsPanel state={state}/>
                             <MutationPanel state={state}/>
                         }.into_any()
                     }

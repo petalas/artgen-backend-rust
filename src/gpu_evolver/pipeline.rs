@@ -18,6 +18,8 @@ pub struct GpuPipeline {
     pub params_buf: Buffer,
     pub readback_staging_buf: Buffer,
     pub control_staging_buf: Buffer,
+    pub fitness_packed_buf: Buffer,
+    pub fitness_staging_buf: Buffer,
 
     // Compute pipelines
     pub mutate_pipeline: ComputePipeline,
@@ -103,6 +105,7 @@ impl GpuPipeline {
             max_buffer_size,
             max_compute_workgroups_per_dimension: 65535,
             max_compute_invocations_per_workgroup: 256,
+            max_storage_buffers_per_shader_stage: 6, // select shader uses 5 storage bindings
             ..Limits::downlevel_defaults()
         };
 
@@ -192,6 +195,22 @@ impl GpuPipeline {
         let control_staging_buf = device.create_buffer(&BufferDescriptor {
             label: Some("control_staging"),
             size: std::mem::size_of::<ControlFlags>() as u64,
+            usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // Fitness packed buffer (u32 per chain — for CPU readback of all chain fitness values)
+        let fitness_packed_size = (chain_count as usize) * 4;
+        let fitness_packed_buf = device.create_buffer(&BufferDescriptor {
+            label: Some("fitness_packed"),
+            size: fitness_packed_size as u64,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+
+        let fitness_staging_buf = device.create_buffer(&BufferDescriptor {
+            label: Some("fitness_staging"),
+            size: fitness_packed_size as u64,
             usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -375,6 +394,16 @@ impl GpuPipeline {
                     },
                     count: None,
                 },
+                BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -461,6 +490,7 @@ impl GpuPipeline {
                 BindGroupEntry { binding: 2, resource: error_accumulators_buf.as_entire_binding() },
                 BindGroupEntry { binding: 3, resource: control_flags_buf.as_entire_binding() },
                 BindGroupEntry { binding: 4, resource: params_buf.as_entire_binding() },
+                BindGroupEntry { binding: 5, resource: fitness_packed_buf.as_entire_binding() },
             ],
         });
 
@@ -474,6 +504,7 @@ impl GpuPipeline {
                 BindGroupEntry { binding: 2, resource: error_accumulators_buf.as_entire_binding() },
                 BindGroupEntry { binding: 3, resource: control_flags_buf.as_entire_binding() },
                 BindGroupEntry { binding: 4, resource: params_buf.as_entire_binding() },
+                BindGroupEntry { binding: 5, resource: fitness_packed_buf.as_entire_binding() },
             ],
         });
 
@@ -488,6 +519,8 @@ impl GpuPipeline {
             params_buf,
             readback_staging_buf,
             control_staging_buf,
+            fitness_packed_buf,
+            fitness_staging_buf,
             mutate_pipeline,
             rasterize_error_pipeline,
             select_pipeline,

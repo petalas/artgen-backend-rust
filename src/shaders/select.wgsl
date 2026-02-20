@@ -62,6 +62,7 @@ struct ControlFlags {
 @group(0) @binding(2) var<storage, read_write> error_accumulators: array<atomic<u32>>;
 @group(0) @binding(3) var<storage, read_write> control:            ControlFlags;
 @group(0) @binding(4) var<uniform>             params:             Params;
+@group(0) @binding(5) var<storage, read_write> fitness_packed:     array<u32>;
 
 @compute @workgroup_size(1)
 fn select_main(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -86,6 +87,9 @@ fn select_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     fitness -= fitness * params.per_point_multiplier * f32(num_points);
 
     let fitness_bits = bitcast<u32>(fitness);
+
+    // Export fitness for CPU readback
+    fitness_packed[chain_id] = fitness_bits;
 
     // Compare against chain's current best
     let current_fitness_bits = chain_states[chain_id].fitness_bits;
@@ -148,4 +152,7 @@ fn migrate_main(@builtin(global_invocation_id) gid: vec3<u32>) {
             chain_states[chain_id].polygons[i] = chain_states[neighbor_id].polygons[i];
         }
     }
+
+    // Update fitness_packed with (possibly migrated) fitness
+    fitness_packed[chain_id] = chain_states[chain_id].fitness_bits;
 }

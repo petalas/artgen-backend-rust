@@ -272,8 +272,53 @@ fn gpu_main_loop(
         // Print stats periodically
         if last_stats_timestamp.elapsed().as_secs() >= 2 {
             print_gpu_stats(&evolver, &global_best);
+            evolver.pass_timings().print_averages();
+            evolver.reset_pass_timings();
             last_stats_timestamp = Instant::now();
         }
+    }
+}
+
+struct GpuPassTimingsWs {
+    mutate_ms: f32,
+    mutate_pct: f32,
+    rasterize_error_ms: f32,
+    rasterize_error_pct: f32,
+    select_ms: f32,
+    select_pct: f32,
+    migrate_ms: f32,
+    migrate_pct: f32,
+    total_ms: f32,
+}
+
+struct GpuStatsWs {
+    chain_count: u32,
+    memory_mb: f32,
+    timings: Option<GpuPassTimingsWs>,
+    chain_fitness: Vec<f32>, // sorted desc
+}
+
+impl GpuStatsWs {
+    fn to_json(&self) -> serde_json::Value {
+        let timings = self.timings.as_ref().map(|t| {
+            serde_json::json!({
+                "mutateMs": t.mutate_ms,
+                "mutatePct": t.mutate_pct,
+                "rasterizeErrorMs": t.rasterize_error_ms,
+                "rasterizeErrorPct": t.rasterize_error_pct,
+                "selectMs": t.select_ms,
+                "selectPct": t.select_pct,
+                "migrateMs": t.migrate_ms,
+                "migratePct": t.migrate_pct,
+                "totalMs": t.total_ms,
+            })
+        });
+        serde_json::json!({
+            "chainCount": self.chain_count,
+            "memoryMb": self.memory_mb,
+            "timings": timings,
+            "chainFitness": self.chain_fitness,
+        })
     }
 }
 
@@ -301,6 +346,8 @@ struct WsState {
     pending_delete: Option<String>, // project dir to delete after inner loop breaks
     // Mutation parameters (runtime-configurable)
     mutation_params: MutationParams,
+    // GPU stats
+    gpu_stats: Option<GpuStatsWs>,
 }
 
 type SharedWsState = Arc<(Mutex<WsState>, Condvar)>;
@@ -380,6 +427,7 @@ fn ws_handle_client(stream: std::net::TcpStream, state: SharedWsState) {
         last_project_list_gen = s.project_list_generation;
 
         // Send init message
+        let gpu_stats_json = s.gpu_stats.as_ref().map(|g| g.to_json());
         let msg = serde_json::json!({
             "type": "init",
             "referenceImage": BASE64.encode(&s.ref_png),
@@ -396,6 +444,7 @@ fn ws_handle_client(stream: std::net::TcpStream, state: SharedWsState) {
             "imageHeight": s.image_height,
             "activeProject": s.active_project,
             "mutationParams": s.mutation_params,
+            "gpuStats": gpu_stats_json,
         });
         if ws
             .send(tungstenite::Message::Text(msg.to_string().into()))
@@ -516,6 +565,7 @@ fn ws_handle_client(stream: std::net::TcpStream, state: SharedWsState) {
                     && last_image_send_time.elapsed() >= image_interval;
                 last_gen = s.generation;
 
+                let gpu_stats_json = s.gpu_stats.as_ref().map(|g| g.to_json());
                 let msg = if has_new_image {
                     last_image_gen = s.image_generation;
                     last_image_send_time = Instant::now();
@@ -530,6 +580,7 @@ fn ws_handle_client(stream: std::net::TcpStream, state: SharedWsState) {
                         "elapsed": s.elapsed_secs,
                         "paused": s.paused,
                         "drawingJson": s.drawing_json,
+                        "gpuStats": gpu_stats_json,
                     })
                 } else {
                     serde_json::json!({
@@ -541,6 +592,7 @@ fn ws_handle_client(stream: std::net::TcpStream, state: SharedWsState) {
                         "totalEvals": s.total_evals,
                         "elapsed": s.elapsed_secs,
                         "paused": s.paused,
+                        "gpuStats": gpu_stats_json,
                     })
                 };
                 msg.to_string()
@@ -729,6 +781,49 @@ fn handle_ws_command(
     }
 }
 
+fn build_gpu_stats(evolver: &GpuEvolver) -> GpuStatsWs {
+    let timings = evolver.pass_timings();
+    let ws_timings = if timings.sample_count > 0 {
+        let n = timings.sample_count as f64;
+        let mutate = timings.mutate_ns / n / 1_000_000.0;
+        let rasterize_error = timings.rasterize_error_ns / n / 1_000_000.0;
+        let select = timings.select_ns / n / 1_000_000.0;
+        let migrate = if timings.migrate_sample_count > 0 {
+            timings.migrate_ns / timings.migrate_sample_count as f64 / 1_000_000.0
+        } else {
+            0.0
+        };
+        let total = mutate + rasterize_error + select + migrate;
+        if total > 0.0 {
+            Some(GpuPassTimingsWs {
+                mutate_ms: mutate as f32,
+                mutate_pct: (mutate / total * 100.0) as f32,
+                rasterize_error_ms: rasterize_error as f32,
+                rasterize_error_pct: (rasterize_error / total * 100.0) as f32,
+                select_ms: select as f32,
+                select_pct: (select / total * 100.0) as f32,
+                migrate_ms: migrate as f32,
+                migrate_pct: (migrate / total * 100.0) as f32,
+                total_ms: total as f32,
+            })
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let mut fitness: Vec<f32> = evolver.chain_fitness().to_vec();
+    fitness.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+
+    GpuStatsWs {
+        chain_count: evolver.chain_count(),
+        memory_mb: evolver.estimated_memory_bytes() as f32 / (1024.0 * 1024.0),
+        timings: ws_timings,
+        chain_fitness: fitness,
+    }
+}
+
 fn gpu_main_loop_headless(legacy_image: Option<&str>) {
     projects::ensure_projects_dir();
 
@@ -759,6 +854,7 @@ fn gpu_main_loop_headless(legacy_image: Option<&str>) {
             reset_active: false,
             pending_delete: None,
             mutation_params: MutationParams::default(),
+            gpu_stats: None,
         }),
         Condvar::new(),
     ));
@@ -1057,6 +1153,7 @@ fn gpu_main_loop_headless(legacy_image: Option<&str>) {
                 let active_secs = active_elapsed.as_secs_f64();
                 let evals = evolver.total_evaluations();
                 let evals_per_sec = if active_secs > 0.0 { evals as f64 / active_secs } else { 0.0 };
+                let gpu_stats = build_gpu_stats(&evolver);
                 {
                     let (lock, cvar) = &*ws_state;
                     let mut s = lock.lock().unwrap();
@@ -1066,11 +1163,14 @@ fn gpu_main_loop_headless(legacy_image: Option<&str>) {
                     s.fitness = global_best.fitness;
                     s.polygons = global_best.polygons.len();
                     s.improvements = improvements;
+                    s.gpu_stats = Some(gpu_stats);
                     s.generation += 1;
                     cvar.notify_all();
                 }
 
                 print_gpu_stats_active(&evolver, &global_best, active_elapsed);
+                evolver.pass_timings().print_averages();
+                evolver.reset_pass_timings();
                 last_stats_timestamp = Instant::now();
             }
         }
