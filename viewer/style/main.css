@@ -145,7 +145,6 @@ body {
 .panel-canvas {
     width: 100%;
     display: block;
-    image-rendering: pixelated;
     background: #f0f0f0;
 }
 
