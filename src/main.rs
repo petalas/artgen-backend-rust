@@ -295,6 +295,7 @@ struct IslandStats {
     best_fitness: f32,
     avg_fitness: f32,
     chain_count: u32,
+    best_chain_id: u32,
 }
 
 struct GpuStatsWs {
@@ -304,6 +305,7 @@ struct GpuStatsWs {
     chain_fitness: Vec<f32>, // sorted desc
     island_stats: Vec<IslandStats>,
     island_count: u32,
+    island_drawings: Vec<Drawing>,
 }
 
 impl GpuStatsWs {
@@ -329,6 +331,9 @@ impl GpuStatsWs {
                 "chainCount": is.chain_count,
             })
         }).collect();
+        let island_drawings: Vec<serde_json::Value> = self.island_drawings.iter()
+            .filter_map(|d| serde_json::to_value(d).ok())
+            .collect();
         serde_json::json!({
             "chainCount": self.chain_count,
             "memoryMb": self.memory_mb,
@@ -336,6 +341,7 @@ impl GpuStatsWs {
             "chainFitness": self.chain_fitness,
             "islandStats": islands,
             "islandCount": self.island_count,
+            "islandDrawings": island_drawings,
         })
     }
 }
@@ -846,17 +852,25 @@ fn build_gpu_stats(evolver: &GpuEvolver, island_count: u32) -> GpuStatsWs {
             ((i + 1) * island_size) as usize
         };
         let slice = &raw_fitness[start..end];
-        let best = slice.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let (best_local_idx, &best) = slice.iter().enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .unwrap_or((0, &0.0));
         let avg = slice.iter().sum::<f32>() / slice.len() as f32;
         island_stats.push(IslandStats {
             best_fitness: best,
             avg_fitness: avg,
             chain_count: (end - start) as u32,
+            best_chain_id: (start + best_local_idx) as u32,
         });
     }
 
     let mut fitness: Vec<f32> = raw_fitness.to_vec();
     fitness.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Readback best drawing from each island
+    let island_drawings: Vec<Drawing> = island_stats.iter()
+        .map(|is| evolver.readback_chain(is.best_chain_id))
+        .collect();
 
     GpuStatsWs {
         chain_count,
@@ -865,6 +879,7 @@ fn build_gpu_stats(evolver: &GpuEvolver, island_count: u32) -> GpuStatsWs {
         chain_fitness: fitness,
         island_stats,
         island_count: effective_islands,
+        island_drawings,
     }
 }
 

@@ -305,7 +305,7 @@ impl GpuEvolver {
 
         if control.new_best_found != 0 {
             self.best_fitness_bits = control.best_fitness_bits;
-            let drawing = self.readback_best(control.best_chain_id);
+            let drawing = self.readback_chain(control.best_chain_id);
             Some(drawing)
         } else {
             None
@@ -329,7 +329,7 @@ impl GpuEvolver {
         flags
     }
 
-    fn readback_best(&self, chain_id: u32) -> Drawing {
+    pub fn readback_chain(&self, chain_id: u32) -> Drawing {
         let p = &self.pipeline;
 
         // Copy the winning chain's state to readback staging

@@ -34,6 +34,7 @@ pub struct GpuStats {
     pub chain_fitness: Vec<f32>, // sorted desc
     pub island_stats: Vec<IslandStats>,
     pub island_count: u32,
+    pub island_drawings: Vec<crate::models::Drawing>,
 }
 
 #[allow(dead_code)]
@@ -244,6 +245,14 @@ fn parse_gpu_stats(data: &serde_json::Value) -> Option<GpuStats> {
         })
         .unwrap_or_default();
     let island_count = gs["islandCount"].as_u64().unwrap_or(0) as u32;
+    let island_drawings = gs["islandDrawings"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| serde_json::from_value::<crate::models::Drawing>(v.clone()).ok())
+                .collect()
+        })
+        .unwrap_or_default();
     Some(GpuStats {
         chain_count: gs["chainCount"].as_u64().unwrap_or(0) as u32,
         memory_mb: gs["memoryMb"].as_f64().unwrap_or(0.0) as f32,
@@ -251,6 +260,7 @@ fn parse_gpu_stats(data: &serde_json::Value) -> Option<GpuStats> {
         chain_fitness,
         island_stats,
         island_count,
+        island_drawings,
     })
 }
 

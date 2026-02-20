@@ -1,5 +1,8 @@
 use leptos::prelude::*;
+use wasm_bindgen::JsCast;
+use web_sys::HtmlCanvasElement;
 
+use crate::canvas_renderer::render_drawing;
 use crate::ws::ViewerState;
 
 #[component]
@@ -266,8 +269,78 @@ fn TopChainsChart(state: RwSignal<ViewerState>) -> impl IntoView {
                             " best"
                         </span>
                     </div>
+                    <IslandThumbnails state={state}/>
                 </div>
             }.into_any()
         }}
+    }
+}
+
+/// Thumbnail previews of each island's best drawing.
+#[component]
+fn IslandThumbnails(state: RwSignal<ViewerState>) -> impl IntoView {
+    let container_ref = NodeRef::<leptos::html::Div>::new();
+
+    Effect::new(move || {
+        let s = state.get();
+        let gs = match s.gpu_stats.as_ref() {
+            Some(g) if !g.island_drawings.is_empty() => g,
+            _ => return,
+        };
+
+        let container = match container_ref.get() {
+            Some(c) => c,
+            None => return,
+        };
+        let container_el: &web_sys::HtmlElement = &container;
+
+        // Determine thumbnail canvas size based on image aspect ratio
+        let thumb_size = 128u32;
+        let (cw, ch) = if s.image_width > 0 && s.image_height > 0 {
+            if s.image_width >= s.image_height {
+                (thumb_size, thumb_size * s.image_height / s.image_width)
+            } else {
+                (thumb_size * s.image_width / s.image_height, thumb_size)
+            }
+        } else {
+            (thumb_size, thumb_size)
+        };
+
+        let document = web_sys::window().unwrap().document().unwrap();
+
+        // Clear previous thumbnails
+        container_el.set_inner_html("");
+
+        let colors = [
+            "#26a69a", "#ef5350", "#42a5f5", "#ffb74d",
+            "#ab47bc", "#66bb6a", "#ec407a", "#5c6bc0",
+        ];
+
+        for (i, drawing) in gs.island_drawings.iter().enumerate() {
+            let wrapper = document.create_element("div").unwrap();
+            wrapper.set_class_name("gpu-island-thumb");
+
+            let canvas = document.create_element("canvas").unwrap();
+            let canvas: HtmlCanvasElement = canvas.dyn_into().unwrap();
+            canvas.set_width(cw);
+            canvas.set_height(ch);
+            canvas.set_class_name("gpu-island-thumb-canvas");
+            let color = colors[i % colors.len()];
+            let html_el: &web_sys::HtmlElement = canvas.as_ref();
+            let _ = html_el.style().set_property("border-color", color);
+            render_drawing(drawing, &canvas);
+
+            let label = document.create_element("span").unwrap();
+            label.set_class_name("gpu-island-thumb-label");
+            label.set_text_content(Some(&format!("I{}", i)));
+
+            wrapper.append_child(&canvas).unwrap();
+            wrapper.append_child(&label).unwrap();
+            container_el.append_child(&wrapper).unwrap();
+        }
+    });
+
+    view! {
+        <div class="gpu-island-thumbs" node_ref={container_ref}></div>
     }
 }
