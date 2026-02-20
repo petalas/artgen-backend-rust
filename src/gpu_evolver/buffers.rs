@@ -7,27 +7,21 @@ use crate::models::polygon::Polygon;
 use crate::mutation_params::MutationParams;
 use crate::settings::MAX_POLYGONS_PER_IMAGE;
 
-/// GPU polygon: a single triangle with color.
-/// 48 bytes, matching WGSL struct alignment.
+/// GPU polygon: a single triangle with color, quantized to 16 bytes.
+/// Word 0: RGBA color packed as 4x u8 via pack4x8unorm convention
+/// Word 1: v0 packed as two u16 (x | y<<16)
+/// Word 2: v1 packed the same way
+/// Word 3: v2 packed the same way
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 pub struct GpuPolygon {
-    /// RGBA color, normalized 0.0–1.0
-    pub color: [f32; 4],   // 16 bytes, offset 0
-    /// Triangle vertex 0, normalized 0.0–1.0
-    pub v0: [f32; 2],     // 8 bytes, offset 16
-    /// Triangle vertex 1
-    pub v1: [f32; 2],     // 8 bytes, offset 24
-    /// Triangle vertex 2
-    pub v2: [f32; 2],     // 8 bytes, offset 32
-    /// Padding to 48-byte stride
-    pub _pad: [f32; 2],   // 8 bytes, offset 40
+    pub data: [u32; 4],   // 16 bytes total
 }
 
 /// Per-chain drawing state on GPU.
 /// polygon_count + fitness + pad + rng_state = 32 bytes header
-/// polygons: MAX_POLYGONS_PER_IMAGE * 48 = 48000 bytes
-/// Total: 48032 bytes
+/// polygons: MAX_POLYGONS_PER_IMAGE * 16 = 16000 bytes
+/// Total: 16032 bytes
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct GpuDrawingState {
@@ -149,6 +143,19 @@ pub fn default_gpu_params(w: u32, h: u32, migration_interval: u32, chain_count: 
     gpu_params_from(&MutationParams::default(), w, h, migration_interval, chain_count)
 }
 
+/// Pack RGBA color (0–255 u8 range) into a single u32, matching WGSL pack4x8unorm layout.
+/// pack4x8unorm packs as: byte0=R, byte1=G, byte2=B, byte3=A (little-endian u32).
+fn pack_color_u32(r: u8, g: u8, b: u8, a: u8) -> u32 {
+    (r as u32) | ((g as u32) << 8) | ((b as u32) << 16) | ((a as u32) << 24)
+}
+
+/// Pack a 2D vertex (0.0–1.0 floats) into a single u32 as two u16 values.
+fn pack_vertex_u32(x: f32, y: f32) -> u32 {
+    let xi = (x.clamp(0.0, 1.0) * 65535.0).round() as u32;
+    let yi = (y.clamp(0.0, 1.0) * 65535.0).round() as u32;
+    xi | (yi << 16)
+}
+
 /// Convert a CPU Drawing to GPU bytes for a single chain's DrawingState.
 /// Multi-vertex polygons are fan-triangulated.
 /// `seed` is used to initialize the PCG RNG state for this chain.
@@ -168,12 +175,12 @@ pub fn drawing_to_gpu(drawing: &Drawing, seed: u64) -> GpuDrawingState {
 
     let mut gpu_idx = 0;
     for polygon in &drawing.polygons {
-        let color = [
-            polygon.color.r as f32 / 255.0,
-            polygon.color.g as f32 / 255.0,
-            polygon.color.b as f32 / 255.0,
-            polygon.color.a as f32 / 255.0,
-        ];
+        let color_packed = pack_color_u32(
+            polygon.color.r,
+            polygon.color.g,
+            polygon.color.b,
+            polygon.color.a,
+        );
 
         let pts = &polygon.points;
         if pts.len() < 3 {
@@ -186,11 +193,12 @@ pub fn drawing_to_gpu(drawing: &Drawing, seed: u64) -> GpuDrawingState {
                 break;
             }
             state.polygons[gpu_idx] = GpuPolygon {
-                color,
-                v0: [pts[0].x, pts[0].y],
-                v1: [pts[i].x, pts[i].y],
-                v2: [pts[i + 1].x, pts[i + 1].y],
-                _pad: [0.0; 2],
+                data: [
+                    color_packed,
+                    pack_vertex_u32(pts[0].x, pts[0].y),
+                    pack_vertex_u32(pts[i].x, pts[i].y),
+                    pack_vertex_u32(pts[i + 1].x, pts[i + 1].y),
+                ],
             };
             gpu_idx += 1;
         }
@@ -204,6 +212,23 @@ pub fn drawing_to_gpu(drawing: &Drawing, seed: u64) -> GpuDrawingState {
     state
 }
 
+/// Unpack RGBA color from a packed u32 (matching WGSL unpack4x8unorm layout).
+fn unpack_color_u32(packed: u32) -> Color {
+    Color {
+        r: (packed & 0xFF) as u8,
+        g: ((packed >> 8) & 0xFF) as u8,
+        b: ((packed >> 16) & 0xFF) as u8,
+        a: ((packed >> 24) & 0xFF) as u8,
+    }
+}
+
+/// Unpack a 2D vertex from a packed u32 (two u16 values).
+fn unpack_vertex_u32(packed: u32) -> Point {
+    let x = (packed & 0xFFFF) as f32 / 65535.0;
+    let y = ((packed >> 16) & 0xFFFF) as f32 / 65535.0;
+    Point { x, y }
+}
+
 /// Convert GPU DrawingState back to a CPU Drawing.
 /// Each GPU triangle becomes a 3-point Polygon.
 pub fn gpu_to_drawing(state: &GpuDrawingState) -> Drawing {
@@ -212,17 +237,11 @@ pub fn gpu_to_drawing(state: &GpuDrawingState) -> Drawing {
 
     for i in 0..count {
         let gp = &state.polygons[i];
-        // GPU is the source of truth for alpha range — no hardcoded clamping
-        let color = Color {
-            r: (gp.color[0] * 255.0).round().clamp(0.0, 255.0) as u8,
-            g: (gp.color[1] * 255.0).round().clamp(0.0, 255.0) as u8,
-            b: (gp.color[2] * 255.0).round().clamp(0.0, 255.0) as u8,
-            a: (gp.color[3] * 255.0).round().clamp(0.0, 255.0) as u8,
-        };
+        let color = unpack_color_u32(gp.data[0]);
         let points = vec![
-            Point { x: gp.v0[0], y: gp.v0[1] },
-            Point { x: gp.v1[0], y: gp.v1[1] },
-            Point { x: gp.v2[0], y: gp.v2[1] },
+            unpack_vertex_u32(gp.data[1]),
+            unpack_vertex_u32(gp.data[2]),
+            unpack_vertex_u32(gp.data[3]),
         ];
         polygons.push(Polygon { points, color });
     }
@@ -240,12 +259,12 @@ mod tests {
 
     #[test]
     fn test_gpu_polygon_size() {
-        assert_eq!(GPU_POLYGON_SIZE, 48);
+        assert_eq!(GPU_POLYGON_SIZE, 16);
     }
 
     #[test]
     fn test_gpu_drawing_state_size() {
-        assert_eq!(GPU_DRAWING_STATE_SIZE, 48032);
+        assert_eq!(GPU_DRAWING_STATE_SIZE, 16032);
     }
 
     #[test]
@@ -279,11 +298,11 @@ mod tests {
         let reconstructed = gpu_to_drawing(&gpu_state);
         assert_eq!(reconstructed.polygons.len(), 2);
 
-        // Check first polygon
+        // Check first polygon — vertex precision is ~1/65535, color is exact (u8 roundtrip)
         let p0 = &reconstructed.polygons[0];
         assert_eq!(p0.points.len(), 3);
-        assert!((p0.points[0].x - 0.1).abs() < 0.01);
-        assert!((p0.points[0].y - 0.2).abs() < 0.01);
+        assert!((p0.points[0].x - 0.1).abs() < 0.001);
+        assert!((p0.points[0].y - 0.2).abs() < 0.001);
         assert_eq!(p0.color.r, 100);
         assert_eq!(p0.color.g, 150);
         assert_eq!(p0.color.b, 200);
@@ -310,15 +329,15 @@ mod tests {
         let gpu_state = drawing_to_gpu(&drawing, 42);
         assert_eq!(gpu_state.polygon_count, 2);
 
-        // First triangle: (0,0) (1,0) (1,1)
-        assert_eq!(gpu_state.polygons[0].v0, [0.0, 0.0]);
-        assert_eq!(gpu_state.polygons[0].v1, [1.0, 0.0]);
-        assert_eq!(gpu_state.polygons[0].v2, [1.0, 1.0]);
+        // First triangle: (0,0) (1,0) (1,1) — packed as u32
+        assert_eq!(gpu_state.polygons[0].data[1], pack_vertex_u32(0.0, 0.0));
+        assert_eq!(gpu_state.polygons[0].data[2], pack_vertex_u32(1.0, 0.0));
+        assert_eq!(gpu_state.polygons[0].data[3], pack_vertex_u32(1.0, 1.0));
 
         // Second triangle: (0,0) (1,1) (0,1)
-        assert_eq!(gpu_state.polygons[1].v0, [0.0, 0.0]);
-        assert_eq!(gpu_state.polygons[1].v1, [1.0, 1.0]);
-        assert_eq!(gpu_state.polygons[1].v2, [0.0, 1.0]);
+        assert_eq!(gpu_state.polygons[1].data[1], pack_vertex_u32(0.0, 0.0));
+        assert_eq!(gpu_state.polygons[1].data[2], pack_vertex_u32(1.0, 1.0));
+        assert_eq!(gpu_state.polygons[1].data[3], pack_vertex_u32(0.0, 1.0));
     }
 
     #[test]

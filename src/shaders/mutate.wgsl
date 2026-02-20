@@ -3,11 +3,7 @@
 // Loops until at least one mutation fires (is_dirty).
 
 struct Polygon {
-    color: vec4<f32>,   // RGBA normalized 0.0–1.0
-    v0: vec2<f32>,
-    v1: vec2<f32>,
-    v2: vec2<f32>,
-    _pad: vec2<f32>,
+    data: vec4<u32>,   // [color_packed, v0_packed, v1_packed, v2_packed] — 16 bytes
 }
 
 struct DrawingState {
@@ -17,6 +13,24 @@ struct DrawingState {
     _pad1: u32,
     rng_state: vec4<u32>,  // .xy = state, .zw = increment
     polygons: array<Polygon, 1000>,
+}
+
+// --- Quantized polygon pack/unpack helpers ---
+
+fn unpack_color(p: Polygon) -> vec4<f32> {
+    return unpack4x8unorm(p.data.x);
+}
+
+fn pack_color(c: vec4<f32>) -> u32 {
+    return pack4x8unorm(c);
+}
+
+fn unpack_vertex(word: u32) -> vec2<f32> {
+    return vec2<f32>(f32(word & 0xFFFFu) / 65535.0, f32(word >> 16u) / 65535.0);
+}
+
+fn pack_vertex(v: vec2<f32>) -> u32 {
+    return u32(round(clamp(v.x, 0.0, 1.0) * 65535.0)) | (u32(round(clamp(v.y, 0.0, 1.0) * 65535.0)) << 16u);
 }
 
 struct Params {
@@ -153,7 +167,10 @@ fn rand_u32(state: ptr<function, vec4<u32>>, max_val: u32) -> u32 {
 
 /// Compute centroid of a triangle (average of 3 vertices).
 fn centroid(poly: Polygon) -> vec2<f32> {
-    return (poly.v0 + poly.v1 + poly.v2) / 3.0;
+    let v0 = unpack_vertex(poly.data.y);
+    let v1 = unpack_vertex(poly.data.z);
+    let v2 = unpack_vertex(poly.data.w);
+    return (v0 + v1 + v2) / 3.0;
 }
 
 /// Tournament selection: pick the fittest chain from `tournament_size` random samples within the same island.
@@ -296,7 +313,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let offspring_count = working_states[chain_id].polygon_count;
         for (var i = 0u; i < offspring_count; i++) {
             var poly = working_states[chain_id].polygons[i];
-            poly.color.w = clamp(poly.color.w, params.min_alpha_norm, params.max_alpha_norm);
+            var color = unpack_color(poly);
+            color.w = clamp(color.w, params.min_alpha_norm, params.max_alpha_norm);
+            poly.data.x = pack_color(color);
             working_states[chain_id].polygons[i] = poly;
         }
 
@@ -317,7 +336,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Copy polygons, clamping alpha to current range
     for (var i = 0u; i < poly_count; i++) {
         var poly = chain_states[chain_id].polygons[i];
-        poly.color.w = clamp(poly.color.w, params.min_alpha_norm, params.max_alpha_norm);
+        var color = unpack_color(poly);
+        color.w = clamp(color.w, params.min_alpha_norm, params.max_alpha_norm);
+        poly.data.x = pack_color(color);
         working_states[chain_id].polygons[i] = poly;
     }
 
@@ -337,26 +358,32 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let origin_y = rand_f32(&rng);
             let d = params.new_point_max_distance;
 
-            var new_poly: Polygon;
-            new_poly.color = vec4<f32>(
+            let new_color = vec4<f32>(
                 rand_f32(&rng),
                 rand_f32(&rng),
                 rand_f32(&rng),
                 clamp(rand_f32(&rng), params.min_alpha_norm, params.max_alpha_norm)
             );
-            new_poly.v0 = vec2<f32>(
+            let new_v0 = vec2<f32>(
                 clamp(rand_f32_range(&rng, origin_x - d, origin_x + d), 0.0, 1.0),
                 clamp(rand_f32_range(&rng, origin_y - d, origin_y + d), 0.0, 1.0)
             );
-            new_poly.v1 = vec2<f32>(
+            let new_v1 = vec2<f32>(
                 clamp(rand_f32_range(&rng, origin_x - d, origin_x + d), 0.0, 1.0),
                 clamp(rand_f32_range(&rng, origin_y - d, origin_y + d), 0.0, 1.0)
             );
-            new_poly.v2 = vec2<f32>(
+            let new_v2 = vec2<f32>(
                 clamp(rand_f32_range(&rng, origin_x - d, origin_x + d), 0.0, 1.0),
                 clamp(rand_f32_range(&rng, origin_y - d, origin_y + d), 0.0, 1.0)
             );
-            new_poly._pad = vec2<f32>(0.0, 0.0);
+
+            var new_poly: Polygon;
+            new_poly.data = vec4<u32>(
+                pack_color(new_color),
+                pack_vertex(new_v0),
+                pack_vertex(new_v1),
+                pack_vertex(new_v2)
+            );
 
             // Append to end (reorder mutation handles z-order)
             working_states[chain_id].polygons[count] = new_poly;
@@ -394,31 +421,37 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         for (var pi = 0u; pi < count; pi++) {
             var poly = working_states[chain_id].polygons[pi];
 
+            // Unpack polygon fields into f32 for mutation
+            var color = unpack_color(poly);
+            var v0 = unpack_vertex(poly.data.y);
+            var v1 = unpack_vertex(poly.data.z);
+            var v2 = unpack_vertex(poly.data.w);
+
             // Offset polygon (move all vertices by same delta)
             if rand_f32(&rng) < params.offset_polygon_prob {
                 let dx = rand_f32_range(&rng, -params.offset_polygon_magnitude, params.offset_polygon_magnitude);
                 let dy = rand_f32_range(&rng, -params.offset_polygon_magnitude, params.offset_polygon_magnitude);
-                poly.v0 = clamp(poly.v0 + vec2<f32>(dx, dy), vec2<f32>(0.0), vec2<f32>(1.0));
-                poly.v1 = clamp(poly.v1 + vec2<f32>(dx, dy), vec2<f32>(0.0), vec2<f32>(1.0));
-                poly.v2 = clamp(poly.v2 + vec2<f32>(dx, dy), vec2<f32>(0.0), vec2<f32>(1.0));
+                v0 = clamp(v0 + vec2<f32>(dx, dy), vec2<f32>(0.0), vec2<f32>(1.0));
+                v1 = clamp(v1 + vec2<f32>(dx, dy), vec2<f32>(0.0), vec2<f32>(1.0));
+                v2 = clamp(v2 + vec2<f32>(dx, dy), vec2<f32>(0.0), vec2<f32>(1.0));
                 is_dirty = true;
             }
 
             // Mutate color channels independently
             if rand_f32(&rng) < params.change_color_prob {
-                poly.color.x = rand_f32(&rng);
+                color.x = rand_f32(&rng);
                 is_dirty = true;
             }
             if rand_f32(&rng) < params.change_color_prob {
-                poly.color.y = rand_f32(&rng);
+                color.y = rand_f32(&rng);
                 is_dirty = true;
             }
             if rand_f32(&rng) < params.change_color_prob {
-                poly.color.z = rand_f32(&rng);
+                color.z = rand_f32(&rng);
                 is_dirty = true;
             }
             if rand_f32(&rng) < params.change_color_prob {
-                poly.color.w = clamp(rand_f32(&rng), params.min_alpha_norm, params.max_alpha_norm);
+                color.w = clamp(rand_f32(&rng), params.min_alpha_norm, params.max_alpha_norm);
                 is_dirty = true;
             }
 
@@ -426,40 +459,40 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let color_step = 1.0 / 255.0;
             if rand_f32(&rng) < params.micro_adjust_prob {
                 let dir = select(-color_step, color_step, rand_f32(&rng) > 0.5);
-                poly.color.x = clamp(poly.color.x + dir, 0.0, 1.0);
+                color.x = clamp(color.x + dir, 0.0, 1.0);
                 is_dirty = true;
             }
             if rand_f32(&rng) < params.micro_adjust_prob {
                 let dir = select(-color_step, color_step, rand_f32(&rng) > 0.5);
-                poly.color.y = clamp(poly.color.y + dir, 0.0, 1.0);
+                color.y = clamp(color.y + dir, 0.0, 1.0);
                 is_dirty = true;
             }
             if rand_f32(&rng) < params.micro_adjust_prob {
                 let dir = select(-color_step, color_step, rand_f32(&rng) > 0.5);
-                poly.color.z = clamp(poly.color.z + dir, 0.0, 1.0);
+                color.z = clamp(color.z + dir, 0.0, 1.0);
                 is_dirty = true;
             }
             if rand_f32(&rng) < params.micro_adjust_prob {
                 let dir = select(-color_step, color_step, rand_f32(&rng) > 0.5);
-                poly.color.w = clamp(poly.color.w + dir, params.min_alpha_norm, params.max_alpha_norm);
+                color.w = clamp(color.w + dir, params.min_alpha_norm, params.max_alpha_norm);
                 is_dirty = true;
             }
 
             // Lighten (all RGB +1/255)
             if rand_f32(&rng) < params.lighten_color_prob
-                && poly.color.x < 1.0 && poly.color.y < 1.0 && poly.color.z < 1.0 {
-                poly.color.x += color_step;
-                poly.color.y += color_step;
-                poly.color.z += color_step;
+                && color.x < 1.0 && color.y < 1.0 && color.z < 1.0 {
+                color.x += color_step;
+                color.y += color_step;
+                color.z += color_step;
                 is_dirty = true;
             }
 
             // Darken (all RGB -1/255)
             if rand_f32(&rng) < params.darken_color_prob
-                && poly.color.x > 0.0 && poly.color.y > 0.0 && poly.color.z > 0.0 {
-                poly.color.x -= color_step;
-                poly.color.y -= color_step;
-                poly.color.z -= color_step;
+                && color.x > 0.0 && color.y > 0.0 && color.z > 0.0 {
+                color.x -= color_step;
+                color.y -= color_step;
+                color.z -= color_step;
                 is_dirty = true;
             }
 
@@ -467,48 +500,55 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             // v0: move point
             if rand_f32(&rng) < params.move_point_prob {
                 let d = params.move_point_max_delta;
-                poly.v0.x = clamp(rand_f32_range(&rng, poly.v0.x - d, poly.v0.x + d), 0.0, 1.0);
-                poly.v0.y = clamp(rand_f32_range(&rng, poly.v0.y - d, poly.v0.y + d), 0.0, 1.0);
+                v0.x = clamp(rand_f32_range(&rng, v0.x - d, v0.x + d), 0.0, 1.0);
+                v0.y = clamp(rand_f32_range(&rng, v0.y - d, v0.y + d), 0.0, 1.0);
                 is_dirty = true;
             }
             // v0: micro adjust
             if rand_f32(&rng) < params.micro_adjust_prob {
                 let d = params.micro_adjust_delta;
-                poly.v0.x = clamp(rand_f32_range(&rng, poly.v0.x - d, poly.v0.x + d), 0.0, 1.0);
-                poly.v0.y = clamp(rand_f32_range(&rng, poly.v0.y - d, poly.v0.y + d), 0.0, 1.0);
+                v0.x = clamp(rand_f32_range(&rng, v0.x - d, v0.x + d), 0.0, 1.0);
+                v0.y = clamp(rand_f32_range(&rng, v0.y - d, v0.y + d), 0.0, 1.0);
                 is_dirty = true;
             }
 
             // v1: move point
             if rand_f32(&rng) < params.move_point_prob {
                 let d = params.move_point_max_delta;
-                poly.v1.x = clamp(rand_f32_range(&rng, poly.v1.x - d, poly.v1.x + d), 0.0, 1.0);
-                poly.v1.y = clamp(rand_f32_range(&rng, poly.v1.y - d, poly.v1.y + d), 0.0, 1.0);
+                v1.x = clamp(rand_f32_range(&rng, v1.x - d, v1.x + d), 0.0, 1.0);
+                v1.y = clamp(rand_f32_range(&rng, v1.y - d, v1.y + d), 0.0, 1.0);
                 is_dirty = true;
             }
             // v1: micro adjust
             if rand_f32(&rng) < params.micro_adjust_prob {
                 let d = params.micro_adjust_delta;
-                poly.v1.x = clamp(rand_f32_range(&rng, poly.v1.x - d, poly.v1.x + d), 0.0, 1.0);
-                poly.v1.y = clamp(rand_f32_range(&rng, poly.v1.y - d, poly.v1.y + d), 0.0, 1.0);
+                v1.x = clamp(rand_f32_range(&rng, v1.x - d, v1.x + d), 0.0, 1.0);
+                v1.y = clamp(rand_f32_range(&rng, v1.y - d, v1.y + d), 0.0, 1.0);
                 is_dirty = true;
             }
 
             // v2: move point
             if rand_f32(&rng) < params.move_point_prob {
                 let d = params.move_point_max_delta;
-                poly.v2.x = clamp(rand_f32_range(&rng, poly.v2.x - d, poly.v2.x + d), 0.0, 1.0);
-                poly.v2.y = clamp(rand_f32_range(&rng, poly.v2.y - d, poly.v2.y + d), 0.0, 1.0);
+                v2.x = clamp(rand_f32_range(&rng, v2.x - d, v2.x + d), 0.0, 1.0);
+                v2.y = clamp(rand_f32_range(&rng, v2.y - d, v2.y + d), 0.0, 1.0);
                 is_dirty = true;
             }
             // v2: micro adjust
             if rand_f32(&rng) < params.micro_adjust_prob {
                 let d = params.micro_adjust_delta;
-                poly.v2.x = clamp(rand_f32_range(&rng, poly.v2.x - d, poly.v2.x + d), 0.0, 1.0);
-                poly.v2.y = clamp(rand_f32_range(&rng, poly.v2.y - d, poly.v2.y + d), 0.0, 1.0);
+                v2.x = clamp(rand_f32_range(&rng, v2.x - d, v2.x + d), 0.0, 1.0);
+                v2.y = clamp(rand_f32_range(&rng, v2.y - d, v2.y + d), 0.0, 1.0);
                 is_dirty = true;
             }
 
+            // Repack mutated fields back into polygon
+            poly.data = vec4<u32>(
+                pack_color(color),
+                pack_vertex(v0),
+                pack_vertex(v1),
+                pack_vertex(v2)
+            );
             working_states[chain_id].polygons[pi] = poly;
         }
     }

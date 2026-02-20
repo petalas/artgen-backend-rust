@@ -2,14 +2,10 @@
 // Dispatch: (W/16, H/16, K) workgroups of size (16, 16, 1)
 // Each thread rasterizes all polygons at its pixel, computes L1 error against reference,
 // then workgroup-reduces the error and thread 0 atomicAdds to per-chain accumulator.
-// Polygons are cooperatively loaded into shared memory in tiles of 256.
+// Polygons are cooperatively loaded into shared memory in tiles of 768 (16 bytes each).
 
 struct Polygon {
-    color: vec4<f32>,
-    v0: vec2<f32>,
-    v1: vec2<f32>,
-    v2: vec2<f32>,
-    _pad: vec2<f32>,
+    data: vec4<u32>,   // [color_packed, v0_packed, v1_packed, v2_packed] — 16 bytes
 }
 
 struct DrawingState {
@@ -19,6 +15,16 @@ struct DrawingState {
     _pad1: u32,
     rng_state: vec4<u32>,
     polygons: array<Polygon, 1000>,
+}
+
+// --- Quantized polygon unpack helpers ---
+
+fn unpack_color(p: Polygon) -> vec4<f32> {
+    return unpack4x8unorm(p.data.x);
+}
+
+fn unpack_vertex(word: u32) -> vec2<f32> {
+    return vec2<f32>(f32(word & 0xFFFFu) / 65535.0, f32(word >> 16u) / 65535.0);
 }
 
 struct Params {
@@ -70,7 +76,7 @@ struct Params {
 @group(0) @binding(2) var<storage, read_write> error_accumulators: array<atomic<u32>>;
 @group(0) @binding(3) var<uniform>             params:             Params;
 
-var<workgroup> shared_polys: array<Polygon, 256>;   // 256 × 48 = 12,288 bytes
+var<workgroup> shared_polys: array<Polygon, 768>;   // 768 × 16 = 12,288 bytes
 var<workgroup> shared_errors: array<u32, 256>;      // 16×16 = 256 threads
 
 // Half-space edge function: positive if point (px,py) is on the left side of edge (ax,ay)->(bx,by)
@@ -105,49 +111,59 @@ fn main(
             var b = 255.0;
 
             let poly_count = working_states[chain_id].polygon_count;
-            let tile_count = (poly_count + 255u) / 256u;
+            let tile_cap = 768u;
+            let tile_count = (poly_count + tile_cap - 1u) / tile_cap;
 
             for (var tile = 0u; tile < tile_count; tile++) {
-                let tile_base = tile * 256u;
-                let load_idx = tile_base + local_idx;
+                let tile_base = tile * tile_cap;
+                let tile_end = min(tile_cap, poly_count - tile_base);
 
-                // Cooperative load: each thread loads one polygon into shared memory
-                if load_idx < poly_count {
-                    shared_polys[local_idx] = working_states[chain_id].polygons[load_idx];
+                // Cooperative load: each thread loads multiple polygons into shared memory
+                // 256 threads loading up to 768 polygons = 3 loads per thread
+                for (var load_pass = 0u; load_pass < 3u; load_pass++) {
+                    let slot = local_idx + load_pass * 256u;
+                    if slot < tile_end {
+                        shared_polys[slot] = working_states[chain_id].polygons[tile_base + slot];
+                    }
                 }
                 workgroupBarrier();
 
                 // Each thread tests its pixel against all polygons in this tile
-                let tile_end = min(256u, poly_count - tile_base);
                 for (var i = 0u; i < tile_end; i++) {
                     let poly = shared_polys[i];
 
+                    // Unpack vertices
+                    let pv0 = unpack_vertex(poly.data.y);
+                    let pv1 = unpack_vertex(poly.data.z);
+                    let pv2 = unpack_vertex(poly.data.w);
+
                     // AABB culling: skip polygons whose bounding box doesn't contain this pixel
-                    let bb_min_x = min(poly.v0.x, min(poly.v1.x, poly.v2.x));
-                    let bb_max_x = max(poly.v0.x, max(poly.v1.x, poly.v2.x));
-                    let bb_min_y = min(poly.v0.y, min(poly.v1.y, poly.v2.y));
-                    let bb_max_y = max(poly.v0.y, max(poly.v1.y, poly.v2.y));
+                    let bb_min_x = min(pv0.x, min(pv1.x, pv2.x));
+                    let bb_max_x = max(pv0.x, max(pv1.x, pv2.x));
+                    let bb_min_y = min(pv0.y, min(pv1.y, pv2.y));
+                    let bb_max_y = max(pv0.y, max(pv1.y, pv2.y));
 
                     if fx < bb_min_x || fx > bb_max_x || fy < bb_min_y || fy > bb_max_y {
                         continue;
                     }
 
                     // Half-space triangle test (3 edge evaluations)
-                    let e0 = edge_fn(poly.v0.x, poly.v0.y, poly.v1.x, poly.v1.y, fx, fy);
-                    let e1 = edge_fn(poly.v1.x, poly.v1.y, poly.v2.x, poly.v2.y, fx, fy);
-                    let e2 = edge_fn(poly.v2.x, poly.v2.y, poly.v0.x, poly.v0.y, fx, fy);
+                    let e0 = edge_fn(pv0.x, pv0.y, pv1.x, pv1.y, fx, fy);
+                    let e1 = edge_fn(pv1.x, pv1.y, pv2.x, pv2.y, fx, fy);
+                    let e2 = edge_fn(pv2.x, pv2.y, pv0.x, pv0.y, fx, fy);
 
                     // Inside if all same sign (handle both CW and CCW winding)
                     let all_pos = e0 >= 0.0 && e1 >= 0.0 && e2 >= 0.0;
                     let all_neg = e0 <= 0.0 && e1 <= 0.0 && e2 <= 0.0;
 
                     if all_pos || all_neg {
-                        // Alpha blend: out = src * alpha + dst * (1 - alpha)
-                        let alpha = poly.color.w;
+                        // Unpack color and alpha blend: out = src * alpha + dst * (1 - alpha)
+                        let pcolor = unpack_color(poly);
+                        let alpha = pcolor.w;
                         let inv_alpha = 1.0 - alpha;
-                        let src_r = poly.color.x * 255.0;
-                        let src_g = poly.color.y * 255.0;
-                        let src_b = poly.color.z * 255.0;
+                        let src_r = pcolor.x * 255.0;
+                        let src_g = pcolor.y * 255.0;
+                        let src_b = pcolor.z * 255.0;
                         r = r * inv_alpha + src_r * alpha;
                         g = g * inv_alpha + src_g * alpha;
                         b = b * inv_alpha + src_b * alpha;

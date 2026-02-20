@@ -2,11 +2,7 @@
 // Two entry points: `select_main` and `migrate_main`
 
 struct Polygon {
-    color: vec4<f32>,
-    v0: vec2<f32>,
-    v1: vec2<f32>,
-    v2: vec2<f32>,
-    _pad: vec2<f32>,
+    data: vec4<u32>,   // [color_packed, v0_packed, v1_packed, v2_packed] — 16 bytes
 }
 
 struct DrawingState {
