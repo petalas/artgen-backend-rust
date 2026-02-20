@@ -25,21 +25,25 @@ WORKDIR /app
 # --- Layer 1: Cache dependency compilation ---
 # Copy only manifests and lockfile, build with dummy source
 COPY Cargo.toml Cargo.lock* rust-toolchain.toml ./
+COPY shared/Cargo.toml shared/Cargo.toml
 COPY viewer/Cargo.toml viewer/Cargo.toml
 RUN mkdir -p src && \
     echo "fn main() {}" > src/main.rs && \
     echo "" > src/lib.rs && \
     mkdir -p benches && \
     echo "fn main() {}" > benches/bench.rs && \
+    mkdir -p shared/src && \
+    echo "" > shared/src/lib.rs && \
     mkdir -p viewer/src && \
     echo "fn main() {}" > viewer/src/main.rs && \
     cargo build --release -p artgen-backend-rust 2>/dev/null; \
-    rm -rf src benches viewer/src
+    rm -rf src benches shared/src viewer/src
 
 # --- Layer 2: Build actual source (only this layer rebuilds on code changes) ---
 COPY src/ src/
+COPY shared/src/ shared/src/
 COPY benches/ benches/
-RUN find src benches -name '*.rs' -exec touch {} + && \
+RUN find src shared/src benches -name '*.rs' -exec touch {} + && \
     mkdir -p viewer/src && echo "fn main() {}" > viewer/src/main.rs && \
     cargo build --release -p artgen-backend-rust
 
