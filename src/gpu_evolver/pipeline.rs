@@ -13,7 +13,6 @@ pub struct GpuPipeline {
     pub chain_states_buf: Buffer,
     pub working_states_buf: Buffer,
     pub reference_image_buf: Buffer,
-    pub render_targets_buf: Buffer,
     pub error_accumulators_buf: Buffer,
     pub control_flags_buf: Buffer,
     pub params_buf: Buffer,
@@ -22,17 +21,21 @@ pub struct GpuPipeline {
 
     // Compute pipelines
     pub mutate_pipeline: ComputePipeline,
-    pub rasterize_pipeline: ComputePipeline,
-    pub error_reduce_pipeline: ComputePipeline,
+    pub rasterize_error_pipeline: ComputePipeline,
     pub select_pipeline: ComputePipeline,
     pub migrate_pipeline: ComputePipeline,
 
     // Bind groups
     pub mutate_bind_group: BindGroup,
-    pub rasterize_bind_group: BindGroup,
-    pub error_reduce_bind_group: BindGroup,
+    pub rasterize_error_bind_group: BindGroup,
     pub select_bind_group: BindGroup,
     pub migrate_bind_group: BindGroup, // same layout as select, reused
+
+    // Timestamp profiling
+    pub timestamp_query_set: QuerySet,
+    pub timestamp_resolve_buf: Buffer,
+    pub timestamp_staging_buf: Buffer,
+    pub timestamp_period: f32,
 
     // Config
     pub chain_count: u32,
@@ -84,15 +87,14 @@ impl GpuPipeline {
         println!("Selected GPU adapter: {:?}", adapter.get_info().name);
 
         // Cap chain_count to fit within the adapter's max storage buffer binding size.
-        // The render_targets buffer (chain_count * W * H * 4) is always the largest.
+        // Largest buffer is chain_states or working_states (chain_count × GPU_DRAWING_STATE_SIZE).
         let adapter_limits = adapter.limits();
         let max_ssbo = adapter_limits.max_storage_buffer_binding_size as u64;
-        let pixels_per_chain = (image_width as u64) * (image_height as u64);
-        let max_chains_by_buffer = max_ssbo / (pixels_per_chain * 4);
+        let max_chains_by_buffer = max_ssbo / (GPU_DRAWING_STATE_SIZE as u64);
         let chain_count = chain_count.min(max_chains_by_buffer as u32);
 
-        // Calculate the largest buffer we actually need (render_targets)
-        let max_buffer_needed = (chain_count as u64) * pixels_per_chain * 4;
+        // Calculate the largest buffer we actually need (chain_states / working_states)
+        let max_buffer_needed = (chain_count as u64) * (GPU_DRAWING_STATE_SIZE as u64);
         // Clamp to adapter limit (don't request more than hardware supports)
         let max_buffer_size = max_buffer_needed.min(max_ssbo as u64);
 
@@ -107,7 +109,7 @@ impl GpuPipeline {
         let (device, queue) = adapter
             .request_device(&DeviceDescriptor {
                 label: Some("gpu_evolver_device"),
-                required_features: Features::empty(),
+                required_features: Features::TIMESTAMP_QUERY,
                 required_limits,
                 memory_hints: MemoryHints::Performance,
             }, None)
@@ -115,9 +117,7 @@ impl GpuPipeline {
             .expect("Failed to create GPU device");
 
         // --- Buffer sizes ---
-        let pixels_per_chain = (image_width * image_height) as usize;
         let chain_states_size = (chain_count as usize) * GPU_DRAWING_STATE_SIZE;
-        let render_targets_size = (chain_count as usize) * pixels_per_chain * 4; // u32 per pixel
         let error_accumulators_size = (chain_count as usize) * 4; // u32 per chain
 
         // --- Create buffers ---
@@ -150,14 +150,6 @@ impl GpuPipeline {
             label: Some("reference_image"),
             contents: bytemuck::cast_slice(&ref_packed),
             usage: BufferUsages::STORAGE,
-        });
-
-        // Render targets (per-chain rendered images)
-        let render_targets_buf = device.create_buffer(&BufferDescriptor {
-            label: Some("render_targets"),
-            size: render_targets_size as u64,
-            usage: BufferUsages::STORAGE,
-            mapped_at_creation: false,
         });
 
         // Error accumulators (atomic u32 per chain)
@@ -204,20 +196,38 @@ impl GpuPipeline {
             mapped_at_creation: false,
         });
 
+        // --- Timestamp query profiling ---
+        let timestamp_query_set = device.create_query_set(&QuerySetDescriptor {
+            label: Some("timestamp_queries"),
+            ty: QueryType::Timestamp,
+            count: 8, // 2 per pass × 4 passes
+        });
+
+        let timestamp_resolve_buf = device.create_buffer(&BufferDescriptor {
+            label: Some("timestamp_resolve"),
+            size: 8 * 8, // 8 × u64
+            usage: BufferUsages::QUERY_RESOLVE | BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+
+        let timestamp_staging_buf = device.create_buffer(&BufferDescriptor {
+            label: Some("timestamp_staging"),
+            size: 8 * 8,
+            usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let timestamp_period = queue.get_timestamp_period();
+
         // --- Shader modules ---
         let mutate_shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("mutate_shader"),
             source: ShaderSource::Wgsl(include_str!("../shaders/mutate.wgsl").into()),
         });
 
-        let rasterize_shader = device.create_shader_module(ShaderModuleDescriptor {
-            label: Some("rasterize_shader"),
-            source: ShaderSource::Wgsl(include_str!("../shaders/rasterize.wgsl").into()),
-        });
-
-        let error_reduce_shader = device.create_shader_module(ShaderModuleDescriptor {
-            label: Some("error_reduce_shader"),
-            source: ShaderSource::Wgsl(include_str!("../shaders/error_reduce.wgsl").into()),
+        let rasterize_error_shader = device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("rasterize_error_shader"),
+            source: ShaderSource::Wgsl(include_str!("../shaders/rasterize_error.wgsl").into()),
         });
 
         let select_shader = device.create_shader_module(ShaderModuleDescriptor {
@@ -264,46 +274,9 @@ impl GpuPipeline {
             ],
         });
 
-        // Rasterize: working_states(read), render_targets(rw), params(uniform)
-        let rasterize_bgl = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-            label: Some("rasterize_bgl"),
-            entries: &[
-                BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-            ],
-        });
-
-        // Error reduce: render_targets(read), reference_image(read), error_accumulators(rw), params(uniform)
-        let error_reduce_bgl = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-            label: Some("error_reduce_bgl"),
+        // Rasterize+Error: working_states(read), reference_image(read), error_accumulators(rw), params(uniform)
+        let rasterize_error_bgl = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("rasterize_error_bgl"),
             entries: &[
                 BindGroupLayoutEntry {
                     binding: 0,
@@ -420,29 +393,15 @@ impl GpuPipeline {
             cache: None,
         });
 
-        let rasterize_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
-            label: Some("rasterize_layout"),
-            bind_group_layouts: &[&rasterize_bgl],
+        let rasterize_error_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+            label: Some("rasterize_error_layout"),
+            bind_group_layouts: &[&rasterize_error_bgl],
             push_constant_ranges: &[],
         });
-        let rasterize_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
-            label: Some("rasterize_pipeline"),
-            layout: Some(&rasterize_pipeline_layout),
-            module: &rasterize_shader,
-            entry_point: "main",
-            compilation_options: Default::default(),
-            cache: None,
-        });
-
-        let error_reduce_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
-            label: Some("error_reduce_layout"),
-            bind_group_layouts: &[&error_reduce_bgl],
-            push_constant_ranges: &[],
-        });
-        let error_reduce_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
-            label: Some("error_reduce_pipeline"),
-            layout: Some(&error_reduce_pipeline_layout),
-            module: &error_reduce_shader,
+        let rasterize_error_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+            label: Some("rasterize_error_pipeline"),
+            layout: Some(&rasterize_error_pipeline_layout),
+            module: &rasterize_error_shader,
             entry_point: "main",
             compilation_options: Default::default(),
             cache: None,
@@ -482,21 +441,11 @@ impl GpuPipeline {
             ],
         });
 
-        let rasterize_bind_group = device.create_bind_group(&BindGroupDescriptor {
-            label: Some("rasterize_bg"),
-            layout: &rasterize_bgl,
+        let rasterize_error_bind_group = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("rasterize_error_bg"),
+            layout: &rasterize_error_bgl,
             entries: &[
                 BindGroupEntry { binding: 0, resource: working_states_buf.as_entire_binding() },
-                BindGroupEntry { binding: 1, resource: render_targets_buf.as_entire_binding() },
-                BindGroupEntry { binding: 2, resource: params_buf.as_entire_binding() },
-            ],
-        });
-
-        let error_reduce_bind_group = device.create_bind_group(&BindGroupDescriptor {
-            label: Some("error_reduce_bg"),
-            layout: &error_reduce_bgl,
-            entries: &[
-                BindGroupEntry { binding: 0, resource: render_targets_buf.as_entire_binding() },
                 BindGroupEntry { binding: 1, resource: reference_image_buf.as_entire_binding() },
                 BindGroupEntry { binding: 2, resource: error_accumulators_buf.as_entire_binding() },
                 BindGroupEntry { binding: 3, resource: params_buf.as_entire_binding() },
@@ -534,20 +483,21 @@ impl GpuPipeline {
             chain_states_buf,
             working_states_buf,
             reference_image_buf,
-            render_targets_buf,
             error_accumulators_buf,
             control_flags_buf,
             params_buf,
             readback_staging_buf,
             control_staging_buf,
             mutate_pipeline,
-            rasterize_pipeline,
-            error_reduce_pipeline,
+            rasterize_error_pipeline,
             select_pipeline,
             migrate_pipeline,
+            timestamp_query_set,
+            timestamp_resolve_buf,
+            timestamp_staging_buf,
+            timestamp_period,
             mutate_bind_group,
-            rasterize_bind_group,
-            error_reduce_bind_group,
+            rasterize_error_bind_group,
             select_bind_group,
             migrate_bind_group,
             chain_count,

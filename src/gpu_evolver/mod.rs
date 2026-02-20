@@ -15,12 +15,62 @@ use buffers::{
 };
 use pipeline::GpuPipeline;
 
+#[derive(Default)]
+pub struct PassTimings {
+    pub mutate_ns: f64,
+    pub rasterize_error_ns: f64,
+    pub select_ns: f64,
+    pub migrate_ns: f64,
+    pub sample_count: u64,
+    pub migrate_sample_count: u64,
+}
+
+impl PassTimings {
+    pub fn total_ns(&self) -> f64 {
+        self.mutate_ns + self.rasterize_error_ns + self.select_ns + self.migrate_ns
+    }
+
+    pub fn print_averages(&self) {
+        if self.sample_count == 0 {
+            return;
+        }
+        let n = self.sample_count as f64;
+        let mutate = self.mutate_ns / n / 1_000_000.0;
+        let rasterize_error = self.rasterize_error_ns / n / 1_000_000.0;
+        let select = self.select_ns / n / 1_000_000.0;
+        let migrate = if self.migrate_sample_count > 0 {
+            self.migrate_ns / self.migrate_sample_count as f64 / 1_000_000.0
+        } else {
+            0.0
+        };
+        let total = mutate + rasterize_error + select + migrate;
+
+        if total <= 0.0 {
+            return;
+        }
+
+        println!("GPU pass timings (avg over {} batches):", self.sample_count);
+        println!("  mutate:          {:6.2}ms ({:5.1}%)", mutate, mutate / total * 100.0);
+        println!("  rasterize+error: {:6.2}ms ({:5.1}%)", rasterize_error, rasterize_error / total * 100.0);
+        println!("  select:          {:6.2}ms ({:5.1}%)", select, select / total * 100.0);
+        if self.migrate_sample_count > 0 {
+            println!("  migrate:         {:6.2}ms ({:5.1}%)", migrate, migrate / total * 100.0);
+        }
+        println!("  total:           {:6.2}ms", total);
+    }
+
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
 pub struct GpuEvolver {
     pipeline: GpuPipeline,
     iteration: u32,
     total_evaluations: u64,
     start_time: Instant,
     best_fitness_bits: u32, // track best fitness across batches for control flag reset
+    pass_timings: PassTimings,
 }
 
 impl GpuEvolver {
@@ -72,6 +122,7 @@ impl GpuEvolver {
             total_evaluations: 0,
             start_time: Instant::now(),
             best_fitness_bits: 0,
+            pass_timings: PassTimings::default(),
         }
     }
 
@@ -108,67 +159,90 @@ impl GpuEvolver {
         let wg_x = (p.image_width + 7) / 8;
         let wg_y = (p.image_height + 7) / 8;
 
+        let is_last_iter = |i: u32| i == iterations - 1;
+        let mut migrate_ran = false;
+
         for i in 0..iterations {
+            let ts = if is_last_iter(i) { Some(&p.timestamp_query_set) } else { None };
+
             // Pass 1: Mutate (K workgroups of size 1)
             {
                 let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
                     label: Some("mutate"),
-                    timestamp_writes: None,
+                    timestamp_writes: ts.map(|qs| ComputePassTimestampWrites {
+                        query_set: qs,
+                        beginning_of_pass_write_index: Some(0),
+                        end_of_pass_write_index: Some(1),
+                    }),
                 });
                 pass.set_pipeline(&p.mutate_pipeline);
                 pass.set_bind_group(0, &p.mutate_bind_group, &[]);
                 pass.dispatch_workgroups(p.chain_count, 1, 1);
             }
 
-            // Pass 2: Rasterize (W/8 × H/8 × K workgroups)
+            // Pass 2: Rasterize + Error (fused, W/8 × H/8 × K workgroups)
             {
                 let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                    label: Some("rasterize"),
-                    timestamp_writes: None,
+                    label: Some("rasterize_error"),
+                    timestamp_writes: ts.map(|qs| ComputePassTimestampWrites {
+                        query_set: qs,
+                        beginning_of_pass_write_index: Some(2),
+                        end_of_pass_write_index: Some(3),
+                    }),
                 });
-                pass.set_pipeline(&p.rasterize_pipeline);
-                pass.set_bind_group(0, &p.rasterize_bind_group, &[]);
+                pass.set_pipeline(&p.rasterize_error_pipeline);
+                pass.set_bind_group(0, &p.rasterize_error_bind_group, &[]);
                 pass.dispatch_workgroups(wg_x, wg_y, p.chain_count);
             }
 
-            // Pass 3: Error + Reduce (W/8 × H/8 × K workgroups)
-            {
-                let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                    label: Some("error_reduce"),
-                    timestamp_writes: None,
-                });
-                pass.set_pipeline(&p.error_reduce_pipeline);
-                pass.set_bind_group(0, &p.error_reduce_bind_group, &[]);
-                pass.dispatch_workgroups(wg_x, wg_y, p.chain_count);
-            }
-
-            // Pass 4: Select (K workgroups of size 1)
+            // Pass 3: Select (K workgroups of size 1)
             {
                 let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
                     label: Some("select"),
-                    timestamp_writes: None,
+                    timestamp_writes: ts.map(|qs| ComputePassTimestampWrites {
+                        query_set: qs,
+                        beginning_of_pass_write_index: Some(4),
+                        end_of_pass_write_index: Some(5),
+                    }),
                 });
                 pass.set_pipeline(&p.select_pipeline);
                 pass.set_bind_group(0, &p.select_bind_group, &[]);
                 pass.dispatch_workgroups(p.chain_count, 1, 1);
             }
 
-            // Pass 5: Migrate (every MIGRATION_INTERVAL iterations)
+            // Pass 4: Migrate (every MIGRATION_INTERVAL iterations)
             let global_iter = self.iteration + i;
             if global_iter > 0 && global_iter % GPU_MIGRATION_INTERVAL == 0 {
                 let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
                     label: Some("migrate"),
-                    timestamp_writes: None,
+                    timestamp_writes: ts.map(|qs| ComputePassTimestampWrites {
+                        query_set: qs,
+                        beginning_of_pass_write_index: Some(6),
+                        end_of_pass_write_index: Some(7),
+                    }),
                 });
                 pass.set_pipeline(&p.migrate_pipeline);
                 pass.set_bind_group(0, &p.migrate_bind_group, &[]);
                 pass.dispatch_workgroups(p.chain_count, 1, 1);
+                if is_last_iter(i) {
+                    migrate_ran = true;
+                }
             }
 
             // Reset error accumulators between iterations (via buffer copy of zeros)
             // We write zeros at start and after each select reads them via atomicExchange,
             // so they're already reset. No extra work needed.
         }
+
+        // Resolve timestamp queries into resolve buffer, then copy to staging
+        encoder.resolve_query_set(&p.timestamp_query_set, 0..8, &p.timestamp_resolve_buf, 0);
+        encoder.copy_buffer_to_buffer(
+            &p.timestamp_resolve_buf,
+            0,
+            &p.timestamp_staging_buf,
+            0,
+            8 * 8,
+        );
 
         // Copy control flags to staging for readback
         encoder.copy_buffer_to_buffer(
@@ -187,6 +261,9 @@ impl GpuEvolver {
 
         // Poll for completion and read control flags
         let control = self.read_control_flags();
+
+        // Read timestamp results (device already polled by read_control_flags)
+        self.read_timestamps(migrate_ran);
 
         if control.new_best_found != 0 {
             self.best_fitness_bits = control.best_fitness_bits;
@@ -251,6 +328,47 @@ impl GpuEvolver {
         drawing
     }
 
+    fn read_timestamps(&mut self, migrate_ran: bool) {
+        let p = &self.pipeline;
+        let slice = p.timestamp_staging_buf.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(MapMode::Read, move |result| {
+            tx.send(result).unwrap();
+        });
+        p.device.poll(Maintain::Wait);
+        rx.recv().unwrap().expect("Failed to map timestamp staging buffer");
+
+        let data = slice.get_mapped_range();
+        let timestamps: &[u64] = bytemuck::cast_slice(&data);
+        let period = p.timestamp_period as f64; // ns per tick
+
+        // Accumulate per-pass durations (in nanoseconds)
+        let duration = |begin_idx: usize, end_idx: usize| -> f64 {
+            timestamps[end_idx].wrapping_sub(timestamps[begin_idx]) as f64 * period
+        };
+
+        self.pass_timings.mutate_ns += duration(0, 1);
+        self.pass_timings.rasterize_error_ns += duration(2, 3);
+        self.pass_timings.select_ns += duration(4, 5);
+        self.pass_timings.sample_count += 1;
+
+        if migrate_ran {
+            self.pass_timings.migrate_ns += duration(6, 7);
+            self.pass_timings.migrate_sample_count += 1;
+        }
+
+        drop(data);
+        p.timestamp_staging_buf.unmap();
+    }
+
+    pub fn pass_timings(&self) -> &PassTimings {
+        &self.pass_timings
+    }
+
+    pub fn reset_pass_timings(&mut self) {
+        self.pass_timings.reset();
+    }
+
     pub fn total_evaluations(&self) -> u64 {
         self.total_evaluations
     }
@@ -275,10 +393,9 @@ fn estimate_gpu_memory(chain_count: u32, w: u32, h: u32) -> usize {
     let chain_states = k * GPU_DRAWING_STATE_SIZE;
     let working_states = k * GPU_DRAWING_STATE_SIZE;
     let reference = pixels * 4;
-    let render_targets = k * pixels * 4;
     let error_accumulators = k * 4;
     let control = 16;
     let params = std::mem::size_of::<GpuParams>();
     let staging = GPU_DRAWING_STATE_SIZE + 16;
-    chain_states + working_states + reference + render_targets + error_accumulators + control + params + staging
+    chain_states + working_states + reference + error_accumulators + control + params + staging
 }
