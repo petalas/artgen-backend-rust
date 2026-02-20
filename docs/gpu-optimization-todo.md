@@ -1,98 +1,146 @@
-# GPU Optimization TODO — Prioritized Roadmap
+# GPU Evolution Pipeline — Optimization TODO
 
-Generated from 5 expert analyses. See individual docs for full details:
+Consolidated from 5 expert analyses (2026-02-20). Items are tiered by expected impact and implementation effort.
+
+## Already Completed
+
+- [x] Fused rasterize + error_reduce into single compute shader (~20% faster, eliminated 301MB buffer)
+- [x] Per-polygon AABB early-out in rasterizer (skips ~97% of pixel tests)
+- [x] L1 error metric instead of sqrt(L2)
+- [x] Ring-topology migration (replaced catastrophic global-best)
+- [x] Increased chains from 64 → 512, iterations/batch from 10 → 50
+- [x] Crossover (spatial + uniform) in mutate shader
+- [x] Tournament selection within islands
+- [x] Island model with configurable island count and migration intervals
+
+---
+
+## Tier 1 — Quick Wins (high impact, low effort)
+
+### 1.1 Consolidate triple staging readback into single poll
+**Source:** CPU-GPU hybrid, wgpu/Vulkan
+**Files:** `src/gpu_evolver/mod.rs`
+Each batch calls `device.poll(Wait)` three times (control flags, timestamps, fitness). All three staging buffers are filled by the same command buffer — map all three simultaneously and poll once. Eliminates 2 unnecessary CPU-GPU sync points per batch. Especially impactful on WSL2 where each fence wait crosses the VM boundary.
+
+### 1.2 Accept neutral mutations (equal fitness)
+**Source:** Evolutionary algorithm
+**Files:** `src/shaders/select.wgsl`
+Selection uses strict `>`, rejecting neutral moves. Polygon art has vast fitness plateaus. Accept equal-fitness candidates with ~50% probability (e.g., `iteration_number % 2 == 0`). One-line change, potentially significant convergence improvement in late stages.
+
+### 1.3 Remove redundant error accumulator reset
+**Source:** GPU compute
+**Files:** `src/gpu_evolver/mod.rs`
+The error accumulator buffer is zeroed via `queue.write_buffer` before every batch, but the select shader already resets it via `atomicExchange` after each iteration. Remove the CPU-side write.
+
+### 1.4 Swap-remove for polygon insert/remove
+**Source:** Data structures
+**Files:** `src/shaders/mutate.wgsl`
+Insert and remove mutations perform O(n) array shifts (up to 48KB of memcpy). Replace with swap-with-last-element + count adjustment for O(1). Z-order impact is negligible since the reorder mutation already randomizes polygon order.
+
+### 1.5 Skip timestamp readback on non-reporting batches
+**Source:** CPU-GPU hybrid
+**Files:** `src/gpu_evolver/mod.rs`
+Timestamp resolve + copy + map runs every batch but is only consumed every ~2 seconds for stats. Only resolve timestamps on reporting batches.
+
+### 1.6 Batch island readbacks into single command buffer
+**Source:** CPU-GPU hybrid
+**Files:** `src/gpu_evolver/mod.rs`
+`build_gpu_stats` issues N separate GPU submissions (one per island). Batch all island readbacks into one command buffer + one staging buffer map. Saves 1-5ms every 2 seconds.
+
+---
+
+## Tier 2 — Major Improvements (high impact, medium effort)
+
+### 2.1 Quantized 16-byte polygon representation
+**Source:** Data structures
+**Files:** `src/gpu_evolver/buffers.rs`, `src/shaders/*.wgsl`
+Pack polygon into a single `vec4<u32>` (16 bytes): color as packed u8x4, vertices as packed u16x2. Shrinks `GpuDrawingState` from 48,032 → 16,032 bytes (67% reduction). Triples cache utilization, triples shared memory tile capacity, cuts memory bandwidth 3x. Unpack cost is ~1 cycle/polygon on modern GPUs.
+
+### 2.2 Reference image as texture instead of storage buffer
+**Source:** wgpu/Vulkan
+**Files:** `src/gpu_evolver/pipeline.rs`, `src/shaders/rasterize_error.wgsl`
+Reference image is stored as `array<u32>` in storage memory. The 16x16 workgroup access pattern has strong 2D spatial locality — `texture_2d<f32>` with `textureLoad` would leverage dedicated texture cache hardware (separate from L1, native 2D tiling). Eliminates manual bit-unpacking. Estimated 10-30% improvement in rasterize_error pass.
+
+### 2.3 Double-buffered staging for CPU/GPU overlap
+**Source:** CPU-GPU hybrid, wgpu/Vulkan
+**Files:** `src/gpu_evolver/mod.rs`, `src/gpu_evolver/pipeline.rs`
+Current flow: submit batch → block for readback → process → submit next. With two staging buffer sets, submit batch N+1 immediately while reading N's results. Estimated 10-30% throughput increase.
+
+### 2.4 Eliminate redundant full-buffer copy in mutate shader
+**Source:** GPU compute
+**Files:** `src/shaders/mutate.wgsl`
+Mutate copies all ~1000 polygons from `chain_states` to `working_states`, then mutates a handful. With low per-polygon mutation probability, >95% of polygons are copied unchanged. Restructure to read-mutate-write in a single pass, halving mutation-phase bandwidth.
+
+### 2.5 Push constants for GpuParams
+**Source:** wgpu/Vulkan
+**Files:** `src/gpu_evolver/pipeline.rs`, `src/gpu_evolver/mod.rs`, `src/shaders/*.wgsl`
+The 128-byte uniform buffer is re-uploaded via `queue.write_buffer()` every batch (allocates staging + copy). 128 bytes fits within Vulkan's minimum push constant guarantee. Eliminates staging allocation, buffer binding slot, and `params_buf` entirely.
+
+### 2.6 Bound the `while !is_dirty` retry loop in mutate
+**Source:** GPU compute
+**Files:** `src/shaders/mutate.wgsl`
+Some chains finish in 1 attempt while others retry hundreds of times, serializing the entire warp. Force a guaranteed micro-mutation (e.g., nudge one vertex by ±1) after the first unsuccessful pass. Bounds execution to at most 2 iterations, eliminates tail-latency spikes.
+
+---
+
+## Tier 3 — Algorithmic & Structural (medium impact, medium effort)
+
+### 3.1 Increase workgroup size for mutate/select/migrate (1 → 64)
+**Source:** GPU compute, Data structures
+**Files:** `src/shaders/mutate.wgsl`, `src/shaders/select.wgsl`
+These shaders all use `@workgroup_size(1)`, wasting 97% of warp lanes. With 512 single-thread workgroups on a 170-SM GPU, occupancy is <0.2%. Even if only thread 0 does work, larger workgroups improve latency hiding. Better: distribute polygon copy work across threads.
+
+### 3.2 Single-mutation mode
+**Source:** Evolutionary algorithm
+**Files:** `src/shaders/mutate.wgsl`
+With N=500 polygons, ~41 per-polygon mutations fire per iteration, drowning signal in noise. A weighted-roulette single-operator-per-iteration mode gives selection cleaner signal. GPU throughput compensates for smaller per-iteration changes.
+
+### 3.3 Add missing mutation operators (scale, rotate, adjacent-swap)
+**Source:** Evolutionary algorithm
+**Files:** `src/shaders/mutate.wgsl`
+No scale (resize around centroid) or rotate operators exist. Reorder uses random swaps when adjacent swaps are far more effective for z-order optimization. These fill gaps in search space exploration.
+
+### 3.4 Adaptive mutation rates
+**Source:** Evolutionary algorithm
+**Files:** `src/shaders/mutate.wgsl`, `src/shaders/select.wgsl`
+All chains use identical static mutation parameters. `iteration_number` is passed to GPU but unused. Implement fitness-proportional intensity (aggressive for low-fitness, fine-grained for high-fitness) and stagnation-triggered mega-mutations.
+
+### 3.5 Perceptually-weighted error (BT.601 luma)
+**Source:** Evolutionary algorithm
+**Files:** `src/shaders/rasterize_error.wgsl`
+L1 treats R, G, B equally but human vision is far more sensitive to green. Apply BT.601 weights (0.299, 0.587, 0.114) to channel differences. 3-line change, improves visual quality at zero performance cost.
+
+### 3.6 Pipeline cache for shader compilation
+**Source:** wgpu/Vulkan
+**Files:** `src/gpu_evolver/pipeline.rs`
+All pipelines use `cache: None`, forcing full WGSL→SPIR-V→ISA recompilation on every launch (0.5-2.5s). wgpu v22 `PipelineCache` can serialize to disk, reducing subsequent startup to ~50ms.
+
+---
+
+## Tier 4 — Ambitious / Future (high impact, high effort)
+
+### 4.1 CPU-GPU co-evolution
+**Source:** CPU-GPU hybrid
+**Files:** `src/main.rs`, `src/gpu_evolver/mod.rs`, `src/evaluator.rs`
+Run CPU worker threads alongside GPU doing broader-search mutations. Periodically inject improved CPU candidates into worst-performing GPU chains via `write_buffer`. Heterogeneous island migration at zero GPU cost.
+
+### 4.2 Subgroup intrinsics for error reduction
+**Source:** GPU compute, Data structures
+**Files:** `src/shaders/rasterize_error.wgsl`
+The shared-memory binary reduction tree uses `workgroupBarrier()` at every step. The final 5 steps (stride ≤ 16) could use `subgroupAdd`, and once wgpu's subgroup feature stabilizes, the entire reduction collapses to `subgroupAdd` + 3 cross-subgroup steps.
+
+### 4.3 Configurable MAX_POLYGONS_PER_IMAGE
+**Source:** Data structures
+**Files:** `src/settings.rs`, `src/gpu_evolver/buffers.rs`, `src/shaders/*.wgsl`
+Fixed at 1000 but many runs use far fewer. Making this configurable (e.g., 256-512) would proportionally shrink per-chain state size and improve all memory-bound passes.
+
+---
+
+## Expert Analysis Docs
+
+Full detailed analysis for each area:
 - [GPU Compute Optimization](gpu-compute-optimization.md)
 - [Evolutionary Algorithm Design](evolutionary-algorithm.md)
 - [CPU-GPU Hybrid Architecture](cpu-gpu-hybrid.md)
 - [Data Structures & Algorithms](data-structures-algorithms.md)
 - [wgpu/Vulkan Performance](wgpu-vulkan-performance.md)
-
----
-
-## Already Completed
-
-- [x] Ring-topology migration replacing global-best replacement (select.wgsl)
-- [x] AABB bounding box culling in rasterize (rasterize.wgsl)
-- [x] L1 error metric replacing sqrt+Euclidean (error_reduce.wgsl)
-- [x] GPU-specific MAX_ERROR_PER_PIXEL = 765.0 separate from CPU constant
-- [x] Chain count increased to 512 (auto-capped to adapter limits)
-- [x] Batch size increased to 50 iterations per submission
-- [x] WSL2 Dozen driver buffer limit handling
-
----
-
-## Tier 0 — Profiling (Do First)
-
-> Without profiling data, priority ordering is guesswork. ~1 hour of work that pays for itself immediately.
-
-- [ ] **Add GPU timestamp queries** — Enable `Features::TIMESTAMP_QUERY`, wire up `ComputePassTimestampWrites` on each of the 5 passes. Currently every pass sets `timestamp_writes: None`. This reveals exactly which pass dominates and guides all other work. *(wgpu-vulkan agent)*
-
----
-
-## Tier 1 — GPU Shader Optimizations (Highest Impact)
-
-> These are pure GPU-side changes with the best effort-to-impact ratio. Expected 2-4x throughput improvement combined.
-
-- [ ] **Fuse rasterize + error_reduce into one shader** — The `render_targets` buffer (301 MB) exists solely to pass pixels between these passes. Fusing keeps pixel values in registers, eliminates 602 MB/iteration of bandwidth, removes one dispatch + barrier, and frees 301 MB of VRAM. ~100 lines of shader change. *(Recommended by 3/5 agents — GPU compute, data structures, wgpu-vulkan)*
-
-- [ ] **Shared-memory polygon prefetch in rasterize** — All 64 threads in an 8x8 tile independently read the same polygon array from global memory. Cooperative loading into `var<workgroup>` shared memory reduces L1 cache pressure ~64x on polygon data. *(GPU compute, wgpu-vulkan agents)*
-
-- [ ] **Increase rasterize workgroup size from 8x8 to 16x16** — Current 64-thread workgroups need 24 concurrent per SM for full occupancy. Moving to 256 threads cuts total workgroup count from 1.18M to 295K, reduces scheduler overhead, and enables more efficient shared-memory tiling. *(GPU compute agent)*
-
-- [ ] **Parallelize struct copies in select/migrate** — select.wgsl and migrate use `@workgroup_size(1)`, copying 48 KB with a single thread. Switching to `@workgroup_size(256)` with cooperative copy gives ~256x speedup on the copy portion. *(GPU compute agent)*
-
-- [ ] **Bump mutate/select workgroup_size(1) to workgroup_size(32)** — A workgroup of 1 wastes 31 of 32 NVIDIA warp lanes. Packing 32 chains per workgroup improves SM utilization. Trivial code change. *(GPU compute, wgpu-vulkan agents)*
-
-- [ ] **Remove redundant CPU-side error accumulator zero-write** — The `atomicExchange` in `select_main` already resets each chain's accumulator. The `queue.write_buffer` of zeros at batch start (mod.rs ~line 100) is unnecessary and adds a host-to-device sync point. *(GPU compute agent)*
-
----
-
-## Tier 2 — CPU-GPU Hybrid Architecture
-
-> Use all available hardware. CPU is completely idle during GPU evolution.
-
-- [ ] **Run CPU worker threads alongside GPU** — Move GPU work to a dedicated thread, spawn `num_cpus - 2` CPU `Evaluator` threads concurrently. CPU throughput is lower but adds search diversity (L2 error, variable-vertex polygons, different mutation operators). *(CPU-GPU hybrid agent)*
-
-- [ ] **Bidirectional CPU↔GPU migration** — `drawing_to_gpu()` and `gpu_to_drawing()` already exist. CPU improvements inject into random GPU chains (set `fitness_bits = 0` to force recompute). GPU global best broadcasts to CPU workers via existing `broadcast::Sender<Drawing>`. *(CPU-GPU hybrid agent)*
-
-- [ ] **Double-buffer command submission** — Currently `device.poll(Maintain::Wait)` blocks CPU while GPU runs, then GPU idles during next batch encoding. Two sets of staging buffers with alternating submission keeps both busy. Expected 10-30% throughput gain. *(CPU-GPU hybrid, wgpu-vulkan agents)*
-
-- [ ] **Async GPU submission for housekeeping overlap** — Split `run_batch` into non-blocking `submit_batch` + deferred `poll_result`. PNG rendering, JSON serialization, and disk I/O execute during GPU compute instead of after. *(CPU-GPU hybrid agent)*
-
----
-
-## Tier 3 — Evolutionary Algorithm Improvements
-
-> Transform from parallel hill climbing to a proper genetic algorithm. The algorithm changes are orthogonal to performance — they improve solution quality.
-
-- [ ] **Stagnation detection & reinitialization** — Repurpose `_pad0` field in `GpuDrawingState` as `stagnation_counter` (zero layout change). Increment on rejection, reset on acceptance. After threshold (~5000 iterations), reinitialize the chain. Prevents dead chains from wasting GPU cycles. *(Evolutionary algorithm agent)*
-
-- [ ] **Adaptive mutation strength** — Scale mutation deltas by fitness: `scale = 0.1 + 0.9 * (1.0 - fitness/100.0)`. Large exploratory mutations early, fine-grained adjustments late. Zero additional state required. *(Evolutionary algorithm agent)*
-
-- [ ] **Clone-based add-polygon** — Instead of random triangles (near-zero chance of benefit), 50% chance to duplicate an existing polygon with slight perturbation. Leverages accumulated optimization. ~30 lines in mutate.wgsl. *(Evolutionary algorithm agent)*
-
-- [ ] **Region-based crossover** — Split image spatially, take each parent's polygons from their respective region. New `crossover.wgsl` shader dispatched every ~200 iterations, pairing chains `(2i, 2i+1)`. No additional buffers needed. *(Evolutionary algorithm agent)*
-
-- [ ] **Hierarchical island model** — Replace flat ring with 32 islands of 16 chains. Intra-island ring migration every 50 iterations, inter-island migration every 500 iterations. Preserves diversity while propagating good solutions. New entry point in select.wgsl. *(Evolutionary algorithm agent)*
-
----
-
-## Tier 4 — Data Structure Optimizations
-
-> Reduce memory footprint and bandwidth further. Best done after Tier 1 fuse.
-
-- [ ] **Pack polygon colors as u32** — RGBA stored in 4x f32 (16 bytes) but values are fundamentally 8-bit. Pack into one u32, shrink GpuPolygon from 48 to 32 bytes (33% reduction), save 15.7 MB across all buffers. Unpack with bitwise ops. *(Data structures agent)*
-
-- [ ] **In-place mutation with undo log** — Mutate pass copies 48 KB/chain (23.5 MB total) every iteration even though typically 1-3 polygons change. Mutate in-place, store a 52-byte undo record. Eliminates `working_states` buffer, halves mutate bandwidth. *(Data structures agent)*
-
----
-
-## Impact Summary
-
-| Tier | Estimated Throughput Gain | Effort | Key Benefit |
-|------|--------------------------|--------|-------------|
-| 0 | 0% (enables measurement) | ~1 hour | Data-driven decisions |
-| 1 | 2-4x | 1-2 days | Pure GPU efficiency |
-| 2 | +30-80% on top of Tier 1 | 2-3 days | Use all hardware |
-| 3 | Better convergence quality | 2-3 days | Solution quality, not raw speed |
-| 4 | +10-20% bandwidth savings | 1-2 days | Memory reduction |

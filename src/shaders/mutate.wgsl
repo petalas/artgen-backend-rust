@@ -358,22 +358,19 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             );
             new_poly._pad = vec2<f32>(0.0, 0.0);
 
-            // Insert at random position (shift everything after it)
-            let insert_idx = rand_u32(&rng, max(count, 1u));
-            for (var j = count; j > insert_idx; j--) {
-                working_states[chain_id].polygons[j] = working_states[chain_id].polygons[j - 1u];
-            }
-            working_states[chain_id].polygons[insert_idx] = new_poly;
+            // Append to end (reorder mutation handles z-order)
+            working_states[chain_id].polygons[count] = new_poly;
             count++;
             working_states[chain_id].polygon_count = count;
             is_dirty = true;
         }
 
-        // Remove polygon
+        // Remove polygon (swap-remove: replace with last element)
         if rand_f32(&rng) < params.remove_polygon_prob && count > params.min_polygons {
             let remove_idx = rand_u32(&rng, count);
-            for (var j = remove_idx; j < count - 1u; j++) {
-                working_states[chain_id].polygons[j] = working_states[chain_id].polygons[j + 1u];
+            let last_idx = count - 1u;
+            if remove_idx != last_idx {
+                working_states[chain_id].polygons[remove_idx] = working_states[chain_id].polygons[last_idx];
             }
             count--;
             working_states[chain_id].polygon_count = count;

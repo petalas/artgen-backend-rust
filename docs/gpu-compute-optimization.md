@@ -1,282 +1,310 @@
 # GPU Compute Optimization Analysis
 
-**Target hardware:** NVIDIA RTX 5090 (Blackwell, SM 120, 170 SMs, 21760 CUDA cores, 32 threads/warp)
-**Current config:** 512 chains, 50 iterations/batch, 384x384 max image, 1000 max polygons per chain
+Analysis of the artgen GPU evolution pipeline for compute performance bottlenecks and optimization opportunities. Focused on wgpu compute shaders running on NVIDIA RTX-class hardware (Vulkan backend via WSL2).
+
+**Pipeline overview:** mutate (1 thread/chain) -> rasterize_error (256 threads/tile/chain) -> select (1 thread/chain) -> migrate (1 thread/chain, periodic)
 
 ---
 
-## 1. Mutate Shader: Workgroup Size 1 (Critical)
+## 1. Mutate Shader: Single-Threaded Bottleneck
 
-**File:** `src/shaders/mutate.wgsl`, line 140
-**Current:** `@workgroup_size(1)` dispatched as `(chain_count, 1, 1)` = 512 workgroups of 1 thread each
+**File:** `src/shaders/mutate.wgsl`, line 267
+**Current:** `@workgroup_size(1)` -- one thread per chain, dispatched as `(active_chains, 1, 1)`
 
-**Problem:** Each SM on the RTX 5090 can host multiple warps (up to 48 warps = 1536 threads at full occupancy). A workgroup of size 1 means every warp is 1/32 utilized -- 31 out of 32 lanes are permanently masked off. With 512 single-thread workgroups across 170 SMs, you get ~3 workgroups per SM, which is 3 active threads out of a potential 1536. That is **0.2% occupancy**.
+### Problem: Zero parallelism within each chain
 
-The mutate shader is inherently serial per chain (it mutates polygons sequentially with data dependencies on the RNG state and polygon array). However, the copy loop at the top (lines 159-163) and the polygon array shifts during add/remove (lines 204-206, 216-218) could be parallelized across threads in a workgroup.
+The mutate shader runs a single thread per chain. Each thread:
+1. Copies up to 1000 polygons (48 bytes each = 48KB) from `chain_states` to `working_states`
+2. Loops through all polygons applying per-polygon mutations
+3. May loop up to 1000 retry attempts in the `while !is_dirty` loop
 
-**Recommendation:** This shader's serial RNG-dependent logic makes it hard to parallelize within a chain. The real fix is to increase chain count well beyond 512 (discussed in section 7) so the GPU has enough independent workgroups to saturate. For the mutate pass specifically, grouping multiple chains into one workgroup (e.g., `@workgroup_size(32)` with 32 chains per workgroup) would improve warp utilization but requires restructuring the indexing.
+With 512 chains, that is 512 workgroups of size 1. On an RTX GPU with 128 SMs, this means each SM gets ~4 workgroups, but each workgroup is a single thread -- the SM's 32-wide warp executes 1 active thread and 31 idle lanes. **Occupancy is effectively 1/32 = ~3%** within each warp.
 
-**Expected impact:** Low-to-moderate for mutate alone (it is not the bottleneck), but fixing occupancy here prevents it from becoming one when rasterize/error are optimized.
+### Optimization A: Parallelize the polygon copy with a workgroup
 
----
-
-## 2. Rasterize Shader: Polygon Loop Serialization (High Impact)
-
-**File:** `src/shaders/rasterize.wgsl`, lines 92-125
-**Current:** `@workgroup_size(8, 8, 1)` = 64 threads, dispatched as `(W/8, H/8, chain_count)`
-
-For a 384x384 image with 512 chains: `48 * 48 * 512 = 1,179,648` workgroups of 64 threads = 75.5M threads total. This gives excellent occupancy.
-
-**Problem:** Each thread loops over ALL polygons (up to 1000) sequentially. With AABB culling already in place, the remaining bottleneck is the **sequential polygon load from global memory**. Each polygon is 48 bytes. Loading 1000 polygons = 48 KB of global memory reads per thread. With 64 threads in a workgroup all reading the same polygon data, this should hit L1 cache well (broadcast pattern), but there is no explicit use of workgroup shared memory to prefetch polygon batches.
-
-**Recommendation: Tiled polygon loading via shared memory.** Have the 64 threads in a workgroup cooperatively load batches of polygons (e.g., 64 at a time) into `var<workgroup>` shared memory, then each thread processes those 64 polygons from shared memory before loading the next batch. This converts 64 independent global memory streams into 1 cooperative load, reducing L1 cache pressure and improving memory bandwidth utilization.
+The initial copy of polygons (lines 318-322) and the crossover paths (lines 192-265) iterate over up to 1000 polygons sequentially. This could be parallelized:
 
 ```wgsl
-var<workgroup> shared_polys: array<Polygon, 64>;
-
-for (var batch = 0u; batch < poly_count; batch += 64u) {
-    // Cooperative load: each thread loads one polygon
-    let load_idx = batch + local_idx;
-    if load_idx < poly_count {
-        shared_polys[local_idx] = working_states[chain_id].polygons[load_idx];
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>,
+        @builtin(local_invocation_index) lid: u32) {
+    let chain_id = gid.x / 64u;  // or use workgroup_id
+    // Thread lid copies polygons lid, lid+64, lid+128, ...
+    let poly_count = chain_states[chain_id].polygon_count;
+    for (var i = lid; i < poly_count; i += 64u) {
+        working_states[chain_id].polygons[i] = chain_states[chain_id].polygons[i];
     }
     workgroupBarrier();
-
-    let batch_end = min(64u, poly_count - batch);
-    for (var i = 0u; i < batch_end; i++) {
-        let poly = shared_polys[i];
-        // ... AABB + half-space test + blend ...
+    // Thread 0 does mutation logic
+    if lid == 0u {
+        // ... existing mutation code ...
     }
-    workgroupBarrier();
 }
 ```
 
-**Expected impact:** High. Polygon data is the dominant memory access in this shader. Shared memory prefetching reduces global memory transactions by ~64x for the polygon data stream. For 500+ polygon drawings, this could be a 2-4x speedup on the rasterize pass.
+**Expected impact:** The copy phase (48KB per chain) is a significant portion of mutate time. Parallelizing it 64x would reduce copy latency from ~48KB/thread to ~750B/thread. The mutation logic itself is inherently serial (sequential RNG), so only the copy benefits.
+
+**Alternative approach:** Skip the copy entirely. Instead of copying `chain_states -> working_states` and then mutating in-place, mutate directly from `chain_states` into `working_states` by reading the source polygon, mutating it in registers, and writing to the destination. This eliminates the copy pass entirely and avoids the need for a barrier. The current code already almost does this -- it reads from `chain_states` and writes to `working_states` -- but it does a bulk copy first and then mutates in the `working_states` buffer. Restructuring to read-mutate-write in a single pass would halve memory bandwidth.
+
+### Optimization B: Eliminate the `while !is_dirty` retry loop
+
+Lines 328-517: The shader retries mutations until at least one fires. With typical per-polygon probabilities around 1/100 to 1/750, and ~150 active polygons, the expected number of attempts before `is_dirty` is set is very low (usually 1). However, in worst-case scenarios (very few polygons, low probabilities), this loop could spin hundreds of times, causing massive warp divergence as some chains finish in 1 iteration while others take 100+.
+
+**Suggestion:** Guarantee at least one mutation fires by always applying one forced mutation (e.g., micro-adjust a random polygon) if nothing fired after the first attempt. This bounds the loop to exactly 1 or 2 iterations and eliminates tail-latency divergence.
+
+### Problem: Scattered memory access pattern in crossover
+
+The crossover functions (`crossover_spatial`, `crossover_uniform`) read from `chain_states[parent_b]` where `parent_b` is a randomly selected chain via tournament selection. Since each thread in a warp picks a different `parent_b`, reads from `chain_states[parent_b].polygons[i]` are scattered across a huge buffer (~24MB for 512 chains). This defeats any L2 cache locality.
+
+**Mitigation is difficult** since parent selection is inherently random, but the impact is bounded by the crossover probability (default 10%).
 
 ---
 
-## 3. Error Reduce: Subgroup Intrinsics for Faster Reduction (Medium Impact)
+## 2. Rasterize+Error Shader: Well-Structured but Tunable
 
-**File:** `src/shaders/error_reduce.wgsl`, lines 87-95
-**Current:** Binary tree reduction in shared memory with 6 barriers (64 -> 32 -> 16 -> 8 -> 4 -> 2 -> 1).
+**File:** `src/shaders/rasterize_error.wgsl`, line 81
+**Current:** `@workgroup_size(16, 16, 1)` = 256 threads, dispatched as `((W+15)/16, (H+15)/16, active_chains)`
 
-**Problem:** Each `workgroupBarrier()` is a full memory fence + execution barrier. On NVIDIA hardware, the first reduction step (64 -> 32) and often the second (32 -> 16) can be done within a single warp using **subgroup operations** (shuffle/reduce), which are barrier-free and execute in a single cycle.
+### Problem: Workgroup size may be suboptimal for modern NVIDIA GPUs
 
-**Recommendation:** Use WGSL subgroup operations (available in WebGPU with the `subgroups` feature). Since RTX 5090 has warp size 32:
+256 threads/workgroup is reasonable, but NVIDIA RTX GPUs execute in warps of 32. With 256 threads that is 8 warps per workgroup. The SM can hold multiple workgroups concurrently (up to register/shared memory limits).
 
+**Shared memory usage:** `shared_polys` = 256 * 48 = 12,288 bytes + `shared_errors` = 256 * 4 = 1,024 bytes = **13,312 bytes total**. NVIDIA SMs have 48-100KB of shared memory (depending on configuration). At 13KB per workgroup, the SM could theoretically hold 3-7 concurrent workgroups, which is good for latency hiding.
+
+**Suggested experiment:** Try `@workgroup_size(8, 8, 1)` = 64 threads with proportionally more workgroups. This would:
+- Reduce shared memory per workgroup to ~3.3KB (allowing more concurrent workgroups)
+- Reduce polygon tile size from 256 to 64, requiring more tiles but better fitting small polygon counts
+- Reduce the warp count per workgroup to 2, potentially improving scheduling flexibility
+
+For a 256x256 image with 16x16 workgroups: 16*16*512 = 131,072 workgroups. With 8x8: 32*32*512 = 524,288 workgroups. Both are far more than enough to saturate the GPU. The key tradeoff is shared memory tile size vs. number of passes over polygons.
+
+### Problem: Redundant workgroupBarrier in reduction
+
+Lines 183-191: The binary reduction has a `workgroupBarrier()` inside the loop for every stride level. On NVIDIA hardware, once the stride drops below 32 (one warp), the barrier is unnecessary because warp threads execute in lockstep. In WGSL, you cannot use subgroup operations without the `subgroups` extension, but you could unroll the last 5 iterations (stride 16, 8, 4, 2, 1) and rely on `workgroupBarrier()` being a no-op for single-warp operations. In practice, naga/SPIR-V compilation likely already handles this, but it is worth verifying.
+
+**Better approach with subgroup operations (wgpu `subgroups` feature, experimental):**
 ```wgsl
-// Phase 1: Subgroup reduce (no barrier needed, warp-level)
-var val = pixel_error;
-val = subgroupAdd(val);  // reduces 32 values within each warp
-
-// Phase 2: Two warps -> shared memory for cross-warp reduction
-if subgroupInvocationId == 0u {
-    shared_errors[local_idx / 32u] = val;  // 2 partial sums
+// If subgroup support available:
+let subgroup_sum = subgroupAdd(pixel_error);
+if subgroupElect() {
+    shared_errors[subgroup_id] = subgroup_sum;
 }
 workgroupBarrier();
-
-if local_idx == 0u {
-    let total = shared_errors[0] + shared_errors[1];
-    atomicAdd(&error_accumulators[chain_id], total);
-}
+// Then reduce only across subgroups (8 entries instead of 256)
 ```
+This would reduce the reduction from 8 barrier+add steps to 1 subgroup intrinsic + 3 barrier+add steps.
 
-This replaces 6 barriers with 1 barrier, and eliminates 5 shared memory round-trips.
+### Observation: AABB early-out causes warp divergence
 
-**Caveat:** Subgroup operations require `enable subgroups;` in WGSL and the `SUBGROUP` feature on the device. The RTX 5090 supports this, but wgpu feature availability should be checked at runtime.
+Lines 126-133: The AABB check causes threads within the same warp to diverge -- some threads skip the polygon (AABB miss) while others proceed to the half-space test and blend. This is inherent to the algorithm and already optimized (AABB is cheap), but it means the effective throughput of the inner loop is less than the peak.
 
-**Expected impact:** Moderate. Reduces barrier overhead from 6 to 1 per workgroup. With 1.18M workgroups dispatched per error_reduce pass, this eliminates ~5.9M barrier synchronizations per iteration.
+For drawings with many small polygons (the common case at high fitness), most threads in a tile will skip most polygons, making the AABB check very effective. The divergence cost is minor compared to the bandwidth savings.
+
+### Problem: Reference image read pattern
+
+Line 166: `reference_image[py * w + px]` -- each thread reads one pixel. Within a 16x16 workgroup, threads in the same warp read 32 consecutive x-coordinates (since the workgroup is laid out x-first). The reference image buffer is in storage (SSBO), not a texture. This means reads go through L2 cache but do not benefit from texture cache spatial locality optimizations. However, since warps read contiguous addresses (32 consecutive u32 values = 128 bytes = one cache line), **the access pattern is actually coalesced** and efficient.
+
+**Suggestion (low priority):** If wgpu ever exposes read-only storage textures for compute, switching the reference image to a `texture_2d<f32>` with a sampler would engage the texture cache's 2D spatial locality, benefiting the Y-direction neighbors. But for the current linear access pattern, the SSBO is fine.
 
 ---
 
-## 4. Fused Rasterize + Error Pass (High Impact)
+## 3. Select Shader: Memory Bandwidth Dominated
 
-**Files:** `src/shaders/rasterize.wgsl` + `src/shaders/error_reduce.wgsl`
-**Current:** Two separate dispatches -- rasterize writes packed RGBA u32 to `render_targets`, then error_reduce reads it back alongside the reference image.
+**File:** `src/shaders/select.wgsl`, line 79
+**Current:** `@workgroup_size(1)`, dispatched as `(active_chains, 1, 1)`
 
-**Problem:** The render_targets buffer is `chain_count * W * H * 4` bytes = `512 * 384 * 384 * 4` = 301 MB. Rasterize writes this entire buffer to global memory, then error_reduce reads it all back. This is a 602 MB round-trip through VRAM that exists solely as an intermediate result -- no other pass reads `render_targets`.
+### Problem: Single-threaded full drawing copy on acceptance
 
-**Recommendation:** Fuse rasterize and error_reduce into a single shader. After compositing all polygons at a pixel, immediately compute the error diff against the reference image and accumulate into shared memory, then reduce. This eliminates the render_targets buffer entirely and the 602 MB of memory traffic.
-
+Lines 119-121: When a candidate is accepted (`fitness > current_fitness`), the shader copies the entire working state to chain state:
 ```wgsl
-@compute @workgroup_size(8, 8, 1)
-fn rasterize_and_error(...) {
-    // ... composite polygons (same as current rasterize) ...
-
-    // Compute error inline instead of writing to render_targets
-    let ref_pixel = reference_image[py * w + px];
-    let refr = f32(ref_pixel & 0xFFu);
-    // ... unpack + L1 diff ...
-    let pixel_error = u32(dr + dg + db);
-
-    // Workgroup reduction (same as current error_reduce)
-    shared_errors[local_idx] = pixel_error;
-    workgroupBarrier();
-    // ... reduce ...
+for (var i = 0u; i < pc; i++) {
+    chain_states[chain_id].polygons[i] = working_states[chain_id].polygons[i];
 }
 ```
 
-**Benefits:**
-- Eliminates `render_targets` buffer (301 MB VRAM savings)
-- Eliminates 602 MB/iteration of global memory bandwidth
-- Removes one full dispatch + implicit barrier between passes
-- Computed pixel color stays in registers -- never touches memory
+With up to 1000 polygons at 48 bytes each, this is **48KB of sequential memory copies per accepted chain**, executed by a single thread. At typical acceptance rates (maybe 1-5% of chains improve per iteration), this affects a small fraction of chains, but the affected chains stall their entire warp.
 
-**Expected impact:** High. This is likely the single biggest optimization available. The render_targets buffer bandwidth is the dominant memory cost in the pipeline.
+### Optimization: Parallelize select with a workgroup
 
----
-
-## 5. Select/Migrate: Large Struct Copy via Single Thread (Medium Impact)
-
-**File:** `src/shaders/select.wgsl`, lines 100-108 and 141-149
-**Current:** `@workgroup_size(1)`, single thread copies up to 1000 polygons (48 KB) in a loop.
-
-**Problem:** Copying a 48 KB `DrawingState` struct one polygon at a time with a single thread is extremely slow for global memory writes. Each polygon write is 48 bytes, so 1000 writes = 48000 bytes of sequential stores from one thread. This serializes memory bandwidth that could be parallelized.
-
-**Recommendation:** Increase workgroup size for select/migrate. Use `@workgroup_size(256)` and have threads cooperatively copy the polygon array when an improvement is found. Broadcast the accept/reject decision via shared memory, then parallelize the copy:
+Same pattern as mutate -- use a workgroup of 64 threads and have all threads participate in the copy:
 
 ```wgsl
-@compute @workgroup_size(256)
+@compute @workgroup_size(64)
 fn select_main(...) {
     let chain_id = workgroup_id.x;
-    let tid = local_invocation_index;
+    let lid = local_invocation_index;
 
-    // Thread 0 computes fitness + accept/reject
-    var do_copy = false;
-    if tid == 0u {
-        // ... fitness computation ...
-        shared_accept = (fitness > current_fitness);
-    }
-    workgroupBarrier();
-
-    if shared_accept {
-        // All 256 threads cooperatively copy polygons
-        // Each polygon is 48 bytes = 12 u32s, so copy as u32 array
-        // 1000 polygons * 12 words = 12000 words / 256 threads = ~47 words/thread
-        for (var i = tid; i < poly_count * 12u; i += 256u) {
-            // copy word i from working to chain_states
+    // Thread 0 computes fitness and decides accept/reject
+    // (store decision in shared memory)
+    // All threads copy in parallel if accepted
+    if accepted {
+        for (var i = lid; i < pc; i += 64u) {
+            chain_states[chain_id].polygons[i] = working_states[chain_id].polygons[i];
         }
     }
 }
 ```
 
-**Expected impact:** Moderate. Select runs every iteration and copies are frequent (especially early in evolution when many candidates improve). Parallelizing the copy with 256 threads gives ~256x speedup on the copy portion.
+**Expected impact:** Reduces per-chain copy latency by 64x when acceptance occurs. Since acceptance is the slow path, this directly reduces tail latency.
+
+### Problem: atomicMax contention on control.best_fitness_bits
+
+Lines 130-135: All 512 chains race on `atomicMax(&control.best_fitness_bits, ...)`. On NVIDIA hardware, atomic operations on the same address serialize through the L2 cache. With 512 threads, this creates a serialization bottleneck. However, since this is a single atomic per chain (not per pixel), the total contention is bounded: ~512 atomic operations, each taking ~30 clock cycles = ~15,360 cycles = negligible at GPU clock speeds.
+
+**Verdict:** Not a meaningful bottleneck.
 
 ---
 
-## 6. Workgroup Size Tuning for RTX 5090 (Medium Impact)
+## 4. Migrate Shader: Same Single-Thread Issue
 
-**Current workgroup sizes:**
-- Mutate: 1
-- Rasterize: (8, 8, 1) = 64
-- Error reduce: (8, 8, 1) = 64
-- Select: 1
-- Migrate: 1
+**File:** `src/shaders/select.wgsl`, lines 163, 180
+**Current:** `@workgroup_size(1)`, dispatched as `(active_chains, 1, 1)`
 
-**RTX 5090 specs:** 32 threads/warp, max 1024 threads/workgroup, max 48 warps/SM (1536 threads/SM).
+### Problem: Full drawing copy in single thread
 
-**Problem with 64-thread workgroups:** 64 = 2 warps. To reach max occupancy of 48 warps/SM, you need 24 concurrent workgroups per SM. Registers and shared memory may limit this. However, 64 is on the small side -- increasing to 128 (4 warps) or 256 (8 warps) can improve instruction-level parallelism within the workgroup and reduce scheduling overhead.
+`migrate_from()` (lines 139-160) copies up to 1000 polygons sequentially when the neighbor is fitter. Same fix as select: use a workgroup for parallel copy.
 
-**Recommendation for rasterize/error (or fused pass):** Try `@workgroup_size(16, 16, 1)` = 256 threads. This means dispatching `(W/16, H/16, chain_count)` = `(24, 24, 512)` = 294,912 workgroups. Each workgroup has 8 warps, so you need only 6 concurrent workgroups/SM for full occupancy. Larger workgroups also mean:
-- More threads for shared memory polygon prefetching (256 instead of 64)
-- Fewer workgroups to schedule (294K vs 1.18M) -- less scheduler overhead
-- Better shared memory reduction (256 threads -> still only 8 steps)
+### Problem: Race condition in ring migration
 
-**Shared memory needed for 16x16:** If tiled polygon loading is used, `256 * 48 bytes = 12 KB` per workgroup (well within the 64-100 KB/SM limit on Blackwell).
+In intra-island ring migration, chain `i` reads from chain `i+1`, and chain `i+1` reads from chain `i+2`, etc. Since all chains execute concurrently, chain `i+1` might have already been overwritten by chain `i+2`'s data before chain `i` reads it. This is a classic read-after-write hazard in concurrent ring migration.
 
-**Expected impact:** 10-30% improvement depending on current register pressure. The reduction in total workgroup count alone saves scheduler overhead.
+**However:** In practice, wgpu compute dispatches with `@workgroup_size(1)` and different `global_invocation_id` values have no ordering guarantees, meaning the read/write order is undefined. The current implementation "works" because the writes and reads happen to different chains, and GPU memory model provides eventual coherence within a dispatch. But the correctness depends on the assumption that chain `i`'s read of `chain_states[i+1]` sees the pre-migration state, not a partially-written state from another thread's migration.
+
+**Recommendation:** This is likely safe on current hardware due to SM-level cache coherence, but for correctness, consider double-buffering: migrate into `working_states` as a staging area, then copy back to `chain_states` in a second pass (or swap buffer roles).
 
 ---
 
-## 7. Error Accumulator Atomics Bottleneck (Medium Impact)
+## 5. Host-Side Dispatch Overhead
 
-**File:** `src/shaders/error_reduce.wgsl`, line 99
-**Current:** Thread 0 of each workgroup does `atomicAdd(&error_accumulators[chain_id], ...)`.
+**File:** `src/gpu_evolver/mod.rs`, lines 179-267
 
-**Problem:** For 512 chains, there are only 512 atomic target addresses. With `(48 * 48) = 2304` workgroups per chain, all 2304 workgroups for the same chain contend on the same atomic u32. Atomic contention on the same cache line serializes and stalls warps.
+### Problem: Separate compute passes per iteration within a batch
 
-**Recommendation:** Two-level reduction. Instead of each workgroup atomically adding to a single u32 per chain, use an intermediate buffer of partial sums per workgroup, then run a second small dispatch to sum those partials:
+Each iteration within the batch creates 3-4 separate compute passes (mutate, rasterize_error, select, optionally migrate). With 50 iterations per batch, that is 150-200 compute passes encoded into a single command buffer. Each compute pass has:
+- Begin/end pass overhead
+- Implicit pipeline barriers between passes (the GPU must ensure all writes from pass N are visible to reads in pass N+1)
 
-```
-// Phase 1: Each workgroup writes its sum to partial_errors[chain_id * num_workgroups + wg_id]
-// Phase 2: Small dispatch (one thread per chain) sums the partial_errors for that chain
-```
+**Current behavior is correct:** The barriers between passes ARE necessary because each pass reads the output of the previous pass. The `begin_compute_pass`/`end_compute_pass` boundaries create the necessary `STORAGE_BUFFER -> STORAGE_BUFFER` barriers in Vulkan.
 
-Alternatively, increase the number of accumulator slots per chain (e.g., 4 or 8 slots) and have workgroups hash to different slots, then sum in the select pass. This reduces contention by 4-8x while keeping a single pass.
+**Suggestion:** Verify that the wgpu/naga compilation does not insert overly conservative full-pipeline barriers. A targeted `storageBarrier()` within a single compute pass would be more efficient than separate passes, but WGSL `storageBarrier()` only synchronizes within a workgroup, not globally. Cross-workgroup synchronization requires separate dispatches (which is what the current separate passes provide).
 
-**Expected impact:** Moderate. Atomic contention is hardware-dependent; NVIDIA L2 atomics are fast, but 2304-way contention per chain is still significant. Reducing to 288-way (8 slots) would help meaningfully.
+**This is a fundamental architectural constraint** -- there is no way to do a global memory barrier within a single compute pass in the WebGPU/Vulkan model without separate dispatches.
 
----
+### Optimization: Reduce error accumulator reset overhead
 
-## 8. Batch Size and Command Buffer Overhead (Low-Medium Impact)
-
-**File:** `src/gpu_evolver/mod.rs`, lines 103-171
-**Current:** 50 iterations encoded into a single command buffer, each iteration = 4-5 compute passes = ~225 pass dispatches per submission.
-
-**Analysis:** 50 iterations per batch is reasonable. However, after each batch, the CPU does:
-1. `queue.submit()` (non-blocking)
-2. `copy_buffer_to_buffer` for control flags
-3. `device.poll(Maintain::Wait)` -- **blocks CPU until GPU finishes**
-4. `map_async` + `recv` -- another CPU stall
-
-This means the CPU is completely idle while the GPU runs, and the GPU is completely idle while the CPU processes the result. There is zero overlap.
-
-**Recommendation: Double-buffering with async polling.** Use two control flag staging buffers. While the GPU runs batch N+1, the CPU reads back results from batch N:
-
+Lines 165-166: Before each batch, the CPU uploads `active * 4` bytes of zeros to reset the error accumulators:
 ```rust
-// Submit batch N+1
-encoder_new.copy_buffer_to_buffer(&control_flags_buf, 0, &staging[next], 0, 16);
-queue.submit(encoder_new.finish());
-
-// Read back batch N results (already complete)
-let flags = read_staging(&staging[current]);
-// Process flags...
-
-// Swap buffers
-std::mem::swap(&mut current, &mut next);
+let zeros = vec![0u8; active as usize * 4];
+p.queue.write_buffer(&p.error_accumulators_buf, 0, &zeros);
 ```
 
-**Expected impact:** Low-medium. If the CPU processing (PNG encoding, WS broadcasting) takes meaningful time, this overlap hides it. The GPU batch is likely the dominant cost, so the absolute gain depends on CPU-side work per batch.
+This is a CPU-side allocation + DMA transfer for every batch (every ~50 iterations). The select shader already resets the error accumulator via `atomicExchange` (line 88 of select.wgsl), so the accumulators should already be zero after the first iteration. **The initial reset before the batch is only needed for the first iteration's rasterize_error pass.**
+
+**Suggestion:** Move the error accumulator reset into the select shader unconditionally (already done via `atomicExchange`), and remove the CPU-side `write_buffer` call. The only issue is the very first iteration of the batch, where the accumulators contain stale data from the previous batch. Since `atomicExchange` in select already resets them, and the rasterize_error pass of iteration 0 writes fresh data via `atomicAdd` starting from the stale value -- this is a bug if the previous batch's select didn't run for all chains. **Actually, looking more carefully:** the `atomicExchange` in select returns the accumulated error and resets to 0. So after select, the accumulators are 0. The next iteration's rasterize_error pass `atomicAdd`s from 0. This is correct. The CPU-side `write_buffer` is redundant if the previous batch completed successfully. It is only necessary for the very first batch (when accumulators contain garbage from buffer creation).
+
+**Fix:** Initialize the error accumulator buffer with zeros at creation (already done -- `BufferDescriptor` without `mapped_at_creation` and no `init` means zeroed on some backends but not guaranteed). Add `mapped_at_creation: true` and explicitly zero it, or use `create_buffer_init` with zeros. Then remove the per-batch `write_buffer` call.
+
+**Impact:** Eliminates one DMA transfer per batch (~2KB for 512 chains). Minor.
 
 ---
 
-## 9. Error Accumulator Reset via CPU Write (Low Impact)
+## 6. Timestamp Query Overhead
 
-**File:** `src/gpu_evolver/mod.rs`, lines 100-101
-**Current:** CPU does `queue.write_buffer()` to zero out `chain_count * 4` bytes of error accumulators before each batch.
+**File:** `src/gpu_evolver/mod.rs`, lines 180, 270-277
 
-**Problem:** `queue.write_buffer` is a host-to-device transfer that may stall the pipeline. For 512 chains this is only 2 KB, but it happens every batch and inserts a pipeline bubble.
+### Observation: Timestamps only on last iteration
 
-**Recommendation:** The `select_main` shader already does `atomicExchange(&error_accumulators[chain_id], 0u)` to reset accumulators. This means the accumulators are already zeroed after select runs. The CPU-side zero write is redundant for iterations 2+ within a batch (the select pass at iteration N resets for iteration N+1). The only issue is the first iteration of a new batch -- but the select pass from the previous batch already zeroed it.
+Lines 180: `let ts = if is_last_iter(i) { Some(&p.timestamp_query_set) } else { None };`
 
-**Action:** Remove the `queue.write_buffer` for error accumulators in `run_batch()`. The `atomicExchange` in `select_main` already handles this. This eliminates one host-to-device transfer per batch.
-
-**Expected impact:** Low. 2 KB transfer is tiny, but removing it simplifies the pipeline and eliminates a potential sync point.
+This is already well-optimized -- timestamps only on the final iteration of each batch. The overhead of `resolve_query_set` + two `copy_buffer_to_buffer` calls per batch is negligible.
 
 ---
 
-## 10. Memory Layout: Struct-of-Arrays vs Array-of-Structs (Speculative, High Effort)
+## 7. Buffer Layout and Memory Access Patterns
 
-**Current:** `DrawingState` is an Array-of-Structs pattern -- each chain's entire state (48 KB) is contiguous. The `working_states` buffer is `[DrawingState_0, DrawingState_1, ..., DrawingState_511]`.
+### Problem: Array-of-Structures layout for chain states
 
-**Problem for rasterize:** When 64 threads in a workgroup all read polygon `i` from the same chain, they all hit the same 48-byte polygon. This is a broadcast pattern that works OK with L1 cache. However, threads in different workgroups for the same chain also read the same data, creating cache pressure across SMs.
+`chain_states` is an array of `DrawingState`, where each `DrawingState` is 48,032 bytes. This means chain 0's data is at offset 0, chain 1 at 48,032, chain 2 at 96,064, etc. When the rasterize_error shader reads `working_states[chain_id].polygons[i]`, all 256 threads in a workgroup read from the same chain (same `chain_id`), which is good for locality. The cooperative load into shared memory (`shared_polys[local_idx] = working_states[chain_id].polygons[load_idx]`) reads 256 consecutive polygons = 12,288 bytes, which is contiguous in memory and results in **coalesced reads across all 8 warps**.
 
-**Observation:** The current AoS layout is actually reasonable for this workload because all threads within a chain read the same polygon data (broadcast), and different chains are fully independent. Converting to SoA would help only if threads within a workgroup accessed different chains (they don't). **No change recommended** for the primary data layout.
+**Verdict:** The AoS layout is actually correct for this workload because the rasterize_error shader processes one chain per workgroup, so all threads in the workgroup read from the same chain's contiguous polygon array. A Structure-of-Arrays layout would hurt here.
+
+### Problem: GpuPolygon padding waste
+
+Each `GpuPolygon` is 48 bytes but only uses 40 bytes of data (color + 3 vertices). The 8-byte `_pad` field wastes 16.7% of bandwidth when reading polygon arrays. With 1000 polygons per chain and 512 chains, that is `1000 * 8 * 512 = 4MB` of wasted buffer space and proportional wasted bandwidth.
+
+**However:** The 48-byte stride aligns to 16-byte boundaries (vec4), which is required by WGSL struct alignment rules. Removing the padding would require restructuring the polygon into a different layout (e.g., SoA for polygon fields), which adds complexity. **The 16.7% waste is the cost of correct alignment.**
+
+**Alternative layout (speculative):** Store polygons as separate arrays of `vec4<f32>` (color), `vec2<f32>` (v0), `vec2<f32>` (v1), `vec2<f32>` (v2). This SoA layout eliminates padding and enables better vectorized loads, but it complicates indexing and the cooperative shared memory load pattern. Not recommended without profiling evidence that the rasterize_error shader is bandwidth-bound.
 
 ---
 
-## Priority Summary
+## 8. Dispatch Dimension Analysis
 
-| # | Optimization | Impact | Effort | Dependencies |
-|---|-------------|--------|--------|--------------|
-| 4 | Fuse rasterize + error_reduce | High | Medium | None |
-| 2 | Shared memory polygon prefetch | High | Medium | Works with or without #4 |
-| 6 | Workgroup size 256 (16x16) | Medium | Low | Best combined with #2 |
-| 5 | Parallel struct copy in select | Medium | Medium | None |
-| 3 | Subgroup intrinsics for reduction | Medium | Low | Requires feature check |
-| 7 | Multi-slot error accumulators | Medium | Medium | Eliminated if #4 is done |
-| 9 | Remove redundant accumulator reset | Low | Trivial | None |
-| 8 | Double-buffer control readback | Low-Med | Medium | None |
-| 1 | Mutate workgroup size | Low | High | Limited by serial RNG |
+### Rasterize+Error dispatch
 
-**Recommended implementation order:** 9 (trivial), then 4+2+6 together (the big win: fuse passes + shared memory + larger workgroups), then 5, then 3.
+For a 256x256 image: `(256/16, 256/16, 512) = (16, 16, 512)` = 131,072 workgroups of 256 threads = ~33.5M thread invocations per iteration.
+
+For a 512x512 image: `(32, 32, 512)` = 524,288 workgroups = ~134M thread invocations.
+
+On an RTX 5090 with 170 SMs, each SM can concurrently execute multiple workgroups. With 256 threads/workgroup and 13KB shared memory, an SM can hold ~3 workgroups (limited by shared memory at 48KB default config). That means ~510 concurrent workgroups, processing 131,072 total = ~257 waves for the 256x256 case. This is well-saturated.
+
+### Mutate/Select/Migrate dispatch
+
+512 workgroups of 1 thread each. On 170 SMs, that is ~3 workgroups per SM, but each workgroup is 1 thread (1/32 warp utilization). **Total active threads: 512 out of a potential 170 * 32 * 48 = 261,120 threads** (assuming 48 warps per SM). That is **0.2% occupancy**.
+
+**This is the single biggest performance opportunity.** Even increasing workgroup_size to 32 (one full warp) and having each thread handle one aspect of the chain processing would be a major improvement.
+
+---
+
+## 9. Concrete Recommendations (Priority Ordered)
+
+### P0: Increase mutate/select/migrate workgroup parallelism
+
+**Impact: HIGH (estimated 5-30% total pipeline speedup depending on pass time breakdown)**
+
+The mutate and select shaders spend most of their time copying polygons (up to 48KB per chain). Using a workgroup of 32-64 threads to parallelize these copies would dramatically reduce per-chain latency and increase warp utilization from 3% to near 100%.
+
+Implementation:
+1. Change `@workgroup_size(1)` to `@workgroup_size(64)` for mutate, select, and migrate
+2. Use `@builtin(local_invocation_index)` to distribute polygon copies across threads
+3. Use shared memory or a flag variable for the single-threaded decision logic (mutation/acceptance), then have all threads participate in the copy
+4. Update dispatch from `dispatch_workgroups(active, 1, 1)` to `dispatch_workgroups(active, 1, 1)` (same -- workgroup_id.x still identifies the chain)
+
+### P1: Eliminate mutate's bulk copy phase
+
+**Impact: MEDIUM (estimated 5-15% mutate speedup)**
+
+Instead of copying all polygons from `chain_states` to `working_states` and then mutating in-place, restructure the mutation loop to read each polygon from `chain_states`, apply mutations in registers, and write directly to `working_states`. This halves the memory traffic for unmutated polygons (which is the vast majority, since mutation probabilities are low).
+
+### P2: Bound the mutation retry loop
+
+**Impact: LOW-MEDIUM (reduces tail latency, prevents warp divergence)**
+
+Replace the unbounded `while !is_dirty && attempts < 1000u` loop with a bounded approach: after one full pass through mutation probabilities, if nothing fired, force a micro-adjustment on a random polygon. This guarantees termination in at most 2 iterations and eliminates worst-case warp divergence.
+
+### P3: Experiment with rasterize_error workgroup size
+
+**Impact: UNCERTAIN (needs profiling)**
+
+Try `@workgroup_size(8, 8, 1)` (64 threads) with a tile size of 64 polygons. This reduces shared memory usage 4x, potentially allowing more concurrent workgroups per SM. The tradeoff is more tiles (more iterations of the outer loop for >64 polygon drawings). Profile both configurations.
+
+### P4: Use subgroup operations for error reduction (when available)
+
+**Impact: LOW (saves ~5 barriers per workgroup per iteration)**
+
+If/when wgpu's `subgroups` feature stabilizes, replace the binary reduction tree with `subgroupAdd()` + a small shared-memory reduction across subgroups. This eliminates 5 of 8 barrier+add steps in the reduction.
+
+### P5: Remove redundant CPU-side error accumulator reset
+
+**Impact: NEGLIGIBLE (saves one small DMA per batch)**
+
+The `atomicExchange` in select already resets accumulators. The CPU-side `write_buffer` is only needed for the first-ever batch. Initialize the buffer to zero at creation time and remove the per-batch reset.
+
+---
+
+## 10. What NOT to Optimize
+
+1. **Buffer binding / descriptor set overhead:** With only 1 bind group per pass and pre-created bind groups, this is negligible.
+2. **Command buffer encoding:** Encoding 150-200 compute passes takes microseconds on the CPU; the GPU execution time dominates.
+3. **Reference image layout (SSBO vs texture):** The current linear SSBO read pattern is already coalesced. Texture cache would help inter-warp Y-locality but adds API complexity for marginal gain.
+4. **Double-buffering chain_states for migration:** Theoretically more correct, but doubles the largest buffer (~24MB) and the current approach works correctly in practice.

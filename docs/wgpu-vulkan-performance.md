@@ -1,459 +1,463 @@
 # wgpu/Vulkan Performance Analysis
 
-**System:** RTX 5090 (32GB VRAM), WSL2, wgpu 22.1.0
-**Current:** 512 chains, 50 iterations/batch, ~2.8GB VRAM used, 5-pass compute pipeline
+Analysis of the GPU evolution pipeline's wgpu API usage and Vulkan-level performance patterns. Targets RTX 5090 on WSL2 with wgpu v22.1.0 (Vulkan backend).
+
+**Already-completed optimizations (out of scope):**
+1. Fused rasterize + error_reduce into single shader
+2. Batched 50 iterations per batch to amortize submission overhead
+3. Per-polygon AABB early-out in rasterize_error
+4. Configurable chain count up to adapter limit
 
 ---
 
-## 1. Command Buffer Submission: Synchronous Readback Stalls (HIGH IMPACT)
+## 1. Triple Buffer Map Stalls (Critical)
 
-### Problem
+**File:** `src/gpu_evolver/mod.rs`, lines 322-427
 
-The main loop in `run_batch()` is entirely synchronous:
-
-```
-encode 50 iterations -> submit -> device.poll(Maintain::Wait) -> map_async -> block on recv()
-```
-
-`device.poll(Maintain::Wait)` in `read_control_flags()` (line 207 of `mod.rs`) blocks the CPU thread until ALL GPU work finishes. This means:
-
-1. The CPU is idle while the GPU executes 50 iterations of 5 passes each.
-2. The GPU is idle while the CPU processes the result and re-encodes the next command buffer.
-3. There is zero overlap between CPU work and GPU work.
-
-### Fix: Double-Buffered Command Submission
-
-Use two sets of staging buffers and alternate between them. While the GPU executes batch N+1, the CPU maps and reads the results from batch N.
+Every `run_batch()` call performs three synchronous buffer maps in sequence:
 
 ```rust
-// Pseudocode for double-buffered submission
-struct DoubleBuffer {
-    control_staging: [Buffer; 2],
-    current: usize,
-    pending_submission: Option<SubmissionIndex>,
-}
+// read_control_flags() — line 329
+p.device.poll(Maintain::Wait);
 
-fn run_batch(&mut self) -> Option<Drawing> {
-    let read_idx = self.current;
-    let write_idx = 1 - self.current;
+// read_timestamps() — line 383
+p.device.poll(Maintain::Wait);
 
-    // 1. If there's a pending submission, poll it and read results
-    //    (this should already be done since we submitted it last frame)
-    let result = if self.pending_submission.is_some() {
-        self.read_results(read_idx)
-    } else {
-        None
-    };
-
-    // 2. Encode and submit the NEXT batch (using write_idx staging)
-    let encoder = self.encode_batch(write_idx);
-    let idx = self.queue.submit(once(encoder.finish()));
-    self.pending_submission = Some(idx);
-
-    // 3. Swap
-    self.current = write_idx;
-
-    result // from the PREVIOUS batch
-}
+// read_chain_fitness() — line 417
+p.device.poll(Maintain::Wait);
 ```
 
-The key wgpu API is `queue.submit()` returning a `SubmissionIndex`, and then using `device.poll(Maintain::WaitForSubmissionIndex(idx))` to wait only for a specific submission rather than all work.
+Each `poll(Maintain::Wait)` is a full CPU-GPU synchronization barrier. The first call already ensures all GPU work has completed, making the subsequent two calls redundant. Worse, each `map_async` + `poll(Wait)` + `unmap` cycle has non-trivial Vulkan overhead (VkMapMemory, cache invalidation, VkUnmapMemory).
 
-**Expected improvement:** 10-30% throughput increase from CPU/GPU overlap. The GPU should rarely idle between batches.
-
-### Additional: `queue.write_buffer()` Implicit Synchronization
-
-Three `queue.write_buffer()` calls happen before each batch (lines 87, 97, 101 of `mod.rs`):
+**Recommendation:** Consolidate all three staging readbacks into a single buffer. Copy control flags (16 bytes) + fitness_packed (K * 4 bytes) + timestamps (64 bytes) into one contiguous staging buffer, then map it once:
 
 ```rust
-p.queue.write_buffer(&p.params_buf, 0, ...);
-p.queue.write_buffer(&p.control_flags_buf, 0, ...);
-p.queue.write_buffer(&p.error_accumulators_buf, 0, &zeros);
+// In pipeline.rs — replace three staging buffers with one:
+let combined_staging_size = 16 + (chain_count as u64 * 4) + 64;
+let combined_staging_buf = device.create_buffer(&BufferDescriptor {
+    label: Some("combined_staging"),
+    size: combined_staging_size,
+    usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+    mapped_at_creation: false,
+});
+
+// In mod.rs run_batch() — single copy sequence, single map:
+encoder.copy_buffer_to_buffer(&p.control_flags_buf, 0, &p.combined_staging_buf, 0, 16);
+encoder.copy_buffer_to_buffer(&p.fitness_packed_buf, 0, &p.combined_staging_buf, 16, fitness_size);
+encoder.copy_buffer_to_buffer(&p.timestamp_resolve_buf, 0, &p.combined_staging_buf, 16 + fitness_size, 64);
+// ...submit, then single map_async + single poll(Wait) + parse all three regions
 ```
 
-In wgpu, `write_buffer` is internally staged -- it does not block -- but it does create an implicit dependency: the writes must complete before the next `submit()` uses them. This is fine with the current single-submit pattern, but with double-buffering you would want to ensure these writes go into the same command encoder as the compute passes, or at least are submitted before the compute work. As-is, this is not a bottleneck.
+This eliminates two of three synchronization points per batch (saves ~0.1-0.5ms on WSL2 where Vulkan-on-D3D12 has higher sync overhead).
 
 ---
 
-## 2. Error Accumulator Reset: Unnecessary CPU-Side Buffer Write (MEDIUM IMPACT)
+## 2. Double-Buffered Staging for Overlap (High Impact)
 
-### Problem
+**File:** `src/gpu_evolver/mod.rs`, lines 143-320
 
-Every batch, the CPU writes a zero-filled buffer to reset error accumulators:
+Currently, the CPU blocks waiting for GPU completion before starting the next batch. With double-buffered staging, batch N+1 can be submitted while batch N's results are still being read back:
+
+```
+Current:  [GPU batch N]---[map+read]---[GPU batch N+1]---[map+read]
+Proposed: [GPU batch N]---[GPU batch N+1]---[GPU batch N+2]
+                    \---[map+read N]---/\---[map+read N+1]---/
+```
+
+**Implementation:** Create two staging buffers (A and B). After submitting batch N, map staging buffer from batch N-1 while the GPU is already working on N. Alternate between A and B each batch. This requires tracking which staging buffer was last used and deferring the readback by one batch.
+
+On an RTX 5090 with 50-iteration batches, the GPU compute time is likely 2-5ms and the map+read cycle is 0.1-0.5ms. Double buffering would overlap these entirely, approaching zero CPU-side idle time.
+
+---
+
+## 3. `queue.write_buffer()` Stalls Before Batch (Medium Impact)
+
+**File:** `src/gpu_evolver/mod.rs`, lines 152-166
+
+Three `write_buffer` calls happen before each batch:
 
 ```rust
-let zeros = vec![0u8; p.chain_count as usize * 4]; // 2KB allocation per batch
-p.queue.write_buffer(&p.error_accumulators_buf, 0, &zeros);
+p.queue.write_buffer(&p.params_buf, 0, bytemuck::bytes_of(&params));        // 128 bytes
+p.queue.write_buffer(&p.control_flags_buf, 0, bytemuck::bytes_of(&control)); // 16 bytes
+p.queue.write_buffer(&p.error_accumulators_buf, 0, &zeros);                  // K * 4 bytes
 ```
 
-This creates a `Vec` allocation + memset + a staged write every batch. With 50 iterations/batch, and the select shader already doing `atomicExchange(..., 0)` to reset per-iteration, this is only needed at the start of each batch.
+`queue.write_buffer()` in wgpu internally creates a staging buffer, copies data into it, and inserts a copy command. For the error accumulators, this means allocating up to 2048 bytes of staging memory every batch (512 chains * 4). Since the select shader already does `atomicExchange(&error_accumulators[chain_id], 0u)` to reset errors, the explicit CPU-side zero-fill of `error_accumulators` is partially redundant.
 
-### Fix: GPU-Side Clear via `encoder.clear_buffer()`
+**Recommendation:**
+- The error accumulator reset via `queue.write_buffer` is needed because `atomicExchange` only resets accumulators that were actually read (chains that ran select). However, since all active chains always run select, this should indeed be handled by `atomicExchange` alone. Verify this is the case and remove the CPU-side zero-fill.
+- For `params_buf` (128 bytes) and `control_flags_buf` (16 bytes), push constants would be ideal (see section 7), but these are small enough that `write_buffer` overhead is minimal.
+
+---
+
+## 4. Buffer Usage Flags Over-Provisioning (Low-Medium Impact)
+
+**File:** `src/gpu_evolver/pipeline.rs`, lines 134-217
+
+Several buffers have more `BufferUsages` flags than needed:
+
+| Buffer | Current flags | Actually needed |
+|--------|--------------|-----------------|
+| `chain_states_buf` | STORAGE \| COPY_SRC \| COPY_DST | STORAGE \| COPY_SRC (COPY_DST only needed for `reinit_chains` — could use a separate init path) |
+| `working_states_buf` | STORAGE \| COPY_DST | STORAGE only (the COPY_DST is unused — no `copy_buffer_to_buffer` targets this) |
+| `error_accumulators_buf` | STORAGE \| COPY_DST | STORAGE only if CPU zero-fill is removed per section 3 |
+| `control_flags_buf` | STORAGE \| COPY_SRC \| COPY_DST | Correct (read back via COPY_SRC, reset via COPY_DST) |
+
+On Vulkan, extra usage flags can prevent the driver from placing buffers in optimal memory pools. A buffer with `COPY_DST` must be visible to the transfer engine, which may force it out of device-local-only memory on some architectures. On an RTX 5090 with large VRAM this is unlikely to matter for placement, but cleaner flags communicate intent better to the driver's internal heuristics.
+
+**Recommendation:** Remove `COPY_DST` from `working_states_buf`. Evaluate whether `reinit_chains` can use a compute shader to copy data from a small upload buffer rather than `write_buffer` directly to `chain_states_buf`.
+
+---
+
+## 5. Readback Chain Creates a Second Command Buffer (Medium Impact)
+
+**File:** `src/gpu_evolver/mod.rs`, lines 339-374
+
+`readback_chain()` creates a new command encoder, submits a single copy command, then blocks on `poll(Wait)`:
 
 ```rust
-encoder.clear_buffer(&p.error_accumulators_buf, 0, None);
+let mut encoder = p.device.create_command_encoder(...);
+encoder.copy_buffer_to_buffer(&p.chain_states_buf, src_offset, &p.readback_staging_buf, 0, ...);
+p.queue.submit(std::iter::once(encoder.finish()));
+// ... map + poll(Wait)
 ```
 
-`clear_buffer()` issues a `vkCmdFillBuffer` on the GPU side. Zero CPU allocation, zero staging transfer. This is a pure GPU-side operation with much lower overhead.
+This is called from `run_batch()` only when `new_best_found != 0`, so it adds a second full submit+sync cycle on improvement batches. It's also called from `build_gpu_stats()` once per island for the island best drawings (up to 8 extra readbacks every 2 seconds).
 
-**Expected improvement:** Eliminates a small per-batch allocation and transfer. Minor but clean.
+**Recommendation:** For the `run_batch()` case, copy the best chain's state to staging as part of the main batch command buffer. Since `best_chain_id` is only known after the select shader runs (GPU-side), this requires either:
+
+1. **Deferred readback:** After reading control flags, if `new_best_found`, include the copy in the *next* batch's command buffer and defer the Drawing conversion by one batch. This is the simplest change and costs zero extra syncs.
+
+2. **GPU-side conditional copy:** Use an indirect dispatch or a simple "copy_best" compute shader that reads `control.best_chain_id` and copies that chain to a dedicated output slot. This eliminates the second submission entirely.
+
+For `build_gpu_stats()`, batch all island-best readbacks into a single command buffer with multiple `copy_buffer_to_buffer` commands, then do one map/poll cycle instead of N.
 
 ---
 
-## 3. Mutate Shader: Workgroup Size 1 (HIGH IMPACT)
+## 6. Compute Pass Timestamp Profiling Overhead (Low Impact)
 
-### Problem
+**File:** `src/gpu_evolver/mod.rs`, lines 176-267
 
-The mutate shader uses `@workgroup_size(1)`:
+Timestamps are only recorded on the last iteration of the batch (`is_last_iter`), which is good. However, the timestamp query set has 8 slots and is resolved every batch regardless of whether migration ran. If migration didn't run on the last iteration, slots 6-7 contain stale data from a previous batch.
 
-```wgsl
-@compute @workgroup_size(1)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+The `read_timestamps` method handles this correctly by checking `migrate_ran`, so there's no correctness issue. However, the `resolve_query_set` for all 8 queries and the copy of 64 bytes could be reduced to only the used queries.
+
+**Recommendation:** Conditional resolve:
+```rust
+let query_count = if migrate_ran { 8 } else { 6 };
+encoder.resolve_query_set(&p.timestamp_query_set, 0..query_count, &p.timestamp_resolve_buf, 0);
 ```
 
-Dispatched as `dispatch_workgroups(chain_count, 1, 1)` = 512 workgroups of 1 thread each.
-
-On NVIDIA GPUs, a warp is 32 threads. A workgroup of size 1 means 31 of every 32 ALU lanes are permanently masked off. The SM scheduler can interleave warps from different workgroups to hide latency, but:
-
-- Each workgroup still occupies a full warp slot.
-- Shared memory/register file per-workgroup overhead is paid 512 times instead of 16 times (512/32).
-- Occupancy is constrained by workgroup count limits per SM.
-
-The real issue is that this shader is fundamentally serial per-chain (loops over all polygons, does sequential mutations). There is no easy way to parallelize mutation within a chain because each mutation depends on the previous one.
-
-### Partial Fix: Pack Multiple Chains per Workgroup
-
-Instead of 1 chain per workgroup, pack 32 chains into one workgroup so each thread handles one chain but they share a warp:
-
-```wgsl
-@compute @workgroup_size(32)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let chain_id = gid.x; // 0..511
-```
-
-Dispatch as `dispatch_workgroups(chain_count / 32, 1, 1)` = 16 workgroups.
-
-This does NOT change the algorithmic work per thread, but it ensures each warp is fully occupied. The 32 threads in a warp execute in lockstep but because each thread operates on independent chain data, there are no warp divergence issues (each thread follows its own random mutation path, but the hardware just masks as needed -- this is inherently divergent work, so the improvement is modest).
-
-**Expected improvement:** 5-15% for the mutate pass. The mutate pass is not the bottleneck (rasterize is), so total improvement is small.
+This is a micro-optimization that saves one or two Vulkan vkCmdCopyQueryPoolResults calls.
 
 ---
 
-## 4. Select/Migrate Shader: Also Workgroup Size 1 (LOW-MEDIUM IMPACT)
+## 7. Push Constants vs Uniform Buffer (Medium Impact)
 
-Same issue as mutate. `select_main` and `migrate_main` both use `@workgroup_size(1)`. Same fix: bump to `@workgroup_size(32)` or `@workgroup_size(64)` and dispatch fewer workgroups.
+**File:** `src/gpu_evolver/pipeline.rs`, lines 411-470
 
-The select shader does a per-polygon copy loop when the candidate wins:
+The `GpuParams` struct is 128 bytes, which fits exactly within the Vulkan minimum guaranteed push constant size (128 bytes). Currently it's uploaded via a uniform buffer with `queue.write_buffer()` every batch.
 
-```wgsl
-for (var i = 0u; i < pc; i++) {
-    chain_states[chain_id].polygons[i] = working_states[chain_id].polygons[i];
+Push constants are embedded directly in the command buffer, eliminating:
+- The staging buffer allocation in `write_buffer`
+- The internal buffer-to-buffer copy
+- A buffer binding slot in every bind group
+
+**Recommendation:**
+```rust
+// Pipeline layout with push constants:
+let layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+    label: Some("mutate_layout"),
+    bind_group_layouts: &[&mutate_bgl],
+    push_constant_ranges: &[PushConstantRange {
+        stages: ShaderStages::COMPUTE,
+        range: 0..128,
+    }],
+});
+
+// In command encoding (replaces write_buffer):
+pass.set_push_constants(ShaderStages::COMPUTE, 0, bytemuck::bytes_of(&params));
+```
+
+In WGSL, replace `@group(0) @binding(N) var<uniform> params: Params` with `var<push_constant> params: Params`. This removes one binding from every bind group layout and eliminates the `params_buf` entirely.
+
+**Caveat:** Vulkan push constants have a minimum guarantee of 128 bytes, but RTX 5090 supports 256 bytes. At exactly 128 bytes, `GpuParams` fits, but verify `adapter.limits().max_push_constant_size >= 128` at init time.
+
+---
+
+## 8. Shader Compilation and Pipeline Caching (Medium Impact)
+
+**File:** `src/gpu_evolver/pipeline.rs`, lines 243-470
+
+All five compute pipelines are created with `cache: None`:
+
+```rust
+let mutate_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+    // ...
+    cache: None,
+});
+```
+
+wgpu v22 supports `PipelineCache` objects that persist compiled shader binaries across runs. Without caching, every application launch recompiles all shaders from WGSL -> SPIR-V -> driver-specific ISA. On an RTX 5090, this compilation happens during `create_compute_pipeline()` and can take 100-500ms per shader, adding 0.5-2.5s to startup.
+
+**Recommendation:**
+```rust
+// At init, create or load pipeline cache:
+let cache = device.create_pipeline_cache(&PipelineCacheDescriptor {
+    label: Some("artgen_cache"),
+    data: std::fs::read("pipeline_cache.bin").ok().as_deref(),
+    fallback: true,
+});
+
+// Pass to all pipeline creation calls:
+let mutate_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+    // ...
+    cache: Some(&cache),
+});
+
+// At shutdown, save:
+if let Some(data) = cache.get_data() {
+    std::fs::write("pipeline_cache.bin", data).ok();
 }
 ```
 
-This is a lot of sequential memory traffic (up to 1000 * 48 = 48KB per chain). With workgroup_size(1), each SM processes these one chain at a time. With workgroup_size(32), 32 chains can be in flight simultaneously on one SM, allowing the memory controller to coalesce and pipeline the loads/stores much better.
-
-**Expected improvement:** 5-10% on the select pass.
+This turns 0.5-2.5s startup into ~50ms on subsequent launches.
 
 ---
 
-## 5. Rasterize: Per-Pixel Polygon Array Reads from Global Memory (HIGH IMPACT -- MOST EXPENSIVE PASS)
+## 9. Reference Image as Texture vs Storage Buffer (Medium-High Impact)
 
-### Problem
+**File:** `src/gpu_evolver/pipeline.rs`, lines 149-157; `src/shaders/rasterize_error.wgsl`
 
-The rasterize shader is dispatched as `(W/8, H/8, chain_count)` with workgroup_size `(8, 8, 1)`. For a 384x384 image with 512 chains, that is:
-
-- 48 * 48 * 512 = 1,179,648 workgroups
-- 64 threads per workgroup = ~75 million threads
-
-Each thread reads the polygon array from the `working_states` storage buffer:
-
-```wgsl
-for (var i = 0u; i < poly_count; i++) {
-    let poly = working_states[chain_id].polygons[i];
-    // AABB cull + edge test + blend
-}
-```
-
-Each polygon is 48 bytes. With 1000 polygons, each thread potentially reads 48KB of global memory. The 64 threads in a workgroup all read the SAME polygon data (same chain_id for all pixels in the 8x8 tile), but because this is storage buffer memory (not uniform/texture), the GPU cannot broadcast the read. Each thread issues its own load, and the L1/L2 caches must handle 64 simultaneous reads of the same address.
-
-### Fix: Load Polygons into Workgroup Shared Memory
-
-The 8x8 workgroup has 64 threads. They can cooperatively load polygon data into `var<workgroup>` shared memory before doing per-pixel processing:
-
-```wgsl
-var<workgroup> shared_polys: array<Polygon, 64>; // 48 * 64 = 3072 bytes
-
-// Process polygons in tiles of 64
-for (var tile_start = 0u; tile_start < poly_count; tile_start += 64u) {
-    // Cooperative load: each thread loads one polygon
-    let load_idx = tile_start + local_idx;
-    if load_idx < poly_count {
-        shared_polys[local_idx] = working_states[chain_id].polygons[load_idx];
-    }
-    workgroupBarrier();
-
-    // Each thread processes all loaded polygons against its pixel
-    let tile_end = min(tile_start + 64u, poly_count);
-    for (var i = tile_start; i < tile_end; i++) {
-        let poly = shared_polys[i - tile_start];
-        // AABB + edge test + blend
-    }
-    workgroupBarrier();
-}
-```
-
-This reduces global memory reads by 64x (one load per polygon per workgroup instead of per thread). Shared memory on NVIDIA has ~100x lower latency than global memory.
-
-**Caveat:** wgpu/WGSL has a limit on shared memory per workgroup (typically 16KB for Vulkan, 32KB on NVIDIA). At 48 bytes/polygon, you can fit 341 polygons in 16KB. Tiling with 64-polygon chunks as shown above stays well within limits (3072 bytes).
-
-**Expected improvement:** 30-60% reduction in rasterize pass time. This is the bottleneck pass, so overall throughput could improve 20-40%.
-
----
-
-## 6. Reference Image: Storage Buffer vs Texture (MEDIUM IMPACT)
-
-### Problem
-
-The reference image is stored as a `storage<read>` buffer of packed u32:
+The reference image is stored as a flat `array<u32>` in a storage buffer:
 
 ```wgsl
 @group(0) @binding(1) var<storage, read> reference_image: array<u32>;
-```
-
-In the error_reduce shader, each thread reads one pixel:
-
-```wgsl
+// ...
+let ref_idx = py * w + px;
 let reference = reference_image[ref_idx];
 ```
 
-Storage buffers go through the general-purpose L1/L2 cache hierarchy. Texture memory, on the other hand, has a dedicated texture cache optimized for 2D spatial locality -- when one thread reads pixel (x, y), neighboring threads reading (x+1, y) or (x, y+1) get cache hits from the texture cache's space-filling curve layout.
+Storage buffer reads go through the L1/L2 cache hierarchy but miss the dedicated texture sampling hardware entirely. The GPU's texture units have:
+- **Dedicated texture caches** (separate from L1, often larger for 2D spatial locality)
+- **Hardware-accelerated bilinear interpolation** (free, though not needed here)
+- **2D spatial tiling** that matches the 16x16 workgroup access pattern perfectly
 
-### Fix: Use a wgpu Texture + `textureLoad()`
+Each 16x16 workgroup reads a contiguous 16x16 tile of the reference image. With a storage buffer using row-major layout, adjacent threads in the Y direction access data 512 pixels apart (for a 512-wide image), causing poor cache utilization. A texture's internal tiled/swizzled layout keeps 16x16 blocks physically contiguous.
 
-Replace the storage buffer with a `texture_2d<f32>`:
-
+**Recommendation:**
 ```rust
-// Rust: create texture instead of buffer
+// Create as texture instead of buffer:
 let reference_texture = device.create_texture(&TextureDescriptor {
+    label: Some("reference_image"),
     size: Extent3d { width: image_width, height: image_height, depth_or_array_layers: 1 },
+    mip_level_count: 1,
+    sample_count: 1,
+    dimension: TextureDimension::D2,
     format: TextureFormat::Rgba8Unorm,
     usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
-    // ...
+    view_formats: &[],
 });
-queue.write_texture(/* upload reference RGBA */);
+
+// Upload via queue.write_texture()
+queue.write_texture(
+    reference_texture.as_image_copy(),
+    reference_rgba,
+    ImageDataLayout { offset: 0, bytes_per_row: Some(image_width * 4), rows_per_image: None },
+    Extent3d { width: image_width, height: image_height, depth_or_array_layers: 1 },
+);
 ```
 
+In the shader:
 ```wgsl
-// WGSL: read from texture
-@group(0) @binding(1) var reference_image: texture_2d<f32>;
+@group(0) @binding(1) var reference_texture: texture_2d<f32>;
 
-let ref_color = textureLoad(reference_image, vec2<u32>(px, py), 0);
-let refr = ref_color.x * 255.0;
-let refg = ref_color.y * 255.0;
-let refb = ref_color.z * 255.0;
+// In main():
+let ref_color = textureLoad(reference_texture, vec2<u32>(px, py), 0);
+let refr = ref_color.r * 255.0;
+let refg = ref_color.g * 255.0;
+let refb = ref_color.b * 255.0;
 ```
 
-The texture cache is purpose-built for 2D access patterns and the error_reduce shader's access pattern (8x8 tile of spatially adjacent pixels) is the ideal case.
+This eliminates the manual bit-unpacking (`reference & 0xFF`, shifts) and leverages the texture unit's hardware decompression. The Rgba8Unorm format returns normalized [0,1] floats directly.
 
-**Expected improvement:** 10-20% on error_reduce pass. The workgroup reduction is also significant work in this shader, so the texture cache wins apply only to the load portion.
+On an RTX 5090 with 16384 CUDA cores, the texture cache bandwidth advantage over storage buffer is substantial for 2D access patterns. Expect 10-30% improvement in the rasterize_error pass, which is the dominant cost.
 
 ---
 
-## 7. Fused Rasterize + Error Reduce Pass (MEDIUM-HIGH IMPACT)
+## 10. Workgroup Size Tuning (Medium Impact)
 
-### Problem
+### 10a. Rasterize + Error: 16x16 vs 8x8
 
-Currently, rasterize writes pixels to `render_targets` (a huge buffer: 512 * 384 * 384 * 4 = 302MB), and then error_reduce reads them back. This is a round-trip through global memory:
+**File:** `src/shaders/rasterize_error.wgsl`, line 81
 
+The current workgroup size is `@workgroup_size(16, 16, 1)` = 256 threads. This is reasonable but may not be optimal:
+
+- **Shared memory usage:** `shared_polys` = 256 * 48 = 12,288 bytes + `shared_errors` = 256 * 4 = 1,024 bytes = **13,312 bytes total**. On an RTX 5090 SM (48KB shared memory), this allows 3 workgroups per SM, which is good occupancy.
+- **Register pressure:** The rasterization loop has moderate register usage (pixel color accumulators, loop variables, polygon fields). With 256 threads per workgroup and 3 workgroups per SM, that's 768 threads per SM using ~65,536 registers (32-bit) = ~85 registers per thread. This is within the 5090's 256 registers per thread limit.
+
+An alternative of `@workgroup_size(8, 8, 1)` = 64 threads would:
+- Reduce shared memory to 64 * 48 + 64 * 4 = 3,328 bytes, allowing 14 workgroups per SM
+- But require 4x more workgroups total, increasing dispatch overhead
+- And reduce the efficiency of the cooperative polygon loading (loading 64 polygons per tile instead of 256, requiring 4x more tiles)
+
+**Recommendation:** 16x16 is likely already optimal for this workload. Profile with both 16x16 and 8x8 using the existing timestamp infrastructure to confirm.
+
+### 10b. Mutate/Select/Migrate: Workgroup Size 1
+
+**File:** `src/shaders/mutate.wgsl`, line 267; `src/shaders/select.wgsl`, lines 79, 163, 180
+
+All three non-rasterization shaders use `@workgroup_size(1)`. With 512 chains, this means 512 workgroups of 1 thread each. On an RTX 5090 SM that can run 2048 threads, this means each SM runs 2048 single-thread workgroups concurrently, but each thread is serialized within its workgroup.
+
+This is actually the correct design for this algorithm since each chain's mutation/selection is independent and sequential. The GPU's warp scheduler fills SMs by running multiple single-thread workgroups simultaneously. However, there's a subtle issue: **single-thread workgroups waste warp lanes**. On NVIDIA, a warp is 32 threads. A workgroup of size 1 occupies one full warp with 31 idle lanes.
+
+With 512 chains, that's 512 warps with 31/32 wasted occupancy = **97% wasted compute**. However, these shaders are memory-bound (copying 48KB drawing states), not compute-bound, so the wasted lanes don't necessarily reduce throughput. The memory pipeline can saturate regardless.
+
+**Recommendation:** For mutate/select/migrate, the algorithmic structure genuinely requires one thread per chain. The wasted warp lanes are unavoidable without a fundamental redesign (e.g., using 32 threads cooperatively per chain to parallelize the polygon copy loops). This is a potential future optimization but requires significant shader refactoring.
+
+---
+
+## 11. Memory Allocation Patterns (Good as-is)
+
+**File:** `src/gpu_evolver/pipeline.rs`, lines 127-238
+
+All buffers are created once in `GpuPipeline::new()` and persist for the lifetime of the application. There are no per-frame or per-batch buffer allocations. This is correct.
+
+The one exception is `reinit_chains()` in `mod.rs` (line 431), which calls `queue.write_buffer()` to upload new chain states. This internally allocates a staging buffer, but wgpu's belt allocator handles this efficiently.
+
+**Assessment:** No issues here.
+
+---
+
+## 12. WSL2-Specific Considerations
+
+### 12a. Vulkan-on-D3D12 Translation Layer
+
+On WSL2, Vulkan calls go through Microsoft's D3D12 translation layer ("Dozen"). This adds overhead to:
+- **Buffer mapping:** Each map/unmap involves D3D12 resource state transitions
+- **Pipeline barriers:** Implicit barriers between compute passes are translated to D3D12 resource barriers, which may be more conservative than native Vulkan
+- **Queue submission:** Each `queue.submit()` translates to D3D12 command list submission
+
+The triple-poll-Wait pattern (section 1) is particularly expensive on WSL2 because each `poll(Wait)` must wait for the D3D12 fence to signal through the WSL2 VM boundary.
+
+### 12b. ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER
+
+**File:** `src/gpu_evolver/pipeline.rs`, line 67
+
+```rust
+flags: wgpu::InstanceFlags::default()
+    | wgpu::InstanceFlags::ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER,
 ```
-rasterize: compute pixel -> write to render_targets[pixel_idx]
-   (implicit barrier between compute passes)
-error_reduce: read render_targets[pixel_idx] -> compute error -> reduce
+
+This is correctly set for WSL2's Dozen driver. Without it, wgpu may reject the adapter.
+
+### 12c. MemoryHints::Performance
+
+**File:** `src/gpu_evolver/pipeline.rs`, line 118
+
+```rust
+memory_hints: MemoryHints::Performance,
 ```
 
-The `render_targets` buffer exists solely to transfer per-pixel colors between these two passes. At 302MB, it is by far the largest buffer and dominates VRAM usage.
+Good. This hints to wgpu/Vulkan to prefer speed over memory usage.
 
-### Fix: Fuse Into a Single Shader
+---
 
-Compute the pixel color and immediately compare against the reference, accumulating error in-place:
+## 13. Device Polling Strategy Optimization (Medium Impact)
+
+**File:** `src/gpu_evolver/mod.rs`
+
+The current pattern is always `device.poll(Maintain::Wait)`, which blocks until all submitted work completes. An alternative is to use `device.poll(Maintain::Poll)` in a spin loop, which returns immediately if work is not yet done.
+
+For this use case, `Maintain::Wait` is correct because the CPU has nothing useful to do while waiting for GPU results. However, combining this with double buffering (section 2) would change the calculus: the CPU could be preparing the next batch's parameters while polling.
+
+**Recommendation:** Implement double-buffered staging first, then switch to `Maintain::Poll` in a loop that alternates between checking GPU completion and doing CPU-side work (parameter updates, WS state updates, etc.).
+
+---
+
+## 14. Bind Group Caching (Good as-is)
+
+**File:** `src/gpu_evolver/pipeline.rs`, lines 472-519
+
+All bind groups are created once during init and reused for every dispatch. This is correct. No bind group is ever recreated.
+
+**Assessment:** No issues here.
+
+---
+
+## 15. Subgroup Operations for Error Reduction (Medium-High Impact)
+
+**File:** `src/shaders/rasterize_error.wgsl`, lines 183-191
+
+The current error reduction uses shared memory with explicit barriers:
 
 ```wgsl
-@compute @workgroup_size(8, 8, 1)
-fn rasterize_and_error(
-    @builtin(global_invocation_id) gid: vec3<u32>,
-    @builtin(local_invocation_index) local_idx: u32,
-) {
-    // ... rasterize pixel (same as current rasterize.wgsl) ...
+shared_errors[local_idx] = pixel_error;
+workgroupBarrier();
 
-    // Immediately compare against reference (no intermediate buffer)
-    let ref_pixel = reference_image[ref_idx]; // or textureLoad()
-    let refr = f32(ref_pixel & 0xFFu);
-    // ... compute L1 error ...
-
-    // Workgroup reduce (same as current error_reduce.wgsl)
-    shared_errors[local_idx] = pixel_error;
-    workgroupBarrier();
-    // ... reduction tree ...
-    if local_idx == 0u {
-        atomicAdd(&error_accumulators[chain_id], shared_errors[0]);
+var stride = 128u;
+while stride > 0u {
+    if local_idx < stride {
+        shared_errors[local_idx] += shared_errors[local_idx + stride];
     }
+    workgroupBarrier();
+    stride >>= 1u;
 }
 ```
 
-Benefits:
-1. **Eliminate the 302MB render_targets buffer entirely.** VRAM drops from ~2.8GB to ~2.5GB.
-2. **Eliminate one full compute pass dispatch per iteration.** That is 50 * (barrier + dispatch) overhead removed.
-3. **Each pixel value stays in registers** -- no round-trip through global memory. On the RTX 5090, global memory bandwidth is shared across all SMs; eliminating 302MB * 2 (write + read) * 512 chains per iteration of memory traffic is massive.
-4. **Bind group simplification:** One fewer pipeline, one fewer bind group layout, fewer descriptor sets.
+This is 8 iterations with 8 `workgroupBarrier()` calls. On NVIDIA, `workgroupBarrier()` translates to `__syncthreads()`, which is relatively cheap but still forces all warps to reach the barrier before any can proceed.
 
-**Caveat:** The fused shader will need bindings for both `working_states` (for rasterize) and `reference_image` (for error). This means more bindings in one bind group, but wgpu supports up to 8 bindings per group easily.
+NVIDIA RTX 5090 supports **subgroup (warp-level) operations** that can replace the lower iterations of the reduction tree. With subgroups of size 32:
 
-**Expected improvement:** 15-30% total throughput improvement. Memory traffic reduction is the dominant win.
+```wgsl
+// Enable subgroup features
+enable subgroups;
 
----
+// Intra-warp reduction (no barriers needed):
+var error = pixel_error;
+error = subgroupAdd(error);
 
-## 8. `queue.write_buffer` for Params: Consider Inline Push Constants (LOW IMPACT)
+// Only one thread per subgroup writes to shared memory
+shared_errors[local_idx / 32u] = error; // 8 values for 256 threads
+workgroupBarrier();
 
-### Problem
-
-`GpuParams` is 96 bytes, written via `queue.write_buffer` every batch:
-
-```rust
-p.queue.write_buffer(&p.params_buf, 0, bytemuck::bytes_of(&params));
+// Final reduction of 8 values (only thread 0)
+if local_idx == 0u {
+    var total = 0u;
+    for (var i = 0u; i < 8u; i++) {
+        total += shared_errors[i];
+    }
+    atomicAdd(&error_accumulators[chain_id], total);
+}
 ```
 
-This goes through wgpu's staging belt (allocate staging buffer, memcpy, schedule DMA transfer). For 96 bytes, the staging overhead dominates.
+This replaces 8 barrier-synchronized iterations with 1 subgroup operation + 1 barrier + 1 serial loop. On an RTX 5090, `subgroupAdd` compiles to a single `redux.sync.add` PTX instruction.
 
-### Alternative: Push Constants
-
-wgpu supports push constants via `PushConstantRange` in the pipeline layout. Push constants are written directly into the command buffer -- zero allocation, zero DMA transfer, immediate availability at shader execution time.
-
-```rust
-// Pipeline layout
-let layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
-    push_constant_ranges: &[PushConstantRange {
-        stages: ShaderStages::COMPUTE,
-        range: 0..96,
-    }],
-    // ...
-});
-
-// In command recording
-pass.set_push_constants(0, bytemuck::bytes_of(&params));
-```
-
-**Caveat:** Push constants have a size limit of 128 bytes (guaranteed by Vulkan spec). At 96 bytes, `GpuParams` fits but leaves minimal room for growth. Also, WGSL does not natively support push constants -- wgpu maps them through a polyfill that uses a small uniform buffer internally. The real-world benefit over `write_buffer` for a 96-byte uniform is negligible.
-
-**Expected improvement:** Negligible. Not worth the complexity.
+**Caveat:** wgpu subgroup support requires `Features::SUBGROUP` and is not yet stabilized. Check wgpu v22.1.0's subgroup support status. If not available, this is a future optimization.
 
 ---
 
-## 9. Timestamp Queries for Profiling (DIAGNOSTIC -- NO THROUGHPUT CHANGE)
+## 16. Specialize Shaders for Common Cases (Low Impact)
 
-### Problem
+**File:** `src/shaders/mutate.wgsl`
 
-There is no way to know which pass is the bottleneck without measurement. All analysis above is theoretical.
+The mutate shader has a hot loop (`while !is_dirty && attempts < 1000u`) that iterates until at least one mutation fires. With typical mutation probabilities (1/50 to 1/750 per polygon, ~150 polygons), the expected number of iterations is very small (1-2). The `1000u` cap is a safety net.
 
-### Fix: Enable Timestamp Queries
-
-wgpu 22.1.0 supports `Features::TIMESTAMP_QUERY`. Use `ComputePassDescriptor::timestamp_writes` (currently set to `None` on every pass).
-
-```rust
-// Request feature
-required_features: Features::TIMESTAMP_QUERY,
-
-// Create query set
-let query_set = device.create_query_set(&QuerySetDescriptor {
-    ty: QueryType::Timestamp,
-    count: 12, // 2 per pass * 5 passes + 2 for batch start/end
-    label: Some("perf_queries"),
-});
-
-// On each pass
-let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-    label: Some("rasterize"),
-    timestamp_writes: Some(ComputePassTimestampWrites {
-        query_set: &query_set,
-        beginning_of_pass_write_index: Some(2),
-        end_of_pass_write_index: Some(3),
-    }),
-});
-
-// After submit, resolve and read back
-encoder.resolve_query_set(&query_set, 0..12, &timestamp_buf, 0);
-// Map timestamp_buf, convert to nanoseconds using queue.get_timestamp_period()
-```
-
-This would immediately reveal whether rasterize, error_reduce, mutate, or select is the bottleneck, and by how much. All other optimizations should be prioritized based on this data.
-
-**Recommendation:** Implement this first. It costs nothing at runtime (timestamp queries are essentially free on NVIDIA) and eliminates guesswork.
+No optimization needed here — the shader compiler will handle this well.
 
 ---
 
-## 10. WSL2-Specific Considerations
+## Priority-Ranked Summary
 
-### Known Issues
-
-- **Dozen driver (Vulkan-on-D3D12):** Already handled by `ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER` and chain count capping. The max_storage_buffer_binding_size is typically lower on Dozen than native Vulkan.
-
-- **PCI-e passthrough overhead:** WSL2 uses a virtual GPU (dxgkrnl VMBus). Every GPU submission crosses the VM boundary. This adds ~10-50us per `queue.submit()` call. With the current pattern of 1 submit per batch (50 iterations), this is already well-amortized. Increasing batch size further (e.g., 100 or 200 iterations) would reduce this overhead proportionally but would also increase latency for detecting new best solutions.
-
-- **Memory mapping latency:** `buffer.map_async()` + `device.poll(Maintain::Wait)` in WSL2 has higher latency than native because the readback must cross the VM boundary. Double-buffering (item 1) mitigates this by overlapping the map with GPU execution.
-
-### Potential: Native Vulkan
-
-Running natively on Linux (not WSL2) would eliminate the VMBus overhead entirely. If the workload is throughput-bound (which it should be at 512 chains), the difference is likely <5%. If the workload is submission-bound, the difference could be 10-20%.
-
----
-
-## 11. Increasing Chain Count with Available VRAM (LOW-MEDIUM IMPACT)
-
-### Problem
-
-Only ~2.8GB of 32GB VRAM is used. The RTX 5090 has substantial spare capacity.
-
-### Analysis
-
-The dominant buffer is `render_targets`: `chain_count * W * H * 4` bytes. At 512 chains and 384x384:
-- render_targets = 512 * 384 * 384 * 4 = 302MB
-- chain_states = 512 * 48032 = 23.5MB
-- working_states = 512 * 48032 = 23.5MB
-- reference = 384 * 384 * 4 = 0.6MB
-- Total ~350MB (matches the ~2.8GB estimate if accounting for wgpu internal overhead)
-
-If the render_targets buffer is eliminated by fusing rasterize + error_reduce (item 7), the per-chain cost drops to ~96KB (two DrawingState buffers). With 30GB available, you could theoretically run ~300,000 chains. The bottleneck shifts to compute throughput and dispatch limits.
-
-Practically, increasing from 512 to 2048 or 4096 chains (with the fused shader) would be feasible and would provide more population diversity, potentially improving convergence quality.
-
-**Caveat:** The `max_storage_buffer_binding_size` limit (typically 128MB-2GB depending on adapter) may cap the chain_states buffer before VRAM runs out. The existing capping logic handles this correctly.
-
----
-
-## 12. Batch Size vs Latency Tradeoff
-
-### Current State
-
-`GPU_ITERATIONS_PER_BATCH = 50` encodes 50 * 5 = 250 compute passes into one command buffer. This is good for amortizing submission overhead. However:
-
-- All 250 passes execute before the CPU can check for a new global best.
-- If a global best is found on iteration 5 of 50, the remaining 45 iterations still execute (their results are valid -- each iteration operates on its chain-local best, not the global best, so no work is wasted from a correctness standpoint).
-
-Increasing to 100 or 200 iterations per batch would reduce CPU-side overhead proportionally but is unlikely to improve throughput significantly since the current 50 already amortizes well.
-
-**Recommendation:** Leave at 50 unless profiling shows significant CPU overhead per batch.
-
----
-
-## Priority-Ordered Recommendations
-
-| Priority | Item | Expected Impact | Effort |
-|----------|------|----------------|--------|
-| 1 | Timestamp queries (#9) | Diagnostic | Low |
-| 2 | Fuse rasterize + error_reduce (#7) | 15-30% throughput | Medium |
-| 3 | Shared memory polygon tiling in rasterize (#5) | 20-40% on rasterize | Medium |
-| 4 | Double-buffered submission (#1) | 10-30% throughput | Medium |
-| 5 | Reference image as texture (#6) | 10-20% on error pass | Low |
-| 6 | GPU-side `clear_buffer` for accumulators (#2) | Minor cleanup | Trivial |
-| 7 | Mutate/select workgroup size > 1 (#3, #4) | 5-15% on those passes | Low |
-| 8 | Increase chain count post-fusion (#11) | Quality improvement | Low |
+| # | Optimization | Impact | Effort | Section |
+|---|-------------|--------|--------|---------|
+| 1 | Consolidate staging buffer maps | High | Low | 1 |
+| 2 | Reference image as texture | Medium-High | Medium | 9 |
+| 3 | Push constants for params | Medium | Medium | 7 |
+| 4 | Pipeline cache for fast startup | Medium | Low | 8 |
+| 5 | Double-buffered staging | High | High | 2 |
+| 6 | Batch readback_chain copies | Medium | Low | 5 |
+| 7 | Subgroup reduction | Medium-High | Medium | 15 |
+| 8 | Remove redundant error accumulator reset | Low-Medium | Low | 3 |
+| 9 | Clean up buffer usage flags | Low | Low | 4 |
+| 10 | Conditional timestamp resolve | Low | Low | 6 |

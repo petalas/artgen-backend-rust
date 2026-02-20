@@ -238,7 +238,8 @@ fn gpu_main_loop(
     let default_params = MutationParams::default();
     loop {
         // Run a batch of GPU iterations
-        if let Some(new_best) = evolver.run_batch(&default_params) {
+        let collect_ts = last_stats_timestamp.elapsed().as_secs() >= 2;
+        if let Some(new_best) = evolver.run_batch(&default_params, collect_ts) {
             if new_best.fitness > global_best.fitness {
                 global_best = new_best;
 
@@ -933,10 +934,9 @@ fn build_gpu_stats(evolver: &GpuEvolver, island_count: u32) -> GpuStatsWs {
     let mut fitness: Vec<f32> = raw_fitness.to_vec();
     fitness.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
 
-    // Readback best drawing from each island
-    let island_drawings: Vec<Drawing> = island_stats.iter()
-        .map(|is| evolver.readback_chain(is.best_chain_id))
-        .collect();
+    // Readback best drawing from each island (single batched GPU submission)
+    let chain_ids: Vec<u32> = island_stats.iter().map(|is| is.best_chain_id).collect();
+    let island_drawings = evolver.readback_chains(&chain_ids);
 
     GpuStatsWs {
         chain_count,
@@ -1013,7 +1013,7 @@ fn run_benchmark(
         }
 
         // Run evolution batch with benchmark params
-        if let Some(new_best) = evolver.run_batch(&bench_params) {
+        if let Some(new_best) = evolver.run_batch(&bench_params, true) {
             if new_best.fitness > bench_best.fitness {
                 bench_improvements += 1;
                 bench_best = new_best;
@@ -1409,7 +1409,8 @@ fn gpu_main_loop_headless(legacy_image: Option<&str>) {
 
             batches += 1;
             let mp = ws_state.0.lock().unwrap().mutation_params.clone();
-            if let Some(new_best) = evolver.run_batch(&mp) {
+            let collect_ts = last_stats_timestamp.elapsed().as_secs() >= 2;
+            if let Some(new_best) = evolver.run_batch(&mp, collect_ts) {
                 if new_best.fitness > global_best.fitness {
                     improvements += 1;
                     let delta = new_best.fitness - global_best.fitness;

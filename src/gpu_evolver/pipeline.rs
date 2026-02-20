@@ -156,12 +156,12 @@ impl GpuPipeline {
             usage: BufferUsages::STORAGE,
         });
 
-        // Error accumulators (atomic u32 per chain)
-        let error_accumulators_buf = device.create_buffer(&BufferDescriptor {
+        // Error accumulators (atomic u32 per chain) — zero-initialized once here;
+        // the select shader resets them via atomicExchange after each iteration.
+        let error_accumulators_buf = device.create_buffer_init(&util::BufferInitDescriptor {
             label: Some("error_accumulators"),
-            size: error_accumulators_size as u64,
+            contents: &vec![0u8; error_accumulators_size],
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
         });
 
         // Control flags

@@ -108,7 +108,10 @@ fn select_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // the next iteration must use a different random stream.
     chain_states[chain_id].rng_state = working_states[chain_id].rng_state;
 
-    if fitness > current_fitness {
+    // Accept if strictly better, or with 50% probability if equal (plateau traversal)
+    let dominated = fitness > current_fitness;
+    let neutral = fitness == current_fitness && (working_states[chain_id].rng_state.x & 1u) == 1u;
+    if dominated || neutral {
         // Accept: copy working → chain_state
         chain_states[chain_id].polygon_count = working_states[chain_id].polygon_count;
         chain_states[chain_id].fitness_bits = fitness_bits;

@@ -1,409 +1,367 @@
-# Evolutionary Algorithm Analysis
+# Evolutionary Algorithm Analysis & Improvement Proposals
 
-Deep analysis of the GPU evolution pipeline in `artgen-backend-rust`, with concrete recommendations for what to build next. Everything listed in "Already Completed Optimizations" is excluded.
+Analysis of the GPU evolution pipeline in `artgen-backend-rust`. All proposals below are for changes **not yet implemented** -- see the project README for already-completed optimizations (ring migration, island model, crossover, tournament selection, L1 error, etc.).
 
 ---
 
 ## 1. Current Architecture Summary
 
-The system runs **512 independent (1+1) evolution strategy chains** on the GPU. Each chain:
+The GPU pipeline runs **K independent (1+1) evolution chains** (default 128, max 512) across 4 compute passes per iteration:
 
-1. Copies its current-best drawing to a working buffer
-2. Applies probabilistic mutations in a `while !is_dirty` loop (up to 1000 attempts)
-3. Rasterizes the mutated drawing (compute shader, 8x8 workgroups per pixel)
-4. Computes per-pixel L1 error vs. reference image, reduces via shared memory
-5. Selects: if mutant fitness > current-best fitness, accept it
-6. Periodically migrates via ring topology (every 50 iterations)
+1. **Mutate** (`src/shaders/mutate.wgsl`): Copy chain state to working state, apply probabilistic mutations (or crossover 10% of the time). One thread per chain.
+2. **Rasterize + Error** (`src/shaders/rasterize_error.wgsl`): Fused rasterization and L1 error computation. 16x16 workgroups with tiled polygon prefetch into shared memory. Error reduced via binary tree within each workgroup, then `atomicAdd` to per-chain accumulator.
+3. **Select** (`src/shaders/select.wgsl`): Compare candidate fitness to current best. Accept if strictly better (greedy). Track global best via `atomicMax`.
+4. **Migrate** (`src/shaders/select.wgsl`): Periodic ring migration within islands (intra) or across all chains (inter). Replace self with neighbor if neighbor is fitter.
 
-All 512 chains execute in lockstep across 50 iterations per GPU submission. There is **no crossover**, **no adaptive mutation**, and **no diversity maintenance** beyond the ring migration.
-
-### Current VRAM Usage
-
-At 384x384 with 512 chains:
-- Chain states: 512 * 48,032 = ~23.5 MB
-- Working states: ~23.5 MB
-- Render targets: 512 * 384 * 384 * 4 = ~302 MB
-- Reference image: 384 * 384 * 4 = ~0.6 MB
-- Error accumulators: 512 * 4 = 2 KB
-- **Total: ~350 MB** out of 32 GB available (~1.1% utilization)
+Fitness = `100 * (1 - L1_error / max_total_error) - complexity_penalty`, where the complexity penalty is proportional to polygon count (via `PER_POINT_MULTIPLIER = 1/5000000`).
 
 ---
 
 ## 2. Mutation Operator Analysis
 
-### 2.1 Current Operators (mutate.wgsl)
+### 2.1 Current Operator Inventory
 
-| Operator | Probability | Scope | Effect |
-|----------|------------|-------|--------|
-| Add polygon | 1/50 = 2% | Drawing | New random triangle near random origin |
-| Remove polygon | 1/1500 = 0.07% | Drawing | Remove random polygon, shift array |
-| Reorder | 1/500 = 0.2% | Drawing | Swap two polygons (z-order) |
-| Offset polygon | 1/500 = 0.2% | Per-polygon | Translate all vertices by same delta |
-| Change color (per channel) | 1/750 = 0.13% | Per-polygon | Replace single channel with random value |
-| Micro-adjust color | 1/100 = 1% | Per-polygon | +/-1 per channel (1/255) |
-| Lighten | 1/750 = 0.13% | Per-polygon | All RGB channels +1/255 |
-| Darken | 1/750 = 0.13% | Per-polygon | All RGB channels -1/255 |
-| Move point | 1/500 = 0.2% | Per-vertex | Random within +/-0.1 of current |
-| Micro-adjust point | 1/100 = 1% | Per-vertex | Random within +/-0.01 of current |
+From `mutate.wgsl` (lines 332-516), the mutation operators are:
 
-### 2.2 Probability Balance Issues
+| Operator | Default Probability | Scope | Effect |
+|----------|-------------------|-------|--------|
+| Add polygon | 1/50 (0.02) | Drawing | Insert random triangle at random position |
+| Remove polygon | 1/1500 (0.00067) | Drawing | Remove random polygon |
+| Reorder (swap) | 1/500 (0.002) | Drawing | Swap two polygons' z-order |
+| Offset polygon | 1/500 (0.002) | Per-polygon | Translate all vertices by same delta |
+| Change color | 1/750 (0.00133) | Per-channel | Replace one channel with random value |
+| Micro-adjust color | 1/100 (0.01) | Per-channel | +/- 1/255 on one channel |
+| Lighten | 1/750 (0.00133) | Per-polygon | All RGB channels +1/255 |
+| Darken | 1/750 (0.00133) | Per-polygon | All RGB channels -1/255 |
+| Move point | 1/500 (0.002) | Per-vertex | Random offset within `move_point_max_delta` (0.1) |
+| Micro-adjust point | 1/100 (0.01) | Per-vertex | Random offset within `micro_adjust_delta` (0.01) |
 
-**Micro-adjust dominates.** With ~150 polygons (3 vertices each = 450 vertices), micro-adjust fires on ~4.5 vertices per mutation pass and ~1.5 color channels. Meanwhile, structural mutations (add/remove/reorder) fire on average 0.02 + 0.0007 + 0.002 = ~0.023 times. The mutation mix is ~99% fine-tuning, ~1% structural. This is appropriate for late-stage optimization but too conservative for early exploration.
+### 2.2 Missing Mutation Operators
 
-**Add vs. Remove asymmetry is extreme.** Add probability (1/50) is 30x higher than Remove (1/1500). The polygon count will monotonically increase toward the cap. Once at cap, the system loses the ability to simplify and restructure. This is a major source of stagnation.
+**a) Scale/Resize Polygon**
 
-### 2.3 Missing Mutation Operators
+There is no operator to uniformly scale a polygon around its centroid. The only way to change polygon size is moving individual vertices. A scale mutation would preserve shape while exploring size, which is especially useful for fine-tuning coverage of a region.
 
-The following operators exist in the CPU path but are absent from the GPU shader:
-
-1. **Remove point** (`REMOVE_POINT_PROBABILITY = 1/500`) -- present in CPU `polygon.mutate()` but not in `mutate.wgsl`. Since GPU polygons are always triangles (3 vertices), this operator doesn't apply in the current representation. However, if the representation ever changes to support N-gons, this would need adding.
-
-The following operators would be valuable additions:
-
-1. **Scale polygon** -- uniformly scale a triangle around its centroid. Currently the only way to resize a polygon is to move individual vertices, which requires 3 lucky mutations to achieve what one scale mutation could do.
-
-2. **Rotate polygon** -- rotate a triangle around its centroid. Same argument as scale: coordinated vertex movement is extremely unlikely through independent point mutations.
-
-3. **Clone polygon** -- duplicate an existing polygon with slight perturbation. Much more useful than adding a random polygon, since existing polygons have already been optimized to useful positions and colors.
-
-4. **Replace polygon** -- simultaneously remove one polygon and add another. Avoids the 2-step penalty of remove-then-add where the intermediate state is always worse.
-
-5. **Swap adjacent polygons** -- instead of swapping two random polygons (which is usually destructive), swap only adjacent polygons in z-order. Most z-order improvements are local.
-
-6. **Color-from-reference** -- sample the reference image color at the polygon's centroid and use it as the polygon's color. This is a strongly guided mutation that would dramatically improve early convergence.
-
----
-
-## 3. Crossover Design for GPU
-
-Crossover is the single biggest missing piece. With 512 chains all doing (1+1) ES, the system is running 512 independent hill-climbers that only interact through ring migration (wholesale copying). True crossover could combine beneficial traits from different chains.
-
-### 3.1 Why Crossover is Hard for Polygon Drawings
-
-Polygon-based drawings have two properties that make naive crossover destructive:
-
-1. **Order-dependent rendering**: Polygons are composited front-to-back with alpha blending. Swapping polygon subsets between drawings changes the z-ordering context, invalidating the fitness of both subsets.
-
-2. **Co-adaptation**: A polygon's optimal color depends on what's behind it (other polygons + background). Polygons co-adapt in groups. Breaking these groups apart is usually worse than either parent.
-
-### 3.2 Recommended: Region-Based Crossover
-
-**Core idea**: Divide the image into spatial regions. For each region, pick one parent. Take all polygons whose centroid falls in that region from the chosen parent.
-
-**Implementation in WGSL**:
-```
-fn crossover(parent_a: chain_id, parent_b: chain_id, child: chain_id, rng):
-    // Choose a random split line (vertical or horizontal)
-    let split_pos = rand_f32(rng)  // 0.0 to 1.0
-    let split_vertical = rand_f32(rng) > 0.5
-
-    var child_count = 0u
-    // From parent A: take polygons on one side of the split
-    for each polygon p in parent_a:
-        centroid = (p.v0 + p.v1 + p.v2) / 3.0
-        let coord = select(centroid.x, centroid.y, split_vertical)
-        if coord < split_pos:
-            child.polygons[child_count++] = p
-
-    // From parent B: take polygons on the other side
-    for each polygon p in parent_b:
-        centroid = (p.v0 + p.v1 + p.v2) / 3.0
-        let coord = select(centroid.x, centroid.y, split_vertical)
-        if coord >= split_pos:
-            child.polygons[child_count++] = p
-```
-
-**Why this works**: Polygons that cover the same image region tend to be co-adapted. By keeping spatially coherent groups together, we preserve the co-adaptation structure while recombining different parts of the image.
-
-**GPU considerations**: This requires a new compute pass between select and migrate, dispatched as `(chain_count/2, 1, 1)` workgroups. Pairs of chains produce one child each. The child replaces the worse parent.
-
-**Buffer requirements**: No additional buffers needed -- the working_states buffer can be repurposed as temporary storage for the child, then copied back to chain_states.
-
-### 3.3 Alternative: Uniform Polygon Crossover with Fitness Sorting
-
-Pick polygons from two parents by index. For each index position, randomly choose parent A or parent B's polygon. This is simpler but more destructive because z-ordering is broken.
-
-**Mitigation**: Sort the child's polygons by area (large first) after crossover. This approximates the natural ordering (big background shapes first, details last) and partially recovers z-order coherence.
-
-### 3.4 Alternative: Headless Chicken Crossover
-
-Cross a good solution with a random solution. The "random parent" is just a newly generated random drawing. This tests whether the good parent's polygons are individually valuable (the ones that survive in the child are likely individually beneficial).
-
-**GPU implementation**: Trivial. Generate a random drawing in the mutate shader, then do region-based crossover between the chain's best and the random drawing. This is essentially a structured "restart from random with memory" operator.
-
-### 3.5 Crossover Frequency and Integration
-
-Crossover should be infrequent relative to mutation -- perhaps every 200-500 iterations, interleaved with the migration pass. Suggested implementation:
-
-- Add a `crossover_interval` parameter to `GpuParams` (e.g., 200)
-- Add a new `crossover.wgsl` compute shader
-- Add a new compute pipeline and bind group in `pipeline.rs`
-- Dispatch conditionally in `mod.rs`, similar to how migration is dispatched
-- Pair chains for crossover: `(2i, 2i+1)` or random pairs via RNG
-
----
-
-## 4. Population Structure Improvements
-
-### 4.1 Current State: Flat Ring
-
-All 512 chains are arranged in a single ring. Migration copies the right neighbor's drawing if it's fitter. This means:
-
-- A good solution propagates around the ring at rate 1 chain per migration event
-- Full propagation takes ~512 * 50 = 25,600 iterations
-- Until propagation completes, most chains are working on inferior solutions
-
-### 4.2 Recommended: Hierarchical Island Model
-
-Partition the 512 chains into **islands** (e.g., 32 islands of 16 chains each). Within each island, use the existing ring migration. Between islands, add a second migration event at a slower rate.
-
-**Implementation**:
-```
-// In select.wgsl, add inter_island_migrate_main entry point:
-
-@compute @workgroup_size(1)
-fn inter_island_migrate_main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let chain_id = gid.x;
-    let island_size = 16u;  // from params
-    let island_id = chain_id / island_size;
-    let local_id = chain_id % island_size;
-
-    // Only island "leader" (local_id == 0) participates
-    if local_id != 0u { return; }
-
-    // Ring of islands: compare with next island's leader
-    let neighbor_island = (island_id + 1u) % (chain_count / island_size);
-    let neighbor_chain = neighbor_island * island_size;
-
-    // Same logic as migrate_main but between island leaders
-    ...
+```wgsl
+// Proposed: scale polygon around centroid
+if rand_f32(&rng) < params.scale_polygon_prob {
+    let c = centroid(poly);
+    let scale = rand_f32_range(&rng, 0.8, 1.2); // +/- 20%
+    poly.v0 = clamp(c + (poly.v0 - c) * scale, vec2(0.0), vec2(1.0));
+    poly.v1 = clamp(c + (poly.v1 - c) * scale, vec2(0.0), vec2(1.0));
+    poly.v2 = clamp(c + (poly.v2 - c) * scale, vec2(0.0), vec2(1.0));
+    is_dirty = true;
 }
 ```
 
-**Benefits**: Islands can explore different regions of the search space independently. Inter-island migration shares the best discoveries without killing diversity within other islands.
+**b) Rotate Polygon**
 
-**Parameters to add to GpuParams**:
-- `island_size: u32` (e.g., 16)
-- `inter_island_migration_interval: u32` (e.g., 500 -- 10x slower than intra-island)
+No rotation operator exists. Rotation around the centroid would allow exploring orientation without changing size or position.
 
-### 4.3 Topology Alternatives
+```wgsl
+// Proposed: rotate polygon around centroid
+if rand_f32(&rng) < params.rotate_polygon_prob {
+    let c = centroid(poly);
+    let angle = rand_f32_range(&rng, -0.3, 0.3); // ~+/- 17 degrees
+    let cos_a = cos(angle);
+    let sin_a = sin(angle);
+    // Rotate each vertex around centroid
+    let d0 = poly.v0 - c;
+    poly.v0 = clamp(c + vec2(d0.x * cos_a - d0.y * sin_a, d0.x * sin_a + d0.y * cos_a), vec2(0.0), vec2(1.0));
+    // ... same for v1, v2
+    is_dirty = true;
+}
+```
 
-Beyond hierarchical islands, other topologies worth considering:
+**c) Duplicate Polygon (with slight mutation)**
 
-- **2D Torus**: Arrange chains in a 2D grid (e.g., 16x32). Each chain migrates from up/down/left/right neighbors. Provides richer connectivity than a ring without full mixing.
-- **Random sparse graph**: Each chain has 2-3 random neighbors. Gives small-world properties (fast propagation of good solutions, but still maintains local diversity).
+Currently, adding a polygon creates a brand new random triangle. A "duplicate nearby polygon" operator would exploit existing good coverage by cloning a polygon with slight perturbation -- this is a form of constructive exploitation.
 
-The 2D torus is particularly GPU-friendly since neighbor computation is just modular arithmetic.
+**d) Gaussian (Non-Uniform) Perturbations**
+
+All vertex and color perturbations use uniform distributions. Gaussian (or Cauchy) perturbation distributions would produce mostly small changes with occasional large jumps, which is well-established as superior for continuous optimization. This could be approximated with the Box-Muller transform or even a simple triangular distribution (sum of two uniform samples).
+
+```wgsl
+// Approximate Gaussian via triangular distribution (sum of 2 uniform)
+fn rand_gaussian_approx(rng: ptr<function, vec4<u32>>, sigma: f32) -> f32 {
+    return (rand_f32(rng) + rand_f32(rng) - 1.0) * sigma;
+}
+```
+
+### 2.3 Mutation Probability Imbalance
+
+The current probabilities have a significant structural issue: **per-polygon mutations compound with polygon count**. With N polygons, the expected number of mutations per iteration is:
+
+- Drawing-level: `add=0.02 + remove=0.00067 + reorder=0.002` = ~0.023
+- Per-polygon (per polygon): `offset=0.002 + 4*color=0.00533 + 4*micro_color=0.04 + 3*move=0.006 + 3*micro_move=0.03` = ~0.083
+- **Total per-polygon contribution: 0.083 * N**
+
+At N=500 polygons, there are ~41.5 expected per-polygon mutations per iteration, but only ~0.023 drawing-level mutations. This means:
+
+1. **Almost every iteration applies many micro-adjustments simultaneously.** This creates a high-dimensional random walk that is much harder to evaluate -- any single good change is drowned out by many neutral/bad changes.
+2. **The "mutate until dirty" loop (line 328) is misleading** -- with N=500, `is_dirty` becomes true on virtually the first attempt, so the loop always runs exactly once. The loop is only meaningful for very small drawings.
+
+**Recommendation**: Consider a "single-mutation" mode where each iteration applies exactly one mutation operator (chosen by weighted roulette). This is the standard approach in (1+1)-ES for combinatorial/structured problems. It allows the selection pressure to act on individual changes rather than batches of changes. The GPU throughput is high enough that evaluating many single-mutation candidates per second is feasible.
+
+```wgsl
+// Single-mutation mode: pick one operator via roulette wheel
+let r = rand_f32(&rng);
+var cumulative = 0.0;
+cumulative += params.add_polygon_prob;
+if r < cumulative { /* add polygon */ }
+cumulative += params.remove_polygon_prob;
+if r < cumulative { /* remove polygon */ }
+// ... etc, pick a random polygon index for per-polygon ops
+```
 
 ---
 
-## 5. Diversity Maintenance
+## 3. Selection Pressure & Diversity
 
-### 5.1 The Convergence Problem
+### 3.1 Greedy Selection is Too Strict
 
-With (1+1) ES + ring migration, all 512 chains will eventually converge to the same local optimum. Once converged, the system is just 512 copies of the same hill-climber, which is no better than 1 chain.
+The current selection (`select.wgsl` line 111) is strictly greedy: `if fitness > current_fitness`. This means:
+- **No neutral moves are accepted.** In combinatorial optimization, accepting moves of equal fitness is critical for escaping plateaus. The fitness landscape for polygon art has vast plateaus (many configurations yield identical L1 error after rounding).
+- **No simulated annealing.** There is no mechanism to accept slightly worse solutions to escape local optima.
 
-### 5.2 Recommended: Fitness Sharing / Niching
-
-Introduce a diversity bonus or penalty based on how similar a chain's drawing is to its neighbors.
-
-**Lightweight approach -- phenotypic distance**: Compare rendered images rather than genotypes. After the error_reduce pass, compute the L1 distance between neighboring chains' render targets. Chains that are very similar to their neighbors get a small fitness penalty.
-
-**Implementation complexity**: This requires an additional compute pass that reads `render_targets` for neighboring chains. The per-pixel comparison is embarrassingly parallel (same dispatch as error_reduce). The challenge is that `render_targets` for chain N and chain N+1 are in different z-slices of the dispatch, so you'd need to read from both in the same shader.
-
-**Simpler alternative -- genotypic distance**: Compare polygon counts and average vertex positions between neighboring chains. This is cheaper (only reads chain_states, not render_targets) and can be computed in the select pass. Chains within a small Hamming distance of their neighbors get a diversity bonus to their error threshold (accept slightly worse mutations to escape local optima).
-
-### 5.3 Recommended: Stagnation Detection + Random Restart
-
-Track per-chain stagnation: count iterations since last improvement. If a chain hasn't improved in N iterations (e.g., 5000), reinitialize it with a random drawing.
-
-**Implementation**: Add a `stagnation_counter: u32` field to `DrawingState` (requires struct layout change -- currently `_pad0` and `_pad1` could be repurposed). In `select_main`:
+**Recommendation**: Accept neutral moves (change `>` to `>=`, or accept with 50% probability when equal). Optionally, implement a simple Metropolis criterion where `P(accept) = exp(-delta_fitness / temperature)` for slightly worse solutions, with temperature decaying over iterations.
 
 ```wgsl
+// Accept improvements always, neutral with 50%, worse with exponential decay
 if fitness > current_fitness {
     // Accept
-    chain_states[chain_id].stagnation_counter = 0u;
-    ...
+} else if fitness == current_fitness && rand_f32(&rng) < 0.5 {
+    // Accept neutral
 } else {
-    chain_states[chain_id].stagnation_counter += 1u;
-    if chain_states[chain_id].stagnation_counter > params.stagnation_limit {
-        // Random restart: generate new random drawing
-        chain_states[chain_id] = random_drawing(rng);
-        chain_states[chain_id].stagnation_counter = 0u;
+    let delta = current_fitness - fitness;
+    let temperature = max(0.001, 1.0 / (1.0 + f32(params.iteration_number) * 0.0001));
+    if rand_f32(&rng) < exp(-delta / temperature) {
+        // Accept worse (simulated annealing)
     }
 }
 ```
 
-This is straightforward and low-risk. The `_pad0` field in `DrawingState` can be repurposed as `stagnation_counter` with no layout change (it's already a u32 at offset 8). The `_pad1` could hold a `last_improvement_fitness` for tracking improvement rate.
+Note: Implementing `rand_f32` in the select shader would require passing the RNG state into the select pass. Currently the RNG lives in `DrawingState` and is only used in `mutate.wgsl`.
 
----
+### 3.2 Diversity Loss in Migration
 
-## 6. Adaptive Mutation Rates (Self-Adaptation)
+The current migration strategy (`migrate_from` in `select.wgsl` line 139-160) is purely elitist: if your neighbor is better, you **completely adopt their drawing**. This means:
+- After enough migration rounds, all chains within an island converge to the island's best solution.
+- Diversity is only maintained by independent mutation streams (different RNG seeds) applied to identical drawings.
 
-### 6.1 The Problem with Fixed Rates
-
-The current mutation probabilities are fixed constants. Early in evolution, when fitness is low, large structural mutations (add/remove polygon) are most valuable. Late in evolution, when fitness is high, only micro-adjustments help. But the probabilities never change.
-
-### 6.2 Recommended: 1/5th Rule Adaptation
-
-The classic (1+1) ES self-adaptation rule: if more than 1/5 of mutations are accepted, increase mutation strength. If fewer than 1/5 are accepted, decrease it.
-
-**Per-chain implementation**: Add `success_count: u32` and `trial_count: u32` to chain state (repurpose padding or extend the struct). Every N iterations (e.g., 100), compute the acceptance rate and scale mutation deltas:
-
-```
-acceptance_rate = success_count / trial_count
-if acceptance_rate > 0.2:
-    mutation_scale *= 1.1   // explore more
-else:
-    mutation_scale *= 0.9   // exploit more
-```
-
-The `mutation_scale` multiplies `move_point_max_delta`, `offset_polygon_magnitude`, and `micro_adjust_delta`. It does NOT affect structural mutations (add/remove polygon).
-
-**GPU-friendly variant**: Instead of per-chain adaptation (which requires extra state), use **global adaptation** based on the overall acceptance rate across all chains. This can be computed in the select pass using `atomicAdd` on a shared counter:
+**Recommendation**: Probabilistic migration acceptance. Instead of always adopting a better neighbor, accept with probability proportional to fitness difference. Or adopt only a fraction of the neighbor's polygons (partial migration).
 
 ```wgsl
-// In select_main, after the fitness comparison:
-if fitness > current_fitness {
-    atomicAdd(&control.accept_count, 1u);
+// Probabilistic migration: accept better neighbor with p < 1.0
+let acceptance_prob = 0.3; // only 30% chance to adopt even if neighbor is better
+if neighbor_fitness > my_fitness && rand_f32(&rng) < acceptance_prob {
+    // migrate
 }
-// CPU reads accept_count after each batch, adjusts params.move_point_max_delta etc.
 ```
 
-This is the simplest approach: the CPU adjusts `GpuParams` between batches based on the acceptance ratio from the previous batch.
+### 3.3 Population Diversity Monitoring
 
-### 6.3 Alternative: Fitness-Proportional Mutation Strength
+There is no mechanism to detect or respond to diversity collapse. All islands can converge to similar solutions without any detection. A simple diversity metric would be to track the variance of fitness across chains within an island -- when variance drops below a threshold, inject random mutations or reset the worst chains.
 
-Scale mutation strength inversely with fitness:
+---
 
+## 4. Adaptive Mutation Rates
+
+### 4.1 The 1/5th Rule (Missing)
+
+The classic (1+1)-ES theory prescribes the **1/5th success rule**: if more than 1/5 of mutations are accepted, increase step size (mutation magnitude); if fewer, decrease it. The current system has completely static mutation parameters.
+
+The infrastructure for this partially exists -- `iteration_number` is passed to the GPU but never used in the mutation shader. This could drive adaptive rates:
+
+```wgsl
+// Adaptive move_point_max_delta: decrease over time as fitness improves
+let adaptive_delta = params.move_point_max_delta * max(0.01, 1.0 / (1.0 + f32(params.iteration_number) * 0.00001));
 ```
-scale = 1.0 - (fitness / 100.0)  // fitness ranges 0-100
-effective_delta = base_delta * (0.1 + 0.9 * scale)
+
+### 4.2 Per-Chain Self-Adaptive Parameters (CMA-ES Inspired)
+
+A more powerful approach: store per-chain mutation parameters (step sizes) in the `DrawingState` and evolve them alongside the drawing. Chains with well-tuned step sizes will produce better offspring, get selected more often via tournament, and spread their step sizes via migration.
+
+This would require adding fields to `DrawingState` (e.g., `mutation_sigma: f32` for vertex perturbation magnitude) and letting successful mutations reinforce their parameter values. This is a well-proven technique from Evolution Strategies.
+
+### 4.3 Fitness-Proportional Mutation Intensity
+
+Low-fitness chains should mutate more aggressively (they are far from optimal and need exploration), while high-fitness chains should apply fine-grained mutations (they are near optimal and need exploitation). Currently all chains use identical mutation parameters regardless of fitness.
+
+```wgsl
+// Scale mutation magnitudes by fitness rank within island
+let my_fitness = bitcast<f32>(chain_states[chain_id].fitness_bits);
+let island_best = /* max fitness in island */;
+let relative_quality = my_fitness / max(island_best, 0.001);
+let exploration_factor = 2.0 - relative_quality; // 1.0 for best, ~2.0 for worst
+// Apply exploration_factor to move_point_max_delta, offset_polygon_magnitude, etc.
 ```
 
-At fitness 0 (bad), full mutation strength. At fitness 90 (good), 19% of base strength. This requires no additional state -- just modify the mutate shader to read chain fitness and scale accordingly.
+---
+
+## 5. Fitness Landscape & Error Metric
+
+### 5.1 L1 vs L2 vs Perceptual
+
+L1 (sum of absolute differences per channel) is currently used on GPU, while CPU uses L2 (Euclidean distance across channels). L1 is faster (no sqrt) but treats all errors equally. Consider:
+
+- **Weighted channel error**: Human perception is more sensitive to green than red or blue. Using weights like `(0.299, 0.587, 0.114)` (ITU-R BT.601 luma) would prioritize perceptually important differences. This is a trivial change in `rasterize_error.wgsl` line 174:
+
+```wgsl
+// Perceptually-weighted L1 error
+let dr = abs(ri - refr) * 0.299;
+let dg = abs(gi - refg) * 0.587;
+let db = abs(bi - refb) * 0.114;
+pixel_error = u32((dr + dg + db) * 3.0); // scale back up to preserve dynamic range
+```
+
+- **SSIM-like structural similarity**: L1/L2 metrics don't capture edge alignment or structural features. A simplified structural metric (comparing local mean/variance in small patches) could be computed as a secondary objective but would be significantly more complex on GPU.
+
+### 5.2 Complexity Penalty Tuning
+
+The current complexity penalty (`PER_POINT_MULTIPLIER = 1/5000000` in `src/settings.rs` line 18) is extremely small. With 1000 triangles (3000 points) and fitness ~90.0:
+
+`penalty = 90.0 * (1/5000000) * 3000 = 0.054`
+
+This 0.054 penalty out of 90.0 fitness is negligible (~0.06%). In practice, the algorithm will always prefer more polygons because the error reduction from an extra polygon almost always exceeds this tiny penalty. Consider whether the penalty should be nonlinear (quadratic in polygon count) or significantly larger if the goal is to find parsimonious solutions.
 
 ---
 
-## 7. Multi-Objective Considerations
+## 6. Convergence Speed Improvements
 
-### 7.1 Current Approach: Weighted Sum
+### 6.1 Warm-Start / Seeded Initialization
 
-The fitness function is `100 * (1 - error/max_error) - fitness * per_point_multiplier * num_points`. This is a weighted sum of image fidelity and complexity (polygon count). The weight `PER_POINT_MULTIPLIER = 1/5,000,000` is extremely small -- at fitness 90 with 1000 polygons * 3 points, the penalty is `90 * 0.0000002 * 3000 = 0.054`. This is negligible.
+Currently all chains start from the same initial drawing (`drawing_to_gpu` in `src/gpu_evolver/buffers.rs` line 155). This means all chains begin identical and only diverge through random mutation.
 
-### 7.2 Issue: Complexity Penalty is Too Weak
+**Recommendation**: Initialize a fraction of chains with random perturbations of the initial drawing (different polygon counts, shuffled z-orders, varied alpha ranges). This gives the population immediate diversity to explore from.
 
-The penalty is so small that the system will always prefer adding polygons. There is no meaningful pressure to simplify. If the goal is to evolve compact, elegant approximations (fewer polygons), the penalty needs to be 10-100x stronger. If the goal is maximum fidelity regardless of complexity, the penalty should be removed entirely.
+```rust
+// In GpuEvolver::new -- perturb some chains on init
+let initial_states: Vec<GpuDrawingState> = (0..max_chains)
+    .map(|i| {
+        let seed = ...;
+        let mut state = drawing_to_gpu(initial_drawing, seed);
+        // Perturb 25% of chains: randomize some polygon properties
+        if i % 4 != 0 {
+            // Shuffle polygon order, drop random polygons, etc.
+        }
+        state
+    })
+    .collect();
+```
 
-### 7.3 Recommended: Pareto-Based Multi-Objective
+### 6.2 Stagnation Detection & Restart
 
-Instead of a weighted sum, maintain a Pareto front of non-dominated solutions across the chains. A solution A dominates B if A has both better fidelity AND fewer polygons. Non-dominated solutions are preserved; dominated ones are candidates for replacement.
+There is no mechanism to detect when evolution has stalled and take corrective action. The system can spend millions of evaluations making no progress.
 
-**Simplified version for (1+1) ES**: In the select pass, accept a mutant if it:
-- Has better fidelity AND same or fewer polygons, OR
-- Has same fidelity AND fewer polygons, OR
-- Has sufficiently better fidelity to justify additional polygons (e.g., fidelity improvement > threshold * polygon_count_increase)
+**Proposal**: Track the iteration number of the last improvement per chain. If a chain has not improved in N iterations (e.g., 10,000), apply a "mega-mutation" (multiple aggressive mutations) or reset it to a perturbation of the island's best.
 
-This doesn't require full NSGA-II machinery but still provides meaningful complexity pressure.
+This could be implemented by adding a `last_improvement_iter: u32` field to `DrawingState` and checking it in the mutate shader:
 
----
+```wgsl
+let stagnant = params.iteration_number - chain_states[chain_id].last_improvement_iter > 10000u;
+if stagnant {
+    // Apply extra-aggressive mutations: larger deltas, higher probabilities
+    // Or: reset to a random perturbation of the island's best
+}
+```
 
-## 8. Population Sizing and VRAM Utilization
+### 6.3 Multi-Mutation Candidates Per Chain
 
-### 8.1 Current Utilization: ~1.1% of 32 GB
+Currently each chain evaluates one candidate per iteration. An alternative is to generate multiple candidates per chain (e.g., 4) using different mutation strategies and select the best. This is the (1+lambda) strategy. On GPU, the rasterize+error pass dominates runtime, so generating 4 mutations per chain (cheap) and evaluating 4x candidates (expensive) may not be worthwhile unless the mutation shader becomes more sophisticated.
 
-With ~350 MB used out of 32,768 MB, there is massive headroom.
-
-### 8.2 Scaling Options
-
-| Chains | VRAM (est.) | Notes |
-|--------|-------------|-------|
-| 512 | 350 MB | Current |
-| 2,048 | 1.4 GB | 4x more chains, still <5% VRAM |
-| 8,192 | 5.5 GB | 16x more chains, ~17% VRAM |
-| 16,384 | 11 GB | 32x more chains, ~34% VRAM |
-
-**However**, more chains does not linearly improve convergence speed. The bottleneck is the quality of individual mutations, not the number of parallel attempts. Diminishing returns set in quickly.
-
-### 8.3 Better Use of VRAM: Increase Image Resolution
-
-The current max resolution is 384x384. Increasing to 512x512 or 768x768 would:
-- Give finer detail in the reference image
-- Improve fitness signal for small polygons
-- Cost more VRAM per chain (render targets scale as W*H*4)
-
-At 512x512 with 512 chains: render targets = 512 * 512 * 512 * 4 = 512 MB. Total ~560 MB -- still well within budget.
-
-At 768x768 with 512 chains: render targets = 512 * 768 * 768 * 4 = 1.2 GB. Total ~1.25 GB -- still only 4% of VRAM.
-
-### 8.4 Better Use of VRAM: Multiple Populations
-
-Instead of one population of 512 chains, run multiple independent populations with different hyperparameters (mutation rates, alpha ranges, polygon limits). This is effectively hyperparameter search for free.
-
-**Implementation**: Partition chains into groups. Each group gets its own `GpuParams` slice. The mutate shader indexes into a params array by `chain_id / group_size` instead of using a single uniform.
+A cheaper alternative: generate 2 candidates with different mutation strengths (one conservative, one aggressive) and select the better one.
 
 ---
 
-## 9. Concrete Prioritized Recommendations
+## 7. Polygon Ordering Optimization
 
-Ordered by expected impact vs. implementation effort:
+### 7.1 Adjacent Swap vs Random Swap
 
-### Tier 1: High Impact, Low Effort
+The current reorder operator (`mutate.wgsl` line 384) swaps two randomly chosen polygons. In polygon art, z-order matters primarily for overlapping polygons. Swapping two polygons that are far apart in the z-order and don't overlap has no visual effect -- it's a wasted evaluation.
 
-1. **Stagnation detection + random restart** (repurpose `_pad0` as stagnation counter in DrawingState, add check in select_main). Prevents dead chains. ~50 lines of WGSL, ~10 lines of Rust.
+**Recommendation**: Bias toward adjacent swaps (swap polygon `i` with `i+1`). This is more likely to produce a visible change and allows the algorithm to bubble polygons through the z-order incrementally.
 
-2. **Fitness-proportional mutation strength** (scale deltas by `1 - fitness/100` in mutate.wgsl). Zero state changes, just multiply deltas by a scale factor read from `chain_states[chain_id].fitness_bits`. ~15 lines of WGSL.
+```wgsl
+// Adjacent swap with 80% probability, random swap otherwise
+if rand_f32(&rng) < 0.8 {
+    let i1 = rand_u32(&rng, count - 1u);
+    let i2 = i1 + 1u;
+    // swap
+} else {
+    // random swap (existing behavior)
+}
+```
 
-3. **Clone polygon mutation** (duplicate existing polygon with perturbation instead of random new one). Much higher acceptance rate than random polygon insertion. ~30 lines of WGSL in the add-polygon section of mutate.wgsl.
+### 7.2 Move-to-Front / Move-to-Back
 
-### Tier 2: High Impact, Medium Effort
-
-4. **Region-based crossover** (new `crossover.wgsl` shader, new compute pipeline, conditional dispatch). The biggest algorithmic improvement possible. ~200 lines of WGSL, ~80 lines of Rust.
-
-5. **Hierarchical island model** (partition 512 chains into 32 islands of 16, add inter-island migration). Better diversity preservation. ~50 lines of WGSL for the new entry point, ~20 lines of Rust for the new params.
-
-6. **CPU-side adaptive mutation via acceptance ratio** (count accepts in select pass via atomicAdd, CPU reads and adjusts GpuParams between batches). ~15 lines of WGSL, ~30 lines of Rust.
-
-### Tier 3: Medium Impact, Higher Effort
-
-7. **Scale/rotate polygon mutations** (compute centroid, apply affine transform to vertices). Better search operators. ~60 lines of WGSL.
-
-8. **Color-from-reference mutation** (sample reference image at polygon centroid, use as color). Requires binding reference_image in the mutate shader. ~40 lines of WGSL, ~30 lines of Rust for bind group changes.
-
-9. **Increase image resolution** (raise MAX_IMAGE_WIDTH/HEIGHT to 512 or 768). Mostly settings changes, but need to verify dispatch limits and test performance.
-
-10. **Multi-population with different hyperparameters** (params array instead of single uniform). Implicit hyperparameter search. ~50 lines of WGSL, ~80 lines of Rust.
+Add operators that move a polygon to the front (top of z-order) or back (bottom). This allows large jumps in z-order that the swap operator explores very slowly.
 
 ---
 
-## 10. Implementation Notes
+## 8. Crossover Improvements
 
-### Struct Layout Constraints
+### 8.1 Crossover Operates on Copies, Not Offspring
 
-`GpuDrawingState` is 48,032 bytes with layout:
-- Offset 0: `polygon_count` (u32)
-- Offset 4: `fitness_bits` (u32)
-- Offset 8: `_pad0` (u32) -- **can repurpose as `stagnation_counter`**
-- Offset 12: `_pad1` (u32) -- **can repurpose as `mutation_scale_bits` (bitcast f32)**
-- Offset 16: `rng_state` (vec4<u32>)
-- Offset 32: `polygons` (array<Polygon, 1000>)
+The current crossover implementation (`mutate.wgsl` lines 278-306) skips the mutation loop entirely when crossover fires. This means crossover offspring are never mutated in the same iteration. Applying a light mutation after crossover (a common practice in genetic algorithms) would help differentiate offspring from parents.
 
-Repurposing `_pad0` and `_pad1` requires updating both `buffers.rs` (GpuDrawingState struct) and all WGSL shaders that reference the struct. The layout and total size remain unchanged.
+### 8.2 Fitness-Weighted Crossover
 
-### Dispatch Limits
+The spatial crossover splits space 50/50 between parents. A fitness-weighted split (better parent contributes more polygons) could be more effective.
 
-wgpu `max_compute_workgroups_per_dimension = 65535`. Current dispatches:
-- Mutate: (512, 1, 1) -- 512 chains
-- Rasterize: (48, 48, 512) at 384x384 -- all within limits
-- At 768x768: (96, 96, 512) -- still within limits
-- At 1024x1024: (128, 128, 512) -- still within limits
-- Chain count of 65535 would hit the z-dimension limit for rasterize
+### 8.3 Crossover Without Tournament Creates Identity Crossover
 
-### Buffer Size Limits
+When `tournament_select` picks the same chain as `chain_id` (possible since the chain is included in its own island), the crossover produces a copy of the parent. This is a wasted evaluation. Add a check:
 
-The render_targets buffer (chains * W * H * 4) is the binding bottleneck. At the WSL2 dozen adapter's `max_storage_buffer_binding_size` of ~1 GB:
-- 384x384: max ~1,700 chains
-- 512x512: max ~950 chains
-- 768x768: max ~425 chains
+```wgsl
+// Ensure parent_b != chain_id
+var parent_b = tournament_select(&rng, chain_id, chain_count);
+var attempts = 0u;
+while parent_b == chain_id && attempts < 5u {
+    parent_b = tournament_select(&rng, chain_id, chain_count);
+    attempts++;
+}
+if parent_b == chain_id {
+    // Fall through to mutation instead
+}
+```
 
-This means increasing resolution trades off against chain count. The current auto-capping logic in `pipeline.rs` handles this correctly.
+---
+
+## 9. Batch Size & Iteration Count
+
+### 9.1 GPU_ITERATIONS_PER_BATCH = 50
+
+Currently 50 iterations are packed into a single command buffer (`src/gpu_evolver/mod.rs` line 145). This is good for amortizing CPU-GPU submission overhead, but it means:
+- Control flags are only checked every 50 iterations (a new global best could exist for 49 iterations before being reported to the CPU).
+- Migration only triggers at multiples of 50 that align with `GPU_MIGRATION_INTERVAL`.
+
+This is unlikely to be a performance issue, but it means the CPU feedback loop is coarse-grained.
+
+### 9.2 Workgroup Size for Mutate/Select
+
+The mutate and select shaders use `@workgroup_size(1)` -- each chain gets a single thread. This is fine for the current design (each chain is independent), but it means these passes have very low occupancy on the GPU. The GPU has many more SMs than chains.
+
+If the chain count is increased significantly (e.g., 2048+), the single-thread-per-workgroup model would still work. But if the mutation logic becomes more complex, consider using workgroup parallelism within each chain (e.g., different threads mutate different polygons).
+
+---
+
+## 10. Summary of Prioritized Recommendations
+
+Ordered by expected impact-to-effort ratio:
+
+| Priority | Improvement | Expected Impact | Effort |
+|----------|-------------|----------------|--------|
+| 1 | Accept neutral moves in selection (`>=` or 50% acceptance) | High -- fixes plateau stagnation | Trivial |
+| 2 | Single-mutation mode (one operator per iteration) | High -- cleaner selection signal | Medium |
+| 3 | Perceptually-weighted L1 error | Medium -- better perceptual quality | Trivial |
+| 4 | Adjacent swap bias for reorder | Medium -- more effective z-order search | Trivial |
+| 5 | Gaussian/triangular perturbation distributions | Medium -- better exploration/exploitation | Low |
+| 6 | Scale and rotate polygon operators | Medium -- fills operator gaps | Low |
+| 7 | Stagnation detection with mega-mutation | Medium -- prevents wasted compute | Medium |
+| 8 | Avoid self-crossover (parent_b == chain_id) | Low-Medium -- prevents wasted evaluations | Trivial |
+| 9 | Crossover + mutation (mutate after crossover) | Low-Medium -- standard GA practice | Low |
+| 10 | Probabilistic migration acceptance | Medium -- preserves diversity | Low |
+| 11 | Adaptive mutation rates (1/5th rule or per-chain sigma) | High long-term -- self-tuning | High |
+| 12 | Warm-start with diverse initial population | Medium -- faster early exploration | Low |
+| 13 | Fitness-proportional mutation intensity | Medium -- better resource allocation | Medium |

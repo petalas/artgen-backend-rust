@@ -140,7 +140,8 @@ impl GpuEvolver {
 
     /// Run a batch of N iterations on the GPU.
     /// Returns `Some(Drawing)` if a new global best was found, `None` otherwise.
-    pub fn run_batch(&mut self, mutation_params: &MutationParams) -> Option<Drawing> {
+    /// When `collect_timestamps` is false, skips GPU timestamp resolve/readback for lower overhead.
+    pub fn run_batch(&mut self, mutation_params: &MutationParams, collect_timestamps: bool) -> Option<Drawing> {
         let p = &self.pipeline;
         let iterations = GPU_ITERATIONS_PER_BATCH;
         let active = mutation_params.chain_count.min(p.chain_count);
@@ -161,9 +162,9 @@ impl GpuEvolver {
         };
         p.queue.write_buffer(&p.control_flags_buf, 0, bytemuck::bytes_of(&control_reset));
 
-        // Reset error accumulators
-        let zeros = vec![0u8; active as usize * 4];
-        p.queue.write_buffer(&p.error_accumulators_buf, 0, &zeros);
+        // Note: error accumulators are NOT reset here — the select shader
+        // resets them via atomicExchange after each iteration. They're
+        // zero-initialized once at buffer creation and in reinit_chains().
 
         // Encode N iterations × 5 passes into one command buffer
         let mut encoder = p.device.create_command_encoder(&CommandEncoderDescriptor {
@@ -177,7 +178,7 @@ impl GpuEvolver {
         let mut migrate_ran = false;
 
         for i in 0..iterations {
-            let ts = if is_last_iter(i) { Some(&p.timestamp_query_set) } else { None };
+            let ts = if collect_timestamps && is_last_iter(i) { Some(&p.timestamp_query_set) } else { None };
 
             // Pass 1: Mutate (K workgroups of size 1)
             {
@@ -267,14 +268,16 @@ impl GpuEvolver {
         }
 
         // Resolve timestamp queries into resolve buffer, then copy to staging
-        encoder.resolve_query_set(&p.timestamp_query_set, 0..8, &p.timestamp_resolve_buf, 0);
-        encoder.copy_buffer_to_buffer(
-            &p.timestamp_resolve_buf,
-            0,
-            &p.timestamp_staging_buf,
-            0,
-            8 * 8,
-        );
+        if collect_timestamps {
+            encoder.resolve_query_set(&p.timestamp_query_set, 0..8, &p.timestamp_resolve_buf, 0);
+            encoder.copy_buffer_to_buffer(
+                &p.timestamp_resolve_buf,
+                0,
+                &p.timestamp_staging_buf,
+                0,
+                8 * 8,
+            );
+        }
 
         // Copy control flags to staging for readback
         encoder.copy_buffer_to_buffer(
@@ -301,14 +304,8 @@ impl GpuEvolver {
         self.iteration += iterations;
         self.total_evaluations += iterations as u64 * active as u64;
 
-        // Poll for completion and read control flags
-        let control = self.read_control_flags();
-
-        // Read timestamp results (device already polled by read_control_flags)
-        self.read_timestamps(migrate_ran);
-
-        // Read chain fitness values
-        self.read_chain_fitness();
+        // Map staging buffers, poll once, read all results
+        let control = self.read_batch_results(migrate_ran, collect_timestamps);
 
         if control.new_best_found != 0 {
             self.best_fitness_bits = control.best_fitness_bits;
@@ -319,20 +316,78 @@ impl GpuEvolver {
         }
     }
 
-    fn read_control_flags(&self) -> ControlFlags {
+    /// Map staging buffers, poll once for GPU completion, then read all results.
+    /// When `collect_timestamps` is false, skips the timestamp staging buffer entirely.
+    fn read_batch_results(&mut self, migrate_ran: bool, collect_timestamps: bool) -> ControlFlags {
         let p = &self.pipeline;
-        let slice = p.control_staging_buf.slice(..);
-        let (tx, rx) = std::sync::mpsc::channel();
-        slice.map_async(MapMode::Read, move |result| {
-            tx.send(result).unwrap();
-        });
-        p.device.poll(Maintain::Wait);
-        rx.recv().unwrap().expect("Failed to map control staging buffer");
+        let active = self.active_chain_count as usize;
 
-        let data = slice.get_mapped_range();
-        let flags: ControlFlags = *bytemuck::from_bytes(&data);
-        drop(data);
+        // Map staging buffers before polling
+        let control_slice = p.control_staging_buf.slice(..);
+        let fitness_slice = p.fitness_staging_buf.slice(..((active * 4) as u64));
+
+        let (tx1, rx1) = std::sync::mpsc::channel();
+        let (tx3, rx3) = std::sync::mpsc::channel();
+
+        control_slice.map_async(MapMode::Read, move |r| { tx1.send(r).unwrap(); });
+
+        let ts_rx = if collect_timestamps {
+            let timestamp_slice = p.timestamp_staging_buf.slice(..);
+            let (tx2, rx2) = std::sync::mpsc::channel();
+            timestamp_slice.map_async(MapMode::Read, move |r| { tx2.send(r).unwrap(); });
+            Some(rx2)
+        } else {
+            None
+        };
+
+        fitness_slice.map_async(MapMode::Read, move |r| { tx3.send(r).unwrap(); });
+
+        // Single poll waits for GPU completion — all maps resolve together
+        p.device.poll(Maintain::Wait);
+
+        rx1.recv().unwrap().expect("Failed to map control staging buffer");
+        if let Some(rx2) = &ts_rx {
+            rx2.recv().unwrap().expect("Failed to map timestamp staging buffer");
+        }
+        rx3.recv().unwrap().expect("Failed to map fitness staging buffer");
+
+        // Read control flags
+        let control_data = control_slice.get_mapped_range();
+        let flags: ControlFlags = *bytemuck::from_bytes(&control_data);
+        drop(control_data);
+
+        // Read timestamps (only if collected)
+        if ts_rx.is_some() {
+            let ts_data = p.timestamp_staging_buf.slice(..).get_mapped_range();
+            let timestamps: &[u64] = bytemuck::cast_slice(&ts_data);
+            let period = p.timestamp_period as f64;
+            let duration = |begin_idx: usize, end_idx: usize| -> f64 {
+                timestamps[end_idx].wrapping_sub(timestamps[begin_idx]) as f64 * period
+            };
+            self.pass_timings.mutate_ns += duration(0, 1);
+            self.pass_timings.rasterize_error_ns += duration(2, 3);
+            self.pass_timings.select_ns += duration(4, 5);
+            self.pass_timings.sample_count += 1;
+            if migrate_ran {
+                self.pass_timings.migrate_ns += duration(6, 7);
+                self.pass_timings.migrate_sample_count += 1;
+            }
+            drop(ts_data);
+            p.timestamp_staging_buf.unmap();
+        }
+
+        // Read chain fitness
+        let fitness_data = fitness_slice.get_mapped_range();
+        let packed: &[u32] = bytemuck::cast_slice(&fitness_data);
+        for (i, &bits) in packed.iter().enumerate() {
+            self.chain_fitness[i] = f32::from_bits(bits);
+        }
+        drop(fitness_data);
+
+        // Unmap
         p.control_staging_buf.unmap();
+        p.fitness_staging_buf.unmap();
+
         flags
     }
 
@@ -373,57 +428,60 @@ impl GpuEvolver {
         drawing
     }
 
-    fn read_timestamps(&mut self, migrate_ran: bool) {
-        let p = &self.pipeline;
-        let slice = p.timestamp_staging_buf.slice(..);
-        let (tx, rx) = std::sync::mpsc::channel();
-        slice.map_async(MapMode::Read, move |result| {
-            tx.send(result).unwrap();
-        });
-        p.device.poll(Maintain::Wait);
-        rx.recv().unwrap().expect("Failed to map timestamp staging buffer");
 
-        let data = slice.get_mapped_range();
-        let timestamps: &[u64] = bytemuck::cast_slice(&data);
-        let period = p.timestamp_period as f64; // ns per tick
-
-        // Accumulate per-pass durations (in nanoseconds)
-        let duration = |begin_idx: usize, end_idx: usize| -> f64 {
-            timestamps[end_idx].wrapping_sub(timestamps[begin_idx]) as f64 * period
-        };
-
-        self.pass_timings.mutate_ns += duration(0, 1);
-        self.pass_timings.rasterize_error_ns += duration(2, 3);
-        self.pass_timings.select_ns += duration(4, 5);
-        self.pass_timings.sample_count += 1;
-
-        if migrate_ran {
-            self.pass_timings.migrate_ns += duration(6, 7);
-            self.pass_timings.migrate_sample_count += 1;
+    /// Batch-readback multiple chains in a single GPU submission.
+    /// Used for island thumbnail display (~every 2s), avoids N separate round-trips.
+    pub fn readback_chains(&self, chain_ids: &[u32]) -> Vec<Drawing> {
+        if chain_ids.is_empty() {
+            return Vec::new();
         }
 
-        drop(data);
-        p.timestamp_staging_buf.unmap();
-    }
-
-    fn read_chain_fitness(&mut self) {
         let p = &self.pipeline;
-        let active = self.active_chain_count as usize;
-        let slice = p.fitness_staging_buf.slice(..((active * 4) as u64));
-        let (tx, rx) = std::sync::mpsc::channel();
-        slice.map_async(MapMode::Read, move |result| {
-            tx.send(result).unwrap();
+        let count = chain_ids.len();
+        let state_size = GPU_DRAWING_STATE_SIZE as u64;
+
+        // Temporary staging buffer sized for all requested chains
+        let staging = p.device.create_buffer(&BufferDescriptor {
+            label: Some("multi_readback_staging"),
+            size: count as u64 * state_size,
+            usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
+
+        let mut encoder = p.device.create_command_encoder(&CommandEncoderDescriptor {
+            label: Some("multi_readback"),
+        });
+
+        for (i, &chain_id) in chain_ids.iter().enumerate() {
+            encoder.copy_buffer_to_buffer(
+                &p.chain_states_buf,
+                chain_id as u64 * state_size,
+                &staging,
+                i as u64 * state_size,
+                state_size,
+            );
+        }
+
+        p.queue.submit(std::iter::once(encoder.finish()));
+
+        let slice = staging.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(MapMode::Read, move |r| { tx.send(r).unwrap(); });
         p.device.poll(Maintain::Wait);
-        rx.recv().unwrap().expect("Failed to map fitness staging buffer");
+        rx.recv().unwrap().expect("Failed to map multi-readback staging buffer");
 
         let data = slice.get_mapped_range();
-        let packed: &[u32] = bytemuck::cast_slice(&data);
-        for (i, &bits) in packed.iter().enumerate() {
-            self.chain_fitness[i] = f32::from_bits(bits);
-        }
+        let drawings: Vec<Drawing> = (0..count)
+            .map(|i| {
+                let offset = i * GPU_DRAWING_STATE_SIZE;
+                let state: &GpuDrawingState = bytemuck::from_bytes(&data[offset..offset + GPU_DRAWING_STATE_SIZE]);
+                gpu_to_drawing(state)
+            })
+            .collect();
         drop(data);
-        p.fitness_staging_buf.unmap();
+        staging.unmap();
+
+        drawings
     }
 
     /// Reinitialize all chains from a given drawing (for benchmarks).
@@ -445,6 +503,12 @@ impl GpuEvolver {
         self.pipeline
             .queue
             .write_buffer(&self.pipeline.chain_states_buf, 0, &bytes);
+
+        // Reset error accumulators so the first batch after reinit starts clean
+        let zeros = vec![0u8; chain_count as usize * 4];
+        self.pipeline
+            .queue
+            .write_buffer(&self.pipeline.error_accumulators_buf, 0, &zeros);
 
         self.iteration = 0;
         self.total_evaluations = 0;
