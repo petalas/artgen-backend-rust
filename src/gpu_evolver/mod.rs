@@ -247,7 +247,7 @@ impl GpuEvolver {
                 pass.dispatch_workgroups(wg_x, wg_y, active);
             }
 
-            // Pass 3: Select (K workgroups of size 1)
+            // Pass 3: Select (K workgroups of size 64 — parallel polygon copy)
             {
                 let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
                     label: Some("select"),
