@@ -169,10 +169,10 @@ fn ConfigureSection(state: RwSignal<ViewerState>) -> impl IntoView {
     let label = RwSignal::new(String::new());
     let chain_exp = RwSignal::new(7u32); // 2^7 = 128
     let island_exp = RwSignal::new(3u32); // 2^3 = 8
-    let lambda_exp = RwSignal::new(0u32); // 2^0 = 1 (default lambda=1)
+    let lambda_exp = RwSignal::new(3u32); // 2^3 = 8 (default lambda=8)
     let isolate_islands = RwSignal::new(false);
     let single_mutation = RwSignal::new(false);
-    let adaptive_mutation = RwSignal::new(false);
+    let adaptive_mutation = RwSignal::new(true);
 
     let add_to_queue = move |_| {
         let s = state.get();

@@ -74,9 +74,9 @@ impl Default for MutationParams {
             island_count: 1,
             inter_island_interval: 500,
             chain_count: 16,
-            lambda: 1,
+            lambda: 8,
             single_mutation_mode: true,
-            adaptive_mutation: false,
+            adaptive_mutation: true,
         }
     }
 }
