@@ -19,16 +19,17 @@ pub struct GpuPolygon {
 }
 
 /// Per-chain drawing state on GPU.
-/// polygon_count + fitness + pad + rng_state = 32 bytes header
+/// polygon_count + fitness + mutation_scale + stagnation_counter + rng_state = 32 bytes header
 /// polygons: MAX_POLYGONS_PER_IMAGE * 16 = 16000 bytes
 /// Total: 16032 bytes
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct GpuDrawingState {
-    pub polygon_count: u32,    // offset 0
-    pub fitness_bits: u32,     // offset 4 — bitcast f32 for atomicMax compatibility
-    pub _pad: [u32; 2],       // offset 8 — align rng_state to 16
-    pub rng_state: [u32; 4],  // offset 16 — PCG RNG state
+    pub polygon_count: u32,           // offset 0
+    pub fitness_bits: u32,            // offset 4 — bitcast f32 for atomicMax compatibility
+    pub mutation_scale_bits: u32,     // offset 8 — bitcast f32, adaptive mutation scale
+    pub stagnation_counter: u32,      // offset 12 — iterations since last improvement
+    pub rng_state: [u32; 4],          // offset 16 — PCG RNG state
     pub polygons: [GpuPolygon; MAX_POLYGONS_PER_IMAGE], // offset 32
 }
 
@@ -79,10 +80,10 @@ pub struct GpuParams {
     pub island_count: u32,
     pub inter_island_interval: u32,
 
-    // vec4[7] — chain count + padding
+    // vec4[7] — chain count + lambda + padding
     pub chain_count_param: u32,
     pub single_mutation_mode: u32,
-    pub _pad7: u32,
+    pub lambda: u32,
     pub _pad8: u32,
 }
 
@@ -133,7 +134,7 @@ pub fn gpu_params_from(mp: &MutationParams, w: u32, h: u32, migration_interval: 
         inter_island_interval: mp.inter_island_interval,
         chain_count_param: chain_count,
         single_mutation_mode: if mp.single_mutation_mode { 1 } else { 0 },
-        _pad7: 0,
+        lambda: mp.lambda,
         _pad8: 0,
     }
 }
@@ -172,6 +173,8 @@ pub fn drawing_to_gpu(drawing: &Drawing, seed: u64) -> GpuDrawingState {
     state.rng_state[3] = (inc >> 32) as u32;
 
     state.fitness_bits = 0; // will be computed on GPU
+    state.mutation_scale_bits = 1.0f32.to_bits(); // start at scale 1.0
+    state.stagnation_counter = 0;
 
     let mut gpu_idx = 0;
     for polygon in &drawing.polygons {

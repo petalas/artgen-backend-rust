@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::mutation_params::MutationParams;
 
+fn default_lambda() -> u32 { 1 }
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BenchmarkRequest {
@@ -36,6 +38,8 @@ pub struct BenchmarkResult {
     pub samples: Vec<BenchmarkSample>,
     pub chain_count: u32,
     pub island_count: u32,
+    #[serde(default = "default_lambda")]
+    pub lambda: u32,
 }
 
 #[derive(Clone, Debug)]

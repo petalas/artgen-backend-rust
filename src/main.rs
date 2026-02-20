@@ -1119,6 +1119,7 @@ fn run_benchmark(
         samples,
         chain_count: bench_params.chain_count,
         island_count: bench_params.island_count,
+        lambda: bench_params.lambda,
     };
 
     println!(

@@ -37,6 +37,9 @@ pub struct MutationParams {
     // Chain count
     pub chain_count: u32,
 
+    // Lambda: offspring per chain per iteration (1+λ)-ES
+    pub lambda: u32,
+
     // Mutation mode
     pub single_mutation_mode: bool,
 }
@@ -68,6 +71,7 @@ impl Default for MutationParams {
             island_count: 1,
             inter_island_interval: 500,
             chain_count: 16,
+            lambda: 1,
             single_mutation_mode: true,
         }
     }

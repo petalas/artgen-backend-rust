@@ -97,6 +97,7 @@ pub struct GpuPipeline {
 
     // Config
     pub chain_count: u32,
+    pub offspring_capacity: u32, // max offspring slots = min(chain_count * GPU_MAX_LAMBDA, ssbo limit)
     pub image_width: u32,
     pub image_height: u32,
 }
@@ -152,8 +153,9 @@ impl GpuPipeline {
         let max_chains_by_buffer = max_ssbo / (GPU_DRAWING_STATE_SIZE as u64);
         let chain_count = chain_count.min(max_chains_by_buffer as u32);
 
-        // Calculate the largest buffer we actually need (chain_states / working_states)
-        let max_buffer_needed = (chain_count as u64) * (GPU_DRAWING_STATE_SIZE as u64);
+        // Calculate the largest buffer we actually need (working_states with offspring_capacity)
+        let max_lambda = crate::settings::GPU_MAX_LAMBDA as u64;
+        let max_buffer_needed = (chain_count as u64) * max_lambda * (GPU_DRAWING_STATE_SIZE as u64);
         // Clamp to adapter limit (don't request more than hardware supports)
         let max_buffer_size = max_buffer_needed.min(max_ssbo as u64);
 
@@ -208,7 +210,12 @@ impl GpuPipeline {
 
         // --- Buffer sizes ---
         let chain_states_size = (chain_count as usize) * GPU_DRAWING_STATE_SIZE;
-        let error_accumulators_size = (chain_count as usize) * 4; // u32 per chain
+        // Offspring capacity: chain_count * max_lambda, capped by SSBO limit
+        let max_lambda = crate::settings::GPU_MAX_LAMBDA as usize;
+        let offspring_capacity = ((max_ssbo as usize) / GPU_DRAWING_STATE_SIZE)
+            .min(chain_count as usize * max_lambda);
+        let working_states_size = offspring_capacity * GPU_DRAWING_STATE_SIZE;
+        let error_accumulators_size = offspring_capacity * 4; // u32 per offspring
 
         // --- Create buffers ---
 
@@ -223,10 +230,10 @@ impl GpuPipeline {
             usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
         });
 
-        // Working states (mutated candidates)
+        // Working states (mutated candidates) — sized for offspring_capacity (chain_count * max_lambda)
         let working_states_buf = device.create_buffer(&BufferDescriptor {
             label: Some("working_states"),
-            size: chain_states_size as u64,
+            size: working_states_size as u64,
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -668,6 +675,7 @@ impl GpuPipeline {
             select_bind_group,
             migrate_bind_group,
             chain_count,
+            offspring_capacity: offspring_capacity as u32,
             image_width,
             image_height,
         }

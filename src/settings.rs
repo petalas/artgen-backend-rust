@@ -13,8 +13,8 @@ pub const DISPLAY_H: u32 = 1024;
 pub const FPS_TARGET: u64 = 30;
 pub const TARGET_FRAMETIME: u64 = (1000.0 / FPS_TARGET as f32) as u64;
 
-pub const MAX_ERROR_PER_PIXEL: f32 = 441.67297; // sqrt(255.0 * 255.0 * 3.0) — used by CPU path
-pub const GPU_MAX_ERROR_PER_PIXEL: f32 = 765.0; // 255 * 3 — L1 distance used by GPU path
+pub const MAX_ERROR_PER_PIXEL: f32 = 441.67297; // sqrt(255.0 * 255.0 * 3.0) — L2 distance
+pub const GPU_MAX_ERROR_PER_PIXEL: f32 = MAX_ERROR_PER_PIXEL; // L2 distance, matches CPU path
 pub const PER_POINT_MULTIPLIER: f32 = 1.0 / 5000000.0;
 pub const MIN_ALPHA: u8 = 10;
 pub const MAX_ALPHA: u8 = 65;
@@ -40,6 +40,8 @@ pub const START_WITH_POLYGONS_PER_IMAGE: usize = 150; // can not go below 2 usin
 // GPU evolution settings
 pub const GPU_MAX_CHAIN_COUNT: u32 = 512;
 pub const GPU_DEFAULT_CHAIN_COUNT: u32 = 16;
+pub const GPU_DEFAULT_LAMBDA: u32 = 1;
+pub const GPU_MAX_LAMBDA: u32 = 32;
 pub const GPU_ITERATIONS_PER_BATCH: u32 = 50;
 pub const GPU_MIGRATION_INTERVAL: u32 = 50;
 

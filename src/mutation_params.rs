@@ -43,6 +43,9 @@ pub struct MutationParams {
     // Chain count (runtime-configurable, capped to GPU buffer allocation)
     pub chain_count: u32,
 
+    // Lambda: offspring per chain per iteration (1+λ)-ES
+    pub lambda: u32,
+
     // Mutation mode
     pub single_mutation_mode: bool,
 }
@@ -79,6 +82,15 @@ impl MutationParams {
 
         // Chain count: clamp to [1, GPU_MAX_CHAIN_COUNT]
         self.chain_count = self.chain_count.clamp(1, settings::GPU_MAX_CHAIN_COUNT);
+
+        // Lambda: clamp to [1, GPU_MAX_LAMBDA], enforce power-of-2 (round down)
+        self.lambda = self.lambda.clamp(1, settings::GPU_MAX_LAMBDA);
+        // Round down to nearest power of 2
+        self.lambda = 1u32 << self.lambda.ilog2();
+        // Enforce chain_count * lambda <= GPU_MAX_CHAIN_COUNT
+        while self.chain_count * self.lambda > settings::GPU_MAX_CHAIN_COUNT && self.lambda > 1 {
+            self.lambda /= 2;
+        }
 
         // Crossover & island parameters
         self.crossover_prob = self.crossover_prob.clamp(0.0, 1.0);
@@ -147,6 +159,7 @@ impl Default for MutationParams {
             island_count: settings::ISLAND_COUNT,
             inter_island_interval: settings::INTER_ISLAND_INTERVAL,
             chain_count: settings::GPU_DEFAULT_CHAIN_COUNT,
+            lambda: settings::GPU_DEFAULT_LAMBDA,
             single_mutation_mode: settings::SINGLE_MUTATION_MODE,
         }
     }

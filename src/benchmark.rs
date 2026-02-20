@@ -34,4 +34,5 @@ pub struct BenchmarkResult {
     pub samples: Vec<BenchmarkSample>,
     pub chain_count: u32,
     pub island_count: u32,
+    pub lambda: u32,
 }

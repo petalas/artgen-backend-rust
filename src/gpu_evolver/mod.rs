@@ -3,6 +3,7 @@ pub mod pipeline;
 
 use std::time::Instant;
 
+use bytemuck::Zeroable;
 use wgpu::*;
 
 use crate::models::drawing::Drawing;
@@ -131,15 +132,20 @@ impl GpuEvolver {
             );
         }
         let active_chains = active_chains.min(actual_max);
+
+        // Initialize offspring RNG states in working_states buffer
+        init_offspring_rng(&pipeline, 0);
+
         let wg_x = (image_width + 15) / 16;
         let wg_y = (image_height + 15) / 16;
         println!(
-            "GPU evolver initialized: {} active chains (max {}), {}x{} image, {:.1} MB GPU memory, rasterize dispatch {}x{}x{}",
+            "GPU evolver initialized: {} active chains (max {}), offspring capacity {}, {}x{} image, {:.1} MB GPU memory, rasterize dispatch {}x{}x{}",
             active_chains,
             actual_max,
+            pipeline.offspring_capacity,
             image_width,
             image_height,
-            estimate_gpu_memory(actual_max, image_width, image_height) as f64 / (1024.0 * 1024.0),
+            estimate_gpu_memory(actual_max, pipeline.offspring_capacity, image_width, image_height) as f64 / (1024.0 * 1024.0),
             wg_x,
             wg_y,
             active_chains,
@@ -210,6 +216,12 @@ impl GpuEvolver {
 
         let wg_x = (p.image_width + 15) / 16;
         let wg_y = (p.image_height + 15) / 16;
+        let lambda = mutation_params.lambda;
+
+        // Runtime check: active * lambda must fit in offspring_capacity
+        assert!(active * lambda <= p.offspring_capacity,
+            "active({}) * lambda({}) = {} exceeds offspring_capacity({})",
+            active, lambda, active * lambda, p.offspring_capacity);
 
         let is_last_iter = |i: u32| i == iterations - 1;
         let mut migrate_ran = false;
@@ -232,7 +244,8 @@ impl GpuEvolver {
                 pass.dispatch_workgroups(active, 1, 1);
             }
 
-            // Pass 2: Rasterize + Error (fused, W/16 x H/16 x K workgroups, tiled polygon prefetch)
+            // Pass 2: Rasterize + Error (fused, W/16 x H/16 x (K*λ) workgroups, tiled polygon prefetch)
+            // gid.z indexes offspring (0..active*lambda), shader reads working_states[gid.z]
             {
                 let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
                     label: Some("rasterize_error"),
@@ -244,7 +257,7 @@ impl GpuEvolver {
                 });
                 pass.set_pipeline(&p.rasterize_error_pipeline);
                 pass.set_bind_group(0, &p.rasterize_error_bind_group, &[]);
-                pass.dispatch_workgroups(wg_x, wg_y, active);
+                pass.dispatch_workgroups(wg_x, wg_y, active * lambda);
             }
 
             // Pass 3: Select (K workgroups of size 64 — parallel polygon copy)
@@ -339,7 +352,7 @@ impl GpuEvolver {
         p.queue.submit(std::iter::once(encoder.finish()));
 
         self.iteration += iterations;
-        self.total_evaluations += iterations as u64 * active as u64;
+        self.total_evaluations += iterations as u64 * active as u64 * lambda as u64;
 
         // 7. Issue map_async on staging set [write_idx] — starts the async map
         //    but don't poll yet (that happens at the start of the NEXT run_batch call)
@@ -586,10 +599,13 @@ impl GpuEvolver {
             .write_buffer(&self.pipeline.chain_states_buf, 0, &bytes);
 
         // Reset error accumulators so the first batch after reinit starts clean
-        let zeros = vec![0u8; chain_count as usize * 4];
+        let zeros = vec![0u8; self.pipeline.offspring_capacity as usize * 4];
         self.pipeline
             .queue
             .write_buffer(&self.pipeline.error_accumulators_buf, 0, &zeros);
+
+        // Reinitialize offspring RNG states
+        init_offspring_rng(&self.pipeline, self.iteration);
 
         self.iteration = 0;
         self.total_evaluations = 0;
@@ -613,7 +629,7 @@ impl GpuEvolver {
 
     pub fn estimated_memory_bytes(&self) -> u64 {
         let p = &self.pipeline;
-        estimate_gpu_memory(p.chain_count, p.image_width, p.image_height) as u64
+        estimate_gpu_memory(p.chain_count, p.offspring_capacity, p.image_width, p.image_height) as u64
     }
 
     pub fn pass_timings(&self) -> &PassTimings {
@@ -642,13 +658,41 @@ impl GpuEvolver {
     }
 }
 
-fn estimate_gpu_memory(chain_count: u32, w: u32, h: u32) -> usize {
+/// Initialize offspring RNG states in the working_states buffer.
+/// Each offspring slot gets a unique persistent RNG seed.
+fn init_offspring_rng(pipeline: &GpuPipeline, iteration: u32) {
+    let capacity = pipeline.offspring_capacity as usize;
+    // Create zeroed states with unique RNG seeds — only the rng_state and mutation_scale matter
+    let states: Vec<GpuDrawingState> = (0..capacity)
+        .map(|i| {
+            let mut s = GpuDrawingState::zeroed();
+            let seed = 0xCAFE_BABE_u64
+                .wrapping_add((i as u64).wrapping_mul(0x9E3779B97F4A7C15))
+                .wrapping_add((iteration as u64).wrapping_mul(0x517CC1B727220A95));
+            s.rng_state[0] = seed as u32;
+            s.rng_state[1] = (seed >> 32) as u32;
+            let inc = seed.wrapping_mul(6364136223846793005);
+            s.rng_state[2] = inc as u32 | 1;
+            s.rng_state[3] = (inc >> 32) as u32;
+            s.mutation_scale_bits = 1.0f32.to_bits();
+            s
+        })
+        .collect();
+    let bytes: Vec<u8> = states
+        .iter()
+        .flat_map(|s| bytemuck::bytes_of(s).to_vec())
+        .collect();
+    pipeline.queue.write_buffer(&pipeline.working_states_buf, 0, &bytes);
+}
+
+fn estimate_gpu_memory(chain_count: u32, offspring_capacity: u32, w: u32, h: u32) -> usize {
     let k = chain_count as usize;
+    let oc = offspring_capacity as usize;
     let pixels = (w * h) as usize;
     let chain_states = k * GPU_DRAWING_STATE_SIZE;
-    let working_states = k * GPU_DRAWING_STATE_SIZE;
+    let working_states = oc * GPU_DRAWING_STATE_SIZE;
     let reference = pixels * 4;
-    let error_accumulators = k * 4;
+    let error_accumulators = oc * 4;
     let control = 16;
     let params = std::mem::size_of::<GpuParams>();
     // Double-buffered staging: 2x control (16B each) + 2x fitness (k*4 each) + 2x timestamp (64B each) + readback

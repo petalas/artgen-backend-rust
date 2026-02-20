@@ -1,7 +1,7 @@
-// Fused rasterize + error compute shader — one thread per pixel per chain
-// Dispatch: (W/16, H/16, K) workgroups of size (16, 16, 1)
-// Each thread rasterizes all polygons at its pixel, computes L1 error against reference,
-// then workgroup-reduces the error and thread 0 atomicAdds to per-chain accumulator.
+// Fused rasterize + error compute shader — one thread per pixel per offspring
+// Dispatch: (W/16, H/16, K*λ) workgroups of size (16, 16, 1)
+// Each thread rasterizes all polygons at its pixel, computes L2 error against reference,
+// then workgroup-reduces the error and thread 0 atomicAdds to per-offspring accumulator.
 // Polygons are cooperatively loaded into shared memory in tiles of 768 (16 bytes each).
 
 struct Polygon {
@@ -11,8 +11,8 @@ struct Polygon {
 struct DrawingState {
     polygon_count: u32,
     fitness_bits: u32,
-    _pad0: u32,
-    _pad1: u32,
+    mutation_scale: f32,
+    stagnation_counter: u32,
     rng_state: vec4<u32>,
     polygons: array<Polygon, 1000>,
 }
@@ -64,10 +64,10 @@ struct Params {
     island_count: u32,
     inter_island_interval: u32,
 
-    // Chain count + padding
+    // Chain count + lambda + padding
     chain_count_param: u32,
     single_mutation_mode: u32,
-    _pad7: u32,
+    lambda: u32,
     _pad8: u32,
 }
 
@@ -183,11 +183,11 @@ fn main(
             let refg = ref_color.y * 255.0;
             let refb = ref_color.z * 255.0;
 
-            // L1 error: sum of absolute differences
-            let dr = abs(ri - refr);
-            let dg = abs(gi - refg);
-            let db = abs(bi - refb);
-            pixel_error = u32(dr + dg + db);
+            // L2 error: Euclidean distance in RGB space
+            let dr = ri - refr;
+            let dg = gi - refg;
+            let db = bi - refb;
+            pixel_error = u32(sqrt(dr * dr + dg * dg + db * db));
         }
     }
 
