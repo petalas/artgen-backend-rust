@@ -72,14 +72,12 @@ fn main(
         let refg = f32((reference >> 8u) & 0xFFu);
         let refb = f32((reference >> 16u) & 0xFFu);
 
-        // RGB Euclidean distance
-        let dr = rr - refr;
-        let dg = rg - refg;
-        let db = rb - refb;
-        let dist = sqrt(dr * dr + dg * dg + db * db);
-
-        // Cast to integer (max per pixel ~442, fits in u32 easily)
-        pixel_error = u32(dist);
+        // Sum of absolute differences (L1 distance) — avoids expensive sqrt,
+        // same selection ordering properties. Max per pixel = 255 * 3 = 765.
+        let dr = abs(rr - refr);
+        let dg = abs(rg - refg);
+        let db = abs(rb - refb);
+        pixel_error = u32(dr + dg + db);
     }
 
     // Store in shared memory for workgroup reduction

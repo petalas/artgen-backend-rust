@@ -101,7 +101,7 @@ pub fn gpu_params_from(mp: &MutationParams, w: u32, h: u32, migration_interval: 
         image_height: h,
         max_polygons: mp.max_polygons.min(MAX_POLYGONS_PER_IMAGE as u32),
         min_polygons: mp.min_polygons,
-        max_error_per_pixel: MAX_ERROR_PER_PIXEL,
+        max_error_per_pixel: GPU_MAX_ERROR_PER_PIXEL,
         per_point_multiplier: PER_POINT_MULTIPLIER,
         iteration_number: 0,
         migration_interval,

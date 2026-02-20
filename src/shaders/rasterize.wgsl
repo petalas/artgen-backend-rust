@@ -92,6 +92,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     for (var i = 0u; i < poly_count; i++) {
         let poly = working_states[chain_id].polygons[i];
 
+        // AABB culling: skip polygons whose bounding box doesn't contain this pixel
+        let bb_min_x = min(poly.v0.x, min(poly.v1.x, poly.v2.x));
+        let bb_max_x = max(poly.v0.x, max(poly.v1.x, poly.v2.x));
+        let bb_min_y = min(poly.v0.y, min(poly.v1.y, poly.v2.y));
+        let bb_max_y = max(poly.v0.y, max(poly.v1.y, poly.v2.y));
+
+        if fx < bb_min_x || fx > bb_max_x || fy < bb_min_y || fy > bb_max_y {
+            continue;
+        }
+
         // Half-space triangle test (3 edge evaluations)
         let e0 = edge_fn(poly.v0.x, poly.v0.y, poly.v1.x, poly.v1.y, fx, fy);
         let e1 = edge_fn(poly.v1.x, poly.v1.y, poly.v2.x, poly.v2.y, fx, fy);

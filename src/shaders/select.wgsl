@@ -126,28 +126,26 @@ fn migrate_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
 
-    // Read global best chain
-    let best_id = atomicLoad(&control.best_chain_id);
-    if best_id == chain_id {
-        return; // Don't copy to self
-    }
+    // Ring topology: compare with right neighbor instead of global best.
+    // This preserves population diversity — good solutions spread gradually
+    // through the ring rather than every chain collapsing to the same solution.
+    let neighbor_id = (chain_id + 1u) % chain_count;
 
-    let global_best_fitness = bitcast<f32>(atomicLoad(&control.best_fitness_bits));
+    let neighbor_fitness = bitcast<f32>(chain_states[neighbor_id].fitness_bits);
     let my_fitness = bitcast<f32>(chain_states[chain_id].fitness_bits);
 
-    // Only adopt if global best is significantly better
-    if global_best_fitness > my_fitness {
-        // Copy drawing from best chain, but keep our own RNG for diversity
+    if neighbor_fitness > my_fitness {
+        // Adopt neighbor's drawing, but keep our own RNG for diversity
         let saved_rng = chain_states[chain_id].rng_state;
 
-        let pc = min(chain_states[best_id].polygon_count, params.max_polygons);
+        let pc = min(chain_states[neighbor_id].polygon_count, params.max_polygons);
         chain_states[chain_id].polygon_count = pc;
-        chain_states[chain_id].fitness_bits = chain_states[best_id].fitness_bits;
+        chain_states[chain_id].fitness_bits = chain_states[neighbor_id].fitness_bits;
         chain_states[chain_id]._pad0 = 0u;
         chain_states[chain_id]._pad1 = 0u;
         chain_states[chain_id].rng_state = saved_rng;
         for (var i = 0u; i < pc; i++) {
-            chain_states[chain_id].polygons[i] = chain_states[best_id].polygons[i];
+            chain_states[chain_id].polygons[i] = chain_states[neighbor_id].polygons[i];
         }
     }
 }
