@@ -1,6 +1,6 @@
 // Fused rasterize + error compute shader — one thread per pixel per offspring
 // Dispatch: (W/16, H/16, K*λ) workgroups of size (16, 16, 1)
-// Each thread rasterizes all polygons at its pixel, computes L2 error against reference,
+// Each thread rasterizes all polygons at its pixel, computes L1 error against reference,
 // then workgroup-reduces the error and thread 0 atomicAdds to per-offspring accumulator.
 // Polygons are cooperatively loaded into shared memory in tiles of 768 (16 bytes each).
 
@@ -74,7 +74,7 @@ struct Params {
 @group(0) @binding(0) var<storage, read>       working_states:     array<DrawingState>;
 @group(0) @binding(1)                          var reference_image: texture_2d<f32>;
 @group(0) @binding(2) var<storage, read_write> error_accumulators: array<atomic<u32>>;
-@group(0) @binding(3) var<uniform>             params:             Params;
+var<push_constant>                             params:             Params;
 
 var<workgroup> shared_polys: array<Polygon, 768>;   // 768 × 16 = 12,288 bytes
 var<workgroup> shared_errors: array<u32, 256>;      // 16×16 = 256 threads
@@ -183,11 +183,11 @@ fn main(
             let refg = ref_color.y * 255.0;
             let refb = ref_color.z * 255.0;
 
-            // L2 error: Euclidean distance in RGB space
+            // L1 error: Manhattan distance in RGB space
             let dr = ri - refr;
             let dg = gi - refg;
             let db = bi - refb;
-            pixel_error = u32(sqrt(dr * dr + dg * dg + db * db));
+            pixel_error = u32(abs(dr) + abs(dg) + abs(db));
         }
     }
 

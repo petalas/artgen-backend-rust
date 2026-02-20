@@ -1,3 +1,4 @@
+use std::num::NonZeroU64;
 use std::path::PathBuf;
 
 use wgpu::*;
@@ -70,7 +71,6 @@ pub struct GpuPipeline {
     pub reference_view: TextureView,
     pub error_accumulators_buf: Buffer,
     pub control_flags_buf: Buffer,
-    pub params_buf: Buffer,
     pub readback_staging_buf: Buffer,
     pub control_staging_bufs: [Buffer; 2],
     pub fitness_packed_buf: Buffer,
@@ -109,7 +109,6 @@ impl GpuPipeline {
         image_height: u32,
         reference_rgba: &[u8],
         initial_states: &[GpuDrawingState],
-        gpu_params: &GpuParams,
     ) -> Self {
         assert!(initial_states.len() >= chain_count as usize);
         assert_eq!(reference_rgba.len(), (image_width * image_height * 4) as usize);
@@ -164,14 +163,15 @@ impl GpuPipeline {
             max_buffer_size,
             max_compute_workgroups_per_dimension: 65535,
             max_compute_invocations_per_workgroup: 256,
-            max_storage_buffers_per_shader_stage: 6, // select shader uses 5 storage bindings
+            max_storage_buffers_per_shader_stage: 5, // select shader uses 5 storage bindings (params moved to push constants)
+            max_push_constant_size: std::mem::size_of::<GpuParams>() as u32, // 128 bytes — Vulkan minimum guarantee
             ..Limits::downlevel_defaults()
         };
 
         // Request PIPELINE_CACHE feature if the adapter supports it (Vulkan only)
         let adapter_features = adapter.features();
         let pipeline_cache_supported = adapter_features.contains(Features::PIPELINE_CACHE);
-        let mut required_features = Features::TIMESTAMP_QUERY;
+        let mut required_features = Features::TIMESTAMP_QUERY | Features::PUSH_CONSTANTS;
         if pipeline_cache_supported {
             required_features |= Features::PIPELINE_CACHE;
             println!("Pipeline cache feature supported — enabling shader cache");
@@ -295,13 +295,6 @@ impl GpuPipeline {
             usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
         });
 
-        // Params uniform
-        let params_buf = device.create_buffer_init(&util::BufferInitDescriptor {
-            label: Some("params"),
-            contents: bytemuck::bytes_of(gpu_params),
-            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
-        });
-
         // Readback staging (one DrawingState)
         let readback_staging_buf = device.create_buffer(&BufferDescriptor {
             label: Some("readback_staging"),
@@ -381,7 +374,7 @@ impl GpuPipeline {
 
         // --- Bind group layouts ---
 
-        // Mutate: chain_states(read), working_states(rw), params(uniform)
+        // Mutate: chain_states(read), working_states(rw); params via push constants
         let mutate_bgl = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some("mutate_bgl"),
             entries: &[
@@ -391,7 +384,7 @@ impl GpuPipeline {
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
-                        min_binding_size: None,
+                        min_binding_size: NonZeroU64::new(GPU_DRAWING_STATE_SIZE as u64),
                     },
                     count: None,
                 },
@@ -401,24 +394,14 @@ impl GpuPipeline {
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Storage { read_only: false },
                         has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                        min_binding_size: NonZeroU64::new(GPU_DRAWING_STATE_SIZE as u64),
                     },
                     count: None,
                 },
             ],
         });
 
-        // Rasterize+Error: working_states(read), reference_image(texture), error_accumulators(rw), params(uniform)
+        // Rasterize+Error: working_states(read), reference_image(texture), error_accumulators(rw); params via push constants
         let rasterize_error_bgl = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some("rasterize_error_bgl"),
             entries: &[
@@ -428,7 +411,7 @@ impl GpuPipeline {
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
-                        min_binding_size: None,
+                        min_binding_size: NonZeroU64::new(GPU_DRAWING_STATE_SIZE as u64),
                     },
                     count: None,
                 },
@@ -448,24 +431,14 @@ impl GpuPipeline {
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Storage { read_only: false },
                         has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                        min_binding_size: NonZeroU64::new(std::mem::size_of::<u32>() as u64),
                     },
                     count: None,
                 },
             ],
         });
 
-        // Select: chain_states(rw), working_states(read), error_accumulators(rw), control(rw), params(uniform)
+        // Select: chain_states(rw), working_states(read), error_accumulators(rw), control(rw), fitness_packed(rw); params via push constants
         let select_bgl = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some("select_bgl"),
             entries: &[
@@ -475,7 +448,7 @@ impl GpuPipeline {
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Storage { read_only: false },
                         has_dynamic_offset: false,
-                        min_binding_size: None,
+                        min_binding_size: NonZeroU64::new(GPU_DRAWING_STATE_SIZE as u64),
                     },
                     count: None,
                 },
@@ -485,7 +458,7 @@ impl GpuPipeline {
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
-                        min_binding_size: None,
+                        min_binding_size: NonZeroU64::new(GPU_DRAWING_STATE_SIZE as u64),
                     },
                     count: None,
                 },
@@ -495,7 +468,7 @@ impl GpuPipeline {
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Storage { read_only: false },
                         has_dynamic_offset: false,
-                        min_binding_size: None,
+                        min_binding_size: NonZeroU64::new(std::mem::size_of::<u32>() as u64),
                     },
                     count: None,
                 },
@@ -505,7 +478,7 @@ impl GpuPipeline {
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Storage { read_only: false },
                         has_dynamic_offset: false,
-                        min_binding_size: None,
+                        min_binding_size: NonZeroU64::new(std::mem::size_of::<ControlFlags>() as u64),
                     },
                     count: None,
                 },
@@ -513,19 +486,9 @@ impl GpuPipeline {
                     binding: 4,
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::Buffer {
-                        ty: BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                BindGroupLayoutEntry {
-                    binding: 5,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
                         ty: BufferBindingType::Storage { read_only: false },
                         has_dynamic_offset: false,
-                        min_binding_size: None,
+                        min_binding_size: NonZeroU64::new(std::mem::size_of::<u32>() as u64),
                     },
                     count: None,
                 },
@@ -533,10 +496,15 @@ impl GpuPipeline {
         });
 
         // --- Compute pipelines ---
+        let push_constant_range = PushConstantRange {
+            stages: ShaderStages::COMPUTE,
+            range: 0..std::mem::size_of::<GpuParams>() as u32,
+        };
+
         let mutate_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: Some("mutate_layout"),
             bind_group_layouts: &[&mutate_bgl],
-            push_constant_ranges: &[],
+            push_constant_ranges: &[push_constant_range.clone()],
         });
         let mutate_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
             label: Some("mutate_pipeline"),
@@ -550,7 +518,7 @@ impl GpuPipeline {
         let rasterize_error_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: Some("rasterize_error_layout"),
             bind_group_layouts: &[&rasterize_error_bgl],
-            push_constant_ranges: &[],
+            push_constant_ranges: &[push_constant_range.clone()],
         });
         let rasterize_error_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
             label: Some("rasterize_error_pipeline"),
@@ -564,7 +532,7 @@ impl GpuPipeline {
         let select_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: Some("select_layout"),
             bind_group_layouts: &[&select_bgl],
-            push_constant_ranges: &[],
+            push_constant_ranges: &[push_constant_range],
         });
         let select_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
             label: Some("select_pipeline"),
@@ -605,7 +573,6 @@ impl GpuPipeline {
             entries: &[
                 BindGroupEntry { binding: 0, resource: chain_states_buf.as_entire_binding() },
                 BindGroupEntry { binding: 1, resource: working_states_buf.as_entire_binding() },
-                BindGroupEntry { binding: 2, resource: params_buf.as_entire_binding() },
             ],
         });
 
@@ -616,7 +583,6 @@ impl GpuPipeline {
                 BindGroupEntry { binding: 0, resource: working_states_buf.as_entire_binding() },
                 BindGroupEntry { binding: 1, resource: BindingResource::TextureView(&reference_view) },
                 BindGroupEntry { binding: 2, resource: error_accumulators_buf.as_entire_binding() },
-                BindGroupEntry { binding: 3, resource: params_buf.as_entire_binding() },
             ],
         });
 
@@ -628,8 +594,7 @@ impl GpuPipeline {
                 BindGroupEntry { binding: 1, resource: working_states_buf.as_entire_binding() },
                 BindGroupEntry { binding: 2, resource: error_accumulators_buf.as_entire_binding() },
                 BindGroupEntry { binding: 3, resource: control_flags_buf.as_entire_binding() },
-                BindGroupEntry { binding: 4, resource: params_buf.as_entire_binding() },
-                BindGroupEntry { binding: 5, resource: fitness_packed_buf.as_entire_binding() },
+                BindGroupEntry { binding: 4, resource: fitness_packed_buf.as_entire_binding() },
             ],
         });
 
@@ -642,8 +607,7 @@ impl GpuPipeline {
                 BindGroupEntry { binding: 1, resource: working_states_buf.as_entire_binding() },
                 BindGroupEntry { binding: 2, resource: error_accumulators_buf.as_entire_binding() },
                 BindGroupEntry { binding: 3, resource: control_flags_buf.as_entire_binding() },
-                BindGroupEntry { binding: 4, resource: params_buf.as_entire_binding() },
-                BindGroupEntry { binding: 5, resource: fitness_packed_buf.as_entire_binding() },
+                BindGroupEntry { binding: 4, resource: fitness_packed_buf.as_entire_binding() },
             ],
         });
 
@@ -656,7 +620,6 @@ impl GpuPipeline {
             reference_view,
             error_accumulators_buf,
             control_flags_buf,
-            params_buf,
             readback_staging_buf,
             control_staging_bufs,
             fitness_packed_buf,

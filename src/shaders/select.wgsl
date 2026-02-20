@@ -73,13 +73,18 @@ struct ControlFlags {
 @group(0) @binding(1) var<storage, read>       working_states:     array<DrawingState>;
 @group(0) @binding(2) var<storage, read_write> error_accumulators: array<atomic<u32>>;
 @group(0) @binding(3) var<storage, read_write> control:            ControlFlags;
-@group(0) @binding(4) var<uniform>             params:             Params;
-@group(0) @binding(5) var<storage, read_write> fitness_packed:     array<u32>;
+var<push_constant>                             params:             Params;
+@group(0) @binding(4) var<storage, read_write> fitness_packed:     array<u32>;
 
 // Workgroup-shared variables for communicating decisions from thread 0 to all threads
 var<workgroup> shared_accept: u32;
 var<workgroup> shared_copy_count: u32;
 var<workgroup> shared_best_offspring_id: u32;
+
+// Shared memory for parallel min-reduction across offspring errors
+// Each entry holds (error, local_offspring_index) packed so min on error also selects the index
+var<workgroup> reduction_err: array<u32, 64>;
+var<workgroup> reduction_idx: array<u32, 64>;
 
 /// Compute fitness from total error and polygon count.
 fn compute_fitness(total_error: u32, polygon_count: u32) -> f32 {
@@ -103,21 +108,42 @@ fn select_main(@builtin(global_invocation_id) gid: vec3<u32>,
         return;
     }
 
-    // Thread 0 does all decision logic
-    if local_id == 0u {
-        let lambda = params.lambda;
+    // --- Parallel min-reduction to find best offspring among λ candidates ---
+    let lambda = params.lambda;
 
-        // Find best offspring among λ candidates
-        var best_error = 0xFFFFFFFFu;
-        var best_local = 0u;
-        for (var i = 0u; i < lambda; i++) {
-            let oid = chain_id * lambda + i;
-            let err = atomicExchange(&error_accumulators[oid], 0u);
-            if err < best_error {
-                best_error = err;
-                best_local = i;
+    // Phase 1: Each thread loads its error value (or sentinel if beyond lambda)
+    // Threads 0..lambda-1 each read one error accumulator via atomicExchange (resets to 0)
+    // Threads lambda..63 load MAX_U32 sentinel so they lose all comparisons
+    if local_id < lambda {
+        let oid = chain_id * lambda + local_id;
+        reduction_err[local_id] = atomicExchange(&error_accumulators[oid], 0u);
+        reduction_idx[local_id] = local_id;
+    } else {
+        reduction_err[local_id] = 0xFFFFFFFFu;
+        reduction_idx[local_id] = 0xFFFFFFFFu;
+    }
+
+    workgroupBarrier();
+
+    // Phase 2: Binary tree min-reduction (O(log2(64)) = 6 steps)
+    // At each step, the active thread compares its value with the one at offset `stride`
+    // and keeps the smaller one (preferring the lower index on ties)
+    for (var stride = 32u; stride >= 1u; stride >>= 1u) {
+        if local_id < stride {
+            let other_err = reduction_err[local_id + stride];
+            let my_err = reduction_err[local_id];
+            if other_err < my_err {
+                reduction_err[local_id] = other_err;
+                reduction_idx[local_id] = reduction_idx[local_id + stride];
             }
         }
+        workgroupBarrier();
+    }
+
+    // Phase 3: Thread 0 reads the reduction result and does all decision logic
+    if local_id == 0u {
+        let best_error = reduction_err[0];
+        let best_local = reduction_idx[0];
         let best_offspring_id = chain_id * lambda + best_local;
 
         let fitness = compute_fitness(best_error, working_states[best_offspring_id].polygon_count);

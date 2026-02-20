@@ -11,7 +11,7 @@ use crate::mutation_params::MutationParams;
 use crate::settings::{GPU_MAX_CHAIN_COUNT, GPU_DEFAULT_CHAIN_COUNT, GPU_ITERATIONS_PER_BATCH, GPU_MIGRATION_INTERVAL};
 
 use buffers::{
-    default_gpu_params, gpu_params_from, drawing_to_gpu, gpu_to_drawing, ControlFlags, GpuDrawingState,
+    gpu_params_from, drawing_to_gpu, gpu_to_drawing, ControlFlags, GpuDrawingState,
     GpuParams, GPU_DRAWING_STATE_SIZE,
 };
 use pipeline::GpuPipeline;
@@ -104,8 +104,6 @@ impl GpuEvolver {
     ) -> Self {
         let max_chains = GPU_MAX_CHAIN_COUNT;
         let active_chains = GPU_DEFAULT_CHAIN_COUNT;
-        let params = default_gpu_params(image_width, image_height, GPU_MIGRATION_INTERVAL, active_chains);
-
         // Create initial chain states for max capacity — all start from the same drawing but with different RNG seeds
         let initial_states: Vec<GpuDrawingState> = (0..max_chains)
             .map(|i| {
@@ -120,7 +118,6 @@ impl GpuEvolver {
             image_height,
             reference_rgba,
             &initial_states,
-            &params,
         )
         .await;
 
@@ -190,10 +187,10 @@ impl GpuEvolver {
         let write_idx = self.staging_idx;
         self.staging_idx = 1 - self.staging_idx;
 
-        // 3. Update iteration number in params
+        // 3. Build params for push constants
         let mut params = gpu_params_from(mutation_params, p.image_width, p.image_height, GPU_MIGRATION_INTERVAL, active);
         params.iteration_number = self.iteration;
-        p.queue.write_buffer(&p.params_buf, 0, bytemuck::bytes_of(&params));
+        let params_bytes: &[u8] = bytemuck::bytes_of(&params);
 
         // Reset control flags before batch — preserve best_fitness_bits so atomicMax
         // only triggers new_best_found when fitness actually improves over last known best
@@ -241,6 +238,7 @@ impl GpuEvolver {
                 });
                 pass.set_pipeline(&p.mutate_pipeline);
                 pass.set_bind_group(0, &p.mutate_bind_group, &[]);
+                pass.set_push_constants(0, params_bytes);
                 pass.dispatch_workgroups(active, 1, 1);
             }
 
@@ -257,6 +255,7 @@ impl GpuEvolver {
                 });
                 pass.set_pipeline(&p.rasterize_error_pipeline);
                 pass.set_bind_group(0, &p.rasterize_error_bind_group, &[]);
+                pass.set_push_constants(0, params_bytes);
                 pass.dispatch_workgroups(wg_x, wg_y, active * lambda);
             }
 
@@ -272,6 +271,7 @@ impl GpuEvolver {
                 });
                 pass.set_pipeline(&p.select_pipeline);
                 pass.set_bind_group(0, &p.select_bind_group, &[]);
+                pass.set_push_constants(0, params_bytes);
                 pass.dispatch_workgroups(active, 1, 1);
             }
 
@@ -290,6 +290,7 @@ impl GpuEvolver {
                 });
                 pass.set_pipeline(&p.migrate_inter_pipeline);
                 pass.set_bind_group(0, &p.migrate_bind_group, &[]);
+                pass.set_push_constants(0, params_bytes);
                 pass.dispatch_workgroups(active, 1, 1);
                 if is_last_iter(i) {
                     migrate_ran = true;
@@ -306,6 +307,7 @@ impl GpuEvolver {
                 });
                 pass.set_pipeline(&p.migrate_intra_pipeline);
                 pass.set_bind_group(0, &p.migrate_bind_group, &[]);
+                pass.set_push_constants(0, params_bytes);
                 pass.dispatch_workgroups(active, 1, 1);
                 if is_last_iter(i) {
                     migrate_ran = true;

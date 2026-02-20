@@ -1,320 +1,384 @@
-# CPU-GPU Hybrid Architecture: Performance Analysis
+# CPU-GPU Hybrid Architecture Analysis
 
-Analysis of the CPU-GPU interaction patterns in the GPU evolution pipeline, focused on identifying bottlenecks and suggesting concrete improvements.
+This document analyzes the CPU-GPU interaction patterns in artgen-backend-rust and proposes optimization opportunities. The analysis focuses on the `--gpu --headless` path (`gpu_main_loop_headless`) which is the primary production mode, and the `GpuEvolver` subsystem in `src/gpu_evolver/`.
 
-## Architecture Overview
+## Current Architecture Summary
 
-The GPU evolution pipeline (`src/gpu_evolver/mod.rs`) runs a batch loop:
-
-1. CPU writes `GpuParams` + `ControlFlags` + error accumulator zeros via `queue.write_buffer`
-2. CPU encodes 50 iterations of (mutate -> rasterize_error -> select -> migrate) into **one command buffer**
-3. CPU submits the command buffer
-4. CPU **synchronously blocks** waiting for three sequential readbacks:
-   - `control_staging_buf` (16 bytes) -- determines if a new global best was found
-   - `timestamp_staging_buf` (64 bytes) -- GPU pass timings
-   - `fitness_staging_buf` (N*4 bytes) -- per-chain fitness values
-5. If `new_best_found`, CPU issues a **second submit** to copy one chain's `GpuDrawingState` (48,032 bytes) and blocks again
-6. CPU returns to step 1
-
-This means the GPU is **idle** between every batch while the CPU reads back results and prepares the next submission.
-
----
-
-## Issue 1: Triple Synchronous Map/Unmap Creates a Pipeline Bubble
-
-**Current code** (`mod.rs` lines 304-317):
-```rust
-let control = self.read_control_flags();   // map + device.poll(Wait) + unmap
-self.read_timestamps(migrate_ran);          // map + device.poll(Wait) + unmap
-self.read_chain_fitness();                  // map + device.poll(Wait) + unmap
-```
-
-Each `read_*` method calls `map_async` then `device.poll(Maintain::Wait)`, which blocks the CPU thread until the GPU finishes the entire submission AND the buffer is mapped. Since timestamps and fitness are already staged by the same command buffer, a single `device.poll(Wait)` call would suffice for all three buffers.
-
-**Suggested fix -- batch all readbacks into one poll:**
-
-```rust
-// Map all three staging buffers before polling
-let ctrl_slice = p.control_staging_buf.slice(..);
-let ts_slice = p.timestamp_staging_buf.slice(..);
-let fit_slice = p.fitness_staging_buf.slice(..((active * 4) as u64));
-
-let (tx1, rx1) = std::sync::mpsc::channel();
-let (tx2, rx2) = std::sync::mpsc::channel();
-let (tx3, rx3) = std::sync::mpsc::channel();
-
-ctrl_slice.map_async(MapMode::Read, move |r| { tx1.send(r).unwrap(); });
-ts_slice.map_async(MapMode::Read, move |r| { tx2.send(r).unwrap(); });
-fit_slice.map_async(MapMode::Read, move |r| { tx3.send(r).unwrap(); });
-
-// ONE poll wakes all three
-p.device.poll(Maintain::Wait);
-
-rx1.recv().unwrap().unwrap();
-rx2.recv().unwrap().unwrap();
-rx3.recv().unwrap().unwrap();
-
-// Read all three, then unmap all three
-let ctrl_data = ctrl_slice.get_mapped_range();
-let ts_data = ts_slice.get_mapped_range();
-let fit_data = fit_slice.get_mapped_range();
-// ... process ...
-drop(ctrl_data); drop(ts_data); drop(fit_data);
-p.control_staging_buf.unmap();
-p.timestamp_staging_buf.unmap();
-p.fitness_staging_buf.unmap();
-```
-
-**Impact:** Eliminates 2 of 3 `device.poll(Wait)` calls per batch. On some drivers, each poll has non-trivial overhead (kernel transition, fence wait). This alone could shave 0.1-0.5ms per batch.
-
----
-
-## Issue 2: GPU Idle During CPU Processing (No Double-Buffering)
-
-The biggest performance issue. The current flow is strictly sequential:
+### GPU Pipeline (4 passes per iteration, batched 50x)
 
 ```
-GPU: [=== batch N compute ===]...........[=== batch N+1 compute ===]
-CPU: .........................[readback N][prepare N+1]
-                              ^--- GPU idle here ---^
+Per batch (GPU_ITERATIONS_PER_BATCH = 50):
+
+  for i in 0..50:
+    [Mutate] -> [Rasterize+Error] -> [Select] -> [Migrate?]
+
+  Copy control_flags, fitness_packed, timestamps -> staging buffers
+  Submit single command buffer
+  Issue map_async on staging
 ```
 
-With double-buffered staging buffers, the CPU could submit batch N+1 while reading back batch N:
+### CPU-GPU Synchronization Flow
 
 ```
-GPU: [=== batch N compute ===][=== batch N+1 compute ===][=== batch N+2 ===]
-CPU: [readback N-1]...........[readback N]................[readback N+1]
+run_batch() call N:
+  1. finish_pending_readback() for batch N-1   <-- device.poll(Wait) stall
+  2. Write params + control flags via queue.write_buffer()
+  3. Encode 50 iterations into one command buffer
+  4. queue.submit()
+  5. Issue map_async for staging buffers
+  6. Return batch N-1's result
 ```
 
-**Implementation sketch:**
+The double-buffered staging (alternating index 0/1) means the CPU reads results from the *previous* batch while the GPU executes the *current* batch. This is the existing overlap mechanism.
 
-Create two sets of staging buffers (`control_staging_buf_a/b`, `timestamp_staging_buf_a/b`, `fitness_staging_buf_a/b`). Alternate which set the command encoder copies into. After submitting batch N (into staging set A), immediately start encoding batch N+1 (into staging set B) while mapping set A asynchronously.
+### Main Loop Cadence (headless mode)
 
-```rust
-struct DoubleBuffered {
-    staging: [StagingSet; 2],
-    current: usize,    // which set the GPU is writing to
-}
-
-fn run_batch(&mut self, ...) {
-    let read_idx = self.current;       // staging set from PREVIOUS batch
-    let write_idx = 1 - self.current;  // staging set for THIS batch
-
-    // 1. Start mapping previous batch's staging buffers (non-blocking)
-    self.staging[read_idx].map_all_async();
-
-    // 2. Encode + submit current batch (writes to staging[write_idx])
-    self.encode_and_submit(write_idx, ...);
-
-    // 3. NOW block to read previous batch's results
-    self.staging[read_idx].poll_and_read();
-
-    self.current = write_idx;
+```
+loop {
+  lock mutex -> check switch_request, pause, benchmark
+  lock mutex -> clone mutation_params
+  evolver.run_batch()                     <-- blocks on previous batch
+  if new_best -> lock mutex, update WsState
+  every 200ms -> CPU rasterize + PNG encode + WsState update
+  every 2s -> build_gpu_stats() + readback island drawings
+  every 10s -> JSON/PNG save to disk
 }
 ```
 
-**Impact:** The GPU stays busy while the CPU processes readback + WS state updates + PNG encoding. With 128 chains at 512x512, the rasterize_error pass alone takes several milliseconds per batch -- currently wasted waiting for CPU.
+## Identified Optimization Opportunities
 
-**Cost:** Doubles staging buffer memory (currently ~48KB for one chain readback + 16 bytes control + 64 bytes timestamps + N*4 fitness). At 512 chains this is ~50KB extra, negligible.
+### 1. Eliminate Main-Loop Mutex Contention During GPU Batch
 
----
+**Problem**: The main evolution loop acquires and releases `ws_state.0.lock()` multiple times per iteration:
+- Check `switch_request` (line 1347)
+- Check `benchmark_request` (line 1384)
+- Check `paused` (line 1398)
+- Clone `mutation_params` (line 1439)
+- Update `WsState` on improvement (line 1466-1484)
+- Update stats (line 1506-1517)
 
-## Issue 3: Unnecessary Per-Batch Readback of Timestamps
+Each lock acquisition can contend with WS server threads that hold the lock while serializing JSON (potentially tens of milliseconds for large GPU stats payloads with 1024 chain fitness values).
 
-Timestamp queries are resolved and read back on **every** batch (50 iterations), but they're only printed every 2 seconds (`last_stats_timestamp` check in `main.rs` lines 1471-1495). The GPU pass timings are averaged over many batches.
-
-**Current:** The `read_timestamps` method maps the timestamp staging buffer every batch even when the data won't be displayed.
-
-**Suggested fix:** Only resolve timestamps on the last iteration of each stats window (or every Nth batch). Set a flag before the batch:
+**Proposal**: Consolidate all reads from `WsState` into a single lock acquisition at the top of each loop iteration. Extract `switch_request`, `benchmark_request`, `paused`, and `mutation_params` in one critical section. This reduces from 4+ lock acquisitions per loop iteration to 1 read + 1 write (for results).
 
 ```rust
-let need_timestamps = last_stats_timestamp.elapsed().as_secs() >= 2;
-// In encode loop, only add timestamp_writes when need_timestamps is true
-// Only resolve_query_set + copy to staging when need_timestamps
-// Only call read_timestamps when need_timestamps
+// Consolidated read
+let (should_switch, bench_req, is_paused, mp) = {
+    let mut s = ws_state.0.lock().unwrap();
+    let switch = s.switch_request.is_some();
+    let bench = s.benchmark_request.take();
+    let paused = s.paused;
+    let mp = s.mutation_params.clone();
+    (switch, bench, paused, mp)
+};
 ```
 
-The timestamp query set slots are still written (they're part of the compute pass descriptor), but the `resolve_query_set` + `copy_buffer_to_buffer` + map/read cycle can be skipped. This eliminates the staging buffer map overhead for ~99% of batches.
+**Impact**: Reduces lock contention by ~75%. Most beneficial when multiple WS clients are connected and generating serialization work.
 
-**Impact:** Small per-batch savings (~0.05ms), but it simplifies the double-buffering implementation.
+### 2. Overlap CPU Work with GPU Execution
 
----
+**Problem**: The current structure is:
 
-## Issue 4: `build_gpu_stats` Does N Island Readbacks
-
-In `main.rs` lines 937-939:
-```rust
-let island_drawings: Vec<Drawing> = island_stats.iter()
-    .map(|is| evolver.readback_chain(is.best_chain_id))
-    .collect();
+```
+[GPU batch N-1 readback + stall] -> [GPU batch N submit] -> [CPU idle/polling]
 ```
 
-Each `readback_chain` call creates a new command encoder, submits it, maps a staging buffer, blocks on `device.poll(Wait)`, reads 48,032 bytes, and unmaps. With 8 islands, that's **8 sequential GPU submissions** just for the stats readback every 2 seconds.
+Between submitting batch N and calling `run_batch()` again, the CPU does useful work (PNG encoding, stats building, file I/O) but this work is *not* systematically overlapped with GPU execution. When there is no improvement and no stats interval, the CPU immediately calls `run_batch()` again, which stalls in `finish_pending_readback()`.
 
-**Suggested fix -- batch all island readbacks into one submission:**
-
-Create a staging buffer large enough for `island_count` drawing states (or reuse a pre-allocated one). Copy all N chains' states in a single command encoder, submit once, map once, read all N.
+**Proposal**: Restructure the main loop into an explicit pipelined model where CPU work is *guaranteed* to overlap with GPU execution:
 
 ```rust
-fn readback_chains(&self, chain_ids: &[u32]) -> Vec<Drawing> {
-    let mut encoder = ...;
-    for (i, &chain_id) in chain_ids.iter().enumerate() {
-        let src_offset = chain_id as u64 * GPU_DRAWING_STATE_SIZE as u64;
-        let dst_offset = i as u64 * GPU_DRAWING_STATE_SIZE as u64;
+loop {
+    // 1. Submit next GPU batch (non-blocking after first call)
+    evolver.submit_batch(&mp);  // encodes + submits, returns immediately
+
+    // 2. Do ALL CPU work while GPU runs
+    do_cpu_work();  // PNG encode, stats, file I/O, WS updates
+
+    // 3. Harvest previous batch results (may need brief poll)
+    let result = evolver.collect_results();  // minimal stall if GPU finished during step 2
+}
+```
+
+This means splitting `run_batch()` into two explicit phases: `submit_batch()` (encode + submit + map_async) and `collect_results()` (poll + readback). The current implementation already does this conceptually via `pending_batch`, but the API forces them into the same call, meaning the CPU must do all its work *after* the blocking readback.
+
+**Impact**: On a typical iteration where GPU batch takes ~5ms and CPU work takes ~1-2ms, this could eliminate ~1-2ms of idle GPU time per batch. Over millions of batches, this adds up to measurably higher evals/sec.
+
+### 3. Adaptive Batch Size Based on GPU Utilization
+
+**Problem**: `GPU_ITERATIONS_PER_BATCH = 50` is a compile-time constant. The optimal batch size depends on:
+- Image resolution (higher resolution = more work per rasterize_error pass)
+- Chain count (more chains = more GPU work)
+- Lambda (more offspring = larger rasterize dispatch)
+- Whether the CPU needs to do work (stats, PNG, saves)
+
+With small images (64x64) and few chains, 50 iterations may complete in <1ms, making the overhead of map_async/poll/readback proportionally large. With large images (512x512) and many chains, 50 iterations may take >50ms, during which the CPU is blocked and cannot respond to WS commands or update the display.
+
+**Proposal**: Implement adaptive batch sizing based on measured GPU execution time:
+
+```rust
+struct BatchSizeController {
+    current_batch_size: u32,
+    target_batch_time_ms: f64,  // e.g., 10ms
+    min_batch_size: u32,        // e.g., 10
+    max_batch_size: u32,        // e.g., 500
+}
+
+impl BatchSizeController {
+    fn adjust(&mut self, actual_time_ms: f64) {
+        let ratio = self.target_batch_time_ms / actual_time_ms;
+        let new_size = (self.current_batch_size as f64 * ratio) as u32;
+        self.current_batch_size = new_size.clamp(self.min_batch_size, self.max_batch_size);
+    }
+}
+```
+
+The target batch time should be tuned to balance:
+- **Throughput**: Larger batches amortize submission overhead
+- **Responsiveness**: Smaller batches let the CPU respond to WS commands sooner
+- **Overlap efficiency**: Batch time should be >= CPU work time for full overlap
+
+A good starting target is 8-12ms (matching display refresh intervals).
+
+**Impact**: Could improve throughput by 10-30% for extreme configurations (very small or very large images) and significantly improve UI responsiveness for large configurations.
+
+### 4. Deferred and Batched Readback of Island Drawings
+
+**Problem**: `build_gpu_stats()` calls `evolver.readback_chains()` which creates a temporary staging buffer, issues copy commands, submits, polls, and maps — all synchronously. This happens every 2 seconds and reads back one full `GpuDrawingState` (16KB) per island. With 4 islands, that is a 64KB synchronous GPU round-trip that blocks the evolution loop.
+
+This readback calls `device.poll(Maintain::Wait)` which forces the GPU to drain *all* pending work, potentially stalling a running evolution batch.
+
+**Proposal A — Async island readback**: Pre-allocate a persistent staging buffer for island readbacks (sized for max islands) and use the same double-buffered async pattern as the main readback. Piggyback the island copy commands onto the next evolution batch's command encoder:
+
+```rust
+// During batch encoding, if stats are due:
+if stats_due {
+    for (i, &chain_id) in island_chain_ids.iter().enumerate() {
         encoder.copy_buffer_to_buffer(
-            &self.chain_states_buf, src_offset,
-            &self.multi_readback_staging_buf, dst_offset,
-            GPU_DRAWING_STATE_SIZE as u64,
+            &p.chain_states_buf,
+            chain_id as u64 * state_size,
+            &p.island_staging_buf,
+            i as u64 * state_size,
+            state_size,
         );
     }
-    p.queue.submit(std::iter::once(encoder.finish()));
-    // Single map + poll + unmap
-    // ...
+}
+// Read island data from the *previous* batch's staging in finish_pending_readback()
+```
+
+**Proposal B — Reduce readback frequency**: Island thumbnails update at ~0.5 Hz in the UI. The 2-second stats interval could skip island readback on alternating cycles (every 4 seconds) since island best chains change slowly.
+
+**Proposal C — Lightweight island readback**: Instead of reading back full 16KB `GpuDrawingState` per island, add a small GPU-side buffer that stores only the JSON-serializable fields needed for display (fitness, polygon count, mutation scale). This reduces the readback to ~32 bytes per island instead of 16KB.
+
+**Impact**: Proposal A eliminates the synchronous stall entirely. Proposal C reduces data transfer by ~99.8%.
+
+### 5. Non-blocking `readback_chain()` for New Best Drawing
+
+**Problem**: When the control flags indicate `new_best_found`, `finish_pending_readback()` calls `readback_chain()` which performs a full synchronous GPU round-trip: encode copy -> submit -> poll(Wait) -> map -> read -> unmap. This 16KB readback blocks the main loop.
+
+Since a new global best is found relatively rarely (once every few hundred batches for mature drawings), this is not a hot path — but it can cause UI jank because it adds 1-3ms of latency to the batch that found an improvement.
+
+**Proposal**: Pre-allocate a dedicated staging buffer for best-chain readback. When `new_best_found` is detected during `finish_pending_readback()`, issue the copy command as part of the *next* batch's command encoder, and read the result in the *following* `finish_pending_readback()` call. This adds one batch of latency to improvement detection (50 iterations x ~0.1ms = ~5ms) but eliminates the synchronous stall.
+
+```rust
+struct GpuEvolver {
+    // ... existing fields
+    pending_best_readback: Option<u32>,  // chain_id to read back next batch
+    best_readback_staging: Buffer,       // persistent staging buffer
 }
 ```
 
-**Impact:** Reduces 8 submit+poll cycles to 1. At 8 islands, this saves ~7 round-trips to the GPU driver, potentially 1-5ms every 2 seconds. More importantly, it prevents GPU pipeline stalls during the stats collection window.
+**Impact**: Eliminates 1-3ms synchronous stall on improvement detection. Negligible latency cost (one batch delay).
 
----
+### 6. CPU-Side Work Queue for Heavy Operations
 
-## Issue 5: Error Accumulator Reset via `write_buffer`
+**Problem**: PNG encoding (`encode_rgba_as_png`), CPU rasterization (`drawing.draw()`), JSON serialization (`serde_json::to_string`), and file I/O (`to_file`, `std::fs::write`) all run on the main evolution thread. These operations can take 5-20ms each, during which the GPU may be idle.
 
-In `mod.rs` lines 165-166:
-```rust
-let zeros = vec![0u8; active as usize * 4];
-p.queue.write_buffer(&p.error_accumulators_buf, 0, &zeros);
-```
-
-This allocates a `Vec` and does a CPU-to-GPU transfer every batch. Since the select shader already does `atomicExchange(&error_accumulators[chain_id], 0u)` (line 88 of `select.wgsl`), the error accumulators are already zeroed after select runs. The `write_buffer` call is redundant for iterations 2-50 within a batch -- it only matters for iteration 1.
-
-But since the command buffer contains 50 iterations with select clearing the accumulators each time, the only accumulator values that matter at submission time are the ones before iteration 1. The `atomicExchange` in select already resets them.
-
-**Verification needed:** Confirm that after the select pass of the previous batch's last iteration, all error accumulators are 0. If so, the `write_buffer` for zeros can be removed entirely (saving a small CPU allocation + GPU DMA per batch). The first batch after `reinit_chains` would need the buffer zeroed, but that's already handled by the buffer being freshly created.
-
-**Impact:** Removes one `queue.write_buffer` call and one `Vec` allocation per batch. Minor but free.
-
----
-
-## Issue 6: CPU-GPU Co-Evolution Opportunity
-
-Currently, the CPU path and GPU path are mutually exclusive (`--gpu` flag). The CPU worker threads sit idle when GPU mode is active, yet the CPU has `num_cpus` cores available.
-
-**Strategy: CPU seeds the GPU with improved candidates**
-
-While the GPU runs batches of (1+1) evolution across 128+ chains, the CPU could run a small number of worker threads doing higher-quality evolution (e.g., larger mutations, multi-step hill climbing) on the current global best. When a CPU worker finds an improvement:
-
-1. Convert the CPU `Drawing` to `GpuDrawingState` via `drawing_to_gpu`
-2. `queue.write_buffer` to inject it into the worst-performing chain's slot in `chain_states_buf`
-3. The GPU pipeline naturally picks it up on the next iteration
-
-This is essentially **heterogeneous island migration**: CPU islands evolve with different strategies (broader search, different mutation distributions) while GPU islands do fast narrow search.
-
-**Implementation complexity:** Medium. Requires:
-- Spawning CPU evaluator threads alongside the GPU evolver
-- Using the existing `Evaluator` struct with CPU rasterization
-- A small channel to send CPU improvements to the GPU main loop
-- Periodic injection of CPU-found drawings into GPU chain states via `write_buffer`
-
-**Impact:** Could significantly improve exploration diversity. The CPU workers cost no GPU time and the `write_buffer` injection is a single DMA of 48KB per improvement found.
-
----
-
-## Issue 7: `write_buffer` for Params Every Batch
-
-In `mod.rs` lines 150-152:
-```rust
-let mut params = gpu_params_from(mutation_params, ...);
-params.iteration_number = self.iteration;
-p.queue.write_buffer(&p.params_buf, 0, bytemuck::bytes_of(&params));
-```
-
-This reconstructs the full 128-byte `GpuParams` struct and writes the entire uniform buffer every batch, even when only `iteration_number` changes. When mutation params haven't changed (the common case during active evolution), this is wasteful.
-
-**Suggested fix:** Cache the previous `MutationParams` and only rebuild + write when it actually changes. When only `iteration_number` changes, use a partial write:
+**Proposal**: Offload heavy CPU work to a dedicated worker thread, communicating via a bounded channel:
 
 ```rust
-// Only write the 4-byte iteration_number at its offset
-let offset = offset_of!(GpuParams, iteration_number) as u64;
-p.queue.write_buffer(&p.params_buf, offset, &self.iteration.to_le_bytes());
-```
+enum CpuWork {
+    RenderAndEncodePng { drawing: Drawing, w: usize, h: usize },
+    SaveToFile { drawing: Drawing, path: String },
+    BuildGpuStats { /* ... */ },
+}
 
-However, `write_buffer` has alignment requirements (offset must be a multiple of 4 for wgpu). The `iteration_number` field is at byte offset 24 (6th u32), which satisfies this. The minimum write size is also 4 bytes.
+// In main loop:
+cpu_worker_tx.try_send(CpuWork::RenderAndEncodePng { ... }).ok();
 
-**Impact:** Eliminates 128 bytes of CPU-to-GPU transfer per batch in the common case. Marginal, but demonstrates the principle.
-
----
-
-## Issue 8: Batch Size Optimization
-
-The current `GPU_ITERATIONS_PER_BATCH = 50` (in `settings.rs` line 43) was likely chosen as a reasonable default. The tradeoffs:
-
-- **Larger batches** (100-200): Amortize submission + readback overhead over more iterations. GPU stays busy longer per submission. But: longer latency before detecting a new global best, and the `ControlFlags` mechanism can only report ONE best per batch (the last chain to improve via `atomicMax`). Improvements within the batch that are later superseded are lost to the CPU.
-- **Smaller batches** (10-25): Lower latency for detecting improvements, more responsive UI updates. But: higher per-iteration overhead from submission + readback.
-
-**Analysis:** With the current synchronous readback, the overhead per batch is dominated by 3 `device.poll(Wait)` calls + map/unmap cycles. If Issue 2 (double-buffering) is implemented, the readback cost effectively overlaps with compute, making larger batches less important.
-
-**Recommendation:** After implementing double-buffering, profile with batch sizes of 25, 50, and 100. The optimal value depends on the ratio of compute time to readback latency. For 128 chains at 512x512, the rasterize_error pass dominates, so 50 iterations likely keeps the GPU busy for 10-50ms -- well above the readback latency.
-
----
-
-## Issue 9: Mutex Lock Contention on WS State
-
-In the headless main loop (`main.rs` lines 1410-1412):
-```rust
-let mp = ws_state.0.lock().unwrap().mutation_params.clone();
-if let Some(new_best) = evolver.run_batch(&mp) {
-```
-
-The `mutation_params` is cloned from a `Mutex<WsState>` **every batch**. The WsState mutex is also acquired by the WS server thread for reads and command handling. While the lock is held briefly, this creates potential contention:
-
-- The evolution loop acquires the lock ~20-100 times per second (once per batch)
-- Each WS client thread acquires it ~30 times per second for stats updates
-- Command handling (pause, parameter changes) also acquires it
-
-**Suggested fix:** Use an `Arc<AtomicBool>` dirty flag for mutation params. Only re-read params when the flag is set:
-
-```rust
-// In the main loop:
-if params_dirty.load(Ordering::Relaxed) {
-    mp = ws_state.0.lock().unwrap().mutation_params.clone();
-    params_dirty.store(false, Ordering::Relaxed);
+// Worker thread:
+while let Ok(work) = rx.recv() {
+    match work {
+        CpuWork::RenderAndEncodePng { drawing, w, h } => {
+            let mut buf = vec![0u8; w * h * 4];
+            drawing.draw(&mut buf, w, h, Rasterizer::HalfSpace);
+            let png = encode_rgba_as_png(&buf, w, h);
+            // Update WsState with new PNG
+        }
+        // ...
+    }
 }
 ```
 
-Or use `tokio::sync::watch` to broadcast parameter changes without polling a mutex.
+Use a bounded channel (capacity 1-2) so the worker naturally back-pressures without unbounded queue growth.
 
-**Impact:** Reduces mutex acquisitions in the hot loop from every-batch to only-when-changed. The `Mutex` is not heavily contended in practice (held for microseconds), so this is a minor optimization.
+**Impact**: Could improve effective GPU utilization by 10-20% by ensuring the main thread always has a batch ready to submit. Most impactful at higher resolutions where CPU rasterization for display is expensive.
 
----
+### 7. Conditional Timestamp Collection
 
-## Issue 10: Chain State Readback Only When Global Best Found
+**Problem**: Timestamp queries are collected for every batch (`collect_timestamps: true` is always passed). Each batch resolves 8 timestamps into a staging buffer, copies to a double-buffered staging buffer, maps it, reads it, and unmaps it. The timestamp data is only consumed every 2 seconds when `print_averages()` is called, but the GPU/driver overhead of timestamp queries applies to every batch.
 
-Currently, the full `GpuDrawingState` readback (48,032 bytes + a separate GPU submission) only happens when `control.new_best_found != 0`. This is already well-optimized. However, there's a subtlety: the `ControlFlags` mechanism uses `atomicMax` on `best_fitness_bits`, so it tracks the single highest-fitness chain across the entire batch. If two chains both improve past the previous global best, only the last one to write wins the `atomicMax`.
+**Proposal**: Only collect timestamps for a small fraction of batches — enough to get statistically meaningful averages but without the per-batch overhead:
 
-This is fine for correctness (the CPU gets the best of the best), but it means the `best_chain_id` stored via `atomicStore` may be stale if two chains race. Chain A sets `best_fitness_bits = 100`, then chain B sets it to `105`, but `best_chain_id` might still point to A if B's `atomicStore` happened before A's.
+```rust
+let collect_timestamps = batches % 10 == 0;  // every 10th batch
+evolver.run_batch(&mp, collect_timestamps);
+```
 
-**Current mitigation:** The `atomicStore` for `best_chain_id` is guarded by `if best_bits > old_best_bits`, so only the true winner writes its ID. But since there's no lock between the `atomicMax` and the `atomicStore`, a very narrow race exists where:
-1. Chain A does `atomicMax(100)`, gets `old=50`, writes `best_chain_id = A`
-2. Chain B does `atomicMax(105)`, gets `old=100`, writes `best_chain_id = B`
+This still provides 5 samples per second at typical batch rates (50+ batches/sec), which is more than enough for meaningful timing averages.
 
-This is correct -- B wins. The race only matters if both happen in the same warp/thread, which they can't since each chain is a separate workgroup.
+**Impact**: Reduces per-batch GPU overhead by eliminating timestamp query set writes for 90% of batches. On some drivers, timestamp queries can add measurable overhead to compute dispatch latency.
 
-**Verdict:** The current approach is correct. No change needed.
+### 8. Multi-Queue / Async Compute Exploitation
 
----
+**Problem**: All GPU work (evolution compute + readback copies + island readback copies) is submitted to a single queue. wgpu currently exposes only one queue per device, but the underlying Vulkan driver may support multiple queue families (compute + transfer).
 
-## Priority-Ordered Recommendations
+**Proposal (Future)**: When wgpu gains multi-queue support (tracked in [wgpu#1716](https://github.com/gfx-rs/wgpu/issues/1716)), use a dedicated transfer queue for staging copies while compute work continues on the compute queue:
 
-| Priority | Issue | Estimated Impact | Effort |
-|----------|-------|-----------------|--------|
-| 1 | **Batch staging buffer readbacks** (Issue 1) | 0.1-0.5ms/batch | Small (1-2 hours) |
-| 2 | **Double-buffer staging for GPU overlap** (Issue 2) | 10-30% throughput increase | Medium (4-8 hours) |
-| 3 | **Batch island readbacks in `build_gpu_stats`** (Issue 4) | 1-5ms every 2s | Small (1-2 hours) |
-| 4 | **Skip timestamp readback most batches** (Issue 3) | Minor per-batch | Small (30 min) |
-| 5 | **Remove redundant error accumulator reset** (Issue 5) | Minor per-batch | Tiny (verify + delete) |
-| 6 | **CPU-GPU co-evolution** (Issue 6) | Potentially large | Large (multi-day) |
-| 7 | **Partial params write** (Issue 7) | Negligible | Small |
-| 8 | **Profile batch sizes** (Issue 8) | Data-dependent | Small |
-| 9 | **Reduce mutex contention** (Issue 9) | Minor | Small |
+```
+Compute Queue: [Mutate] -> [Rasterize] -> [Select] -> [Migrate] ...
+Transfer Queue:                    [Copy staging] -> [Map]
+```
 
-Issues 1-3 are the highest-value, lowest-effort improvements. Issue 2 (double-buffering) is the single biggest win because it eliminates the GPU idle period during CPU readback processing.
+This is a long-term architectural consideration. For now, the single-queue constraint means all copies are serialized with compute dispatches.
+
+**Near-term alternative**: Use `queue.write_buffer()` for small uniform updates (params, control flags) instead of staging + copy, as wgpu may internally use a transfer queue for `write_buffer()` on some backends. This is *already done* in the current code, so no change needed here.
+
+**Impact**: Multi-queue would theoretically eliminate copy stalls entirely, but this is blocked on wgpu API support.
+
+### 9. Multi-GPU Support Architecture
+
+**Problem**: The system currently uses a single GPU device. Systems with multiple GPUs (e.g., discrete + integrated, or multi-GPU workstations) leave hardware unused.
+
+**Proposal**: A multi-GPU architecture could partition chains across GPUs:
+
+```rust
+struct MultiGpuEvolver {
+    evolvers: Vec<GpuEvolver>,  // one per GPU
+    chains_per_gpu: Vec<u32>,
+}
+```
+
+**Design considerations**:
+- **Island mapping**: Each GPU runs a set of islands. Inter-island migration would require CPU-mediated data transfer (readback from GPU A, upload to GPU B).
+- **Migration cost**: A full `GpuDrawingState` is 16KB. Migrating 1 chain between GPUs costs ~32KB of PCIe bandwidth (readback + upload). At 1000 iterations/migration interval, this is negligible.
+- **Load balancing**: GPUs with different capabilities could run different chain counts. The adaptive batch sizing (proposal 3) would handle this naturally.
+- **Synchronization**: Each GPU runs independently with its own `run_batch()` loop. The CPU collects results from all GPUs and identifies the global best.
+- **wgpu support**: `Instance::enumerate_adapters()` already lists all GPUs (the code already does this in `pipeline.rs`). Creating a separate `GpuPipeline` per adapter is straightforward.
+
+**Implementation sketch**:
+1. Enumerate adapters, create one `GpuEvolver` per GPU
+2. Partition total chain count across GPUs
+3. Run independent batch loops (could be separate threads, one per GPU)
+4. Periodically exchange best drawings between GPUs via CPU
+5. Report combined evals/sec and global best
+
+**Impact**: Near-linear throughput scaling for 2-GPU systems. Diminishing returns beyond 2 GPUs due to migration overhead and CPU bottlenecks in result collection.
+
+### 10. Headless Mode GPU Scheduling Optimization
+
+**Problem**: In headless mode, the only consumers of GPU results are:
+- Evolution (continuous)
+- WS stats updates (every 2s)
+- WS image updates (every 200ms, only when improved)
+- File saves (every 10s)
+
+The GPU runs flat-out with no vsync or frame pacing, which is correct for throughput, but the polling strategy could be refined.
+
+**Proposal**: Use `device.poll(Maintain::Poll)` (non-blocking) instead of `Maintain::Wait` when the CPU has other work to do, falling back to `Maintain::Wait` only when the CPU is idle:
+
+```rust
+fn finish_pending_readback_nonblocking(&mut self) -> Option<Option<Drawing>> {
+    // Try non-blocking poll first
+    self.pipeline.device.poll(Maintain::Poll);
+
+    // Check if map_async completed
+    match self.pending_map_receivers.as_ref() {
+        Some(r) => match r.control_rx.try_recv() {
+            Ok(_) => {
+                // Data is ready, proceed with readback
+                Some(self.do_readback())
+            }
+            Err(TryRecvError::Empty) => None,  // Not ready yet, CPU can do other work
+            Err(TryRecvError::Disconnected) => panic!("map_async callback dropped"),
+        }
+        None => None,
+    }
+}
+```
+
+This converts the blocking wait into a polling loop that interleaves CPU work:
+
+```rust
+loop {
+    evolver.submit_batch(&mp);
+
+    // Try to harvest results while doing CPU work
+    loop {
+        if let Some(result) = evolver.try_collect_results() {
+            break result;
+        }
+        // Do a chunk of CPU work
+        do_next_cpu_task();
+    }
+}
+```
+
+**Impact**: Better CPU utilization during GPU execution. Most beneficial when there is significant CPU work to do (multiple WS clients, frequent stats updates, large images requiring expensive CPU rasterization).
+
+### 11. Params Update Coalescing
+
+**Problem**: `mutation_params` is read from the mutex and uploaded to the GPU via `queue.write_buffer()` on *every* batch, even when params haven't changed. The `GpuParams` struct is 128 bytes, so the per-batch cost is small, but the mutex acquisition adds latency.
+
+**Proposal**: Track a generation counter on `MutationParams` and only re-upload when it changes:
+
+```rust
+struct GpuEvolver {
+    // ... existing
+    last_params_generation: u64,
+    cached_params: GpuParams,
+}
+
+// In run_batch:
+if params_generation != self.last_params_generation {
+    self.cached_params = gpu_params_from(mp, ...);
+    p.queue.write_buffer(&p.params_buf, 0, bytemuck::bytes_of(&self.cached_params));
+    self.last_params_generation = params_generation;
+}
+```
+
+**Impact**: Eliminates ~99% of params uploads (params change only on user interaction). Marginal throughput improvement, but cleaner separation of concerns.
+
+## Priority Ranking
+
+| # | Optimization | Effort | Impact | Risk |
+|---|-------------|--------|--------|------|
+| 2 | Overlap CPU work with GPU execution | Medium | High | Low |
+| 3 | Adaptive batch sizing | Medium | High | Low |
+| 6 | CPU work queue for heavy operations | Medium | High | Low |
+| 1 | Mutex contention reduction | Low | Medium | Low |
+| 4 | Deferred island readback | Medium | Medium | Low |
+| 7 | Conditional timestamp collection | Low | Low-Medium | None |
+| 11 | Params update coalescing | Low | Low | None |
+| 5 | Non-blocking best readback | Medium | Low | Low |
+| 10 | Non-blocking poll strategy | Medium | Medium | Medium |
+| 9 | Multi-GPU support | High | High | Medium |
+| 8 | Multi-queue compute | N/A (blocked) | High | N/A |
+
+## Recommended Implementation Order
+
+1. **Quick wins** (1, 7, 11): Low effort, low risk, measurable improvement
+2. **Core pipeline improvement** (2, 3): Restructure the main loop for proper CPU-GPU overlap and adaptive batching
+3. **Background workers** (6, 4): Offload CPU-heavy work to keep the GPU fed
+4. **Advanced optimizations** (5, 10): Non-blocking readback patterns
+5. **Hardware scaling** (9): Multi-GPU support when single-GPU throughput plateaus

@@ -79,7 +79,7 @@ struct Params {
 
 @group(0) @binding(0) var<storage, read>       chain_states:   array<DrawingState>;
 @group(0) @binding(1) var<storage, read_write>  working_states: array<DrawingState>;
-@group(0) @binding(2) var<uniform>              params:         Params;
+var<push_constant>                              params:         Params;
 
 // --- PCG32 RNG ---
 // PCG-XSH-RR: high-quality, fast, minimal state
@@ -513,13 +513,9 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
     working_states[offspring_id].mutation_scale = mutation_scale;
     working_states[offspring_id].stagnation_counter = 0u;
 
-    // Copy polygons, clamping alpha
+    // Copy polygons as-is (all mutation paths already clamp alpha)
     for (var i = 0u; i < poly_count; i++) {
-        var poly = chain_states[chain_id].polygons[i];
-        var color = unpack_color(poly);
-        color.w = clamp(color.w, params.min_alpha_norm, params.max_alpha_norm);
-        poly.data.x = pack_color(color);
-        working_states[offspring_id].polygons[i] = poly;
+        working_states[offspring_id].polygons[i] = chain_states[chain_id].polygons[i];
     }
 
     // Apply mutation

@@ -1,121 +1,148 @@
-# Data Structures & Algorithms: GPU Evolution Pipeline
+# Data Structures & Algorithms Analysis
 
-Performance analysis of the wgpu compute-shader evolution pipeline. Focuses on data layout, memory access patterns, algorithmic efficiency, and concrete optimization opportunities.
-
-**Scope**: GPU path only (`src/gpu_evolver/`, `src/shaders/`). CPU rasterizer is out of scope.
-
-**Already optimized** (not re-discussed): per-polygon AABB early-out, L1 error metric, fused rasterize+error_reduce, 48-byte GpuPolygon alignment.
+Detailed analysis of data layout, memory efficiency, and algorithmic complexity in the artgen-backend-rust GPU evolution pipeline. Focuses on new optimization opportunities beyond the already-implemented GpuPolygon packing, tiled polygon prefetch, workgroup error reduction, and per-offspring persistent RNG.
 
 ---
 
-## 1. Memory Layout: AoS vs SoA
+## 1. GPU Memory Layout: AoS vs SoA for Polygons
 
-### Current: Array of Structures (AoS)
+### Current Layout (AoS)
+
+`GpuDrawingState` stores polygons as an Array-of-Structures:
 
 ```
-// buffers.rs — GpuDrawingState (48,032 bytes per chain)
-pub struct GpuDrawingState {
-    polygon_count: u32,        // 4 bytes
-    fitness_bits: u32,         // 4 bytes
-    _pad: [u32; 2],            // 8 bytes
-    rng_state: [u32; 4],       // 16 bytes
-    polygons: [GpuPolygon; 1000],  // 48,000 bytes
+struct DrawingState {
+    polygon_count: u32,      // 4B
+    fitness_bits: u32,       // 4B
+    mutation_scale: f32,     // 4B
+    stagnation_counter: u32, // 4B
+    rng_state: vec4<u32>,    // 16B
+    polygons: array<Polygon, 1000>,  // 16000B
 }
+// Total: 16032 bytes per chain
 ```
 
-Each `GpuPolygon` is 48 bytes containing interleaved geometry (v0, v1, v2) and color (RGBA):
+Each `Polygon` is `vec4<u32>` = 16 bytes: `[color_packed, v0, v1, v2]`.
 
+### Opportunity: Split Color from Geometry
+
+In the rasterize_error shader, every pixel iterates over all polygons but only accesses color data when the pixel is **inside** the triangle (typically a minority of iterations for small triangles). The AABB cull skips many polygons entirely, but for polygons that pass the AABB check, color and vertices are in the same 16-byte record, so loading the polygon into registers/shared memory always loads the color even if the half-space test rejects the pixel.
+
+**Proposed SoA layout** (per-chain):
 ```
-// buffers.rs — GpuPolygon (48 bytes)
-pub struct GpuPolygon {
-    color: [f32; 4],   // 16 bytes
-    v0: [f32; 2],      // 8 bytes
-    v1: [f32; 2],      // 8 bytes
-    v2: [f32; 2],      // 8 bytes
-    _pad: [f32; 2],    // 8 bytes (wasted)
-}
+vertices: array<vec3<u32>, 1000>   // 12B per polygon (v0, v1, v2)
+colors:   array<u32, 1000>         //  4B per polygon (packed RGBA)
 ```
 
-### Analysis: Why AoS Is Acceptable Here
+**Estimated benefit**: During rasterization, the shared memory tile (currently 768 polygons * 16B = 12,288B) could hold 768 * 12B = 9,216B for vertices only. This is a 25% reduction in shared memory pressure per tile, or equivalently the tile capacity increases to 1024 polygons per tile (1024 * 12B = 12,288B), reducing tile count and barrier synchronization by ~25% for large drawings.
 
-The typical argument for SoA on GPU is that threads in a warp/subgroup need the same field from different elements, enabling coalesced loads. However, in this pipeline:
+**Estimated cost**: The mutation shader and select shader would need to access two separate arrays instead of one `vec4<u32>`. More complex addressing. The color array would need a second cooperative load pass in the rasterize shader for polygons that pass the half-space test.
 
-- **Rasterize shader** (`rasterize_error.wgsl` line 116): Each thread loads `shared_polys[local_idx] = working_states[chain_id].polygons[load_idx]` — one thread loads one *entire* polygon cooperatively into shared memory. Then all 256 threads read the same polygon from shared memory (broadcast, not coalesced). The cooperative load is a single 48-byte read per thread — already a single cache line (or two, depending on alignment). SoA would not help because each thread needs all fields of its assigned polygon.
-
-- **Mutate shader** (`mutate.wgsl` line 268): Workgroup size is 1, so there is no cross-thread access pattern to coalesce. Each thread reads/writes its own chain's polygons sequentially. SoA would add complexity for zero benefit.
-
-- **Select/migrate shaders**: Workgroup size 1, copying entire polygons between chains.
-
-**Verdict**: AoS is the correct layout for this access pattern. Do not convert to SoA.
-
-### The Real Waste: 8 Bytes of Padding Per Polygon
-
-Each `GpuPolygon` has `_pad: [f32; 2]` (8 bytes, 16.7% of the struct). Over 1000 polygons, that's **8,000 bytes per chain wasted** (8 KB), or **4 MB across 512 chains**. This padding exists to reach a 48-byte stride, but the reason for 48 is not a WGSL alignment requirement — WGSL only requires structs to align to their largest member (here `vec4<f32>` = 16 bytes), meaning 40 bytes would need padding to 48 (next multiple of 16). The padding is mandatory given the current field layout.
-
-**Optimization opportunity**: If color were stored as `u8x4` packed into a single `u32` (see Section 6), the struct could shrink from 48 to 32 bytes (a power of 2, inherently 16-byte aligned with no padding needed). This would reduce `GpuDrawingState` from 48,032 to 32,032 bytes, a **33% reduction** in per-chain memory, enabling more chains or reducing cache pressure.
+**Verdict**: Moderate benefit. The main advantage is fitting more polygons per shared memory tile in the rasterizer. Worth prototyping if rasterize_error is the bottleneck (which timestamp profiling shows it is, typically 60-80% of GPU time). However, the complication of lazy color loading (only when inside) requires per-pixel divergent memory access, which may reduce occupancy benefits. **Recommend profiling the ratio of inside-pixels to AABB-pass-pixels to quantify potential gains before implementing.**
 
 ---
 
-## 2. Rasterization Algorithm
+## 2. Buffer Packing and Padding Analysis
 
-### Current: Per-Pixel Half-Space Test with Tiled Polygon Prefetch
+### GpuDrawingState Padding Audit
 
-```wgsl
-// rasterize_error.wgsl — workgroup_size(16, 16, 1)
-// Dispatch: (W/16, H/16, K) where K = chain count
-
-// Cooperative load: 256 threads load 256 polygons into shared memory
-shared_polys[local_idx] = working_states[chain_id].polygons[load_idx];
-
-// Then each thread tests its pixel against all 256 polygons
-for (var i = 0u; i < tile_end; i++) {
-    let poly = shared_polys[i];
-    // AABB test, then 3 edge functions, then alpha blend
-}
+```
+polygon_count:      offset 0,  4 bytes
+fitness_bits:       offset 4,  4 bytes
+mutation_scale:     offset 8,  4 bytes
+stagnation_counter: offset 12, 4 bytes
+rng_state:          offset 16, 16 bytes (vec4<u32>)
+polygons:           offset 32, 16000 bytes
+Total: 16032 bytes
 ```
 
-This is a **screen-space parallel** approach: one thread per pixel, iterating over all polygons. The AABB early-out (`rasterize_error.wgsl` lines 126-133) skips ~97% of tests, so the inner loop is efficient for small polygons.
+This is tightly packed with no wasted padding. The 32-byte header aligns perfectly to `vec4<u32>` boundaries (WGSL struct alignment rules).
 
-### Alternative: Tile-Based Rasterization (Not Recommended Yet)
+### Opportunity: Reduce Header to Enable Power-of-2 Alignment
 
-A tile-based approach would assign polygon subsets to screen tiles. However:
+The total state size (16032B) is not a power of two. GPU memory controllers work most efficiently with power-of-2 aligned strides for coalesced access patterns. Padding each state to 16384B (16 KiB) would waste 352 bytes per chain (2.2% overhead) but could improve memory access coalescing when multiple chains are accessed in strided patterns (e.g., the migration shader reading `chain_states[neighbor_id]`).
 
-- Current tile size (16x16 = 256 pixels) already matches one workgroup.
-- With AABB early-out, most polygons are skipped for most tiles. A hierarchical structure would help only if polygon counts are very high (>500) AND polygons are large relative to the image.
-- The cooperative shared-memory prefetch already ensures polygon data is loaded once and reused by all 256 threads.
+**Verdict**: Low priority. The SSBO access pattern is primarily sequential within a single chain (one thread reads its own chain). Strided cross-chain access only happens during migration (rare) and tournament selection (one chain at a time). The 2.2% memory overhead per chain is not justified for the marginal coalescing improvement.
 
-**Verdict**: The current algorithm is appropriate. The main bottleneck is likely memory bandwidth for the polygon loads, not ALU. Focus optimization effort on reducing polygon data size (Section 6).
+### Opportunity: Compact Header by Combining Fields
 
-### Potential Improvement: Precomputed AABBs
+The `stagnation_counter` (u32, max value ~10000) and `polygon_count` (u32, max 1000) could be packed into a single u32 (10 bits for polygon_count, 22 bits for stagnation_counter = up to 4M). This would save 4 bytes per chain but complicate shader code with bitfield extraction.
 
-Currently each pixel thread recomputes the AABB from vertices every time a polygon is tested (`rasterize_error.wgsl` lines 126-129):
-
-```wgsl
-let bb_min_x = min(poly.v0.x, min(poly.v1.x, poly.v2.x));
-let bb_max_x = max(poly.v0.x, max(poly.v1.x, poly.v2.x));
-let bb_min_y = min(poly.v0.y, min(poly.v1.y, poly.v2.y));
-let bb_max_y = max(poly.v0.y, max(poly.v1.y, poly.v2.y));
-```
-
-That's 8 `min`/`max` operations per polygon per pixel (256 threads x up to 1000 polygons). Since the AABB is the same for all pixels in a workgroup (and indeed for all workgroups in the same chain), it could be computed once during the cooperative load phase and stored in shared memory alongside the polygon.
-
-**Concrete change**: Store precomputed AABB in the `_pad` field of the polygon (or in a separate `shared_aabb` array). During the cooperative load, one thread computes the AABB for each polygon. This saves 8 `min`/`max` ops per pixel per polygon.
-
-However, note: the `_pad` field is `vec2<f32>` (8 bytes) — enough for `bb_min` (2 floats) but not `bb_max` (needs 4 floats total). A separate `shared_aabb: array<vec4<f32>, 256>` (4 KB) would work, bringing total shared memory to 12,288 + 1,024 + 4,096 = 17,408 bytes — well within the 16,384 byte minimum guaranteed by WebGPU. Wait — 17 KB exceeds the 16 KB minimum. Check your adapter's actual limit; many GPUs support 32 KB or 48 KB shared memory per workgroup. If limited to 16 KB, you could reduce the polygon tile size from 256 to 192 to fit both arrays.
-
-**Expected savings**: Marginal per polygon (GPUs are fast at min/max), but it adds up: at 100 active polygons x 256 threads x 8 ops = 204,800 saved operations per workgroup. Probably a 1-3% improvement.
+**Verdict**: Not worthwhile. The header is already only 32 bytes vs 16000 bytes of polygon data. Saving 4 bytes (0.025% of total) adds complexity for no measurable gain.
 
 ---
 
-## 3. Error Reduction Algorithm
+## 3. Polygon Sorting for Better Rasterization Cache Behavior
 
-### Current: Binary Tree Reduction in Shared Memory
+### Current Behavior
 
+Polygons are stored in painter's algorithm order (back-to-front for correct alpha blending). This order is essential for visual correctness and cannot be changed for the rasterization pass.
+
+### Opportunity: Spatial Sorting Within Same-Depth Groups
+
+Since alpha blending is order-dependent, polygons cannot be globally reordered. However, within the AABB culling step, spatial locality matters: if polygons that are spatially close are also close in the array, the AABB cull can reject entire contiguous ranges early, improving branch prediction and reducing wasted iterations.
+
+**Analysis**: In practice, the evolutionary process naturally tends to produce polygons that are somewhat spatially distributed (the algorithm adds polygons near reference features). The polygons are not randomly scattered. Furthermore, the AABB cull is already per-pixel, so spatial ordering would only help if it improved the **early exit** rate, which requires a two-pass approach (bounding box scan + inside test) that would add more overhead than it saves.
+
+**Verdict**: Not recommended. The painter's order constraint is fundamental to correctness. Any reordering within "same-depth groups" would require defining what constitutes a group (polygons at the same z-layer), which doesn't exist in this flat 2D model. The AABB cull already provides per-polygon spatial filtering.
+
+---
+
+## 4. Spatial Data Structures for Rasterization
+
+### Current Approach
+
+The rasterize_error shader does a brute-force loop over all polygons per pixel, with two optimizations:
+1. Tiled shared memory prefetch (768 polygons per tile, cooperative load)
+2. AABB culling per polygon per pixel
+
+### Opportunity A: Precomputed Bounding Box Buffer
+
+Separate the bounding box computation from the per-pixel loop. Currently each pixel recomputes AABB min/max for every polygon. With 1000 polygons and 512x512=262,144 pixels, that's 262M redundant AABB computations per offspring.
+
+**Proposed approach**: Add a lightweight pass (or compute at mutation time) that stores precomputed `vec4<f32>` bounding boxes (min_x, min_y, max_x, max_y) per polygon in a separate buffer. The rasterizer loads these from shared memory and performs the AABB test before loading the full polygon data.
+
+**Analysis**: The AABB computation is 6 min/max operations on unpacked vertices. Unpacking the vertex (2 shifts, 2 ANDs, 2 multiplies) is the expensive part. With precomputed AABBs, the rasterizer would:
+1. Load AABB (4 floats = 16B) from shared memory
+2. Test pixel against AABB (4 comparisons)
+3. Only on hit: load full polygon (16B) and do half-space test
+
+However, this doubles the shared memory requirements (16B AABB + 16B polygon per entry), halving the tile size from 768 to ~384 polygons and doubling the number of tiles and barriers. The savings from avoiding vertex unpacking on rejected polygons must outweigh the cost of more tiles.
+
+**Estimated break-even**: If >50% of polygons are rejected by AABB per workgroup (which is typical for small polygons), the precomputed AABB approach wins. For large polygons that cover most of the image, it loses.
+
+**Verdict**: Worth investigating for drawings with many small polygons (the common case at high polygon counts). Could be implemented as a separate `precompute_aabb` pass that runs once per iteration, storing results in a transient buffer that the rasterizer reads.
+
+### Opportunity B: Hierarchical Tile Culling (Two-Level Rasterization)
+
+Instead of testing every polygon against every pixel, use a coarse pass that determines which polygons overlap each 16x16 tile, then a fine pass that only tests the relevant polygons.
+
+**Proposed approach**:
+1. Coarse pass: For each 16x16 tile, test all polygon AABBs against the tile bounds. Produce a per-tile polygon list (indices).
+2. Fine pass: Each workgroup only iterates over its tile's polygon list.
+
+**Analysis**: This is essentially a GPU-side bounding volume hierarchy / binning approach. The coarse pass would require:
+- A buffer to store per-tile polygon lists (variable length)
+- Either a fixed-size allocation (e.g., max 1000 entries per tile) or a prefix-sum-based dynamic allocation
+
+For a 512x512 image with 16x16 tiles: 32x32 = 1024 tiles. With 1000 polygons and average ~10% coverage per polygon, each tile would have ~100 relevant polygons (vs 1000 brute-force). This is a 10x reduction in inner-loop iterations.
+
+**Cost**: The coarse pass itself is O(tiles * polygons) = O(1024 * 1000) = ~1M operations, which is cheap. The main challenge is memory allocation for variable-length per-tile lists.
+
+**Implementation strategy using indirect dispatch**:
+1. `coarse_cull` shader: For each (tile, polygon) pair, atomicAdd a counter per tile, write polygon index to a flat buffer at the computed offset.
+2. `rasterize_error` shader: Each workgroup reads its tile's polygon count and iterates only over the relevant polygons.
+
+**Verdict**: High potential for large polygon counts (500+). The brute-force approach scales as O(pixels * polygons), while the tiled approach scales as O(pixels * avg_polygons_per_tile). For 1000 polygons with ~10% average tile coverage, this could reduce rasterization work by ~10x. **This is the single highest-impact optimization in this analysis.** The main implementation challenge is the per-tile polygon list memory management, which requires either a worst-case allocation or a prefix-sum compaction pass.
+
+---
+
+## 5. Error Reduction Algorithm
+
+### Current Approach
+
+The rasterize_error shader uses a standard binary reduction in shared memory:
 ```wgsl
-// rasterize_error.wgsl lines 183-191
-shared_errors[local_idx] = pixel_error;
-workgroupBarrier();
-
 var stride = 128u;
 while stride > 0u {
     if local_idx < stride {
@@ -125,331 +152,292 @@ while stride > 0u {
     stride >>= 1u;
 }
 ```
+This is 8 steps for 256 threads, with a `workgroupBarrier()` at each step.
 
-This is a standard parallel reduction: 8 steps for 256 elements, each step halves active threads. The pattern is textbook-correct with `log2(256) = 8` barriers.
+### Opportunity: Warp-Level Reduction to Eliminate Barriers
 
-### Issue: Warp Divergence in Final Steps
+On modern GPUs (Vulkan subgroup operations), threads within a single warp/wavefront can communicate without shared memory or barriers. WGSL supports `subgroupAdd` (via the `subgroups` extension in newer wgpu versions).
 
-In the last 5 steps (stride <= 16), only the first 1-32 threads are active. On GPUs with 32-wide warps (NVIDIA) or 64-wide waves (AMD), this means:
+**Proposed approach**:
+```wgsl
+// Phase 1: Subgroup reduction (no barriers needed)
+let subgroup_sum = subgroupAdd(pixel_error);
+// Phase 2: One thread per subgroup writes to shared memory
+if subgroupElect() {
+    shared_errors[subgroup_id] = subgroup_sum;
+}
+workgroupBarrier();
+// Phase 3: Final reduction across subgroups (only 4-8 active threads for 256-thread workgroup)
+if local_idx < subgroup_count {
+    // tree reduction on just 4-8 values
+}
+```
 
-- Stride 16: 16/32 or 16/64 threads active (50% or 25% utilization)
-- Stride 1: 1/32 or 1/64 threads active (3% or 1.5% utilization)
+For a 256-thread workgroup with 32-thread warps: 8 subgroups. Current approach: 8 barriers. Proposed approach: 1 barrier. This eliminates 7 barrier synchronizations per workgroup per iteration.
 
-Each step still pays for a `workgroupBarrier()`. For subgroup sizes >= 32, the last 5 steps could use **subgroup operations** (`subgroupAdd`) instead of shared memory, eliminating barriers and shared memory bank conflicts.
+**Availability**: The `subgroups` feature requires wgpu 0.20+ and Vulkan 1.1 with `VK_KHR_shader_subgroup`. Most modern discrete GPUs support this. The WSL2/Dozen driver may or may not expose it.
 
-**Concrete change** (requires `enable subgroups;` in WGSL, supported in wgpu with the `SUBGROUP` feature):
+**Verdict**: Medium priority. The reduction is a small fraction of the rasterizer's total work (the polygon loop dominates), but eliminating 7 barriers is free performance. Requires checking adapter feature support at runtime and falling back to the current approach if unavailable.
+
+---
+
+## 6. Memory Bandwidth Analysis
+
+### Per-Iteration Bandwidth Budget
+
+For a configuration with K=16 chains, lambda=8, 512x512 image, 150 polygons per drawing:
+
+**Mutate pass**:
+- Read: K * DrawingState = 16 * 16032B = 250 KB (chain_states)
+- Write: K * lambda * DrawingState = 128 * 16032B = 2.0 MB (working_states, mostly polygon copy)
+- Total: ~2.3 MB
+
+**Rasterize+Error pass** (dominant):
+- Read: K * lambda * (polygon_count * 16B tiled reads + reference texture reads)
+  - Polygon data: 128 * 150 * 16B = 300 KB (but each read through shared memory, so global read is 1x)
+  - Reference texture: 512 * 512 * 4B = 1 MB (per offspring, but texture cache reuse across offspring is near-perfect for same-tile workgroups)
+  - Effective: ~1.3 MB global reads (polygon data) + ~1 MB texture (heavily cached)
+- Write: 128 * 4B = 512B (error accumulators, atomic adds)
+- Total: ~2.3 MB
+
+**Select pass**:
+- Read: K * lambda * 4B (error accumulators) + K * DrawingState (conditional polygon copy on accept)
+- Write: K * DrawingState (conditional) + K * 4B (fitness_packed)
+- With ~5% acceptance rate: ~0.05 * 16 * 16032B = ~12.5 KB average
+- Total: ~270 KB average
+
+**Per-iteration total**: ~5 MB. At 50 iterations per batch: ~250 MB per batch.
+
+### Opportunity: Reduce Mutation Copy Bandwidth
+
+The mutate shader copies the **entire** parent drawing (all 1000 polygon slots) to the offspring slot, even though only `polygon_count` polygons are active (typically 150-300). The copy loop is:
+```wgsl
+for (var i = 0u; i < poly_count; i++) {
+    working_states[offspring_id].polygons[i] = chain_states[chain_id].polygons[i];
+}
+```
+
+This already only copies `poly_count` polygons (good), but each polygon access to `working_states[offspring_id]` involves a scatter write to a potentially cold memory location. With lambda=8 offspring per chain and 16 chains, that's 128 offspring copies per iteration.
+
+**Opportunity**: Since the mutate shader typically modifies only 1-3 polygons per offspring, a "copy-on-write" approach could be considered: store only the delta (which polygon index changed and the new value) and apply it during rasterization. However, this would complicate the rasterizer significantly and break the tile prefetch pattern.
+
+**Verdict**: The current approach of copying only `poly_count` polygons is already reasonably efficient. The full 1000-polygon buffer is allocated but not accessed beyond `poly_count`. No change recommended.
+
+---
+
+## 7. Quantization Tradeoffs
+
+### Current Vertex Quantization
+
+Vertices are quantized to u16 (65536 levels) packed as two u16 per u32 word. For a 512x512 image:
+- Resolution: 65536 / 512 = 128 sub-pixel positions per pixel
+- Precision: 1/65536 = 0.0000153 in normalized coords = 0.0078 pixels at 512px
+- This is well beyond perceptual resolution.
+
+### Opportunity: Reduce to 12-bit Quantization
+
+With 12-bit quantization (4096 levels):
+- Resolution: 4096 / 512 = 8 sub-pixel positions per pixel
+- Precision: 0.000244 normalized = 0.125 pixels at 512px
+- Still sub-pixel, but approaching visible quantization artifacts for fine detail
+
+Packing: Two 12-bit values in a u32 leaves 8 bits unused. Could pack all 3 vertices into 2 u32s (3 * 24 bits = 72 bits) instead of 3 u32s (96 bits), saving 1 word per polygon. Total polygon size: 12B instead of 16B, a 25% reduction.
+
+**Analysis**: The 12-bit quantization adds visible stepping artifacts at high zoom levels and for polygons near the image edges. The u16 quantization is already compact and has no visible artifacts. The 25% size savings per polygon translates to 25% more polygons per shared memory tile (from 768 to ~1024), which reduces tile count.
+
+**Verdict**: Not recommended. The u16 quantization is a good balance of precision and compactness. Going to 12-bit would introduce visible artifacts and make pack/unpack more complex (non-aligned bit extraction). The tile capacity improvement is better achieved through the SoA layout or hierarchical culling approaches.
+
+### Opportunity: Use u8 for Color Components Instead of pack4x8unorm
+
+Color is already stored as 4x u8 packed via `pack4x8unorm`. This is optimal -- no further compression is useful without sacrificing color fidelity.
+
+---
+
+## 8. Indirect Dispatch for Variable Workload
+
+### Current Dispatch Strategy
+
+The rasterize_error shader is dispatched as:
+```rust
+pass.dispatch_workgroups(wg_x, wg_y, active * lambda);
+```
+where `wg_x = (W+15)/16`, `wg_y = (H+15)/16`. Every offspring gets the same dispatch dimensions.
+
+### Opportunity: Per-Offspring Variable Dispatch via Indirect
+
+Offspring with fewer polygons need less rasterization work. An indirect dispatch could skip or reduce workgroups for offspring with very few polygons (e.g., an offspring with 10 polygons doesn't need the shared-memory tiling overhead).
+
+**Analysis**: The dispatch dimensions are per-pixel (image space), not per-polygon. Even an offspring with 1 polygon still needs all pixels evaluated to compute the full-image error. The polygon loop is the inner variable, not the dispatch dimensions. Therefore, indirect dispatch based on polygon count doesn't reduce the pixel-level work.
+
+**Potential variant**: For offspring where `polygon_count < tile_cap` (i.e., all polygons fit in a single tile), the tiling loop overhead (extra barrier, tile management) could be avoided with a specialized shader variant. But WGSL/wgpu doesn't support shader specialization constants (override constants are limited), so this would require maintaining two separate shader modules.
+
+**Verdict**: Not applicable for the current architecture. Indirect dispatch would only help if the dispatch dimensions themselves varied per offspring, which they don't (all offspring render the full image).
+
+---
+
+## 9. Prefix Sum / Scan for Dynamic Workloads
+
+### Opportunity: Prefix Sum for Hierarchical Tile Culling
+
+If the hierarchical tile culling from Section 4B is implemented, a prefix sum is needed to allocate variable-length per-tile polygon lists in a flat buffer:
+
+1. **Count pass**: Each tile counts how many polygons overlap it
+2. **Prefix sum**: Exclusive scan over tile counts to compute per-tile offsets into a flat buffer
+3. **Scatter pass**: Write polygon indices to the flat buffer at the computed offsets
+4. **Rasterize pass**: Each tile reads its polygon list from `offset[tile_id]` to `offset[tile_id] + count[tile_id]`
+
+**Implementation**: For 1024 tiles, the prefix sum is trivially small (fits in one workgroup). A simple Blelloch scan in shared memory would suffice:
 
 ```wgsl
-// After stride reaches subgroup_size, switch to subgroup reduction
-shared_errors[local_idx] = pixel_error;
-workgroupBarrier();
-
-// Reduce in shared memory until we reach subgroup-sized chunks
-var stride = 128u;
-while stride > subgroup_size {
-    if local_idx < stride {
-        shared_errors[local_idx] += shared_errors[local_idx + stride];
+@compute @workgroup_size(1024)
+fn prefix_sum(@builtin(local_invocation_index) lid: u32) {
+    shared_data[lid] = tile_counts[lid];
+    // Up-sweep
+    for (var d = 1u; d < 1024u; d *= 2u) {
+        workgroupBarrier();
+        if lid % (2u * d) == 2u * d - 1u { shared_data[lid] += shared_data[lid - d]; }
+    }
+    // Down-sweep
+    if lid == 1023u { shared_data[lid] = 0u; }
+    for (var d = 512u; d > 0u; d /= 2u) {
+        workgroupBarrier();
+        if lid % (2u * d) == 2u * d - 1u {
+            let t = shared_data[lid - d];
+            shared_data[lid - d] = shared_data[lid];
+            shared_data[lid] += t;
+        }
     }
     workgroupBarrier();
-    stride >>= 1u;
-}
-
-// Final reduction within each subgroup (no barriers needed)
-var val = shared_errors[local_idx];
-val = subgroupAdd(val);
-
-// Only lane 0 of subgroup 0 writes the result
-if local_idx == 0u {
-    atomicAdd(&error_accumulators[chain_id], val);
+    tile_offsets[lid] = shared_data[lid];
 }
 ```
 
-**Expected savings**: Eliminates ~5 `workgroupBarrier()` calls. Real-world impact is modest (perhaps 2-5%) because the reduction is fast relative to the rasterization loop, but it's a clean win with no downsides.
-
-**Portability note**: `subgroupAdd` is in the WebGPU subgroups proposal and supported in wgpu v22+ behind a feature flag. Falls back to the current approach on unsupported hardware.
+**Verdict**: Only applicable if hierarchical tile culling is implemented. The prefix sum itself is trivial for 1024 tiles.
 
 ---
 
-## 4. Mutate Shader: Single-Threaded Bottleneck
+## 10. Buffer Reuse and Aliasing
 
-### Current Architecture
+### Current Buffer Allocation
 
-```wgsl
-// mutate.wgsl line 267
-@compute @workgroup_size(1)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let chain_id = gid.x;
-    // ... copies entire chain state, loops over all polygons
-```
+The pipeline allocates these buffers:
 
-Each chain is processed by a **single thread** in a workgroup of size 1. For 512 chains, this dispatches 512 workgroups of 1 thread each. The per-chain work includes:
+| Buffer | Size (K=16, lambda=8, 512x512) | Usage Pattern |
+|--------|------|---------------|
+| `chain_states_buf` | 16 * 16032B = 250 KB | Persistent, R/W |
+| `working_states_buf` | 128 * 16032B = 2.0 MB | Per-iteration, R/W |
+| `error_accumulators_buf` | 128 * 4B = 512B | Per-iteration, atomic R/W |
+| `reference_texture` | 512 * 512 * 4B = 1.0 MB | Read-only |
+| `control_flags_buf` | 16B | Per-batch, atomic R/W |
+| `params_buf` | 128B | Per-batch, read-only |
+| `readback_staging_buf` | 16032B | On-demand |
+| `control_staging_bufs` (x2) | 16B each | Per-batch |
+| `fitness_packed_buf` | 64B | Per-iteration |
+| `fitness_staging_bufs` (x2) | 64B each | Per-batch |
+| **Total** | **~3.3 MB** | |
 
-1. Copy all polygons (up to 1000) from `chain_states` to `working_states` with alpha clamping
-2. Mutation loop (up to 1000 attempts until dirty)
-3. Per-polygon mutations: iterate all polygons, test ~15 probability checks each
+### Opportunity: Alias `error_accumulators_buf` With Padding in `working_states_buf`
 
-### Problems
+Since each offspring already has a `fitness_bits` field in its `GpuDrawingState`, the separate `error_accumulators_buf` could theoretically use those fields directly. However, the error accumulator requires `atomic<u32>` access, and atomics on SSBO fields within a struct array are syntactically different in WGSL than atomics on a flat array.
 
-1. **GPU occupancy**: Workgroup size 1 means the GPU scheduler has only 1 thread per workgroup to schedule. Modern GPUs have warps/waves of 32-64 threads. A workgroup of 1 means 31-63 lanes are idle per scheduled warp. With 512 chains, only 512 threads are active across the entire GPU — far below the thousands needed for full occupancy.
+**Analysis**: The `error_accumulators_buf` is only 512B for typical configurations. This is negligible compared to the 2 MB `working_states_buf`. No meaningful savings from aliasing.
 
-2. **Memory bandwidth**: The copy phase reads/writes 48,032 bytes per chain, sequentially. With 512 chains, that's ~47 MB of memory traffic. The polygon copy loop (`mutate.wgsl` lines 318-322) writes one polygon per loop iteration — no vectorization.
+**Verdict**: Not worthwhile. The buffer is too small to matter, and aliasing would add shader complexity.
 
-3. **Serialized polygon iteration**: The mutation loop iterates polygons 0..count sequentially within a single thread. This is inherently serial but mutation order matters (each mutation depends on previous state).
+### Opportunity: Temporal Buffer Aliasing Between Passes
 
-### Optimization Opportunity: Parallelize the Copy Phase
+The `working_states_buf` is only needed during mutate and rasterize passes. After the select pass extracts results, it could theoretically be reused for other purposes. However, within a single batch of 50 iterations, the buffer is needed for every iteration, so there's no temporal window for reuse.
 
-The alpha-clamped copy (`mutate.wgsl` lines 317-322) could be done as a separate compute pass with a larger workgroup, where each thread copies a few polygons. This separates the embarrassingly-parallel copy from the inherently-serial mutation.
-
-However, the real bottleneck is that mutation is sequential per chain by design (each decision depends on RNG state and previous mutations). Increasing workgroup size would not help the mutation loop.
-
-**Practical improvement**: Increase workgroup size to 64 and have only thread 0 do actual work. This improves occupancy for the GPU scheduler even though extra threads are idle — the scheduler can overlap memory latency better with 64 threads per workgroup.
-
-```wgsl
-@compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>,
-        @builtin(local_invocation_index) local_idx: u32) {
-    if local_idx != 0u { return; }
-    let chain_id = gid.x / 64u;
-    // ... rest of mutation logic
-}
-```
-
-Dispatch becomes `dispatch_workgroups(ceil(active / 64), 1, 1)` with `chain_id` computed from the global invocation ID. This is a common GPU pattern for latency hiding.
-
-**Expected impact**: Moderate. The mutate pass is already relatively cheap compared to rasterization. Profile first to confirm it's a bottleneck.
+**Verdict**: No opportunity for temporal aliasing within the current batch-of-50 architecture.
 
 ---
 
-## 5. Select & Migrate: Full-Chain Copy Cost
+## 11. CPU Path Algorithmic Improvements
 
-### Current: Copy All Polygons on Accept
+### Scanline Fill vs Half-Space Rasterization
+
+The CPU path (`utils.rs`) maintains two rasterization algorithms:
+1. `fill_shape`: Scanline fill using edge tables, HashMap-based. O(n * h) where n = edges, h = height.
+2. `fill_triangle`: Half-space (Fgiesen-style) with 8x8 blocking. O(bbox_area) per triangle.
+
+The scanline fill (`fill_shape`) allocates a `HashMap<usize, Vec<Line>>` per polygon, a `Vec<Point>` per scanline, sorts intersection points per row, and produces individual `Point` objects for every filled pixel. This is heavily allocation-bound.
+
+### Opportunity: Eliminate Scanline Path
+
+The GPU path only uses triangles (fan-triangulated). The CPU `fill_shape` is only used for polygons with >3 points. Since the GPU path already fan-triangulates all polygons, the CPU path could do the same: fan-triangulate any multi-point polygon into triangles and use `fill_triangle` for all of them. This would eliminate the allocation-heavy scanline code path entirely.
+
+**Verdict**: Low priority since the CPU path is secondary to the GPU path. But if CPU performance matters, fan-triangulating and using `fill_triangle` exclusively would be faster due to zero allocations per polygon.
+
+### Opportunity: SIMD Error Computation
+
+The CPU evaluator (`evaluator.rs`) computes per-pixel L2 error using scalar `f32::sqrt()`:
+```rust
+let sqrt = f32::sqrt(((re * re) + (ge * ge) + (be * be)) as f32);
+```
+
+This could be vectorized using SIMD to process 4 pixels at once (each pixel has 3 channels). However, the `sqrt` operation is the bottleneck, and portable SIMD for `sqrt` is not yet stable. An alternative is to skip `sqrt` and use squared error (L2 squared), which is monotonically equivalent for comparison purposes and avoids the sqrt entirely.
+
+**Caveat**: Changing from L2 to L2-squared would change the fitness scale and make CPU/GPU results diverge unless the GPU shader is also updated. The `MAX_ERROR_PER_PIXEL` constant would need to change from `sqrt(255^2 * 3) = 441.67` to `255^2 * 3 = 195075`.
+
+**Verdict**: If CPU/GPU parity matters, not recommended without changing both. If the CPU path is only for fallback, switching to L2-squared is a free performance win.
+
+---
+
+## 12. Select Shader: Parallel Degenerate Triangle Culling
+
+### Current Approach
+
+After accepting an offspring, thread 0 sequentially scans all polygons for degenerate triangles (cross product < 0.00001):
 
 ```wgsl
-// select.wgsl lines 111-122
-if fitness > current_fitness {
-    // Copy working → chain_state (header + all polygons)
-    chain_states[chain_id].polygon_count = working_states[chain_id].polygon_count;
-    chain_states[chain_id].fitness_bits = fitness_bits;
-    let pc = working_states[chain_id].polygon_count;
-    for (var i = 0u; i < pc; i++) {
-        chain_states[chain_id].polygons[i] = working_states[chain_id].polygons[i];
+if shared_accept == 1u && local_id == 0u {
+    for (var r = 0u; r < count; r++) {
+        // ... cross product check, compact if degenerate
     }
 }
 ```
 
-When a candidate is accepted, the entire polygon array (up to 48,000 bytes) is copied in a loop within a workgroup of size 1. Similarly, migration (`select.wgsl` lines 147-155) copies the full polygon set.
+This is O(polygon_count) work on a single thread while 63 other threads in the workgroup are idle.
 
-### Optimization: Double-Buffer Pointer Swap
+### Opportunity: Parallel Culling With Prefix Sum Compaction
 
-Instead of copying polygon data, maintain two buffers (A and B) per chain and swap which is "current best" vs "working candidate" using a single u32 flag. The select shader would just flip the flag instead of copying 48 KB.
+1. All 64 threads cooperatively test polygons (thread i tests polygons i, i+64, i+128, ...)
+2. Each thread marks keep/remove in shared memory
+3. A workgroup-level prefix sum computes new indices
+4. All threads cooperatively copy polygons to their compacted positions
 
-**Trade-off**: This requires restructuring the buffer layout. Currently `chain_states` and `working_states` are separate buffers. A pointer-swap approach would need either:
-- An indirection buffer (`chain_active_buffer: array<u32>`) and both buffers accessible from all shaders
-- Or a single buffer with 2x the entries and an index per chain
+**Analysis**: For 150 polygons, single-threaded culling takes ~150 iterations. Parallelized across 64 threads: ~3 iterations per thread. The prefix sum adds ~10 steps. Total: ~13 steps vs 150. A ~10x speedup for the culling operation.
 
-This is a significant architectural change with non-trivial complexity. **Recommended only if profiling shows select/migrate copy is a significant fraction of total time.** Current GPU timestamp profiling (`PassTimings`) already captures per-pass timing — check `select` percentage first.
+**However**: The culling only runs on acceptance (~5% of iterations), and the culling itself is fast (simple arithmetic, no memory-bound operations). The total time spent in culling is negligible compared to rasterization.
 
----
-
-## 6. Compressed Polygon Representation
-
-### Current: f32 Everything (48 bytes per polygon)
-
-```
-color: [f32; 4]  = 16 bytes  (RGBA, each 0.0-1.0)
-v0:    [f32; 2]  =  8 bytes  (xy, each 0.0-1.0)
-v1:    [f32; 2]  =  8 bytes
-v2:    [f32; 2]  =  8 bytes
-_pad:  [f32; 2]  =  8 bytes
-Total:             48 bytes
-```
-
-### Proposal: Quantized 32-Byte Polygon
-
-All values are in [0.0, 1.0]. Using `u16` (65,536 steps) gives sub-pixel precision for images up to 32K resolution. Color channels are originally u8 (256 levels) on the CPU side and only converted to f32 for the GPU — a `u8` roundtrip is lossless.
-
-```
-color: u8x4 packed as u32    =  4 bytes  (exact match to CPU Color struct)
-v0:    [u16; 2] packed as u32 =  4 bytes  (65536 steps, ~0.002% precision)
-v1:    [u16; 2] packed as u32 =  4 bytes
-v2:    [u16; 2] packed as u32 =  4 bytes
-Total:                          16 bytes
-```
-
-At 16 bytes, the struct aligns naturally to 16-byte boundaries (WGSL vec4 alignment). With proper padding to 16 bytes, this fits in a single `vec4<u32>`:
-
-```wgsl
-struct PackedPolygon {
-    data: vec4<u32>,  // [color_rgba8, v0_xy16, v1_xy16, v2_xy16]
-}
-// Unpack in shader:
-fn unpack_polygon(p: PackedPolygon) -> Polygon {
-    let c = unpack4x8unorm(p.data.x);  // WGSL built-in
-    let v0 = unpack2x16unorm(p.data.y);
-    let v1 = unpack2x16unorm(p.data.z);
-    let v2 = unpack2x16unorm(p.data.w);
-    // ...
-}
-```
-
-**Impact**:
-- Per-chain state: 32 (header) + 1000 * 16 = **16,032 bytes** (down from 48,032 — **67% reduction**)
-- 512 chains: **~15.6 MB** total for chain+working states (down from ~47 MB)
-- 3x more polygons fit in shared memory tile (768 vs 256 per 12 KB)
-- 3x less memory bandwidth for polygon loads
-- L1/L2 cache hit rates improve dramatically
-
-**Trade-off**: Unpacking adds ALU work (4 unpack operations per polygon per pixel). But `unpack4x8unorm` and `unpack2x16unorm` are single-cycle instructions on modern GPUs. The memory bandwidth savings vastly outweigh the unpack cost.
-
-**Mutation shader impact**: Mutations currently operate in f32 space. With quantized storage, the mutate shader would unpack to f32, mutate, then repack. This adds ~8 pack/unpack ops per polygon touched — negligible given mutation only touches 1-3 polygons per iteration.
-
-**Precision consideration**: For a 512x512 image, u16 gives 65536/512 = 128 sub-pixel positions per pixel — far more than needed. For color, the CPU side already works in u8, so no precision is lost.
+**Verdict**: Theoretically clean but practically negligible. Only worth implementing if the acceptance rate increases substantially or polygon counts grow much larger.
 
 ---
 
-## 7. Reducing Per-Chain State to Fit More Chains
+## Summary of Recommendations
 
-### Current Memory Budget
+### High Impact (Recommended)
 
-| Component | Per-chain | 512 chains |
-|-----------|-----------|------------|
-| chain_states (GpuDrawingState) | 48,032 B | 23.4 MB |
-| working_states (GpuDrawingState) | 48,032 B | 23.4 MB |
-| error_accumulators (u32) | 4 B | 2 KB |
-| fitness_packed (u32) | 4 B | 2 KB |
-| **Total per-chain** | **96,072 B** | **~46.8 MB** |
+| # | Optimization | Expected Benefit | Effort |
+|---|-------------|-----------------|--------|
+| 4B | Hierarchical tile culling | ~5-10x rasterization speedup for 500+ polygon drawings | High |
+| 5 | Subgroup reduction for error accumulation | Eliminate 7 barriers per workgroup per iteration | Medium |
+| 4A | Precomputed AABB buffer | Avoid redundant vertex unpacking for rejected polygons | Medium |
 
-Plus reference image (512x512x4 = 1 MB) and control flags (16 B).
+### Medium Impact (Consider)
 
-### With Quantized Polygons (Section 6)
+| # | Optimization | Expected Benefit | Effort |
+|---|-------------|-----------------|--------|
+| 1 | SoA polygon layout (split color from geometry) | 25% more polygons per tile, reduced shared memory pressure | Medium |
+| 11 | Eliminate CPU scanline path (fan-triangulate all) | Faster CPU rasterization, zero allocations | Low |
 
-| Component | Per-chain | 512 chains |
-|-----------|-----------|------------|
-| chain_states | 16,032 B | 7.8 MB |
-| working_states | 16,032 B | 7.8 MB |
-| **Total per-chain** | **32,068 B** | **~15.6 MB** |
+### Low Impact (Not Recommended)
 
-This alone would allow **~3x more chains** within the same memory budget, or the same chain count with dramatically better cache utilization.
-
-### Further: Reduce MAX_POLYGONS_PER_IMAGE
-
-`MAX_POLYGONS_PER_IMAGE = 1000` (`settings.rs` line 36) allocates space for 1000 polygons per chain regardless of how many are actually used. The `polygon_count` field tracks the actual count. If typical drawings use 100-300 polygons, 70-90% of the polygon array is wasted zeros.
-
-**Dynamic allocation is impractical on GPU** (no malloc), but a **configurable compile-time maximum** (e.g., 256 or 512) that matches actual usage would save significant memory. This is a configuration change, not an algorithm change — just reduce the constant and recompile.
-
-With MAX_POLYGONS = 256 and quantized polygons: 32 + 256*16 = 4,128 bytes per chain. At 512 chains, that's only ~4 MB for both chain+working states.
-
----
-
-## 8. Shared Memory Utilization
-
-### Current Usage in Rasterize Shader
-
-```wgsl
-var<workgroup> shared_polys: array<Polygon, 256>;   // 256 * 48 = 12,288 bytes
-var<workgroup> shared_errors: array<u32, 256>;       // 256 * 4  = 1,024 bytes
-// Total: 13,312 bytes
-```
-
-WebGPU guarantees minimum 16,384 bytes shared memory per workgroup. Most desktop GPUs offer 32-48 KB. Current usage is **13,312 / 16,384 = 81%** of guaranteed minimum.
-
-### With Quantized Polygons
-
-```wgsl
-var<workgroup> shared_polys: array<PackedPolygon, 256>;  // 256 * 16 = 4,096 bytes
-var<workgroup> shared_errors: array<u32, 256>;           // 1,024 bytes
-// Total: 5,120 bytes (31% of minimum)
-```
-
-This opens up two options:
-1. **Larger tile size**: Load 768 polygons per tile instead of 256, reducing the number of tile iterations by 3x (fewer barriers, better instruction-level parallelism).
-2. **More occupancy**: Smaller shared memory footprint means more workgroups can run concurrently on each Compute Unit, improving latency hiding.
-
----
-
-## 9. Reference Image Optimization
-
-### Current: u32 Per Pixel (4 bytes)
-
-```wgsl
-// rasterize_error.wgsl lines 165-169
-let reference = reference_image[ref_idx];
-let refr = f32(reference & 0xFFu);
-let refg = f32((reference >> 8u) & 0xFFu);
-let refb = f32((reference >> 16u) & 0xFFu);
-```
-
-The reference image is stored as `array<u32>` where each u32 packs RGBA as bytes. At 512x512, this is 1 MB. This is already efficient — no optimization needed here.
-
-However, the reference image access pattern is **coherent** across chains: all chains access the same pixel at the same coordinates. If multiple chains' workgroups land on the same CU, L2 cache reuse is high. This is already implicitly exploited by the dispatch pattern `(wg_x, wg_y, chain_id)`.
-
----
-
-## 10. Mutation Shader: Polygon Insert/Remove Shifts
-
-### Current: O(n) Array Shifts
-
-```wgsl
-// mutate.wgsl lines 362-366 — insert polygon
-let insert_idx = rand_u32(&rng, max(count, 1u));
-for (var j = count; j > insert_idx; j--) {
-    working_states[chain_id].polygons[j] = working_states[chain_id].polygons[j - 1u];
-}
-
-// mutate.wgsl lines 374-378 — remove polygon
-let remove_idx = rand_u32(&rng, count);
-for (var j = remove_idx; j < count - 1u; j++) {
-    working_states[chain_id].polygons[j] = working_states[chain_id].polygons[j + 1u];
-}
-```
-
-Inserting or removing a polygon shifts up to 999 elements (48 bytes each) = up to 47,952 bytes of memory writes. This happens in the single-threaded mutate shader.
-
-### Optimization: Swap-Remove + Append
-
-Instead of maintaining polygon order during insert/remove:
-
-- **Remove**: Swap the removed polygon with the last polygon, then decrement count. O(1) instead of O(n).
-- **Insert**: Append at the end (index `count`), then swap with the desired position. O(1) instead of O(n).
-
-**Trade-off**: Polygon order matters for rendering (painter's algorithm — later polygons are drawn on top). Swap-remove changes the z-order of one polygon per operation. However, the `reorder_polygon_prob` mutation already randomly swaps polygons, so the algorithm explicitly explores different orderings. A single reorder per add/remove is likely insignificant compared to the dedicated reorder mutation.
-
-**Alternative**: Use the current shift only occasionally (or for a small fraction of cases) and default to swap-remove. Or mark "order matters" as a separate, less-frequent mutation.
-
-**Expected savings**: Eliminates the worst-case 48 KB memcpy per add/remove. For chains with 500+ polygons, this is meaningful.
-
----
-
-## 11. Workgroup Barrier Count in Rasterize Shader
-
-### Current: 2 Barriers Per Tile
-
-```wgsl
-for (var tile = 0u; tile < tile_count; tile++) {
-    // Cooperative load
-    shared_polys[local_idx] = working_states[chain_id].polygons[load_idx];
-    workgroupBarrier();    // Barrier 1: ensure all loads complete
-
-    // Process all polygons in tile
-    for (var i = 0u; i < tile_end; i++) { ... }
-    workgroupBarrier();    // Barrier 2: prevent next tile overwriting shared_polys
-}
-```
-
-For 1000 polygons, there are `ceil(1000/256) = 4` tiles, so **8 barriers** during rasterization plus **8 barriers** for the reduction phase = **16 total barriers**. This is already quite good.
-
-With quantized polygons and a larger tile size (e.g., 768), there would be `ceil(1000/768) = 2` tiles = **4 barriers** for rasterization — a 50% reduction in barrier overhead.
-
----
-
-## Summary of Recommendations (Priority Order)
-
-| # | Optimization | Effort | Expected Impact | Risk |
-|---|-------------|--------|----------------|------|
-| 1 | **Quantized 16-byte polygons** (Section 6) | Medium | High (3x less memory, 3x better cache, 3x larger tiles) | Low — precision is sufficient |
-| 2 | **Swap-remove for insert/delete** (Section 10) | Low | Medium (eliminates O(n) shifts in mutate) | Low — order already explored by reorder mutation |
-| 3 | **Precomputed AABBs in shared memory** (Section 2) | Low | Low-Medium (saves 8 min/max per polygon per pixel) | None |
-| 4 | **Subgroup reduction** (Section 3) | Low | Low (eliminates ~5 barriers) | Medium — requires feature detection |
-| 5 | **Reduce MAX_POLYGONS_PER_IMAGE** (Section 7) | Trivial | Medium (if actual usage is well below 1000) | Requires checking typical polygon counts |
-| 6 | **Increase mutate workgroup size** (Section 4) | Low | Low (better occupancy/latency hiding) | None |
-| 7 | **Double-buffer pointer swap** (Section 5) | High | Medium (eliminates 48 KB copy on accept) | Architectural complexity |
+| # | Optimization | Reason to Skip |
+|---|-------------|---------------|
+| 2 | Power-of-2 state alignment | Negligible coalescing benefit for single-chain access |
+| 3 | Spatial polygon sorting | Painter's order constraint prevents reordering |
+| 7 | 12-bit vertex quantization | Visible artifacts, marginal size savings |
+| 8 | Indirect dispatch for variable polygon count | Dispatch is per-pixel, not per-polygon |
+| 10 | Buffer aliasing | Buffers too small to matter |
+| 12 | Parallel degenerate culling | Only runs on rare acceptance events |
