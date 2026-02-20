@@ -4,6 +4,7 @@ pub mod controls;
 pub mod gpu_stats_panel;
 pub mod header;
 pub mod image_row;
+pub mod improvement_chart;
 pub mod mutation_panel;
 pub mod project_selector;
 pub mod stats;

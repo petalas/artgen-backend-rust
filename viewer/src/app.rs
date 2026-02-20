@@ -5,6 +5,7 @@ use crate::components::controls::Controls;
 use crate::components::gpu_stats_panel::GpuStatsPanel;
 use crate::components::header::Header;
 use crate::components::image_row::ImageRow;
+use crate::components::improvement_chart::ImprovementChart;
 use crate::components::mutation_panel::MutationPanel;
 use crate::components::project_selector::ProjectsPage;
 use crate::components::stats::Stats;
@@ -36,6 +37,7 @@ pub fn App() -> impl IntoView {
                         view! {
                             <ImageRow state={state}/>
                             <Stats state={state}/>
+                            <ImprovementChart state={state}/>
                             <Controls state={state}/>
                             <GpuStatsPanel state={state}/>
                             <MutationPanel state={state}/>
