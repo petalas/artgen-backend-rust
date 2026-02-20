@@ -72,7 +72,7 @@ struct Params {
 }
 
 @group(0) @binding(0) var<storage, read>       working_states:     array<DrawingState>;
-@group(0) @binding(1) var<storage, read>       reference_image:    array<u32>;
+@group(0) @binding(1)                          var reference_image: texture_2d<f32>;
 @group(0) @binding(2) var<storage, read_write> error_accumulators: array<atomic<u32>>;
 @group(0) @binding(3) var<uniform>             params:             Params;
 
@@ -177,12 +177,11 @@ fn main(
             let gi = clamp(g, 0.0, 255.0);
             let bi = clamp(b, 0.0, 255.0);
 
-            // Unpack reference pixel
-            let ref_idx = py * w + px;
-            let reference = reference_image[ref_idx];
-            let refr = f32(reference & 0xFFu);
-            let refg = f32((reference >> 8u) & 0xFFu);
-            let refb = f32((reference >> 16u) & 0xFFu);
+            // Load reference pixel from texture (Rgba8Unorm: automatically [0,1] float)
+            let ref_color = textureLoad(reference_image, vec2<i32>(i32(px), i32(py)), 0);
+            let refr = ref_color.x * 255.0;
+            let refg = ref_color.y * 255.0;
+            let refb = ref_color.z * 255.0;
 
             // L1 error: sum of absolute differences
             let dr = abs(ri - refr);

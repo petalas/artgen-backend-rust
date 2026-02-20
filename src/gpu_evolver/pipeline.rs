@@ -12,7 +12,8 @@ pub struct GpuPipeline {
     // Buffers
     pub chain_states_buf: Buffer,
     pub working_states_buf: Buffer,
-    pub reference_image_buf: Buffer,
+    pub reference_texture: Texture,
+    pub reference_view: TextureView,
     pub error_accumulators_buf: Buffer,
     pub control_flags_buf: Buffer,
     pub params_buf: Buffer,
@@ -145,16 +146,41 @@ impl GpuPipeline {
             mapped_at_creation: false,
         });
 
-        // Reference image — pack RGBA bytes as u32 array
-        let ref_packed: Vec<u32> = reference_rgba
-            .chunks_exact(4)
-            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-            .collect();
-        let reference_image_buf = device.create_buffer_init(&util::BufferInitDescriptor {
+        // Reference image — stored as a texture to leverage GPU texture cache hardware
+        let reference_texture = device.create_texture(&TextureDescriptor {
             label: Some("reference_image"),
-            contents: bytemuck::cast_slice(&ref_packed),
-            usage: BufferUsages::STORAGE,
+            size: Extent3d {
+                width: image_width,
+                height: image_height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: TextureFormat::Rgba8Unorm,
+            usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+            view_formats: &[],
         });
+        queue.write_texture(
+            ImageCopyTexture {
+                texture: &reference_texture,
+                mip_level: 0,
+                origin: Origin3d::ZERO,
+                aspect: TextureAspect::All,
+            },
+            reference_rgba,
+            ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(image_width * 4),
+                rows_per_image: Some(image_height),
+            },
+            Extent3d {
+                width: image_width,
+                height: image_height,
+                depth_or_array_layers: 1,
+            },
+        );
+        let reference_view = reference_texture.create_view(&TextureViewDescriptor::default());
 
         // Error accumulators (atomic u32 per chain) — zero-initialized once here;
         // the select shader resets them via atomicExchange after each iteration.
@@ -294,7 +320,7 @@ impl GpuPipeline {
             ],
         });
 
-        // Rasterize+Error: working_states(read), reference_image(read), error_accumulators(rw), params(uniform)
+        // Rasterize+Error: working_states(read), reference_image(texture), error_accumulators(rw), params(uniform)
         let rasterize_error_bgl = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some("rasterize_error_bgl"),
             entries: &[
@@ -311,10 +337,10 @@ impl GpuPipeline {
                 BindGroupLayoutEntry {
                     binding: 1,
                     visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                    ty: BindingType::Texture {
+                        sample_type: TextureSampleType::Float { filterable: false },
+                        view_dimension: TextureViewDimension::D2,
+                        multisampled: false,
                     },
                     count: None,
                 },
@@ -485,7 +511,7 @@ impl GpuPipeline {
             layout: &rasterize_error_bgl,
             entries: &[
                 BindGroupEntry { binding: 0, resource: working_states_buf.as_entire_binding() },
-                BindGroupEntry { binding: 1, resource: reference_image_buf.as_entire_binding() },
+                BindGroupEntry { binding: 1, resource: BindingResource::TextureView(&reference_view) },
                 BindGroupEntry { binding: 2, resource: error_accumulators_buf.as_entire_binding() },
                 BindGroupEntry { binding: 3, resource: params_buf.as_entire_binding() },
             ],
@@ -523,7 +549,8 @@ impl GpuPipeline {
             queue,
             chain_states_buf,
             working_states_buf,
-            reference_image_buf,
+            reference_texture,
+            reference_view,
             error_accumulators_buf,
             control_flags_buf,
             params_buf,
