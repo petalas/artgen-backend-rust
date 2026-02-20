@@ -83,9 +83,17 @@ fn main() {
 
     let use_gpu = args.iter().any(|a| a == "--gpu");
     let headless = args.iter().any(|a| a == "--headless");
+    let run_bench = args.iter().any(|a| a == "--bench");
 
     // Filter out flags to get positional args
     let positional: Vec<&String> = args.iter().skip(1).filter(|a| !a.starts_with("--")).collect();
+
+    if run_bench {
+        // Quick GPU benchmark mode — no WS server, no project system
+        let project = positional.first().map(|s| s.as_str()).unwrap_or("ff");
+        run_cli_benchmark(project);
+        return;
+    }
 
     if use_gpu && headless {
         // Project management mode — image arg is optional
@@ -843,6 +851,30 @@ fn handle_ws_command(
             }
             None
         }
+        Some("run_standard_benchmark") => {
+            // Fixed-settings benchmark from random start — no snapshot needed
+            let random_drawing = Drawing::new_random_capped(1000);
+            let drawing_json = serde_json::to_string(&random_drawing).unwrap();
+            let mut params = MutationParams::default();
+            params.chain_count = 4;
+            params.lambda = 64;
+            params.single_mutation_mode = true;
+            params.adaptive_mutation = true;
+            params.island_count = 1;
+            params.sanitize();
+            let req = BenchmarkRequest {
+                drawing_json,
+                params,
+                duration_secs: 33,
+                label: "standard-bench".to_string(),
+            };
+            let mut s = lock.lock().unwrap();
+            s.benchmark_request = Some(req);
+            s.generation += 1;
+            cvar.notify_all();
+            println!("[WS] Standard benchmark requested by {:?}", peer);
+            None
+        }
         Some("clear_benchmarks") => {
             let mut s = lock.lock().unwrap();
             s.benchmark_results.clear();
@@ -997,9 +1029,6 @@ fn run_benchmark(
     let mut bench_params = req.params.clone();
     bench_params.sanitize();
 
-    // Reinitialize chains from snapshot
-    evolver.reinit_chains(&drawing);
-
     // Signal benchmark started
     {
         let (lock, cvar) = &**ws_state;
@@ -1014,6 +1043,11 @@ fn run_benchmark(
     }
     println!("[Benchmark] Started: '{}' ({}s, {} chains, {} islands)",
         req.label, req.duration_secs, bench_params.chain_count, bench_params.island_count);
+
+    // Prepare: reinit chains, recreate pipeline if needed, run 2 warmup batches,
+    // then reset counters. This ensures pipeline compilation and warmup time
+    // are NOT counted in the benchmark duration.
+    evolver.prepare_for_benchmark(&drawing, &bench_params);
 
     let bench_start = Instant::now();
     let duration = Duration::from_secs(req.duration_secs as u64);
@@ -1150,6 +1184,137 @@ fn run_benchmark(
         s.generation += 1;
         cvar.notify_all();
     }
+}
+
+/// Standalone CLI benchmark — no WS server, no project system.
+/// Loads the reference image from a project directory, starts from a random drawing,
+/// evolves for 33 seconds with fixed settings, and prints results.
+///
+/// Usage: cargo run --release -- --bench [project_name]
+///   project_name defaults to "ff"
+fn run_cli_benchmark(project: &str) {
+    use artgen_backend_rust::settings::GPU_ITERATIONS_PER_BATCH;
+
+    const DURATION_SECS: u64 = 33;
+    const BENCH_CHAINS: u32 = 4;
+    const BENCH_LAMBDA: u32 = 64;
+    const BENCH_RESOLUTION: u32 = 256;
+
+    println!("=== GPU CLI Benchmark ===");
+    println!("Project: {}, Duration: {}s, Chains: {}, Lambda: {}, Resolution: {}",
+        project, DURATION_SECS, BENCH_CHAINS, BENCH_LAMBDA, BENCH_RESOLUTION);
+
+    // Load reference image from project directory
+    projects::ensure_projects_dir();
+    let original_path = projects::project_original_path(project);
+    let ref_path = projects::project_reference_path(project);
+    let image_path = if original_path.exists() { original_path } else { ref_path };
+    if !image_path.exists() {
+        eprintln!("Error: Reference image not found for project '{}' at {:?}", project, image_path);
+        eprintln!("Make sure the project exists in projects/{}/", project);
+        exit(1);
+    }
+
+    let ref_image_bytes = std::fs::read(&image_path).expect("Failed to read reference image");
+    let (rgba, w, h) = projects::load_and_normalize_image(&ref_image_bytes, Some(BENCH_RESOLUTION))
+        .expect("Failed to normalize image");
+    println!("Image: {}x{}", w, h);
+
+    // Create random starting drawing
+    let initial = Drawing::new_random_capped(1000);
+
+    // Initialize GPU evolver
+    let mut evolver = futures_lite::future::block_on(GpuEvolver::new(
+        &rgba,
+        w as u32,
+        h as u32,
+        &initial,
+    ));
+
+    // Configure benchmark params: 4 chains, 64 lambda, single mutation, adaptive scale
+    let mut params = MutationParams::default();
+    params.chain_count = BENCH_CHAINS;
+    params.lambda = BENCH_LAMBDA;
+    params.single_mutation_mode = true;
+    params.adaptive_mutation = true;
+    params.island_count = 1;
+    params.sanitize();
+
+    let evals_per_batch = GPU_ITERATIONS_PER_BATCH as u64
+        * params.chain_count as u64
+        * params.lambda as u64;
+
+    // Warm up: pipeline setup + 2 batches to fill double-buffer
+    println!("Warming up...");
+    evolver.prepare_for_benchmark(&initial, &params);
+
+    // Run benchmark
+    println!("Running evolution for {}s...\n", DURATION_SECS);
+    let bench_start = Instant::now();
+    let duration = Duration::from_secs(DURATION_SECS);
+    let mut improvements = 0u64;
+    let mut best = initial;
+    best.fitness = 0.0;
+    let mut batches = 0u64;
+    let mut last_print = Instant::now();
+
+    loop {
+        let elapsed = bench_start.elapsed();
+        if elapsed >= duration {
+            break;
+        }
+
+        if let Some(new_best) = evolver.run_batch(&params, false) {
+            if new_best.fitness > best.fitness {
+                improvements += 1;
+                best = new_best;
+            }
+        }
+        batches += 1;
+
+        // Print progress every 5 seconds
+        if last_print.elapsed() >= Duration::from_secs(5) {
+            let secs = elapsed.as_secs_f64();
+            let total_evals = evolver.total_evaluations();
+            let evals_per_sec = if secs > 0.0 { total_evals as f64 / secs } else { 0.0 };
+            println!("  {:>3.0}s  {:.4}%  {:>8} evals/s  {:>4} improvements",
+                secs, best.fitness * 100.0, evals_per_sec as u64, improvements);
+            last_print = Instant::now();
+        }
+    }
+
+    let total_elapsed = bench_start.elapsed();
+    let total_secs = total_elapsed.as_secs_f64();
+    let total_evals = evolver.total_evaluations();
+    let evals_per_sec = if total_secs > 0.0 { total_evals as f64 / total_secs } else { 0.0 };
+    let improvements_per_sec = if total_secs > 0.0 { improvements as f64 / total_secs } else { 0.0 };
+
+    println!("\n=== Results ===");
+    println!("  Final fitness:    {:.4}%", best.fitness * 100.0);
+    println!("  Evals/sec:        {:.0}", evals_per_sec);
+    println!("  Total evals:      {}", total_evals);
+    println!("  Improvements:     {}", improvements);
+    println!("  Improvements/sec: {:.1}", improvements_per_sec);
+    println!("  Batches:          {}", batches);
+    println!("  Elapsed:          {:.1}s", total_secs);
+    println!("  Polygons:         {}", best.polygons.len());
+    println!("  Evals/batch:      {}", evals_per_batch);
+
+    // Print JSON for machine-readable output
+    let result = serde_json::json!({
+        "finalFitness": best.fitness,
+        "evalsPerSec": evals_per_sec as u64,
+        "totalEvals": total_evals,
+        "improvements": improvements,
+        "improvementsPerSec": improvements_per_sec,
+        "batches": batches,
+        "elapsedSecs": total_secs,
+        "polygons": best.polygons.len(),
+        "chains": BENCH_CHAINS,
+        "lambda": BENCH_LAMBDA,
+        "resolution": format!("{}x{}", w, h),
+    });
+    println!("\nJSON: {}", serde_json::to_string(&result).unwrap());
 }
 
 fn gpu_main_loop_headless(legacy_image: Option<&str>) {

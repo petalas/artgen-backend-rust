@@ -467,6 +467,24 @@ fn ConfigureSection(state: RwSignal<ViewerState>) -> impl IntoView {
                 >
                     "Run Now"
                 </button>
+                <button
+                    class="btn btn-primary"
+                    style="background: #6366f1;"
+                    on:click={move |_| {
+                        send_ws_json(&serde_json::json!({
+                            "type": "run_standard_benchmark",
+                        }));
+                    }}
+                    disabled={move || is_active() || state.get().active_project.is_none()}
+                    title="4 chains, 64 lambda, 1 island, single mutation, adaptive, 33s from random start"
+                >
+                    {move || {
+                        match &state.get().active_project {
+                            Some(name) => format!("Std Bench: {} (33s)", name),
+                            None => "Std Bench (no project)".to_string(),
+                        }
+                    }}
+                </button>
             </div>
         </div>
     }

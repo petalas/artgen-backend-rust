@@ -732,6 +732,31 @@ impl GpuEvolver {
     pub fn rasterize_wg(&self) -> [u32; 2] {
         self.pipeline.rasterize_wg
     }
+
+    /// Prepare for a benchmark: reinitialize chains, trigger pipeline recreation
+    /// if needed, run 2 warmup batches to fill the double-buffer and populate
+    /// chain fitness values, then reset all counters. Returns the initial fitness
+    /// from GPU evaluation so the benchmark starts with accurate data.
+    pub fn prepare_for_benchmark(&mut self, drawing: &Drawing, params: &MutationParams) {
+        // 1. Reinit chains from snapshot (uploads drawing, zeros counters)
+        self.reinit_chains(drawing);
+
+        // 2. Trigger pipeline recreation before timing starts
+        self.pipeline.set_rasterize_wg(params.rasterize_wg);
+
+        // 3. Run 2 warmup batches to fill the double-buffer pipeline
+        //    and get initial fitness values read back from GPU
+        self.run_batch(params, false); // batch 1: submits, returns None
+        self.run_batch(params, false); // batch 2: reads back batch 1 results
+
+        // 4. Reset all counters so the benchmark starts clean
+        self.iteration = 0;
+        self.total_evaluations = 0;
+        self.start_time = Instant::now();
+        self.pass_timings = PassTimings::default();
+        // Note: chain_fitness and best_fitness_bits are now populated
+        // from the warmup readback — don't reset them
+    }
 }
 
 /// Initialize offspring RNG states in the working_states buffer.

@@ -173,18 +173,9 @@ fn rand_u32(state: ptr<function, vec4<u32>>, max_val: u32) -> u32 {
     return pcg_step(state) % max_val;
 }
 
-// --- Crossover functions ---
-
-/// Compute centroid of a triangle (average of 3 vertices).
-fn centroid(poly: Polygon) -> vec2<f32> {
-    let v0 = unpack_vertex(poly.data.y);
-    let v1 = unpack_vertex(poly.data.z);
-    let v2 = unpack_vertex(poly.data.w);
-    return (v0 + v1 + v2) / 3.0;
-}
+// --- Crossover ---
 
 /// Tournament selection: pick the fittest chain from `tournament_size` random samples within the same island.
-/// Returns the chain ID of the winner.
 fn tournament_select(rng: ptr<function, vec4<u32>>, chain_id: u32, chain_count: u32) -> u32 {
     let island_size = params.chain_count_param / max(params.island_count, 1u);
     let island_start = (chain_id / island_size) * island_size;
@@ -203,42 +194,9 @@ fn tournament_select(rng: ptr<function, vec4<u32>>, chain_id: u32, chain_count: 
     return best_id;
 }
 
-/// Spatial crossover writing to offspring slot.
-/// Parent A is read from shared memory (cooperatively loaded), parent B from global.
-fn crossover_spatial_offspring(rng: ptr<function, vec4<u32>>, parent_b: u32, offspring_id: u32) {
-    let use_y_axis = rand_f32(rng) > 0.5;
-    let split_pos = rand_f32(rng);
-    let count_a = min(shared_parent_poly_count, params.max_polygons);
-    let count_b = min(chain_states[parent_b].polygon_count, params.max_polygons);
-    var out_count = 0u;
-    for (var i = 0u; i < count_a; i++) {
-        if out_count >= params.max_polygons { break; }
-        let poly = shared_parent_polygons[i];
-        let c = centroid(poly);
-        let coord = select(c.x, c.y, use_y_axis);
-        if coord < split_pos {
-            working_states[offspring_id].polygons[out_count] = poly;
-            out_count++;
-        }
-    }
-    for (var i = 0u; i < count_b; i++) {
-        if out_count >= params.max_polygons { break; }
-        let poly = chain_states[parent_b].polygons[i];
-        let c = centroid(poly);
-        let coord = select(c.x, c.y, use_y_axis);
-        if coord >= split_pos {
-            working_states[offspring_id].polygons[out_count] = poly;
-            out_count++;
-        }
-    }
-    working_states[offspring_id].polygon_count = max(out_count, 1u);
-    if out_count == 0u {
-        working_states[offspring_id].polygons[0] = shared_parent_polygons[0];
-    }
-}
-
-/// Uniform crossover writing to offspring slot.
-/// Parent A is read from shared memory (cooperatively loaded), parent B from global.
+/// Uniform crossover: walk both parents in lockstep by layer index, coin-flip each slot.
+/// Preserves z-ordering (alpha compositing order) — no centroid math needed.
+/// Parent A from shared memory, parent B from global.
 fn crossover_uniform_offspring(rng: ptr<function, vec4<u32>>, parent_b: u32, offspring_id: u32) {
     let count_a = min(shared_parent_poly_count, params.max_polygons);
     let count_b = min(chain_states[parent_b].polygon_count, params.max_polygons);
@@ -515,12 +473,8 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
         working_states[offspring_id].mutation_scale = mutation_scale;
         working_states[offspring_id].stagnation_counter = 0u;
 
-        // Crossover reads parent A from shared memory, parent B from global
-        if rand_f32(&rng) < params.spatial_crossover_weight {
-            crossover_spatial_offspring(&rng, parent_b, offspring_id);
-        } else {
-            crossover_uniform_offspring(&rng, parent_b, offspring_id);
-        }
+        // Uniform crossover: parent A from shared memory, parent B from global
+        crossover_uniform_offspring(&rng, parent_b, offspring_id);
 
         // Clamp alphas on crossover offspring
         let offspring_count = working_states[offspring_id].polygon_count;
