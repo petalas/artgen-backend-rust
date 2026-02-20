@@ -8,16 +8,11 @@
 // Supported configurations: 16x16 (256 threads), 16x8 (128 threads), 8x8 (64 threads).
 // Tile capacity and shared memory arrays scale with WG_X * WG_Y.
 
-// naga 22.x converts f64 pipeline override values to i32, so declare as i32
+// naga 22.x converts f64 pipeline override values to i32, so declare as i32.
+// Derived values (THREAD_COUNT, TILE_CAP) are computed as `let` inside main()
+// because naga 22.x does not allow `const` to reference `override` values.
 override WG_X: i32 = 16;
 override WG_Y: i32 = 16;
-
-// Derived constants — computed from override values at pipeline creation time.
-// THREAD_COUNT = WG_X * WG_Y (e.g. 256, 128, or 64)
-// TILE_CAP = THREAD_COUNT * 3 (each thread loads 3 polygons per tile pass)
-const THREAD_COUNT: u32 = u32(WG_X * WG_Y);
-const TILE_CAP: u32 = THREAD_COUNT * 3u;
-const LOADS_PER_THREAD: u32 = 3u;
 
 struct Polygon {
     data: vec4<u32>,   // [color_packed, v0_packed, v1_packed, v2_packed] — 16 bytes
@@ -109,6 +104,12 @@ fn main(
     @builtin(subgroup_invocation_id) subgroup_lane: u32,
     @builtin(subgroup_size) subgroup_sz: u32,
 ) {
+    // Derived from override WG_X/WG_Y — computed here because naga 22.x
+    // does not allow const to reference override values
+    let THREAD_COUNT = u32(WG_X * WG_Y);
+    let TILE_CAP = THREAD_COUNT * 3u;
+    let LOADS_PER_THREAD = 3u;
+
     let px = gid.x;
     let py = gid.y;
     let chain_id = gid.z;
