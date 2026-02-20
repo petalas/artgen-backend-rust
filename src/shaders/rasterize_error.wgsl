@@ -8,13 +8,14 @@
 // Supported configurations: 16x16 (256 threads), 16x8 (128 threads), 8x8 (64 threads).
 // Tile capacity and shared memory arrays scale with WG_X * WG_Y.
 
-override WG_X: u32 = 16;
-override WG_Y: u32 = 16;
+// naga 22.x converts f64 pipeline override values to i32, so declare as i32
+override WG_X: i32 = 16;
+override WG_Y: i32 = 16;
 
 // Derived constants — computed from override values at pipeline creation time.
 // THREAD_COUNT = WG_X * WG_Y (e.g. 256, 128, or 64)
 // TILE_CAP = THREAD_COUNT * 3 (each thread loads 3 polygons per tile pass)
-const THREAD_COUNT: u32 = WG_X * WG_Y;
+const THREAD_COUNT: u32 = u32(WG_X * WG_Y);
 const TILE_CAP: u32 = THREAD_COUNT * 3u;
 const LOADS_PER_THREAD: u32 = 3u;
 
