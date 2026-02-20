@@ -186,8 +186,8 @@ fn MutationPanelBody(state: RwSignal<ViewerState>) -> impl IntoView {
                 <IntSlider state={state} label="Tournament size" get={|mp| mp.tournament_size as i64} set={|mp, v| { mp.tournament_size = v as u32; }} min=1 max=16 step=1/>
                 <Pow2Slider state={state} label="Islands" get={|mp| mp.island_count} set={|mp, v| { mp.island_count = v; }} min_exp=0 max_exp=5/>
                 <IntSlider state={state} label="Inter-island interval" get={|mp| mp.inter_island_interval as i64} set={|mp, v| { mp.inter_island_interval = v as u32; }} min=0 max=10000 step=50/>
-                <Pow2Slider state={state} label="Chains" get={|mp| mp.chain_count} set={|mp, v| { mp.chain_count = v; }} min_exp=4 max_exp=9/>
-                <Pow2Slider state={state} label="Lambda (\u{03BB})" get={|mp| mp.lambda} set={|mp, v| { mp.lambda = v; }} min_exp=0 max_exp=5/>
+                <Pow2Slider state={state} label="Chains" get={|mp| mp.chain_count} set={|mp, v| { mp.chain_count = v; }} min_exp=0 max_exp=10/>
+                <Pow2Slider state={state} label="Lambda (\u{03BB})" get={|mp| mp.lambda} set={|mp, v| { mp.lambda = v; }} min_exp=0 max_exp=6/>
             </div>
             <div class="mutation-section">
                 <div class="mutation-section-title">"Alpha"</div>

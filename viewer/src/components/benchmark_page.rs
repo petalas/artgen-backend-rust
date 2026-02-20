@@ -1,9 +1,10 @@
 use leptos::prelude::*;
+use wasm_bindgen::prelude::*;
+use wasm_bindgen::JsCast;
 
 use crate::benchmark::{BenchmarkRequest, BenchmarkResult, BenchmarkSnapshot};
 use crate::components::benchmark_chart::{color_for_index, BenchmarkChart};
-use wasm_bindgen::JsCast;
-
+use crate::components::controls::download_blob;
 use crate::ws::{send_ws_json, send_ws_loading, ViewerState};
 
 #[component]
@@ -102,7 +103,7 @@ fn SnapshotsSection(state: RwSignal<ViewerState>) -> impl IntoView {
 
 // ── Configure Run ──────────────────────────────────────────
 
-// Chains: exponent 4..9 → 16,32,64,128,256,512
+// Chains: exponent 0..9 → 1,2,4,...,512
 fn chains_from_exp(exp: u32) -> u32 { 1u32 << exp }
 fn exp_from_chains(chains: u32) -> u32 { chains.max(1).ilog2() }
 
@@ -110,7 +111,7 @@ fn exp_from_chains(chains: u32) -> u32 { chains.max(1).ilog2() }
 fn islands_from_exp(exp: u32) -> u32 { 1u32 << exp }
 fn exp_from_islands(islands: u32) -> u32 { islands.max(1).ilog2() }
 
-// Lambda: exponent 0..5 → 1,2,4,8,16,32
+// Lambda: exponent 0..6 → 1,2,4,8,16,32,64
 fn lambda_from_exp(exp: u32) -> u32 { 1u32 << exp }
 
 fn build_benchmark_params(
@@ -293,7 +294,7 @@ fn ConfigureSection(state: RwSignal<ViewerState>) -> impl IntoView {
                     <input
                         type="range"
                         class="mutation-slider"
-                        min="4" max="9" step="1"
+                        min="0" max="10" step="1"
                         prop:value={move || chain_exp.get().to_string()}
                         on:input={move |ev| {
                             if let Ok(v) = event_target_value(&ev).parse::<u32>() {
@@ -308,7 +309,7 @@ fn ConfigureSection(state: RwSignal<ViewerState>) -> impl IntoView {
                     <input
                         type="range"
                         class="mutation-slider"
-                        min="0" max="5" step="1"
+                        min="0" max="6" step="1"
                         prop:value={move || lambda_exp.get().to_string()}
                         on:input={move |ev| {
                             if let Ok(v) = event_target_value(&ev).parse::<u32>() {
@@ -601,6 +602,17 @@ fn ResultsSection(state: RwSignal<ViewerState>) -> impl IntoView {
                             }}>
                                 "Copy as Text"
                             </button>
+                            <button class="btn btn-secondary" on:click={move |_| {
+                                let results = state.get().benchmark_results.clone();
+                                export_results_json(&results);
+                            }}>
+                                "Export JSON"
+                            </button>
+                            <button class="btn btn-secondary" on:click={move |_| {
+                                import_results_from_file(state);
+                            }}>
+                                "Import JSON"
+                            </button>
                             <button class="btn btn-danger" on:click={clear_results}>
                                 "Clear Results"
                             </button>
@@ -647,6 +659,54 @@ fn export_results_text(results: &[BenchmarkResult]) -> String {
 fn copy_to_clipboard(text: &str) {
     let escaped = text.replace('\\', "\\\\").replace('`', "\\`").replace('$', "\\$");
     let _ = js_sys::eval(&format!("navigator.clipboard.writeText(`{}`)", escaped));
+}
+
+fn export_results_json(results: &[BenchmarkResult]) {
+    let json = serde_json::to_string_pretty(results).unwrap_or_default();
+    download_blob(&json, "benchmark-results.json", "application/json");
+}
+
+fn import_results_from_file(state: RwSignal<ViewerState>) {
+    let window = web_sys::window().expect("no window");
+    let document = window.document().expect("no document");
+
+    let input: web_sys::HtmlInputElement = document
+        .create_element("input")
+        .expect("create input")
+        .dyn_into()
+        .expect("into input");
+    input.set_type("file");
+    input.set_attribute("accept", ".json").ok();
+
+    let input_clone = input.clone();
+    let onchange = Closure::<dyn Fn()>::new(move || {
+        let Some(files) = input_clone.files() else { return };
+        let Some(file) = files.get(0) else { return };
+
+        let reader = web_sys::FileReader::new().unwrap();
+        let reader_clone = reader.clone();
+
+        let onload = Closure::<dyn Fn()>::new(move || {
+            let result = reader_clone.result().unwrap();
+            let text = result.as_string().unwrap_or_default();
+            match serde_json::from_str::<Vec<BenchmarkResult>>(&text) {
+                Ok(imported) => {
+                    state.update(|s| s.benchmark_results.extend(imported));
+                }
+                Err(e) => {
+                    web_sys::console::error_1(&format!("Failed to parse benchmark JSON: {}", e).into());
+                }
+            }
+        });
+
+        reader.set_onload(Some(onload.as_ref().unchecked_ref()));
+        onload.forget();
+        reader.read_as_text(&file).ok();
+    });
+
+    input.set_onchange(Some(onchange.as_ref().unchecked_ref()));
+    onchange.forget();
+    input.click();
 }
 
 fn result_row(i: usize, r: &BenchmarkResult) -> impl IntoView {

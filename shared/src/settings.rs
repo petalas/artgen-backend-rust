@@ -25,10 +25,10 @@ pub const MAX_POLYGONS_PER_IMAGE: usize = 1000;
 pub const MIN_POLYGONS_PER_IMAGE: usize = 1;
 
 // GPU evolution settings
-pub const GPU_MAX_CHAIN_COUNT: u32 = 512;
+pub const GPU_MAX_CHAIN_COUNT: u32 = 1024;
 pub const GPU_DEFAULT_CHAIN_COUNT: u32 = 16;
 pub const GPU_DEFAULT_LAMBDA: u32 = 8;
-pub const GPU_MAX_LAMBDA: u32 = 32;
+pub const GPU_MAX_LAMBDA: u32 = 64;
 
 // Crossover & island defaults
 pub const CROSSOVER_PROB: f32 = 0.1;

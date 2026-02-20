@@ -4,7 +4,7 @@ use wasm_bindgen::prelude::*;
 use crate::models::Drawing;
 use crate::ws::{send_ws_command, send_ws_loading, ViewerState};
 
-fn download_blob(content: &str, filename: &str, mime_type: &str) {
+pub fn download_blob(content: &str, filename: &str, mime_type: &str) {
     let window = web_sys::window().expect("no window");
     let document = window.document().expect("no document");
 

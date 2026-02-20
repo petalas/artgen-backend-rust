@@ -445,7 +445,7 @@ fn single_mutate_offspring(rng: ptr<function, vec4<u32>>, oid: u32, count: ptr<f
     working_states[oid].polygons[pi] = poly;
 }
 
-@compute @workgroup_size(32, 1, 1)
+@compute @workgroup_size(64, 1, 1)
 fn main(@builtin(workgroup_id) wid: vec3<u32>,
         @builtin(local_invocation_id) lid: vec3<u32>) {
     let chain_id = wid.x;

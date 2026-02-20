@@ -90,10 +90,6 @@ impl MutationParams {
         self.lambda = self.lambda.clamp(1, settings::GPU_MAX_LAMBDA);
         // Round down to nearest power of 2
         self.lambda = 1u32 << self.lambda.ilog2();
-        // Enforce chain_count * lambda <= GPU_MAX_CHAIN_COUNT
-        while self.chain_count * self.lambda > settings::GPU_MAX_CHAIN_COUNT && self.lambda > 1 {
-            self.lambda /= 2;
-        }
 
         // Crossover & island parameters
         self.crossover_prob = self.crossover_prob.clamp(0.0, 1.0);
