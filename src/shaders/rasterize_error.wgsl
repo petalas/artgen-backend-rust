@@ -101,8 +101,6 @@ fn edge_fn(ax: f32, ay: f32, bx: f32, by: f32, px: f32, py: f32) -> f32 {
 fn main(
     @builtin(global_invocation_id) gid: vec3<u32>,
     @builtin(local_invocation_index) local_idx: u32,
-    @builtin(subgroup_invocation_id) subgroup_lane: u32,
-    @builtin(subgroup_size) subgroup_sz: u32,
 ) {
     let px = gid.x;
     let py = gid.y;
@@ -204,23 +202,21 @@ fn main(
         }
     }
 
-    // Subgroup reduction: each subgroup sums via register shuffles (no shared memory needed)
-    let subgroup_sum = subgroupAdd(pixel_error);
-
-    // Subgroup leaders (lane 0) write their subgroup's sum to shared memory
-    let subgroup_id = local_idx / subgroup_sz;
-    if subgroup_lane == 0u {
-        shared_errors[subgroup_id] = subgroup_sum;
-    }
+    // Binary tree reduction in shared memory
+    shared_errors[local_idx] = pixel_error;
     workgroupBarrier();
 
-    // Thread 0 sums all subgroup results and atomicAdds to per-offspring accumulator
-    if local_idx == 0u {
-        let num_subgroups = (THREAD_COUNT + subgroup_sz - 1u) / subgroup_sz;
-        var total = 0u;
-        for (var i = 0u; i < num_subgroups; i++) {
-            total += shared_errors[i];
+    var stride = THREAD_COUNT / 2u;
+    while stride > 0u {
+        if local_idx < stride {
+            shared_errors[local_idx] += shared_errors[local_idx + stride];
         }
-        atomicAdd(&error_accumulators[chain_id], total);
+        workgroupBarrier();
+        stride >>= 1u;
+    }
+
+    // Thread 0 adds workgroup sum to chain's accumulator
+    if local_idx == 0u {
+        atomicAdd(&error_accumulators[chain_id], shared_errors[0]);
     }
 }

@@ -177,7 +177,7 @@ impl GpuPipeline {
         // Request PIPELINE_CACHE feature if the adapter supports it (Vulkan only)
         let adapter_features = adapter.features();
         let pipeline_cache_supported = adapter_features.contains(Features::PIPELINE_CACHE);
-        let mut required_features = Features::TIMESTAMP_QUERY | Features::PUSH_CONSTANTS | Features::SUBGROUP;
+        let mut required_features = Features::TIMESTAMP_QUERY | Features::PUSH_CONSTANTS;
         if pipeline_cache_supported {
             required_features |= Features::PIPELINE_CACHE;
             println!("Pipeline cache feature supported — enabling shader cache");
