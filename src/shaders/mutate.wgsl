@@ -290,6 +290,9 @@ fn single_mutate(rng: ptr<function, vec4<u32>>, chain_id: u32, count: ptr<functi
     let w_add = params.add_polygon_prob;
     let w_remove = params.remove_polygon_prob;
     let w_reorder = params.reorder_polygon_prob;
+    let w_scale = params.offset_polygon_prob;
+    let w_rotate = params.offset_polygon_prob;
+    let w_adjacent_swap = params.reorder_polygon_prob;
 
     // Per-polygon mutation weights — multiply by count since there are `count` polygons
     let fc = f32(c);
@@ -301,7 +304,7 @@ fn single_mutate(rng: ptr<function, vec4<u32>>, chain_id: u32, count: ptr<functi
     let w_lighten = params.lighten_color_prob * fc;
     let w_darken = params.darken_color_prob * fc;
 
-    let total = w_add + w_remove + w_reorder + w_offset + w_move_point + w_micro_adjust + w_change_color + w_micro_color + w_lighten + w_darken;
+    let total = w_add + w_remove + w_reorder + w_scale + w_rotate + w_adjacent_swap + w_offset + w_move_point + w_micro_adjust + w_change_color + w_micro_color + w_lighten + w_darken;
 
     let r = rand_f32(rng) * total;
     var cumulative = 0.0;
@@ -368,6 +371,62 @@ fn single_mutate(rng: ptr<function, vec4<u32>>, chain_id: u32, count: ptr<functi
         let tmp = working_states[chain_id].polygons[i1];
         working_states[chain_id].polygons[i1] = working_states[chain_id].polygons[i2];
         working_states[chain_id].polygons[i2] = tmp;
+        return;
+    }
+
+    // Scale polygon (resize around centroid)
+    cumulative += w_scale;
+    if r < cumulative && c >= 1u {
+        let si = rand_u32(rng, c);
+        var poly = working_states[chain_id].polygons[si];
+        var sv0 = unpack_vertex(poly.data.y);
+        var sv1 = unpack_vertex(poly.data.z);
+        var sv2 = unpack_vertex(poly.data.w);
+        let sc = (sv0 + sv1 + sv2) / 3.0;
+        let scale = rand_f32_range(rng, 0.8, 1.2);
+        sv0 = clamp(sc + (sv0 - sc) * scale, vec2<f32>(0.0), vec2<f32>(1.0));
+        sv1 = clamp(sc + (sv1 - sc) * scale, vec2<f32>(0.0), vec2<f32>(1.0));
+        sv2 = clamp(sc + (sv2 - sc) * scale, vec2<f32>(0.0), vec2<f32>(1.0));
+        poly.data.y = pack_vertex(sv0);
+        poly.data.z = pack_vertex(sv1);
+        poly.data.w = pack_vertex(sv2);
+        working_states[chain_id].polygons[si] = poly;
+        return;
+    }
+
+    // Rotate polygon (around centroid)
+    cumulative += w_rotate;
+    if r < cumulative && c >= 1u {
+        let ri = rand_u32(rng, c);
+        var poly = working_states[chain_id].polygons[ri];
+        var rv0 = unpack_vertex(poly.data.y);
+        var rv1 = unpack_vertex(poly.data.z);
+        var rv2 = unpack_vertex(poly.data.w);
+        let rc = (rv0 + rv1 + rv2) / 3.0;
+        let angle = rand_f32_range(rng, -0.2618, 0.2618);
+        let cos_a = cos(angle);
+        let sin_a = sin(angle);
+        let rd0 = rv0 - rc;
+        rv0 = clamp(rc + vec2<f32>(rd0.x * cos_a - rd0.y * sin_a, rd0.x * sin_a + rd0.y * cos_a), vec2<f32>(0.0), vec2<f32>(1.0));
+        let rd1 = rv1 - rc;
+        rv1 = clamp(rc + vec2<f32>(rd1.x * cos_a - rd1.y * sin_a, rd1.x * sin_a + rd1.y * cos_a), vec2<f32>(0.0), vec2<f32>(1.0));
+        let rd2 = rv2 - rc;
+        rv2 = clamp(rc + vec2<f32>(rd2.x * cos_a - rd2.y * sin_a, rd2.x * sin_a + rd2.y * cos_a), vec2<f32>(0.0), vec2<f32>(1.0));
+        poly.data.y = pack_vertex(rv0);
+        poly.data.z = pack_vertex(rv1);
+        poly.data.w = pack_vertex(rv2);
+        working_states[chain_id].polygons[ri] = poly;
+        return;
+    }
+
+    // Adjacent swap (z-order fine-tuning)
+    cumulative += w_adjacent_swap;
+    if r < cumulative && c >= 2u {
+        let ai = rand_u32(rng, c);
+        let aj = select(ai + 1u, ai - 1u, ai == c - 1u);
+        let tmp = working_states[chain_id].polygons[ai];
+        working_states[chain_id].polygons[ai] = working_states[chain_id].polygons[aj];
+        working_states[chain_id].polygons[aj] = tmp;
         return;
     }
 
@@ -609,6 +668,61 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         while i1 == i2 {
             i2 = rand_u32(&rng, count);
         }
+        let tmp = working_states[chain_id].polygons[i1];
+        working_states[chain_id].polygons[i1] = working_states[chain_id].polygons[i2];
+        working_states[chain_id].polygons[i2] = tmp;
+        is_dirty = true;
+    }
+
+    // Scale polygon (resize around centroid)
+    if rand_f32(&rng) < params.offset_polygon_prob && count >= 1u {
+        let si = rand_u32(&rng, count);
+        var poly = working_states[chain_id].polygons[si];
+        var v0 = unpack_vertex(poly.data.y);
+        var v1 = unpack_vertex(poly.data.z);
+        var v2 = unpack_vertex(poly.data.w);
+        let c = (v0 + v1 + v2) / 3.0;
+        let scale = rand_f32_range(&rng, 0.8, 1.2);
+        v0 = clamp(c + (v0 - c) * scale, vec2<f32>(0.0), vec2<f32>(1.0));
+        v1 = clamp(c + (v1 - c) * scale, vec2<f32>(0.0), vec2<f32>(1.0));
+        v2 = clamp(c + (v2 - c) * scale, vec2<f32>(0.0), vec2<f32>(1.0));
+        poly.data.y = pack_vertex(v0);
+        poly.data.z = pack_vertex(v1);
+        poly.data.w = pack_vertex(v2);
+        working_states[chain_id].polygons[si] = poly;
+        is_dirty = true;
+    }
+
+    // Rotate polygon (around centroid)
+    if rand_f32(&rng) < params.offset_polygon_prob && count >= 1u {
+        let ri = rand_u32(&rng, count);
+        var poly = working_states[chain_id].polygons[ri];
+        var v0 = unpack_vertex(poly.data.y);
+        var v1 = unpack_vertex(poly.data.z);
+        var v2 = unpack_vertex(poly.data.w);
+        let c = (v0 + v1 + v2) / 3.0;
+        let angle = rand_f32_range(&rng, -0.2618, 0.2618);  // ±15 degrees
+        let cos_a = cos(angle);
+        let sin_a = sin(angle);
+        // Rotate each vertex around centroid
+        let d0 = v0 - c;
+        v0 = clamp(c + vec2<f32>(d0.x * cos_a - d0.y * sin_a, d0.x * sin_a + d0.y * cos_a), vec2<f32>(0.0), vec2<f32>(1.0));
+        let d1 = v1 - c;
+        v1 = clamp(c + vec2<f32>(d1.x * cos_a - d1.y * sin_a, d1.x * sin_a + d1.y * cos_a), vec2<f32>(0.0), vec2<f32>(1.0));
+        let d2 = v2 - c;
+        v2 = clamp(c + vec2<f32>(d2.x * cos_a - d2.y * sin_a, d2.x * sin_a + d2.y * cos_a), vec2<f32>(0.0), vec2<f32>(1.0));
+        poly.data.y = pack_vertex(v0);
+        poly.data.z = pack_vertex(v1);
+        poly.data.w = pack_vertex(v2);
+        working_states[chain_id].polygons[ri] = poly;
+        is_dirty = true;
+    }
+
+    // Adjacent swap (z-order fine-tuning)
+    if rand_f32(&rng) < params.reorder_polygon_prob && count >= 2u {
+        let i1 = rand_u32(&rng, count);
+        // Swap with neighbor: either i+1 or i-1 (wrapping)
+        let i2 = select(i1 + 1u, i1 - 1u, i1 == count - 1u);
         let tmp = working_states[chain_id].polygons[i1];
         working_states[chain_id].polygons[i1] = working_states[chain_id].polygons[i2];
         working_states[chain_id].polygons[i2] = tmp;
