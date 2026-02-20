@@ -1,47 +1,6 @@
-use serde::{Deserialize, Serialize};
+pub use artgen_shared::benchmark::{BenchmarkRequest, BenchmarkResult, BenchmarkSample};
 
-use crate::mutation_params::MutationParams;
-
-fn default_lambda() -> u32 { 1 }
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BenchmarkRequest {
-    pub drawing_json: String,
-    pub params: MutationParams,
-    pub duration_secs: u32,
-    pub label: String,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BenchmarkSample {
-    pub elapsed_secs: f32,
-    pub best_fitness: f32,
-    pub avg_fitness: f32,
-    pub worst_fitness: f32,
-    pub improvements: u64,
-    pub total_evals: u64,
-    pub evals_per_sec: f64,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BenchmarkResult {
-    pub label: String,
-    pub start_fitness: f32,
-    pub final_fitness: f32,
-    pub total_improvements: u64,
-    pub total_evals: u64,
-    pub duration_secs: u32,
-    pub improvements_per_sec: f64,
-    pub samples: Vec<BenchmarkSample>,
-    pub chain_count: u32,
-    pub island_count: u32,
-    #[serde(default = "default_lambda")]
-    pub lambda: u32,
-}
-
+/// UI-only snapshot state (not sent over WebSocket).
 #[derive(Clone, Debug)]
 pub struct BenchmarkSnapshot {
     pub name: String,
@@ -50,6 +9,7 @@ pub struct BenchmarkSnapshot {
     pub polygon_count: u32,
 }
 
+/// UI-only progress state (received from WebSocket, not sent back).
 #[derive(Clone, Debug, Default)]
 pub struct BenchmarkProgress {
     pub label: String,

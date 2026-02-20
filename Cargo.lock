@@ -116,6 +116,7 @@ name = "artgen-backend-rust"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "artgen-shared",
  "base64",
  "bytemuck",
  "divan",
@@ -136,9 +137,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "artgen-shared"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "artgen-viewer"
 version = "0.1.0"
 dependencies = [
+ "artgen-shared",
  "base64",
  "gloo-timers",
  "image",

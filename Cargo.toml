@@ -1,5 +1,5 @@
 [workspace]
-members = ["viewer"]
+members = ["shared", "viewer"]
 
 [package]
 name = "artgen-backend-rust"
@@ -7,6 +7,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+artgen-shared = { path = "shared" }
 anyhow = "1.0.86"
 base64 = "0.22"
 bytemuck = { version = "1.17.1", features = ["derive"] }

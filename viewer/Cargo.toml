@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+artgen-shared = { path = "../shared" }
 leptos = { version = "0.7", features = ["csr"] }
 web-sys = { version = "0.3", features = [
     "WebSocket",
