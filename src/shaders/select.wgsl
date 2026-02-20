@@ -100,9 +100,6 @@ fn select_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let fitness_bits = bitcast<u32>(fitness);
 
-    // Export fitness for CPU readback
-    fitness_packed[chain_id] = fitness_bits;
-
     // Compare against chain's current best
     let current_fitness_bits = chain_states[chain_id].fitness_bits;
     let current_fitness = bitcast<f32>(current_fitness_bits);
@@ -124,10 +121,14 @@ fn select_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     }
 
+    // Export actual chain fitness (after acceptance) for CPU readback
+    fitness_packed[chain_id] = chain_states[chain_id].fitness_bits;
+
     // Track global best using atomicMax on IEEE 754 bit pattern
     // For positive floats, bit patterns sort the same as float values
-    let old_best_bits = atomicMax(&control.best_fitness_bits, fitness_bits);
-    if fitness_bits > old_best_bits {
+    let best_bits = chain_states[chain_id].fitness_bits;
+    let old_best_bits = atomicMax(&control.best_fitness_bits, best_bits);
+    if best_bits > old_best_bits {
         // We set a new global best
         atomicStore(&control.best_chain_id, chain_id);
         atomicStore(&control.new_best_found, 1u);
