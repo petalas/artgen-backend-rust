@@ -65,6 +65,28 @@ impl PassTimings {
     }
 }
 
+/// Which migration variant to run this iteration (if any).
+enum MigrationType {
+    Intra,
+    Inter,
+}
+
+impl MigrationType {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Intra => "migrate_intra",
+            Self::Inter => "migrate_inter",
+        }
+    }
+
+    fn pipeline<'a>(&self, p: &'a GpuPipeline) -> &'a ComputePipeline {
+        match self {
+            Self::Intra => &p.migrate_intra_pipeline,
+            Self::Inter => &p.migrate_inter_pipeline,
+        }
+    }
+}
+
 /// Tracks state for a previously submitted batch whose staging buffers
 /// have map_async issued but haven't been polled/read yet.
 struct PendingBatch {
@@ -223,100 +245,141 @@ impl GpuEvolver {
         let is_last_iter = |i: u32| i == iterations - 1;
         let mut migrate_ran = false;
 
-        for i in 0..iterations {
-            let ts = if collect_timestamps && is_last_iter(i) { Some(&p.timestamp_query_set) } else { None };
+        // Determine which iterations need separate passes (for timestamp profiling).
+        // The last iteration uses separate passes when collect_timestamps is true,
+        // so we can get per-stage timing via ComputePassDescriptor::timestamp_writes.
+        //
+        // All other iterations are consolidated into single compute passes (one per
+        // iteration) that contain mutate + rasterize_error + select + optional migration
+        // as dispatches within the same pass. This eliminates 2-3 Vulkan pipeline barriers
+        // per iteration that were previously inserted at begin/end_compute_pass boundaries.
+        //
+        // SAFETY: wgpu's resource tracker inserts vkCmdPipelineBarrier between dispatches
+        // within a single compute pass when buffer usage changes (e.g. STORAGE_READ_WRITE
+        // -> STORAGE_READ). See flush_states() in wgpu-core/src/command/compute.rs which
+        // calls drain_barriers() before every dispatch. STORAGE_READ_WRITE is in BufferUses::
+        // EXCLUSIVE (not ORDERED), so transitions are never skipped.
 
-            // Pass 1: Mutate (K workgroups of size 1)
-            {
+        for i in 0..iterations {
+            let use_separate_passes = collect_timestamps && is_last_iter(i);
+
+            // Check if migration runs this iteration
+            let global_iter = self.iteration + i;
+            let inter_interval = mutation_params.inter_island_interval;
+            let migration_type = if global_iter > 0 && inter_interval > 0 && global_iter % inter_interval == 0 {
+                Some(MigrationType::Inter)
+            } else if global_iter > 0 && global_iter % GPU_MIGRATION_INTERVAL == 0 {
+                Some(MigrationType::Intra)
+            } else {
+                None
+            };
+
+            if use_separate_passes {
+                // Separate passes for per-stage timestamp profiling
+                let qs = &p.timestamp_query_set;
+
+                // Pass 1: Mutate
+                {
+                    let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                        label: Some("mutate"),
+                        timestamp_writes: Some(ComputePassTimestampWrites {
+                            query_set: qs,
+                            beginning_of_pass_write_index: Some(0),
+                            end_of_pass_write_index: Some(1),
+                        }),
+                    });
+                    pass.set_pipeline(&p.mutate_pipeline);
+                    pass.set_bind_group(0, &p.mutate_bind_group, &[]);
+                    pass.set_push_constants(0, params_bytes);
+                    pass.dispatch_workgroups(active, 1, 1);
+                }
+
+                // Pass 2: Rasterize + Error
+                {
+                    let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                        label: Some("rasterize_error"),
+                        timestamp_writes: Some(ComputePassTimestampWrites {
+                            query_set: qs,
+                            beginning_of_pass_write_index: Some(2),
+                            end_of_pass_write_index: Some(3),
+                        }),
+                    });
+                    pass.set_pipeline(&p.rasterize_error_pipeline);
+                    pass.set_bind_group(0, &p.rasterize_error_bind_group, &[]);
+                    pass.set_push_constants(0, params_bytes);
+                    pass.dispatch_workgroups(wg_x, wg_y, active * lambda);
+                }
+
+                // Pass 3: Select
+                {
+                    let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                        label: Some("select"),
+                        timestamp_writes: Some(ComputePassTimestampWrites {
+                            query_set: qs,
+                            beginning_of_pass_write_index: Some(4),
+                            end_of_pass_write_index: Some(5),
+                        }),
+                    });
+                    pass.set_pipeline(&p.select_pipeline);
+                    pass.set_bind_group(0, &p.select_bind_group, &[]);
+                    pass.set_push_constants(0, params_bytes);
+                    pass.dispatch_workgroups(active, 1, 1);
+                }
+
+                // Pass 4: Migration (separate pass for timestamp)
+                if let Some(mt) = migration_type {
+                    let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                        label: Some(mt.label()),
+                        timestamp_writes: Some(ComputePassTimestampWrites {
+                            query_set: qs,
+                            beginning_of_pass_write_index: Some(6),
+                            end_of_pass_write_index: Some(7),
+                        }),
+                    });
+                    pass.set_pipeline(mt.pipeline(p));
+                    pass.set_bind_group(0, &p.migrate_bind_group, &[]);
+                    pass.set_push_constants(0, params_bytes);
+                    pass.dispatch_workgroups(active, 1, 1);
+                    migrate_ran = true;
+                }
+            } else {
+                // Consolidated: mutate + rasterize + select (+ optional migration)
+                // all within a single compute pass. wgpu inserts Vulkan barriers between
+                // dispatches based on storage buffer usage tracking.
                 let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                    label: Some("mutate"),
-                    timestamp_writes: ts.map(|qs| ComputePassTimestampWrites {
-                        query_set: qs,
-                        beginning_of_pass_write_index: Some(0),
-                        end_of_pass_write_index: Some(1),
-                    }),
+                    label: Some("iteration"),
+                    timestamp_writes: None,
                 });
+
+                // Dispatch 1: Mutate
                 pass.set_pipeline(&p.mutate_pipeline);
                 pass.set_bind_group(0, &p.mutate_bind_group, &[]);
                 pass.set_push_constants(0, params_bytes);
                 pass.dispatch_workgroups(active, 1, 1);
-            }
 
-            // Pass 2: Rasterize + Error (fused, W/16 x H/16 x (K*λ) workgroups, tiled polygon prefetch)
-            // gid.z indexes offspring (0..active*lambda), shader reads working_states[gid.z]
-            {
-                let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                    label: Some("rasterize_error"),
-                    timestamp_writes: ts.map(|qs| ComputePassTimestampWrites {
-                        query_set: qs,
-                        beginning_of_pass_write_index: Some(2),
-                        end_of_pass_write_index: Some(3),
-                    }),
-                });
+                // Dispatch 2: Rasterize + Error
                 pass.set_pipeline(&p.rasterize_error_pipeline);
                 pass.set_bind_group(0, &p.rasterize_error_bind_group, &[]);
                 pass.set_push_constants(0, params_bytes);
                 pass.dispatch_workgroups(wg_x, wg_y, active * lambda);
-            }
 
-            // Pass 3: Select (K workgroups of size 64 — parallel polygon copy)
-            {
-                let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                    label: Some("select"),
-                    timestamp_writes: ts.map(|qs| ComputePassTimestampWrites {
-                        query_set: qs,
-                        beginning_of_pass_write_index: Some(4),
-                        end_of_pass_write_index: Some(5),
-                    }),
-                });
+                // Dispatch 3: Select
                 pass.set_pipeline(&p.select_pipeline);
                 pass.set_bind_group(0, &p.select_bind_group, &[]);
                 pass.set_push_constants(0, params_bytes);
                 pass.dispatch_workgroups(active, 1, 1);
-            }
 
-            // Pass 4: Migration — inter-island (rare, global ring) or intra-island (frequent, island ring)
-            let global_iter = self.iteration + i;
-            let inter_interval = mutation_params.inter_island_interval;
-            if global_iter > 0 && inter_interval > 0 && global_iter % inter_interval == 0 {
-                // Inter-island: global ring (takes priority when both intervals align)
-                let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                    label: Some("migrate_inter"),
-                    timestamp_writes: ts.map(|qs| ComputePassTimestampWrites {
-                        query_set: qs,
-                        beginning_of_pass_write_index: Some(6),
-                        end_of_pass_write_index: Some(7),
-                    }),
-                });
-                pass.set_pipeline(&p.migrate_inter_pipeline);
-                pass.set_bind_group(0, &p.migrate_bind_group, &[]);
-                pass.set_push_constants(0, params_bytes);
-                pass.dispatch_workgroups(active, 1, 1);
-                if is_last_iter(i) {
-                    migrate_ran = true;
-                }
-            } else if global_iter > 0 && global_iter % GPU_MIGRATION_INTERVAL == 0 {
-                // Intra-island: island ring (frequent)
-                let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                    label: Some("migrate_intra"),
-                    timestamp_writes: ts.map(|qs| ComputePassTimestampWrites {
-                        query_set: qs,
-                        beginning_of_pass_write_index: Some(6),
-                        end_of_pass_write_index: Some(7),
-                    }),
-                });
-                pass.set_pipeline(&p.migrate_intra_pipeline);
-                pass.set_bind_group(0, &p.migrate_bind_group, &[]);
-                pass.set_push_constants(0, params_bytes);
-                pass.dispatch_workgroups(active, 1, 1);
-                if is_last_iter(i) {
-                    migrate_ran = true;
+                // Dispatch 4: Migration (if needed, same pass)
+                if let Some(mt) = migration_type {
+                    pass.set_pipeline(mt.pipeline(p));
+                    pass.set_bind_group(0, &p.migrate_bind_group, &[]);
+                    pass.set_push_constants(0, params_bytes);
+                    pass.dispatch_workgroups(active, 1, 1);
+                    if is_last_iter(i) {
+                        migrate_ran = true;
+                    }
                 }
             }
-
-            // Reset error accumulators between iterations (via buffer copy of zeros)
-            // We write zeros at start and after each select reads them via atomicExchange,
-            // so they're already reset. No extra work needed.
         }
 
         // 5. Resolve timestamp queries into resolve buffer, then copy to staging[write_idx]
