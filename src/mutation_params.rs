@@ -42,6 +42,9 @@ pub struct MutationParams {
 
     // Chain count (runtime-configurable, capped to GPU buffer allocation)
     pub chain_count: u32,
+
+    // Mutation mode
+    pub single_mutation_mode: bool,
 }
 
 impl MutationParams {
@@ -144,6 +147,7 @@ impl Default for MutationParams {
             island_count: settings::ISLAND_COUNT,
             inter_island_interval: settings::INTER_ISLAND_INTERVAL,
             chain_count: settings::GPU_DEFAULT_CHAIN_COUNT,
+            single_mutation_mode: settings::SINGLE_MUTATION_MODE,
         }
     }
 }

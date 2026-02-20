@@ -113,6 +113,7 @@ fn build_benchmark_params(
     chain_count: u32,
     island_count: u32,
     isolate_islands: bool,
+    single_mutation_mode: bool,
 ) -> crate::mutation_params::MutationParams {
     let mut params = state.mutation_params.clone();
     params.chain_count = chain_count;
@@ -120,14 +121,16 @@ fn build_benchmark_params(
     if isolate_islands {
         params.inter_island_interval = 0;
     }
+    params.single_mutation_mode = single_mutation_mode;
     params
 }
 
-fn auto_label(chain_count: u32, island_count: u32, isolate_islands: bool) -> String {
+fn auto_label(chain_count: u32, island_count: u32, isolate_islands: bool, single_mutation_mode: bool) -> String {
+    let mode = if single_mutation_mode { "single" } else { "multi" };
     if isolate_islands {
-        format!("{}c-{}i-isolated", chain_count, island_count)
+        format!("{}c-{}i-isolated-{}", chain_count, island_count, mode)
     } else {
-        format!("{}c-{}i", chain_count, island_count)
+        format!("{}c-{}i-{}", chain_count, island_count, mode)
     }
 }
 
@@ -156,6 +159,7 @@ fn ConfigureSection(state: RwSignal<ViewerState>) -> impl IntoView {
     let chain_exp = RwSignal::new(7u32); // 2^7 = 128
     let island_exp = RwSignal::new(3u32); // 2^3 = 8
     let isolate_islands = RwSignal::new(false);
+    let single_mutation = RwSignal::new(false);
 
     let add_to_queue = move |_| {
         let s = state.get();
@@ -164,9 +168,10 @@ fn ConfigureSection(state: RwSignal<ViewerState>) -> impl IntoView {
         let cc = chains_from_exp(chain_exp.get());
         let ic = islands_from_exp(island_exp.get());
         let iso = isolate_islands.get();
-        let params = build_benchmark_params(&s, cc, ic, iso);
+        let sm = single_mutation.get();
+        let params = build_benchmark_params(&s, cc, ic, iso, sm);
         let lbl = label.get();
-        let base = if lbl.trim().is_empty() { auto_label(cc, ic, iso) } else { lbl.trim().to_string() };
+        let base = if lbl.trim().is_empty() { auto_label(cc, ic, iso, sm) } else { lbl.trim().to_string() };
         let lbl = deduplicate_label(&base, &s);
         let req = BenchmarkRequest {
             drawing_json: snap.drawing_json.clone(),
@@ -185,9 +190,10 @@ fn ConfigureSection(state: RwSignal<ViewerState>) -> impl IntoView {
         let cc = chains_from_exp(chain_exp.get());
         let ic = islands_from_exp(island_exp.get());
         let iso = isolate_islands.get();
-        let params = build_benchmark_params(&s, cc, ic, iso);
+        let sm = single_mutation.get();
+        let params = build_benchmark_params(&s, cc, ic, iso, sm);
         let lbl = label.get();
-        let base = if lbl.trim().is_empty() { auto_label(cc, ic, iso) } else { lbl.trim().to_string() };
+        let base = if lbl.trim().is_empty() { auto_label(cc, ic, iso, sm) } else { lbl.trim().to_string() };
         let lbl = deduplicate_label(&base, &s);
         let msg = serde_json::json!({
             "type": "start_benchmark",
@@ -306,6 +312,19 @@ fn ConfigureSection(state: RwSignal<ViewerState>) -> impl IntoView {
                             }}
                         />
                         "Isolate islands (no inter-island migration)"
+                    </label>
+                </div>
+                <div class="bench-config-row">
+                    <label class="bench-config-label">"Mutation"</label>
+                    <label class="bench-checkbox-label">
+                        <input
+                            type="checkbox"
+                            prop:checked={move || single_mutation.get()}
+                            on:change={move |_| {
+                                single_mutation.set(!single_mutation.get_untracked());
+                            }}
+                        />
+                        "Single mutation per iteration"
                     </label>
                 </div>
             </div>

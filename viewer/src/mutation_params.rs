@@ -36,6 +36,9 @@ pub struct MutationParams {
 
     // Chain count
     pub chain_count: u32,
+
+    // Mutation mode
+    pub single_mutation_mode: bool,
 }
 
 impl Default for MutationParams {
@@ -65,6 +68,7 @@ impl Default for MutationParams {
             island_count: 8,
             inter_island_interval: 500,
             chain_count: 128,
+            single_mutation_mode: false,
         }
     }
 }

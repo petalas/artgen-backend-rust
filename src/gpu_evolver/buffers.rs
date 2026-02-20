@@ -81,7 +81,7 @@ pub struct GpuParams {
 
     // vec4[7] — chain count + padding
     pub chain_count_param: u32,
-    pub _pad6: u32,
+    pub single_mutation_mode: u32,
     pub _pad7: u32,
     pub _pad8: u32,
 }
@@ -132,7 +132,7 @@ pub fn gpu_params_from(mp: &MutationParams, w: u32, h: u32, migration_interval: 
         island_count: mp.island_count,
         inter_island_interval: mp.inter_island_interval,
         chain_count_param: chain_count,
-        _pad6: 0,
+        single_mutation_mode: if mp.single_mutation_mode { 1 } else { 0 },
         _pad7: 0,
         _pad8: 0,
     }

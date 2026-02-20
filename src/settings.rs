@@ -49,3 +49,5 @@ pub const SPATIAL_CROSSOVER_WEIGHT: f32 = 0.7;
 pub const TOURNAMENT_SIZE: u32 = 3;
 pub const ISLAND_COUNT: u32 = 8;
 pub const INTER_ISLAND_INTERVAL: u32 = 500;
+
+pub const SINGLE_MUTATION_MODE: bool = false;

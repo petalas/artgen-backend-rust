@@ -80,6 +80,24 @@ fn MutationPanelBody(state: RwSignal<ViewerState>) -> impl IntoView {
     view! {
         <div class="mutation-panel-body">
             <div class="mutation-section">
+                <div class="mutation-section-title">"Mode"</div>
+                <div class="mutation-row">
+                    <label class="bench-checkbox-label">
+                        <input
+                            type="checkbox"
+                            prop:checked={move || state.get().mutation_params.single_mutation_mode}
+                            on:change={move |_| {
+                                state.update(|s| {
+                                    s.mutation_params.single_mutation_mode = !s.mutation_params.single_mutation_mode;
+                                });
+                                send_params(&state.get_untracked().mutation_params);
+                            }}
+                        />
+                        "Single mutation per iteration"
+                    </label>
+                </div>
+            </div>
+            <div class="mutation-section">
                 <div class="mutation-section-title">"Polygons"</div>
                 <IntSlider state={state} label="Min polygons" get={|mp| mp.min_polygons as i64} set={|mp, v| { mp.min_polygons = v as u32; if mp.max_polygons < mp.min_polygons { mp.max_polygons = mp.min_polygons; } }} min=1 max=1000 step=1/>
                 <IntSlider state={state} label="Max polygons" get={|mp| mp.max_polygons as i64} set={|mp, v| { mp.max_polygons = v as u32; if mp.min_polygons > mp.max_polygons { mp.min_polygons = mp.max_polygons; } }} min=1 max=1000 step=1/>

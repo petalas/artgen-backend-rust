@@ -72,7 +72,7 @@ struct Params {
 
     // Chain count + padding
     chain_count_param: u32,
-    _pad6: u32,
+    single_mutation_mode: u32,
     _pad7: u32,
     _pad8: u32,
 }
@@ -281,6 +281,197 @@ fn crossover_uniform(rng: ptr<function, vec4<u32>>, chain_id: u32, parent_b: u32
     }
 }
 
+// --- Single-mutation mode ---
+// Picks exactly one mutation via weighted roulette wheel.
+fn single_mutate(rng: ptr<function, vec4<u32>>, chain_id: u32, count: ptr<function, u32>) {
+    let c = *count;
+
+    // Drawing-level mutation weights (unnormalized)
+    let w_add = params.add_polygon_prob;
+    let w_remove = params.remove_polygon_prob;
+    let w_reorder = params.reorder_polygon_prob;
+
+    // Per-polygon mutation weights — multiply by count since there are `count` polygons
+    let fc = f32(c);
+    let w_offset = params.offset_polygon_prob * fc;
+    let w_move_point = params.move_point_prob * fc * 3.0;  // 3 vertices
+    let w_micro_adjust = params.micro_adjust_prob * fc * 3.0;  // 3 vertices
+    let w_change_color = params.change_color_prob * fc * 4.0;  // 4 channels
+    let w_micro_color = params.micro_adjust_prob * fc * 4.0;  // 4 channels
+    let w_lighten = params.lighten_color_prob * fc;
+    let w_darken = params.darken_color_prob * fc;
+
+    let total = w_add + w_remove + w_reorder + w_offset + w_move_point + w_micro_adjust + w_change_color + w_micro_color + w_lighten + w_darken;
+
+    let r = rand_f32(rng) * total;
+    var cumulative = 0.0;
+
+    // Add polygon
+    cumulative += w_add;
+    if r < cumulative && c < params.max_polygons {
+        let origin_x = rand_f32(rng);
+        let origin_y = rand_f32(rng);
+        let d = params.new_point_max_distance;
+
+        let new_color = vec4<f32>(
+            rand_f32(rng),
+            rand_f32(rng),
+            rand_f32(rng),
+            clamp(rand_f32(rng), params.min_alpha_norm, params.max_alpha_norm)
+        );
+        let new_v0 = vec2<f32>(
+            clamp(rand_f32_range(rng, origin_x - d, origin_x + d), 0.0, 1.0),
+            clamp(rand_f32_range(rng, origin_y - d, origin_y + d), 0.0, 1.0)
+        );
+        let new_v1 = vec2<f32>(
+            clamp(rand_f32_range(rng, origin_x - d, origin_x + d), 0.0, 1.0),
+            clamp(rand_f32_range(rng, origin_y - d, origin_y + d), 0.0, 1.0)
+        );
+        let new_v2 = vec2<f32>(
+            clamp(rand_f32_range(rng, origin_x - d, origin_x + d), 0.0, 1.0),
+            clamp(rand_f32_range(rng, origin_y - d, origin_y + d), 0.0, 1.0)
+        );
+
+        var new_poly: Polygon;
+        new_poly.data = vec4<u32>(
+            pack_color(new_color),
+            pack_vertex(new_v0),
+            pack_vertex(new_v1),
+            pack_vertex(new_v2)
+        );
+
+        working_states[chain_id].polygons[c] = new_poly;
+        *count = c + 1u;
+        working_states[chain_id].polygon_count = c + 1u;
+        return;
+    }
+
+    // Remove polygon
+    cumulative += w_remove;
+    if r < cumulative && c > params.min_polygons {
+        let remove_idx = rand_u32(rng, c);
+        let last_idx = c - 1u;
+        if remove_idx != last_idx {
+            working_states[chain_id].polygons[remove_idx] = working_states[chain_id].polygons[last_idx];
+        }
+        *count = c - 1u;
+        working_states[chain_id].polygon_count = c - 1u;
+        return;
+    }
+
+    // Reorder (swap two)
+    cumulative += w_reorder;
+    if r < cumulative && c >= 2u {
+        let i1 = rand_u32(rng, c);
+        var i2 = rand_u32(rng, c);
+        while i1 == i2 { i2 = rand_u32(rng, c); }
+        let tmp = working_states[chain_id].polygons[i1];
+        working_states[chain_id].polygons[i1] = working_states[chain_id].polygons[i2];
+        working_states[chain_id].polygons[i2] = tmp;
+        return;
+    }
+
+    // For per-polygon mutations: pick a random polygon
+    if c == 0u { return; }
+    let pi = rand_u32(rng, c);
+    var poly = working_states[chain_id].polygons[pi];
+    var color = unpack_color(poly);
+    var v0 = unpack_vertex(poly.data.y);
+    var v1 = unpack_vertex(poly.data.z);
+    var v2 = unpack_vertex(poly.data.w);
+
+    // Offset polygon
+    cumulative += w_offset;
+    if r < cumulative {
+        let dx = rand_f32_range(rng, -params.offset_polygon_magnitude, params.offset_polygon_magnitude);
+        let dy = rand_f32_range(rng, -params.offset_polygon_magnitude, params.offset_polygon_magnitude);
+        v0 = clamp(v0 + vec2<f32>(dx, dy), vec2<f32>(0.0), vec2<f32>(1.0));
+        v1 = clamp(v1 + vec2<f32>(dx, dy), vec2<f32>(0.0), vec2<f32>(1.0));
+        v2 = clamp(v2 + vec2<f32>(dx, dy), vec2<f32>(0.0), vec2<f32>(1.0));
+    }
+    // Move point (pick random vertex)
+    else {
+        cumulative += w_move_point;
+        if r < cumulative {
+            let d = params.move_point_max_delta;
+            let vi = rand_u32(rng, 3u);
+            if vi == 0u {
+                v0.x = clamp(rand_f32_range(rng, v0.x - d, v0.x + d), 0.0, 1.0);
+                v0.y = clamp(rand_f32_range(rng, v0.y - d, v0.y + d), 0.0, 1.0);
+            } else if vi == 1u {
+                v1.x = clamp(rand_f32_range(rng, v1.x - d, v1.x + d), 0.0, 1.0);
+                v1.y = clamp(rand_f32_range(rng, v1.y - d, v1.y + d), 0.0, 1.0);
+            } else {
+                v2.x = clamp(rand_f32_range(rng, v2.x - d, v2.x + d), 0.0, 1.0);
+                v2.y = clamp(rand_f32_range(rng, v2.y - d, v2.y + d), 0.0, 1.0);
+            }
+        }
+        // Micro-adjust vertex
+        else {
+            cumulative += w_micro_adjust;
+            if r < cumulative {
+                let d = params.micro_adjust_delta;
+                let vi = rand_u32(rng, 3u);
+                if vi == 0u {
+                    v0.x = clamp(rand_f32_range(rng, v0.x - d, v0.x + d), 0.0, 1.0);
+                    v0.y = clamp(rand_f32_range(rng, v0.y - d, v0.y + d), 0.0, 1.0);
+                } else if vi == 1u {
+                    v1.x = clamp(rand_f32_range(rng, v1.x - d, v1.x + d), 0.0, 1.0);
+                    v1.y = clamp(rand_f32_range(rng, v1.y - d, v1.y + d), 0.0, 1.0);
+                } else {
+                    v2.x = clamp(rand_f32_range(rng, v2.x - d, v2.x + d), 0.0, 1.0);
+                    v2.y = clamp(rand_f32_range(rng, v2.y - d, v2.y + d), 0.0, 1.0);
+                }
+            }
+            // Change color channel
+            else {
+                cumulative += w_change_color;
+                if r < cumulative {
+                    let ch = rand_u32(rng, 4u);
+                    if ch == 0u { color.x = rand_f32(rng); }
+                    else if ch == 1u { color.y = rand_f32(rng); }
+                    else if ch == 2u { color.z = rand_f32(rng); }
+                    else { color.w = clamp(rand_f32(rng), params.min_alpha_norm, params.max_alpha_norm); }
+                }
+                // Micro-adjust color
+                else {
+                    cumulative += w_micro_color;
+                    if r < cumulative {
+                        let ch = rand_u32(rng, 4u);
+                        let color_step = 1.0 / 255.0;
+                        let dir = select(-color_step, color_step, rand_f32(rng) > 0.5);
+                        if ch == 0u { color.x = clamp(color.x + dir, 0.0, 1.0); }
+                        else if ch == 1u { color.y = clamp(color.y + dir, 0.0, 1.0); }
+                        else if ch == 2u { color.z = clamp(color.z + dir, 0.0, 1.0); }
+                        else { color.w = clamp(color.w + dir, params.min_alpha_norm, params.max_alpha_norm); }
+                    }
+                    // Lighten
+                    else {
+                        cumulative += w_lighten;
+                        if r < cumulative {
+                            let color_step = 1.0 / 255.0;
+                            color.x = min(color.x + color_step, 1.0);
+                            color.y = min(color.y + color_step, 1.0);
+                            color.z = min(color.z + color_step, 1.0);
+                        }
+                        // Darken (fallback)
+                        else {
+                            let color_step = 1.0 / 255.0;
+                            color.x = max(color.x - color_step, 0.0);
+                            color.y = max(color.y - color_step, 0.0);
+                            color.z = max(color.z - color_step, 0.0);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Repack and write back
+    poly.data = vec4<u32>(pack_color(color), pack_vertex(v0), pack_vertex(v1), pack_vertex(v2));
+    working_states[chain_id].polygons[pi] = poly;
+}
+
 @compute @workgroup_size(1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let chain_id = gid.x;
@@ -345,6 +536,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Single-pass mutation: try all mutations once, then fallback if nothing fired
     var is_dirty = false;
     var count = working_states[chain_id].polygon_count;
+
+    if params.single_mutation_mode == 1u {
+        // Single-mutation mode: pick exactly one mutation via weighted roulette
+        single_mutate(&rng, chain_id, &count);
+
+        // Save updated RNG state
+        working_states[chain_id].rng_state = rng;
+        return;
+    }
+
+    // Multi-mutation mode: existing code (all operators independently)
 
     // --- Drawing-level mutations ---
 
