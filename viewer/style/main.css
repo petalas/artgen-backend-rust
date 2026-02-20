@@ -708,47 +708,94 @@ body {
     font-family: 'Ubuntu Mono', monospace;
 }
 
-/* Top chains bar chart */
+/* Island fitness chart */
 .gpu-fitness-section {
     margin-bottom: 0;
 }
 
-.gpu-fitness-row {
+.gpu-island-row {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 6px;
     padding: 2px 0;
 }
 
-.gpu-fitness-rank {
+.gpu-island-label {
     font-size: 11px;
     color: #888;
-    min-width: 24px;
+    min-width: 20px;
     text-align: right;
     font-family: 'Ubuntu Mono', monospace;
 }
 
-.gpu-fitness-bar-bg {
+.gpu-island-bar-bg {
     flex: 1;
-    height: 16px;
+    height: 14px;
     background: #e8e8e8;
     border-radius: 3px;
+    position: relative;
     overflow: hidden;
 }
 
-.gpu-fitness-bar {
+.gpu-island-bar-avg {
+    position: absolute;
+    top: 0;
+    left: 0;
     height: 100%;
-    background: linear-gradient(90deg, #66bb6a, #43a047);
     border-radius: 3px;
+    opacity: 0.5;
     transition: width 0.3s ease;
 }
 
-.gpu-fitness-value {
-    font-size: 12px;
+.gpu-island-bar-best {
+    position: absolute;
+    top: 0;
+    left: 0;
+    height: 100%;
+    border-radius: 3px;
+    border-right: 3px solid;
+    box-sizing: border-box;
+    transition: width 0.3s ease;
+}
+
+.gpu-island-value {
+    font-size: 11px;
     color: #555;
-    min-width: 56px;
+    min-width: 52px;
     text-align: right;
     font-family: 'Ubuntu Mono', monospace;
+}
+
+.gpu-island-legend {
+    display: flex;
+    gap: 12px;
+    justify-content: flex-end;
+    padding-top: 4px;
+    font-size: 10px;
+    color: #999;
+}
+
+.gpu-island-legend-item {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+}
+
+.gpu-island-legend-fill {
+    display: inline-block;
+    width: 12px;
+    height: 8px;
+    background: #888;
+    opacity: 0.5;
+    border-radius: 2px;
+}
+
+.gpu-island-legend-outline {
+    display: inline-block;
+    width: 12px;
+    height: 8px;
+    border-right: 3px solid #888;
+    border-radius: 2px;
 }
 
 /* Responsive */

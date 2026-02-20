@@ -110,6 +110,14 @@ fn MutationPanelBody(state: RwSignal<ViewerState>) -> impl IntoView {
                 <DeltaSlider state={state} label="Offset magnitude" field="offset_polygon_magnitude" min=0.001 max=0.5 step=0.001/>
             </div>
             <div class="mutation-section">
+                <div class="mutation-section-title">"Crossover & Islands"</div>
+                <ProbSlider state={state} label="Crossover prob" field="crossover_prob"/>
+                <DeltaSlider state={state} label="Spatial weight" field="spatial_crossover_weight" min=0.0 max=1.0 step=0.05/>
+                <IntSlider state={state} label="Tournament size" get={|mp| mp.tournament_size as i64} set={|mp, v| { mp.tournament_size = v as u32; }} min=1 max=16 step=1/>
+                <IntSlider state={state} label="Islands" get={|mp| mp.island_count as i64} set={|mp, v| { mp.island_count = v as u32; }} min=1 max=64 step=1/>
+                <IntSlider state={state} label="Inter-island interval" get={|mp| mp.inter_island_interval as i64} set={|mp, v| { mp.inter_island_interval = v as u32; }} min=50 max=10000 step=50/>
+            </div>
+            <div class="mutation-section">
                 <div class="mutation-section-title">"Alpha"</div>
                 <IntSlider state={state} label="Min alpha" get={|mp| mp.min_alpha as i64} set={|mp, v| { mp.min_alpha = v as u8; if mp.max_alpha < mp.min_alpha { mp.max_alpha = mp.min_alpha; } }} min=0 max=255 step=1/>
                 <IntSlider state={state} label="Max alpha" get={|mp| mp.max_alpha as i64} set={|mp, v| { mp.max_alpha = v as u8; if mp.min_alpha > mp.max_alpha { mp.min_alpha = mp.max_alpha; } }} min=0 max=255 step=1/>
@@ -247,6 +255,7 @@ fn get_prob_field(mp: &MutationParams, field: &str) -> f32 {
         "change_color_prob" => mp.change_color_prob,
         "lighten_color_prob" => mp.lighten_color_prob,
         "darken_color_prob" => mp.darken_color_prob,
+        "crossover_prob" => mp.crossover_prob,
         _ => 0.0,
     }
 }
@@ -263,6 +272,7 @@ fn set_prob_field(mp: &mut MutationParams, field: &str, val: f32) {
         "change_color_prob" => mp.change_color_prob = val,
         "lighten_color_prob" => mp.lighten_color_prob = val,
         "darken_color_prob" => mp.darken_color_prob = val,
+        "crossover_prob" => mp.crossover_prob = val,
         _ => {}
     }
 }
@@ -273,6 +283,7 @@ fn get_delta_field(mp: &MutationParams, field: &str) -> f32 {
         "micro_adjust_delta" => mp.micro_adjust_delta,
         "new_point_max_distance" => mp.new_point_max_distance,
         "offset_polygon_magnitude" => mp.offset_polygon_magnitude,
+        "spatial_crossover_weight" => mp.spatial_crossover_weight,
         _ => 0.0,
     }
 }
@@ -283,6 +294,7 @@ fn set_delta_field(mp: &mut MutationParams, field: &str, val: f32) {
         "micro_adjust_delta" => mp.micro_adjust_delta = val,
         "new_point_max_distance" => mp.new_point_max_distance = val,
         "offset_polygon_magnitude" => mp.offset_polygon_magnitude = val,
+        "spatial_crossover_weight" => mp.spatial_crossover_weight = val,
         _ => {}
     }
 }

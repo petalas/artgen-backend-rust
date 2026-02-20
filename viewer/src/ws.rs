@@ -20,11 +20,20 @@ pub struct GpuTimings {
 }
 
 #[derive(Clone, Debug, Default)]
+pub struct IslandStats {
+    pub best_fitness: f32,
+    pub avg_fitness: f32,
+    pub chain_count: u32,
+}
+
+#[derive(Clone, Debug, Default)]
 pub struct GpuStats {
     pub chain_count: u32,
     pub memory_mb: f32,
     pub timings: GpuTimings,
     pub chain_fitness: Vec<f32>, // sorted desc
+    pub island_stats: Vec<IslandStats>,
+    pub island_count: u32,
 }
 
 #[allow(dead_code)]
@@ -222,11 +231,26 @@ fn parse_gpu_stats(data: &serde_json::Value) -> Option<GpuStats> {
         .as_array()
         .map(|arr| arr.iter().filter_map(|v| v.as_f64().map(|f| f as f32)).collect())
         .unwrap_or_default();
+    let island_stats = gs["islandStats"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .map(|is| IslandStats {
+                    best_fitness: is["bestFitness"].as_f64().unwrap_or(0.0) as f32,
+                    avg_fitness: is["avgFitness"].as_f64().unwrap_or(0.0) as f32,
+                    chain_count: is["chainCount"].as_u64().unwrap_or(0) as u32,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let island_count = gs["islandCount"].as_u64().unwrap_or(0) as u32;
     Some(GpuStats {
         chain_count: gs["chainCount"].as_u64().unwrap_or(0) as u32,
         memory_mb: gs["memoryMb"].as_f64().unwrap_or(0.0) as f32,
         timings,
         chain_fitness,
+        island_stats,
+        island_count,
     })
 }
 

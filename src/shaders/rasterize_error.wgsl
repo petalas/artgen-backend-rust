@@ -50,7 +50,19 @@ struct Params {
     offset_polygon_magnitude: f32,
     min_alpha_norm: f32,
     max_alpha_norm: f32,
-    _params_pad: u32,
+    crossover_prob: f32,
+
+    // Crossover & island params
+    spatial_crossover_weight: f32,
+    tournament_size: u32,
+    island_count: u32,
+    inter_island_interval: u32,
+
+    // Chain count + padding
+    chain_count_param: u32,
+    _pad6: u32,
+    _pad7: u32,
+    _pad8: u32,
 }
 
 @group(0) @binding(0) var<storage, read>       working_states:     array<DrawingState>;

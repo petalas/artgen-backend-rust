@@ -82,7 +82,7 @@ impl GpuEvolver {
         initial_drawing: &Drawing,
     ) -> Self {
         let chain_count = GPU_CHAIN_COUNT;
-        let params = default_gpu_params(image_width, image_height, GPU_MIGRATION_INTERVAL);
+        let params = default_gpu_params(image_width, image_height, GPU_MIGRATION_INTERVAL, chain_count);
 
         // Create initial chain states — all start from the same drawing but with different RNG seeds
         let initial_states: Vec<GpuDrawingState> = (0..chain_count)
@@ -140,7 +140,7 @@ impl GpuEvolver {
         let iterations = GPU_ITERATIONS_PER_BATCH;
 
         // Update iteration number in params
-        let mut params = gpu_params_from(mutation_params, p.image_width, p.image_height, GPU_MIGRATION_INTERVAL);
+        let mut params = gpu_params_from(mutation_params, p.image_width, p.image_height, GPU_MIGRATION_INTERVAL, p.chain_count);
         params.iteration_number = self.iteration;
         p.queue.write_buffer(&p.params_buf, 0, bytemuck::bytes_of(&params));
 
@@ -217,18 +217,36 @@ impl GpuEvolver {
                 pass.dispatch_workgroups(p.chain_count, 1, 1);
             }
 
-            // Pass 4: Migrate (every MIGRATION_INTERVAL iterations)
+            // Pass 4: Migration — inter-island (rare, global ring) or intra-island (frequent, island ring)
             let global_iter = self.iteration + i;
-            if global_iter > 0 && global_iter % GPU_MIGRATION_INTERVAL == 0 {
+            let inter_interval = mutation_params.inter_island_interval;
+            if global_iter > 0 && inter_interval > 0 && global_iter % inter_interval == 0 {
+                // Inter-island: global ring (takes priority when both intervals align)
                 let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                    label: Some("migrate"),
+                    label: Some("migrate_inter"),
                     timestamp_writes: ts.map(|qs| ComputePassTimestampWrites {
                         query_set: qs,
                         beginning_of_pass_write_index: Some(6),
                         end_of_pass_write_index: Some(7),
                     }),
                 });
-                pass.set_pipeline(&p.migrate_pipeline);
+                pass.set_pipeline(&p.migrate_inter_pipeline);
+                pass.set_bind_group(0, &p.migrate_bind_group, &[]);
+                pass.dispatch_workgroups(p.chain_count, 1, 1);
+                if is_last_iter(i) {
+                    migrate_ran = true;
+                }
+            } else if global_iter > 0 && global_iter % GPU_MIGRATION_INTERVAL == 0 {
+                // Intra-island: island ring (frequent)
+                let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                    label: Some("migrate_intra"),
+                    timestamp_writes: ts.map(|qs| ComputePassTimestampWrites {
+                        query_set: qs,
+                        beginning_of_pass_write_index: Some(6),
+                        end_of_pass_write_index: Some(7),
+                    }),
+                });
+                pass.set_pipeline(&p.migrate_intra_pipeline);
                 pass.set_bind_group(0, &p.migrate_bind_group, &[]);
                 pass.dispatch_workgroups(p.chain_count, 1, 1);
                 if is_last_iter(i) {

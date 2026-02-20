@@ -47,7 +47,19 @@ struct Params {
     offset_polygon_magnitude: f32,
     min_alpha_norm: f32,
     max_alpha_norm: f32,
-    _params_pad: u32,
+    crossover_prob: f32,
+
+    // Crossover & island params
+    spatial_crossover_weight: f32,
+    tournament_size: u32,
+    island_count: u32,
+    inter_island_interval: u32,
+
+    // Chain count + padding
+    chain_count_param: u32,
+    _pad6: u32,
+    _pad7: u32,
+    _pad8: u32,
 }
 
 struct ControlFlags {
@@ -122,19 +134,8 @@ fn select_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 }
 
-@compute @workgroup_size(1)
-fn migrate_main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let chain_id = gid.x;
-    let chain_count = arrayLength(&chain_states);
-    if chain_id >= chain_count {
-        return;
-    }
-
-    // Ring topology: compare with right neighbor instead of global best.
-    // This preserves population diversity — good solutions spread gradually
-    // through the ring rather than every chain collapsing to the same solution.
-    let neighbor_id = (chain_id + 1u) % chain_count;
-
+/// Migrate if neighbor is fitter. Shared logic for both intra/inter migration.
+fn migrate_from(chain_id: u32, neighbor_id: u32) {
     let neighbor_fitness = bitcast<f32>(chain_states[neighbor_id].fitness_bits);
     let my_fitness = bitcast<f32>(chain_states[chain_id].fitness_bits);
 
@@ -155,4 +156,34 @@ fn migrate_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // Update fitness_packed with (possibly migrated) fitness
     fitness_packed[chain_id] = chain_states[chain_id].fitness_bits;
+}
+
+/// Intra-island migration: ring within island boundaries.
+@compute @workgroup_size(1)
+fn migrate_intra_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let chain_id = gid.x;
+    let chain_count = arrayLength(&chain_states);
+    if chain_id >= chain_count {
+        return;
+    }
+
+    let island_size = params.chain_count_param / max(params.island_count, 1u);
+    let island_start = (chain_id / island_size) * island_size;
+    let local_id = chain_id - island_start;
+    let neighbor_id = island_start + (local_id + 1u) % island_size;
+
+    migrate_from(chain_id, neighbor_id);
+}
+
+/// Inter-island migration: global ring across all chains.
+@compute @workgroup_size(1)
+fn migrate_inter_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let chain_id = gid.x;
+    let chain_count = arrayLength(&chain_states);
+    if chain_id >= chain_count {
+        return;
+    }
+
+    let neighbor_id = (chain_id + 1u) % chain_count;
+    migrate_from(chain_id, neighbor_id);
 }

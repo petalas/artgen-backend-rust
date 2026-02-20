@@ -25,7 +25,8 @@ pub struct GpuPipeline {
     pub mutate_pipeline: ComputePipeline,
     pub rasterize_error_pipeline: ComputePipeline,
     pub select_pipeline: ComputePipeline,
-    pub migrate_pipeline: ComputePipeline,
+    pub migrate_intra_pipeline: ComputePipeline,
+    pub migrate_inter_pipeline: ComputePipeline,
 
     // Bind groups
     pub mutate_bind_group: BindGroup,
@@ -450,11 +451,20 @@ impl GpuPipeline {
             cache: None,
         });
 
-        let migrate_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
-            label: Some("migrate_pipeline"),
+        let migrate_intra_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+            label: Some("migrate_intra_pipeline"),
             layout: Some(&select_pipeline_layout),
             module: &select_shader,
-            entry_point: "migrate_main",
+            entry_point: "migrate_intra_main",
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        let migrate_inter_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+            label: Some("migrate_inter_pipeline"),
+            layout: Some(&select_pipeline_layout),
+            module: &select_shader,
+            entry_point: "migrate_inter_main",
             compilation_options: Default::default(),
             cache: None,
         });
@@ -524,7 +534,8 @@ impl GpuPipeline {
             mutate_pipeline,
             rasterize_error_pipeline,
             select_pipeline,
-            migrate_pipeline,
+            migrate_intra_pipeline,
+            migrate_inter_pipeline,
             timestamp_query_set,
             timestamp_resolve_buf,
             timestamp_staging_buf,

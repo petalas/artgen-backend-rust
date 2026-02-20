@@ -77,7 +77,19 @@ pub struct GpuParams {
     pub offset_polygon_magnitude: f32,
     pub min_alpha_norm: f32,
     pub max_alpha_norm: f32,
-    pub _params_pad: u32,
+    pub crossover_prob: f32,
+
+    // vec4[6] — crossover & island params
+    pub spatial_crossover_weight: f32,
+    pub tournament_size: u32,
+    pub island_count: u32,
+    pub inter_island_interval: u32,
+
+    // vec4[7] — chain count + padding
+    pub chain_count_param: u32,
+    pub _pad6: u32,
+    pub _pad7: u32,
+    pub _pad8: u32,
 }
 
 /// Control flags for CPU ↔ GPU communication (atomic u32s).
@@ -94,7 +106,7 @@ pub const GPU_DRAWING_STATE_SIZE: usize = std::mem::size_of::<GpuDrawingState>()
 pub const GPU_POLYGON_SIZE: usize = std::mem::size_of::<GpuPolygon>();
 
 /// Build GpuParams from runtime MutationParams + image dimensions.
-pub fn gpu_params_from(mp: &MutationParams, w: u32, h: u32, migration_interval: u32) -> GpuParams {
+pub fn gpu_params_from(mp: &MutationParams, w: u32, h: u32, migration_interval: u32, chain_count: u32) -> GpuParams {
     use crate::settings::*;
     GpuParams {
         image_width: w,
@@ -120,13 +132,21 @@ pub fn gpu_params_from(mp: &MutationParams, w: u32, h: u32, migration_interval: 
         offset_polygon_magnitude: mp.offset_polygon_magnitude,
         min_alpha_norm: mp.min_alpha as f32 / 255.0,
         max_alpha_norm: mp.max_alpha as f32 / 255.0,
-        _params_pad: 0,
+        crossover_prob: mp.crossover_prob,
+        spatial_crossover_weight: mp.spatial_crossover_weight,
+        tournament_size: mp.tournament_size,
+        island_count: mp.island_count,
+        inter_island_interval: mp.inter_island_interval,
+        chain_count_param: chain_count,
+        _pad6: 0,
+        _pad7: 0,
+        _pad8: 0,
     }
 }
 
 /// Build the default GpuParams from settings constants.
-pub fn default_gpu_params(w: u32, h: u32, migration_interval: u32) -> GpuParams {
-    gpu_params_from(&MutationParams::default(), w, h, migration_interval)
+pub fn default_gpu_params(w: u32, h: u32, migration_interval: u32, chain_count: u32) -> GpuParams {
+    gpu_params_from(&MutationParams::default(), w, h, migration_interval, chain_count)
 }
 
 /// Convert a CPU Drawing to GPU bytes for a single chain's DrawingState.
@@ -303,8 +323,8 @@ mod tests {
 
     #[test]
     fn test_params_size() {
-        // Must be 96 bytes (6 vec4 = 24 u32s * 4 = 96)
-        assert_eq!(std::mem::size_of::<GpuParams>(), 96);
+        // Must be 128 bytes (8 vec4 = 32 u32s * 4 = 128)
+        assert_eq!(std::mem::size_of::<GpuParams>(), 128);
     }
 
     #[test]

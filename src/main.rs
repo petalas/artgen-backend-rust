@@ -291,11 +291,19 @@ struct GpuPassTimingsWs {
     total_ms: f32,
 }
 
+struct IslandStats {
+    best_fitness: f32,
+    avg_fitness: f32,
+    chain_count: u32,
+}
+
 struct GpuStatsWs {
     chain_count: u32,
     memory_mb: f32,
     timings: Option<GpuPassTimingsWs>,
     chain_fitness: Vec<f32>, // sorted desc
+    island_stats: Vec<IslandStats>,
+    island_count: u32,
 }
 
 impl GpuStatsWs {
@@ -313,11 +321,21 @@ impl GpuStatsWs {
                 "totalMs": t.total_ms,
             })
         });
+        let islands: Vec<serde_json::Value> = self.island_stats.iter().enumerate().map(|(i, is)| {
+            serde_json::json!({
+                "island": i,
+                "bestFitness": is.best_fitness,
+                "avgFitness": is.avg_fitness,
+                "chainCount": is.chain_count,
+            })
+        }).collect();
         serde_json::json!({
             "chainCount": self.chain_count,
             "memoryMb": self.memory_mb,
             "timings": timings,
             "chainFitness": self.chain_fitness,
+            "islandStats": islands,
+            "islandCount": self.island_count,
         })
     }
 }
@@ -781,7 +799,7 @@ fn handle_ws_command(
     }
 }
 
-fn build_gpu_stats(evolver: &GpuEvolver) -> GpuStatsWs {
+fn build_gpu_stats(evolver: &GpuEvolver, island_count: u32) -> GpuStatsWs {
     let timings = evolver.pass_timings();
     let ws_timings = if timings.sample_count > 0 {
         let n = timings.sample_count as f64;
@@ -813,14 +831,40 @@ fn build_gpu_stats(evolver: &GpuEvolver) -> GpuStatsWs {
         None
     };
 
-    let mut fitness: Vec<f32> = evolver.chain_fitness().to_vec();
+    let raw_fitness = evolver.chain_fitness();
+    let chain_count = evolver.chain_count();
+
+    // Compute per-island stats
+    let effective_islands = island_count.max(1).min(chain_count);
+    let island_size = chain_count / effective_islands;
+    let mut island_stats = Vec::with_capacity(effective_islands as usize);
+    for i in 0..effective_islands {
+        let start = (i * island_size) as usize;
+        let end = if i == effective_islands - 1 {
+            chain_count as usize
+        } else {
+            ((i + 1) * island_size) as usize
+        };
+        let slice = &raw_fitness[start..end];
+        let best = slice.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let avg = slice.iter().sum::<f32>() / slice.len() as f32;
+        island_stats.push(IslandStats {
+            best_fitness: best,
+            avg_fitness: avg,
+            chain_count: (end - start) as u32,
+        });
+    }
+
+    let mut fitness: Vec<f32> = raw_fitness.to_vec();
     fitness.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
 
     GpuStatsWs {
-        chain_count: evolver.chain_count(),
+        chain_count,
         memory_mb: evolver.estimated_memory_bytes() as f32 / (1024.0 * 1024.0),
         timings: ws_timings,
         chain_fitness: fitness,
+        island_stats,
+        island_count: effective_islands,
     }
 }
 
@@ -1153,7 +1197,7 @@ fn gpu_main_loop_headless(legacy_image: Option<&str>) {
                 let active_secs = active_elapsed.as_secs_f64();
                 let evals = evolver.total_evaluations();
                 let evals_per_sec = if active_secs > 0.0 { evals as f64 / active_secs } else { 0.0 };
-                let gpu_stats = build_gpu_stats(&evolver);
+                let gpu_stats = build_gpu_stats(&evolver, mp.island_count);
                 {
                     let (lock, cvar) = &*ws_state;
                     let mut s = lock.lock().unwrap();

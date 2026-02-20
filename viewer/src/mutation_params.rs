@@ -26,6 +26,13 @@ pub struct MutationParams {
 
     pub min_polygons: u32,
     pub max_polygons: u32,
+
+    // Crossover & island parameters
+    pub crossover_prob: f32,
+    pub spatial_crossover_weight: f32,
+    pub tournament_size: u32,
+    pub island_count: u32,
+    pub inter_island_interval: u32,
 }
 
 impl Default for MutationParams {
@@ -49,6 +56,11 @@ impl Default for MutationParams {
             max_alpha: 65,
             min_polygons: 1,
             max_polygons: 1000,
+            crossover_prob: 0.1,
+            spatial_crossover_weight: 0.7,
+            tournament_size: 3,
+            island_count: 8,
+            inter_island_interval: 500,
         }
     }
 }

@@ -191,49 +191,81 @@ fn TopChainsChart(state: RwSignal<ViewerState>) -> impl IntoView {
         {move || {
             let s = state.get();
             let gs = match s.gpu_stats.as_ref() {
-                Some(g) if !g.chain_fitness.is_empty() => g.clone(),
+                Some(g) if !g.island_stats.is_empty() => g.clone(),
                 _ => return view! { <div></div> }.into_any(),
             };
 
-            let top10: Vec<(usize, f32)> = gs.chain_fitness.iter()
-                .take(10)
-                .enumerate()
-                .map(|(i, &f)| (i + 1, f))
-                .collect();
-
-            if top10.is_empty() {
+            let islands = &gs.island_stats;
+            if islands.is_empty() {
                 return view! { <div></div> }.into_any();
             }
 
-            let max_val = top10.first().map(|(_, f)| *f).unwrap_or(100.0);
-            let min_val = top10.last().map(|(_, f)| *f).unwrap_or(0.0);
-            let floor = (min_val - 2.0).max(0.0);
-            let ceiling = max_val + 0.5;
+            // Compute scale from all island best/avg values
+            let best_max = islands.iter().map(|is| is.best_fitness).fold(f32::NEG_INFINITY, f32::max);
+            let avg_min = islands.iter().map(|is| is.avg_fitness).fold(f32::INFINITY, f32::min);
+            let floor = (avg_min - 2.0).max(0.0);
+            let ceiling = best_max + 0.5;
             let range = ceiling - floor;
+
+            // Color palette for islands (cycle if more than 8)
+            let colors = [
+                "#26a69a", "#ef5350", "#42a5f5", "#ffb74d",
+                "#ab47bc", "#66bb6a", "#ec407a", "#5c6bc0",
+            ];
+
+            let island_views: Vec<_> = islands.iter().enumerate().map(|(i, is)| {
+                let best_pct = if range > 0.0 {
+                    ((is.best_fitness - floor) / range * 100.0).clamp(0.0, 100.0)
+                } else {
+                    100.0
+                };
+                let avg_pct = if range > 0.0 {
+                    ((is.avg_fitness - floor) / range * 100.0).clamp(0.0, 100.0)
+                } else {
+                    100.0
+                };
+                let color = colors[i % colors.len()];
+                let best_width = format!("{}%", best_pct);
+                let avg_width = format!("{}%", avg_pct);
+                let spread = is.best_fitness - is.avg_fitness;
+                let title = format!(
+                    "Island {}: best {:.2}%, avg {:.2}%, spread {:.2}, {} chains",
+                    i, is.best_fitness, is.avg_fitness, spread, is.chain_count,
+                );
+                view! {
+                    <div class="gpu-island-row" title={title}>
+                        <span class="gpu-island-label">{format!("I{}", i)}</span>
+                        <div class="gpu-island-bar-bg">
+                            <div
+                                class="gpu-island-bar-avg"
+                                style:width={avg_width}
+                                style:background={color}
+                            ></div>
+                            <div
+                                class="gpu-island-bar-best"
+                                style:width={best_width}
+                                style:border-color={color}
+                            ></div>
+                        </div>
+                        <span class="gpu-island-value">{format!("{:.2}%", is.best_fitness)}</span>
+                    </div>
+                }
+            }).collect();
 
             view! {
                 <div class="gpu-fitness-section">
-                    <div class="mutation-section-title">"Top 10 Chains"</div>
-                    {top10.into_iter().map(|(rank, fitness)| {
-                        let width_pct = if range > 0.0 {
-                            ((fitness - floor) / range * 100.0).clamp(0.0, 100.0)
-                        } else {
-                            100.0
-                        };
-                        let width_str = format!("{}%", width_pct);
-                        view! {
-                            <div class="gpu-fitness-row">
-                                <span class="gpu-fitness-rank">{"#"}{rank.to_string()}</span>
-                                <div class="gpu-fitness-bar-bg">
-                                    <div
-                                        class="gpu-fitness-bar"
-                                        style:width={width_str}
-                                    ></div>
-                                </div>
-                                <span class="gpu-fitness-value">{format!("{:.2}%", fitness)}</span>
-                            </div>
-                        }
-                    }).collect::<Vec<_>>()}
+                    <div class="mutation-section-title">{format!("Islands ({})", gs.island_count)}</div>
+                    {island_views}
+                    <div class="gpu-island-legend">
+                        <span class="gpu-island-legend-item">
+                            <span class="gpu-island-legend-fill"></span>
+                            " avg"
+                        </span>
+                        <span class="gpu-island-legend-item">
+                            <span class="gpu-island-legend-outline"></span>
+                            " best"
+                        </span>
+                    </div>
                 </div>
             }.into_any()
         }}

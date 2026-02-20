@@ -32,6 +32,13 @@ pub struct MutationParams {
     // Polygon count limits
     pub min_polygons: u32,
     pub max_polygons: u32,
+
+    // Crossover & island parameters
+    pub crossover_prob: f32,
+    pub spatial_crossover_weight: f32,
+    pub tournament_size: u32,
+    pub island_count: u32,
+    pub inter_island_interval: u32,
 }
 
 impl MutationParams {
@@ -63,6 +70,44 @@ impl MutationParams {
         self.micro_adjust_delta = self.micro_adjust_delta.max(0.0);
         self.new_point_max_distance = self.new_point_max_distance.max(0.0);
         self.offset_polygon_magnitude = self.offset_polygon_magnitude.max(0.0);
+
+        // Crossover & island parameters
+        self.crossover_prob = self.crossover_prob.clamp(0.0, 1.0);
+        self.spatial_crossover_weight = self.spatial_crossover_weight.clamp(0.0, 1.0);
+        self.tournament_size = self.tournament_size.clamp(1, 16);
+        // Snap island_count to nearest divisor of GPU_CHAIN_COUNT
+        let chain_count = settings::GPU_CHAIN_COUNT;
+        self.island_count = self.island_count.clamp(1, chain_count);
+        if self.island_count > 1 {
+            // Find nearest divisor of chain_count
+            let target = self.island_count;
+            let mut best = 1u32;
+            let mut best_dist = target.abs_diff(1);
+            let mut d = 2u32;
+            while d * d <= chain_count {
+                if chain_count % d == 0 {
+                    let dist_d = target.abs_diff(d);
+                    if dist_d < best_dist {
+                        best = d;
+                        best_dist = dist_d;
+                    }
+                    let complement = chain_count / d;
+                    let dist_c = target.abs_diff(complement);
+                    if dist_c < best_dist {
+                        best = complement;
+                        best_dist = dist_c;
+                    }
+                }
+                d += 1;
+            }
+            // Also check chain_count itself as a divisor
+            let dist_cc = target.abs_diff(chain_count);
+            if dist_cc < best_dist {
+                best = chain_count;
+            }
+            self.island_count = best;
+        }
+        self.inter_island_interval = self.inter_island_interval.clamp(1, 10000);
     }
 }
 
@@ -87,6 +132,11 @@ impl Default for MutationParams {
             max_alpha: settings::MAX_ALPHA,
             min_polygons: settings::MIN_POLYGONS_PER_IMAGE as u32,
             max_polygons: settings::MAX_POLYGONS_PER_IMAGE as u32,
+            crossover_prob: settings::CROSSOVER_PROB,
+            spatial_crossover_weight: settings::SPATIAL_CROSSOVER_WEIGHT,
+            tournament_size: settings::TOURNAMENT_SIZE,
+            island_count: settings::ISLAND_COUNT,
+            inter_island_interval: settings::INTER_ISLAND_INTERVAL,
         }
     }
 }

@@ -41,3 +41,10 @@ pub const START_WITH_POLYGONS_PER_IMAGE: usize = 150; // can not go below 2 usin
 pub const GPU_CHAIN_COUNT: u32 = 512;
 pub const GPU_ITERATIONS_PER_BATCH: u32 = 50;
 pub const GPU_MIGRATION_INTERVAL: u32 = 50;
+
+// Crossover & island defaults
+pub const CROSSOVER_PROB: f32 = 0.1;
+pub const SPATIAL_CROSSOVER_WEIGHT: f32 = 0.7;
+pub const TOURNAMENT_SIZE: u32 = 3;
+pub const ISLAND_COUNT: u32 = 8;
+pub const INTER_ISLAND_INTERVAL: u32 = 500;

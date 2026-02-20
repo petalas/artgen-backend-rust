@@ -48,7 +48,19 @@ struct Params {
     offset_polygon_magnitude: f32,
     min_alpha_norm: f32,
     max_alpha_norm: f32,
-    _params_pad: u32,
+    crossover_prob: f32,
+
+    // Crossover & island params
+    spatial_crossover_weight: f32,
+    tournament_size: u32,
+    island_count: u32,
+    inter_island_interval: u32,
+
+    // Chain count + padding
+    chain_count_param: u32,
+    _pad6: u32,
+    _pad7: u32,
+    _pad8: u32,
 }
 
 @group(0) @binding(0) var<storage, read>       chain_states:   array<DrawingState>;
@@ -137,6 +149,121 @@ fn rand_u32(state: ptr<function, vec4<u32>>, max_val: u32) -> u32 {
     return pcg_step(state) % max_val;
 }
 
+// --- Crossover functions ---
+
+/// Compute centroid of a triangle (average of 3 vertices).
+fn centroid(poly: Polygon) -> vec2<f32> {
+    return (poly.v0 + poly.v1 + poly.v2) / 3.0;
+}
+
+/// Tournament selection: pick the fittest chain from `tournament_size` random samples within the same island.
+/// Returns the chain ID of the winner.
+fn tournament_select(rng: ptr<function, vec4<u32>>, chain_id: u32, chain_count: u32) -> u32 {
+    let island_size = params.chain_count_param / max(params.island_count, 1u);
+    let island_start = (chain_id / island_size) * island_size;
+
+    var best_id = island_start + rand_u32(rng, island_size);
+    var best_fitness = bitcast<f32>(chain_states[best_id].fitness_bits);
+
+    for (var t = 1u; t < params.tournament_size; t++) {
+        let candidate_id = island_start + rand_u32(rng, island_size);
+        let candidate_fitness = bitcast<f32>(chain_states[candidate_id].fitness_bits);
+        if candidate_fitness > best_fitness {
+            best_id = candidate_id;
+            best_fitness = candidate_fitness;
+        }
+    }
+    return best_id;
+}
+
+/// Spatial crossover: split space along a random axis at a random position.
+/// Polygons on parent A's side come from A, polygons on parent B's side come from B.
+fn crossover_spatial(rng: ptr<function, vec4<u32>>, chain_id: u32, parent_b: u32) {
+    // Random split: axis (0=x, 1=y) and position [0, 1)
+    let use_y_axis = rand_f32(rng) > 0.5;
+    let split_pos = rand_f32(rng);
+
+    let count_a = min(chain_states[chain_id].polygon_count, params.max_polygons);
+    let count_b = min(chain_states[parent_b].polygon_count, params.max_polygons);
+
+    var out_count = 0u;
+
+    // From parent A: include polygons whose centroid is on A's side of the split
+    for (var i = 0u; i < count_a; i++) {
+        if out_count >= params.max_polygons { break; }
+        let poly = chain_states[chain_id].polygons[i];
+        let c = centroid(poly);
+        let coord = select(c.x, c.y, use_y_axis);
+        if coord < split_pos {
+            working_states[chain_id].polygons[out_count] = poly;
+            out_count++;
+        }
+    }
+
+    // From parent B: include polygons whose centroid is on B's side of the split
+    for (var i = 0u; i < count_b; i++) {
+        if out_count >= params.max_polygons { break; }
+        let poly = chain_states[parent_b].polygons[i];
+        let c = centroid(poly);
+        let coord = select(c.x, c.y, use_y_axis);
+        if coord >= split_pos {
+            working_states[chain_id].polygons[out_count] = poly;
+            out_count++;
+        }
+    }
+
+    // Guard: never produce an empty drawing
+    working_states[chain_id].polygon_count = max(out_count, 1u);
+    if out_count == 0u {
+        // Copy at least one polygon from parent A
+        working_states[chain_id].polygons[0] = chain_states[chain_id].polygons[0];
+    }
+}
+
+/// Uniform crossover: for each polygon index, randomly pick from parent A or B.
+fn crossover_uniform(rng: ptr<function, vec4<u32>>, chain_id: u32, parent_b: u32) {
+    let count_a = min(chain_states[chain_id].polygon_count, params.max_polygons);
+    let count_b = min(chain_states[parent_b].polygon_count, params.max_polygons);
+    let max_count = max(count_a, count_b);
+
+    var out_count = 0u;
+
+    for (var i = 0u; i < max_count; i++) {
+        if out_count >= params.max_polygons { break; }
+        let have_a = i < count_a;
+        let have_b = i < count_b;
+        let pick_a = rand_f32(rng) < 0.5;
+
+        if have_a && have_b {
+            // Both parents have this index — pick one
+            if pick_a {
+                working_states[chain_id].polygons[out_count] = chain_states[chain_id].polygons[i];
+            } else {
+                working_states[chain_id].polygons[out_count] = chain_states[parent_b].polygons[i];
+            }
+            out_count++;
+        } else if have_a {
+            // Only parent A — include with 50% probability
+            if pick_a {
+                working_states[chain_id].polygons[out_count] = chain_states[chain_id].polygons[i];
+                out_count++;
+            }
+        } else if have_b {
+            // Only parent B — include with 50% probability
+            if !pick_a {
+                working_states[chain_id].polygons[out_count] = chain_states[parent_b].polygons[i];
+                out_count++;
+            }
+        }
+    }
+
+    // Guard: never produce an empty drawing
+    working_states[chain_id].polygon_count = max(out_count, 1u);
+    if out_count == 0u {
+        working_states[chain_id].polygons[0] = chain_states[chain_id].polygons[0];
+    }
+}
+
 @compute @workgroup_size(1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let chain_id = gid.x;
@@ -145,15 +272,47 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
 
+    // Load RNG state into registers
+    var rng = chain_states[chain_id].rng_state;
+
+    // --- Crossover path ---
+    // With probability crossover_prob, produce offspring via crossover instead of mutation.
+    let island_size = params.chain_count_param / max(params.island_count, 1u);
+    if params.crossover_prob > 0.0 && rand_f32(&rng) < params.crossover_prob && island_size >= 2u {
+        let parent_b = tournament_select(&rng, chain_id, chain_count);
+
+        // Initialize working state header
+        working_states[chain_id].fitness_bits = chain_states[chain_id].fitness_bits;
+        working_states[chain_id]._pad0 = 0u;
+        working_states[chain_id]._pad1 = 0u;
+
+        if rand_f32(&rng) < params.spatial_crossover_weight {
+            crossover_spatial(&rng, chain_id, parent_b);
+        } else {
+            crossover_uniform(&rng, chain_id, parent_b);
+        }
+
+        // Clamp alphas on crossover offspring
+        let offspring_count = working_states[chain_id].polygon_count;
+        for (var i = 0u; i < offspring_count; i++) {
+            var poly = working_states[chain_id].polygons[i];
+            poly.color.w = clamp(poly.color.w, params.min_alpha_norm, params.max_alpha_norm);
+            working_states[chain_id].polygons[i] = poly;
+        }
+
+        // Save RNG and return — skip mutation loop
+        working_states[chain_id].rng_state = rng;
+        return;
+    }
+
+    // --- Normal mutation path ---
+
     // Copy current best to working state, clamping to current limits
     let poly_count = min(chain_states[chain_id].polygon_count, params.max_polygons);
     working_states[chain_id].polygon_count = poly_count;
     working_states[chain_id].fitness_bits = chain_states[chain_id].fitness_bits;
     working_states[chain_id]._pad0 = 0u;
     working_states[chain_id]._pad1 = 0u;
-
-    // Load RNG state into registers
-    var rng = chain_states[chain_id].rng_state;
 
     // Copy polygons, clamping alpha to current range
     for (var i = 0u; i < poly_count; i++) {
