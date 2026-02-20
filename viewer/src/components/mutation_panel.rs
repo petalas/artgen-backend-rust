@@ -81,8 +81,8 @@ fn MutationPanelBody(state: RwSignal<ViewerState>) -> impl IntoView {
         <div class="mutation-panel-body">
             <div class="mutation-section">
                 <div class="mutation-section-title">"Polygons"</div>
-                <IntSlider state={state} label="Min polygons" get={|mp| mp.min_polygons as i64} set={|mp, v| mp.min_polygons = v as u32} min=1 max=1000 step=1/>
-                <IntSlider state={state} label="Max polygons" get={|mp| mp.max_polygons as i64} set={|mp, v| mp.max_polygons = v as u32} min=1 max=1000 step=1/>
+                <IntSlider state={state} label="Min polygons" get={|mp| mp.min_polygons as i64} set={|mp, v| { mp.min_polygons = v as u32; if mp.max_polygons < mp.min_polygons { mp.max_polygons = mp.min_polygons; } }} min=1 max=1000 step=1/>
+                <IntSlider state={state} label="Max polygons" get={|mp| mp.max_polygons as i64} set={|mp, v| { mp.max_polygons = v as u32; if mp.min_polygons > mp.max_polygons { mp.min_polygons = mp.max_polygons; } }} min=1 max=1000 step=1/>
             </div>
             <div class="mutation-section">
                 <div class="mutation-section-title">"Structure"</div>
@@ -111,8 +111,8 @@ fn MutationPanelBody(state: RwSignal<ViewerState>) -> impl IntoView {
             </div>
             <div class="mutation-section">
                 <div class="mutation-section-title">"Alpha"</div>
-                <IntSlider state={state} label="Min alpha" get={|mp| mp.min_alpha as i64} set={|mp, v| mp.min_alpha = v as u8} min=0 max=255 step=1/>
-                <IntSlider state={state} label="Max alpha" get={|mp| mp.max_alpha as i64} set={|mp, v| mp.max_alpha = v as u8} min=0 max=255 step=1/>
+                <IntSlider state={state} label="Min alpha" get={|mp| mp.min_alpha as i64} set={|mp, v| { mp.min_alpha = v as u8; if mp.max_alpha < mp.min_alpha { mp.max_alpha = mp.min_alpha; } }} min=0 max=255 step=1/>
+                <IntSlider state={state} label="Max alpha" get={|mp| mp.max_alpha as i64} set={|mp, v| { mp.max_alpha = v as u8; if mp.min_alpha > mp.max_alpha { mp.min_alpha = mp.max_alpha; } }} min=0 max=255 step=1/>
             </div>
             <div class="mutation-section mutation-section-actions">
                 <button class="btn btn-secondary" on:click={on_reset}>"Reset to Defaults"</button>
