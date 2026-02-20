@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::num::NonZeroU64;
 use std::path::PathBuf;
 
@@ -369,11 +368,6 @@ impl GpuPipeline {
             source: ShaderSource::Wgsl(include_str!("../shaders/mutate.wgsl").into()),
         });
 
-        let rasterize_error_shader = device.create_shader_module(ShaderModuleDescriptor {
-            label: Some("rasterize_error_shader"),
-            source: ShaderSource::Wgsl(include_str!("../shaders/rasterize_error.wgsl").into()),
-        });
-
         let select_shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("select_shader"),
             source: ShaderSource::Wgsl(include_str!("../shaders/select.wgsl").into()),
@@ -531,9 +525,8 @@ impl GpuPipeline {
             crate::settings::RASTERIZE_WG_X_DEFAULT,
             crate::settings::RASTERIZE_WG_Y_DEFAULT,
         ];
-        let rasterize_error_pipeline = create_rasterize_pipeline(
+        let (rasterize_error_pipeline, rasterize_error_shader) = create_rasterize_pipeline(
             &device,
-            &rasterize_error_shader,
             &rasterize_error_pipeline_layout,
             pipeline_cache.as_ref(),
             rasterize_wg,
@@ -668,38 +661,44 @@ impl GpuPipeline {
             "Recreating rasterize_error pipeline: {}x{} -> {}x{}",
             self.rasterize_wg[0], self.rasterize_wg[1], wg[0], wg[1]
         );
-        self.rasterize_error_pipeline = create_rasterize_pipeline(
+        let (pipeline, shader) = create_rasterize_pipeline(
             &self.device,
-            &self.rasterize_error_shader,
             &self.rasterize_error_pipeline_layout,
             self.pipeline_cache.as_ref(),
             wg,
         );
+        self.rasterize_error_pipeline = pipeline;
+        self.rasterize_error_shader = shader;
         self.rasterize_wg = wg;
     }
 }
 
-/// Create a rasterize_error compute pipeline with the given workgroup size override constants.
+/// Create a rasterize_error compute pipeline with the given workgroup size.
+/// Uses string replacement on the shader source since naga 22.x does not support
+/// override constants in @workgroup_size or const expressions.
 fn create_rasterize_pipeline(
     device: &Device,
-    shader: &ShaderModule,
     layout: &PipelineLayout,
     cache: Option<&PipelineCache>,
     wg: [u32; 2],
-) -> ComputePipeline {
-    let mut constants = HashMap::new();
-    constants.insert("WG_X".to_string(), wg[0] as f64);
-    constants.insert("WG_Y".to_string(), wg[1] as f64);
+) -> (ComputePipeline, ShaderModule) {
+    let source = include_str!("../shaders/rasterize_error.wgsl")
+        .replace("const WG_X: u32 = 16;", &format!("const WG_X: u32 = {};", wg[0]))
+        .replace("const WG_Y: u32 = 16;", &format!("const WG_Y: u32 = {};", wg[1]));
 
-    device.create_compute_pipeline(&ComputePipelineDescriptor {
+    let shader = device.create_shader_module(ShaderModuleDescriptor {
+        label: Some("rasterize_error_shader"),
+        source: ShaderSource::Wgsl(source.into()),
+    });
+
+    let pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
         label: Some("rasterize_error_pipeline"),
         layout: Some(layout),
-        module: shader,
+        module: &shader,
         entry_point: "main",
-        compilation_options: PipelineCompilationOptions {
-            constants: &constants,
-            ..Default::default()
-        },
+        compilation_options: Default::default(),
         cache,
-    })
+    });
+
+    (pipeline, shader)
 }
