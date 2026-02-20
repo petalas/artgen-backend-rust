@@ -1,8 +1,22 @@
 // Fused rasterize + error compute shader — one thread per pixel per offspring
-// Dispatch: (W/16, H/16, K*λ) workgroups of size (16, 16, 1)
+// Dispatch: (W/WG_X, H/WG_Y, K*λ) workgroups of size (WG_X, WG_Y, 1)
 // Each thread rasterizes all polygons at its pixel, computes L1 error against reference,
 // then workgroup-reduces the error and thread 0 atomicAdds to per-offspring accumulator.
-// Polygons are cooperatively loaded into shared memory in tiles of 768 (16 bytes each).
+// Polygons are cooperatively loaded into shared memory in tiles (scaled to thread count).
+//
+// Workgroup size is configurable via pipeline-overridable constants WG_X and WG_Y.
+// Supported configurations: 16x16 (256 threads), 16x8 (128 threads), 8x8 (64 threads).
+// Tile capacity and shared memory arrays scale with WG_X * WG_Y.
+
+override WG_X: u32 = 16;
+override WG_Y: u32 = 16;
+
+// Derived constants — computed from override values at pipeline creation time.
+// THREAD_COUNT = WG_X * WG_Y (e.g. 256, 128, or 64)
+// TILE_CAP = THREAD_COUNT * 3 (each thread loads 3 polygons per tile pass)
+const THREAD_COUNT: u32 = WG_X * WG_Y;
+const TILE_CAP: u32 = THREAD_COUNT * 3u;
+const LOADS_PER_THREAD: u32 = 3u;
 
 struct Polygon {
     data: vec4<u32>,   // [color_packed, v0_packed, v1_packed, v2_packed] — 16 bytes
@@ -76,18 +90,23 @@ struct Params {
 @group(0) @binding(2) var<storage, read_write> error_accumulators: array<atomic<u32>>;
 var<push_constant>                             params:             Params;
 
-var<workgroup> shared_polys: array<Polygon, 768>;   // 768 × 16 = 12,288 bytes
-var<workgroup> shared_errors: array<u32, 256>;      // 16×16 = 256 threads
+// Shared memory arrays sized to thread count.
+// shared_polys: TILE_CAP polygons (THREAD_COUNT * 3 * 16 bytes)
+// shared_errors: one u32 per thread for workgroup reduction
+var<workgroup> shared_polys: array<Polygon, 768>;   // max tile cap (256*3) — only TILE_CAP entries used
+var<workgroup> shared_errors: array<u32, 256>;      // max threads — only THREAD_COUNT entries used
 
 // Half-space edge function: positive if point (px,py) is on the left side of edge (ax,ay)->(bx,by)
 fn edge_fn(ax: f32, ay: f32, bx: f32, by: f32, px: f32, py: f32) -> f32 {
     return (bx - ax) * (py - ay) - (by - ay) * (px - ax);
 }
 
-@compute @workgroup_size(16, 16, 1)
+@compute @workgroup_size(WG_X, WG_Y, 1)
 fn main(
     @builtin(global_invocation_id) gid: vec3<u32>,
     @builtin(local_invocation_index) local_idx: u32,
+    @builtin(subgroup_invocation_id) subgroup_lane: u32,
+    @builtin(subgroup_size) subgroup_sz: u32,
 ) {
     let px = gid.x;
     let py = gid.y;
@@ -111,17 +130,15 @@ fn main(
             var b = 255.0;
 
             let poly_count = working_states[chain_id].polygon_count;
-            let tile_cap = 768u;
-            let tile_count = (poly_count + tile_cap - 1u) / tile_cap;
+            let tile_count = (poly_count + TILE_CAP - 1u) / TILE_CAP;
 
             for (var tile = 0u; tile < tile_count; tile++) {
-                let tile_base = tile * tile_cap;
-                let tile_end = min(tile_cap, poly_count - tile_base);
+                let tile_base = tile * TILE_CAP;
+                let tile_end = min(TILE_CAP, poly_count - tile_base);
 
-                // Cooperative load: each thread loads multiple polygons into shared memory
-                // 256 threads loading up to 768 polygons = 3 loads per thread
-                for (var load_pass = 0u; load_pass < 3u; load_pass++) {
-                    let slot = local_idx + load_pass * 256u;
+                // Cooperative load: each thread loads LOADS_PER_THREAD polygons into shared memory
+                for (var load_pass = 0u; load_pass < LOADS_PER_THREAD; load_pass++) {
+                    let slot = local_idx + load_pass * THREAD_COUNT;
                     if slot < tile_end {
                         shared_polys[slot] = working_states[chain_id].polygons[tile_base + slot];
                     }
@@ -191,22 +208,23 @@ fn main(
         }
     }
 
-    // Store in shared memory for workgroup reduction
-    shared_errors[local_idx] = pixel_error;
+    // Subgroup reduction: each subgroup sums via register shuffles (no shared memory needed)
+    let subgroup_sum = subgroupAdd(pixel_error);
+
+    // Subgroup leaders (lane 0) write their subgroup's sum to shared memory
+    let subgroup_id = local_idx / subgroup_sz;
+    if subgroup_lane == 0u {
+        shared_errors[subgroup_id] = subgroup_sum;
+    }
     workgroupBarrier();
 
-    // Binary reduction: 256 -> 128 -> 64 -> 32 -> 16 -> 8 -> 4 -> 2 -> 1
-    var stride = 128u;
-    while stride > 0u {
-        if local_idx < stride {
-            shared_errors[local_idx] += shared_errors[local_idx + stride];
-        }
-        workgroupBarrier();
-        stride >>= 1u;
-    }
-
-    // Thread 0 adds workgroup sum to chain's accumulator
+    // Thread 0 sums all subgroup results and atomicAdds to per-offspring accumulator
     if local_idx == 0u {
-        atomicAdd(&error_accumulators[chain_id], shared_errors[0]);
+        let num_subgroups = (THREAD_COUNT + subgroup_sz - 1u) / subgroup_sz;
+        var total = 0u;
+        for (var i = 0u; i < num_subgroups; i++) {
+            total += shared_errors[i];
+        }
+        atomicAdd(&error_accumulators[chain_id], total);
     }
 }

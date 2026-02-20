@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::num::NonZeroU64;
 use std::path::PathBuf;
 
@@ -83,6 +84,11 @@ pub struct GpuPipeline {
     pub migrate_intra_pipeline: ComputePipeline,
     pub migrate_inter_pipeline: ComputePipeline,
 
+    // Rasterize pipeline recreation support — stored for creating new pipeline variants
+    rasterize_error_shader: ShaderModule,
+    rasterize_error_pipeline_layout: PipelineLayout,
+    pipeline_cache: Option<PipelineCache>,
+
     // Bind groups
     pub mutate_bind_group: BindGroup,
     pub rasterize_error_bind_group: BindGroup,
@@ -100,6 +106,7 @@ pub struct GpuPipeline {
     pub offspring_capacity: u32, // max offspring slots = min(chain_count * GPU_MAX_LAMBDA, ssbo limit)
     pub image_width: u32,
     pub image_height: u32,
+    pub rasterize_wg: [u32; 2], // current workgroup size [wg_x, wg_y]
 }
 
 impl GpuPipeline {
@@ -171,7 +178,7 @@ impl GpuPipeline {
         // Request PIPELINE_CACHE feature if the adapter supports it (Vulkan only)
         let adapter_features = adapter.features();
         let pipeline_cache_supported = adapter_features.contains(Features::PIPELINE_CACHE);
-        let mut required_features = Features::TIMESTAMP_QUERY | Features::PUSH_CONSTANTS;
+        let mut required_features = Features::TIMESTAMP_QUERY | Features::PUSH_CONSTANTS | Features::SUBGROUP;
         if pipeline_cache_supported {
             required_features |= Features::PIPELINE_CACHE;
             println!("Pipeline cache feature supported — enabling shader cache");
@@ -520,14 +527,17 @@ impl GpuPipeline {
             bind_group_layouts: &[&rasterize_error_bgl],
             push_constant_ranges: &[push_constant_range.clone()],
         });
-        let rasterize_error_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
-            label: Some("rasterize_error_pipeline"),
-            layout: Some(&rasterize_error_pipeline_layout),
-            module: &rasterize_error_shader,
-            entry_point: "main",
-            compilation_options: Default::default(),
-            cache: pipeline_cache.as_ref(),
-        });
+        let rasterize_wg = [
+            crate::settings::RASTERIZE_WG_X_DEFAULT,
+            crate::settings::RASTERIZE_WG_Y_DEFAULT,
+        ];
+        let rasterize_error_pipeline = create_rasterize_pipeline(
+            &device,
+            &rasterize_error_shader,
+            &rasterize_error_pipeline_layout,
+            pipeline_cache.as_ref(),
+            rasterize_wg,
+        );
 
         let select_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: Some("select_layout"),
@@ -629,6 +639,9 @@ impl GpuPipeline {
             select_pipeline,
             migrate_intra_pipeline,
             migrate_inter_pipeline,
+            rasterize_error_shader,
+            rasterize_error_pipeline_layout,
+            pipeline_cache,
             timestamp_query_set,
             timestamp_resolve_buf,
             timestamp_staging_bufs,
@@ -641,6 +654,52 @@ impl GpuPipeline {
             offspring_capacity: offspring_capacity as u32,
             image_width,
             image_height,
+            rasterize_wg,
         }
     }
+
+    /// Recreate the rasterize_error pipeline with a new workgroup size.
+    /// This is called between batches when the user changes the workgroup size.
+    pub fn set_rasterize_wg(&mut self, wg: [u32; 2]) {
+        if wg == self.rasterize_wg {
+            return;
+        }
+        println!(
+            "Recreating rasterize_error pipeline: {}x{} -> {}x{}",
+            self.rasterize_wg[0], self.rasterize_wg[1], wg[0], wg[1]
+        );
+        self.rasterize_error_pipeline = create_rasterize_pipeline(
+            &self.device,
+            &self.rasterize_error_shader,
+            &self.rasterize_error_pipeline_layout,
+            self.pipeline_cache.as_ref(),
+            wg,
+        );
+        self.rasterize_wg = wg;
+    }
+}
+
+/// Create a rasterize_error compute pipeline with the given workgroup size override constants.
+fn create_rasterize_pipeline(
+    device: &Device,
+    shader: &ShaderModule,
+    layout: &PipelineLayout,
+    cache: Option<&PipelineCache>,
+    wg: [u32; 2],
+) -> ComputePipeline {
+    let mut constants = HashMap::new();
+    constants.insert("WG_X".to_string(), wg[0] as f64);
+    constants.insert("WG_Y".to_string(), wg[1] as f64);
+
+    device.create_compute_pipeline(&ComputePipelineDescriptor {
+        label: Some("rasterize_error_pipeline"),
+        layout: Some(layout),
+        module: shader,
+        entry_point: "main",
+        compilation_options: PipelineCompilationOptions {
+            constants: &constants,
+            ..Default::default()
+        },
+        cache,
+    })
 }
