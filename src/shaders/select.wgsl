@@ -140,13 +140,12 @@ fn migrate_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         // Copy drawing from best chain, but keep our own RNG for diversity
         let saved_rng = chain_states[chain_id].rng_state;
 
-        chain_states[chain_id].polygon_count = chain_states[best_id].polygon_count;
+        let pc = min(chain_states[best_id].polygon_count, params.max_polygons);
+        chain_states[chain_id].polygon_count = pc;
         chain_states[chain_id].fitness_bits = chain_states[best_id].fitness_bits;
         chain_states[chain_id]._pad0 = 0u;
         chain_states[chain_id]._pad1 = 0u;
         chain_states[chain_id].rng_state = saved_rng;
-
-        let pc = chain_states[best_id].polygon_count;
         for (var i = 0u; i < pc; i++) {
             chain_states[chain_id].polygons[i] = chain_states[best_id].polygons[i];
         }

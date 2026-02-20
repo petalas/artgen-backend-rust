@@ -4,6 +4,7 @@ use crate::models::color::Color;
 use crate::models::drawing::Drawing;
 use crate::models::point::Point;
 use crate::models::polygon::Polygon;
+use crate::mutation_params::MutationParams;
 use crate::settings::{MAX_POLYGONS_PER_IMAGE, MIN_ALPHA, MAX_ALPHA};
 
 /// GPU polygon: a single triangle with color.
@@ -92,35 +93,40 @@ pub struct ControlFlags {
 pub const GPU_DRAWING_STATE_SIZE: usize = std::mem::size_of::<GpuDrawingState>();
 pub const GPU_POLYGON_SIZE: usize = std::mem::size_of::<GpuPolygon>();
 
-/// Build the default GpuParams from settings constants.
-pub fn default_gpu_params(w: u32, h: u32, migration_interval: u32) -> GpuParams {
+/// Build GpuParams from runtime MutationParams + image dimensions.
+pub fn gpu_params_from(mp: &MutationParams, w: u32, h: u32, migration_interval: u32) -> GpuParams {
     use crate::settings::*;
     GpuParams {
         image_width: w,
         image_height: h,
-        max_polygons: MAX_POLYGONS_PER_IMAGE as u32,
-        min_polygons: MIN_POLYGONS_PER_IMAGE as u32,
+        max_polygons: mp.max_polygons.min(MAX_POLYGONS_PER_IMAGE as u32),
+        min_polygons: mp.min_polygons,
         max_error_per_pixel: MAX_ERROR_PER_PIXEL,
         per_point_multiplier: PER_POINT_MULTIPLIER,
         iteration_number: 0,
         migration_interval,
-        add_polygon_prob: ADD_POLYGON_PROB,
-        remove_polygon_prob: REMOVE_POLYGON_PROB,
-        reorder_polygon_prob: REORDER_POLYGON_PROB,
-        offset_polygon_prob: OFFSET_POLYGON_PROBABILITY,
-        move_point_prob: MOVE_POINT_PROBABILITY,
-        micro_adjust_prob: MICRO_ADJUSTMENT_PROBABILITY,
-        change_color_prob: CHANGE_COLOR_PROB,
-        lighten_color_prob: LIGHTEN_COLOR_PROB,
-        darken_color_prob: DARKEN_COLOR_PROB,
-        move_point_max_delta: MOVE_POINT_MAX_DELTA,
-        micro_adjust_delta: MICRO_ADJUSTMENT_DELTA,
-        new_point_max_distance: NEW_POINT_MAX_DISTANCE,
-        offset_polygon_magnitude: OFFSET_POLYGON_MAGNITUDE,
-        min_alpha_norm: MIN_ALPHA as f32 / 255.0,
-        max_alpha_norm: MAX_ALPHA as f32 / 255.0,
+        add_polygon_prob: mp.add_polygon_prob,
+        remove_polygon_prob: mp.remove_polygon_prob,
+        reorder_polygon_prob: mp.reorder_polygon_prob,
+        offset_polygon_prob: mp.offset_polygon_prob,
+        move_point_prob: mp.move_point_prob,
+        micro_adjust_prob: mp.micro_adjust_prob,
+        change_color_prob: mp.change_color_prob,
+        lighten_color_prob: mp.lighten_color_prob,
+        darken_color_prob: mp.darken_color_prob,
+        move_point_max_delta: mp.move_point_max_delta,
+        micro_adjust_delta: mp.micro_adjust_delta,
+        new_point_max_distance: mp.new_point_max_distance,
+        offset_polygon_magnitude: mp.offset_polygon_magnitude,
+        min_alpha_norm: mp.min_alpha as f32 / 255.0,
+        max_alpha_norm: mp.max_alpha as f32 / 255.0,
         _params_pad: 0,
     }
+}
+
+/// Build the default GpuParams from settings constants.
+pub fn default_gpu_params(w: u32, h: u32, migration_interval: u32) -> GpuParams {
+    gpu_params_from(&MutationParams::default(), w, h, migration_interval)
 }
 
 /// Convert a CPU Drawing to GPU bytes for a single chain's DrawingState.

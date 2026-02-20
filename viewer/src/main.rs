@@ -2,6 +2,7 @@ mod app;
 mod components;
 mod heatmap;
 mod models;
+mod mutation_params;
 mod ws;
 
 fn main() {

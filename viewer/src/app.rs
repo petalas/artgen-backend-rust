@@ -3,6 +3,7 @@ use leptos::prelude::*;
 use crate::components::controls::Controls;
 use crate::components::header::Header;
 use crate::components::image_row::ImageRow;
+use crate::components::mutation_panel::MutationPanel;
 use crate::components::project_selector::ProjectsPage;
 use crate::components::stats::Stats;
 use crate::ws::{connect_ws, ViewerState};
@@ -29,6 +30,7 @@ pub fn App() -> impl IntoView {
                             <ImageRow state={state}/>
                             <Stats state={state}/>
                             <Controls state={state}/>
+                            <MutationPanel state={state}/>
                         }.into_any()
                     }
                 }}

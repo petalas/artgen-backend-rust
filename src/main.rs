@@ -3,6 +3,7 @@ use artgen_backend_rust::{
     evaluator::{Evaluator, EvaluatorPayload},
     gpu_evolver::GpuEvolver,
     models::drawing::Drawing,
+    mutation_params::MutationParams,
     projects,
     settings::{
         DISPLAY_H, DISPLAY_W, MAX_IMAGE_HEIGHT, MAX_IMAGE_WIDTH, MIN_IMAGE_HEIGHT, MIN_IMAGE_WIDTH,
@@ -231,9 +232,10 @@ fn gpu_main_loop(
     let mut last_save_timestamp = Instant::now();
     let mut last_stats_timestamp = Instant::now();
 
+    let default_params = MutationParams::default();
     loop {
         // Run a batch of GPU iterations
-        if let Some(new_best) = evolver.run_batch() {
+        if let Some(new_best) = evolver.run_batch(&default_params) {
             if new_best.fitness > global_best.fitness {
                 global_best = new_best;
 
@@ -297,6 +299,8 @@ struct WsState {
     switch_request: Option<String>,
     reset_active: bool,   // skip saving on switch when true (reset deletes best.json)
     pending_delete: Option<String>, // project dir to delete after inner loop breaks
+    // Mutation parameters (runtime-configurable)
+    mutation_params: MutationParams,
 }
 
 type SharedWsState = Arc<(Mutex<WsState>, Condvar)>;
@@ -391,6 +395,7 @@ fn ws_handle_client(stream: std::net::TcpStream, state: SharedWsState) {
             "imageWidth": s.image_width,
             "imageHeight": s.image_height,
             "activeProject": s.active_project,
+            "mutationParams": s.mutation_params,
         });
         if ws
             .send(tungstenite::Message::Text(msg.to_string().into()))
@@ -498,6 +503,7 @@ fn ws_handle_client(stream: std::net::TcpStream, state: SharedWsState) {
                     "drawingJson": s.drawing_json,
                     "imageWidth": s.image_width,
                     "imageHeight": s.image_height,
+                    "mutationParams": s.mutation_params,
                 });
                 msg.to_string()
             } else if s.generation == last_gen {
@@ -682,6 +688,20 @@ fn handle_ws_command(
             cvar.notify_all();
             None
         }
+        Some("update_params") => {
+            if let Ok(params) = serde_json::from_value::<MutationParams>(cmd["params"].clone()) {
+                let mut s = lock.lock().unwrap();
+                s.mutation_params = params;
+                println!("[WS] Mutation params updated by {:?}", peer);
+            }
+            None
+        }
+        Some("reset_params") => {
+            let mut s = lock.lock().unwrap();
+            s.mutation_params = MutationParams::default();
+            println!("[WS] Mutation params reset by {:?}", peer);
+            None
+        }
         Some("import_drawing") => {
             let name = cmd["name"].as_str().unwrap_or("");
             let drawing_json = cmd["drawingJson"].as_str().unwrap_or("");
@@ -737,6 +757,7 @@ fn gpu_main_loop_headless(legacy_image: Option<&str>) {
             switch_request: migrated_project,
             reset_active: false,
             pending_delete: None,
+            mutation_params: MutationParams::default(),
         }),
         Condvar::new(),
     ));
@@ -811,16 +832,22 @@ fn gpu_main_loop_headless(legacy_image: Option<&str>) {
 
         let engine = initialize_engine_from_rgba(&rgba, w, h);
 
-        // Load best drawing or start fresh
+        // Load best drawing or start fresh, respecting current evolution params
         let best_path = projects::project_best_json_path(&project_name);
-        let initial_best = if best_path.exists() {
+        let mp = ws_state.0.lock().unwrap().mutation_params.clone();
+        let max_poly = mp.max_polygons as usize;
+        let mut initial_best = if best_path.exists() {
             let best_str = best_path.to_str().unwrap_or("");
             println!("[Projects] Loading existing best for '{}'", project_name);
             Drawing::from_file(best_str)
         } else {
             println!("[Projects] Starting fresh for '{}'", project_name);
-            Drawing::new_random()
+            Drawing::new_random_capped(max_poly)
         };
+        // Truncate loaded drawings that exceed current max_polygons
+        if initial_best.polygons.len() > max_poly {
+            initial_best.polygons.truncate(max_poly);
+        }
 
         let json_filename = best_path.to_string_lossy().to_string();
         let png_path = projects::project_best_png_path(&project_name).to_string_lossy().to_string();
@@ -964,7 +991,8 @@ fn gpu_main_loop_headless(legacy_image: Option<&str>) {
             }
 
             batches += 1;
-            if let Some(new_best) = evolver.run_batch() {
+            let mp = ws_state.0.lock().unwrap().mutation_params.clone();
+            if let Some(new_best) = evolver.run_batch(&mp) {
                 if new_best.fitness > global_best.fitness {
                     improvements += 1;
                     let delta = new_best.fitness - global_best.fitness;

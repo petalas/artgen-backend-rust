@@ -145,8 +145,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
 
-    // Copy current best to working state
-    let poly_count = chain_states[chain_id].polygon_count;
+    // Copy current best to working state, clamping to current limits
+    let poly_count = min(chain_states[chain_id].polygon_count, params.max_polygons);
     working_states[chain_id].polygon_count = poly_count;
     working_states[chain_id].fitness_bits = chain_states[chain_id].fitness_bits;
     working_states[chain_id]._pad0 = 0u;

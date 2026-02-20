@@ -56,6 +56,18 @@ impl Drawing {
         }
     }
 
+    /// Create a random drawing respecting the given polygon count limit.
+    pub fn new_random_capped(max_polygons: usize) -> Drawing {
+        let count = START_WITH_POLYGONS_PER_IMAGE.min(max_polygons);
+        Drawing {
+            polygons: (0..count)
+                .map(|_| Polygon::new_random())
+                .collect(),
+            is_dirty: true,
+            fitness: 0.0,
+        }
+    }
+
     pub fn mutate(&mut self) {
         if randomf32() < ADD_POLYGON_PROB && self.add_polygon() {
             self.is_dirty = true;

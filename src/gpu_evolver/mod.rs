@@ -6,10 +6,11 @@ use std::time::Instant;
 use wgpu::*;
 
 use crate::models::drawing::Drawing;
+use crate::mutation_params::MutationParams;
 use crate::settings::{GPU_CHAIN_COUNT, GPU_ITERATIONS_PER_BATCH, GPU_MIGRATION_INTERVAL};
 
 use buffers::{
-    default_gpu_params, drawing_to_gpu, gpu_to_drawing, ControlFlags, GpuDrawingState,
+    default_gpu_params, gpu_params_from, drawing_to_gpu, gpu_to_drawing, ControlFlags, GpuDrawingState,
     GpuParams, GPU_DRAWING_STATE_SIZE,
 };
 use pipeline::GpuPipeline;
@@ -69,12 +70,12 @@ impl GpuEvolver {
 
     /// Run a batch of N iterations on the GPU.
     /// Returns `Some(Drawing)` if a new global best was found, `None` otherwise.
-    pub fn run_batch(&mut self) -> Option<Drawing> {
+    pub fn run_batch(&mut self, mutation_params: &MutationParams) -> Option<Drawing> {
         let p = &self.pipeline;
         let iterations = GPU_ITERATIONS_PER_BATCH;
 
         // Update iteration number in params
-        let mut params = default_gpu_params(p.image_width, p.image_height, GPU_MIGRATION_INTERVAL);
+        let mut params = gpu_params_from(mutation_params, p.image_width, p.image_height, GPU_MIGRATION_INTERVAL);
         params.iteration_number = self.iteration;
         p.queue.write_buffer(&p.params_buf, 0, bytemuck::bytes_of(&params));
 

@@ -8,4 +8,5 @@ pub mod buffer_dimensions;
 pub mod texture_wrapper;
 pub mod evaluator;
 pub mod gpu_evolver;
+pub mod mutation_params;
 pub mod projects;

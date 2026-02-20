@@ -473,6 +473,139 @@ body {
     background: #eee;
 }
 
+/* Mutation Panel */
+.mutation-panel {
+    margin-top: 20px;
+    background: #fff;
+    border-radius: 8px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+    overflow: hidden;
+}
+
+.mutation-panel-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 16px;
+    cursor: pointer;
+    user-select: none;
+    transition: background 0.15s;
+}
+
+.mutation-panel-header:hover {
+    background: #f5f5f5;
+}
+
+.mutation-panel-toggle {
+    font-size: 11px;
+    color: #888;
+    width: 16px;
+}
+
+.mutation-panel-title {
+    font-size: 14px;
+    font-weight: 500;
+    color: #333;
+}
+
+.mutation-panel-body {
+    padding: 4px 16px 16px;
+}
+
+.mutation-section {
+    margin-bottom: 12px;
+}
+
+.mutation-section:last-child {
+    margin-bottom: 0;
+}
+
+.mutation-section-title {
+    font-size: 11px;
+    font-weight: 600;
+    color: #888;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 6px;
+    padding-top: 4px;
+    border-top: 1px solid #f0f0f0;
+}
+
+.mutation-section:first-child .mutation-section-title {
+    border-top: none;
+    padding-top: 0;
+}
+
+.mutation-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 3px 0;
+}
+
+.mutation-label {
+    font-size: 13px;
+    color: #555;
+    min-width: 130px;
+    white-space: nowrap;
+}
+
+.mutation-slider {
+    flex: 1;
+    height: 4px;
+    -webkit-appearance: none;
+    appearance: none;
+    background: #e0e0e0;
+    border-radius: 2px;
+    outline: none;
+    cursor: pointer;
+}
+
+.mutation-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: #1976d2;
+    cursor: pointer;
+    border: none;
+}
+
+.mutation-slider::-moz-range-thumb {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: #1976d2;
+    cursor: pointer;
+    border: none;
+}
+
+.mutation-value {
+    font-size: 12px;
+    color: #888;
+    min-width: 70px;
+    text-align: right;
+    font-family: 'Ubuntu Mono', monospace;
+}
+
+.mutation-section-actions {
+    display: flex;
+    justify-content: flex-end;
+    padding-top: 8px;
+    border-top: 1px solid #f0f0f0;
+}
+
+.btn-secondary {
+    background: #f5f5f5;
+    color: #555;
+    border: 1px solid #ddd;
+}
+
+.btn-secondary:hover:not(:disabled) {
+    background: #e8e8e8;
+}
+
 /* Responsive */
 @media (max-width: 600px) {
     .image-row {

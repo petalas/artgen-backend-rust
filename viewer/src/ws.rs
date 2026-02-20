@@ -4,6 +4,8 @@ use leptos::prelude::*;
 use wasm_bindgen::prelude::*;
 use web_sys::{MessageEvent, WebSocket};
 
+use crate::mutation_params::MutationParams;
+
 #[allow(dead_code)]
 #[derive(Clone, Debug, Default)]
 pub struct ProjectInfo {
@@ -33,6 +35,8 @@ pub struct ViewerState {
     pub projects: Vec<ProjectInfo>,
     pub active_project: Option<String>,
     pub project_error: Option<String>,
+    // Mutation parameters
+    pub mutation_params: MutationParams,
 }
 
 impl Default for ViewerState {
@@ -55,6 +59,7 @@ impl Default for ViewerState {
             projects: vec![],
             active_project: None,
             project_error: None,
+            mutation_params: MutationParams::default(),
         }
     }
 }
@@ -217,6 +222,9 @@ fn handle_message(data: &serde_json::Value, state: RwSignal<ViewerState>) {
                 } else if data["activeProject"].is_null() {
                     s.active_project = None;
                 }
+                if let Ok(mp) = serde_json::from_value::<MutationParams>(data["mutationParams"].clone()) {
+                    s.mutation_params = mp;
+                }
             }
             "update" => {
                 if let Some(img) = data["image"].as_str() {
@@ -250,6 +258,9 @@ fn handle_message(data: &serde_json::Value, state: RwSignal<ViewerState>) {
                 }
                 if let Some(ap) = data["project"].as_str() {
                     s.active_project = Some(ap.to_string());
+                }
+                if let Ok(mp) = serde_json::from_value::<MutationParams>(data["mutationParams"].clone()) {
+                    s.mutation_params = mp;
                 }
             }
             "project_error" => {
