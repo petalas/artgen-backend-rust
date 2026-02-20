@@ -1,2 +1,5 @@
 /target
+output/
+projects/
+viewer/dist/
 *.best.json

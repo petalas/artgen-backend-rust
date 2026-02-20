@@ -33,6 +33,9 @@ pub struct MutationParams {
     pub tournament_size: u32,
     pub island_count: u32,
     pub inter_island_interval: u32,
+
+    // Chain count
+    pub chain_count: u32,
 }
 
 impl Default for MutationParams {
@@ -61,6 +64,7 @@ impl Default for MutationParams {
             tournament_size: 3,
             island_count: 8,
             inter_island_interval: 500,
+            chain_count: 128,
         }
     }
 }

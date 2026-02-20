@@ -791,6 +791,27 @@ fn handle_ws_command(
             cvar.notify_all();
             None
         }
+        Some("rename_project") => {
+            let old_name = cmd["oldName"].as_str().unwrap_or("");
+            let new_name = cmd["newName"].as_str().unwrap_or("");
+            match projects::rename_project(old_name, new_name) {
+                Ok(()) => {
+                    println!("[WS] Project '{}' renamed to '{}' by {:?}", old_name, new_name, peer);
+                    let mut s = lock.lock().unwrap();
+                    if s.active_project.as_deref() == Some(old_name) {
+                        s.active_project = Some(new_name.to_string());
+                    }
+                    s.project_list_generation += 1;
+                    s.generation += 1;
+                    cvar.notify_all();
+                    None
+                }
+                Err(e) => Some(serde_json::json!({
+                    "type": "project_error",
+                    "error": e,
+                })),
+            }
+        }
         Some("update_params") => {
             if let Ok(mut params) = serde_json::from_value::<MutationParams>(cmd["params"].clone()) {
                 params.sanitize();

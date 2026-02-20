@@ -493,6 +493,13 @@ fn ResultsSection(state: RwSignal<ViewerState>) -> impl IntoView {
                             </table>
                         </div>
                         <div class="bench-results-actions">
+                            <button class="btn btn-secondary" on:click={move |_| {
+                                let results = state.get().benchmark_results.clone();
+                                let text = export_results_text(&results);
+                                copy_to_clipboard(&text);
+                            }}>
+                                "Copy as Text"
+                            </button>
                             <button class="btn btn-danger" on:click={clear_results}>
                                 "Clear Results"
                             </button>
@@ -502,6 +509,43 @@ fn ResultsSection(state: RwSignal<ViewerState>) -> impl IntoView {
             }}
         </div>
     }
+}
+
+fn export_results_text(results: &[BenchmarkResult]) -> String {
+    let mut out = String::new();
+
+    // Summary table
+    out.push_str("=== Benchmark Results ===\n\n");
+    out.push_str(&format!("{:<24} {:>6} {:>7} {:>8} {:>8} {:>8} {:>6} {:>8}\n",
+        "Label", "Chains", "Islands", "Duration", "Start", "Final", "Impr", "Impr/s"));
+    out.push_str(&"-".repeat(90));
+    out.push('\n');
+    for r in results {
+        out.push_str(&format!("{:<24} {:>6} {:>7} {:>7}s {:>7.2}% {:>7.2}% {:>6} {:>8.2}\n",
+            r.label, r.chain_count, r.island_count, r.duration_secs,
+            r.start_fitness, r.final_fitness,
+            r.total_improvements, r.improvements_per_sec));
+    }
+
+    // Time series per run
+    for r in results {
+        out.push_str(&format!("\n--- {} ({}c {}i {}s) ---\n",
+            r.label, r.chain_count, r.island_count, r.duration_secs));
+        out.push_str(&format!("{:>6} {:>10} {:>10} {:>10} {:>8} {:>12} {:>10}\n",
+            "time", "best", "avg", "worst", "impr", "evals", "evals/s"));
+        for s in &r.samples {
+            out.push_str(&format!("{:>5.0}s {:>9.4}% {:>9.4}% {:>9.4}% {:>8} {:>12} {:>10.0}\n",
+                s.elapsed_secs, s.best_fitness, s.avg_fitness, s.worst_fitness,
+                s.improvements, s.total_evals, s.evals_per_sec));
+        }
+    }
+
+    out
+}
+
+fn copy_to_clipboard(text: &str) {
+    let escaped = text.replace('\\', "\\\\").replace('`', "\\`").replace('$', "\\$");
+    let _ = js_sys::eval(&format!("navigator.clipboard.writeText(`{}`)", escaped));
 }
 
 fn result_row(i: usize, r: &BenchmarkResult) -> impl IntoView {

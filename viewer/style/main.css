@@ -422,6 +422,25 @@ body {
     margin-left: 12px;
 }
 
+.project-card-rename {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: 1;
+    padding: 4px 0;
+}
+
+.project-rename-input {
+    flex: 1;
+    background: #2a2a2a;
+    border: 1px solid #26a69a;
+    border-radius: 4px;
+    color: #eee;
+    padding: 4px 8px;
+    font-size: 14px;
+    outline: none;
+}
+
 .btn-icon {
     width: 32px;
     height: 32px;

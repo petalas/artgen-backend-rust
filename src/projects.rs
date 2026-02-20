@@ -165,6 +165,21 @@ pub fn create_project(name: &str, image_bytes: &[u8]) -> Result<ProjectInfo, Str
     })
 }
 
+pub fn rename_project(old_name: &str, new_name: &str) -> Result<(), String> {
+    validate_name(old_name)?;
+    validate_name(new_name)?;
+    let old_dir = project_dir(old_name);
+    if !old_dir.exists() {
+        return Err(format!("Project '{}' does not exist", old_name));
+    }
+    let new_dir = project_dir(new_name);
+    if new_dir.exists() {
+        return Err(format!("Project '{}' already exists", new_name));
+    }
+    std::fs::rename(&old_dir, &new_dir).map_err(|e| format!("Failed to rename project: {}", e))?;
+    Ok(())
+}
+
 pub fn delete_project(name: &str) -> Result<(), String> {
     validate_name(name)?;
     let dir = project_dir(name);

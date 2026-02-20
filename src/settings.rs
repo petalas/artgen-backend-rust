@@ -38,7 +38,8 @@ pub const MIN_POLYGONS_PER_IMAGE: usize = 1;
 pub const START_WITH_POLYGONS_PER_IMAGE: usize = 150; // can not go below 2 using range 0..START_WITH_POLYGONS_PER_IMAGE
 
 // GPU evolution settings
-pub const GPU_CHAIN_COUNT: u32 = 512;
+pub const GPU_MAX_CHAIN_COUNT: u32 = 512;
+pub const GPU_DEFAULT_CHAIN_COUNT: u32 = 128;
 pub const GPU_ITERATIONS_PER_BATCH: u32 = 50;
 pub const GPU_MIGRATION_INTERVAL: u32 = 50;
 
