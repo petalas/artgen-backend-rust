@@ -49,7 +49,7 @@ impl GpuPipeline {
         initial_states: &[GpuDrawingState],
         gpu_params: &GpuParams,
     ) -> Self {
-        assert_eq!(initial_states.len(), chain_count as usize);
+        assert!(initial_states.len() >= chain_count as usize);
         assert_eq!(reference_rgba.len(), (image_width * image_height * 4) as usize);
 
         // --- Device + Queue ---
@@ -83,10 +83,18 @@ impl GpuPipeline {
 
         println!("Selected GPU adapter: {:?}", adapter.get_info().name);
 
+        // Cap chain_count to fit within the adapter's max storage buffer binding size.
+        // The render_targets buffer (chain_count * W * H * 4) is always the largest.
+        let adapter_limits = adapter.limits();
+        let max_ssbo = adapter_limits.max_storage_buffer_binding_size as u64;
+        let pixels_per_chain = (image_width as u64) * (image_height as u64);
+        let max_chains_by_buffer = max_ssbo / (pixels_per_chain * 4);
+        let chain_count = chain_count.min(max_chains_by_buffer as u32);
+
         // Calculate the largest buffer we actually need (render_targets)
-        let max_buffer_needed = (chain_count as u64) * (image_width as u64) * (image_height as u64) * 4;
-        // Round up to nearest MB + margin
-        let max_buffer_size = ((max_buffer_needed / (1024 * 1024)) + 2) * 1024 * 1024;
+        let max_buffer_needed = (chain_count as u64) * pixels_per_chain * 4;
+        // Clamp to adapter limit (don't request more than hardware supports)
+        let max_buffer_size = max_buffer_needed.min(max_ssbo as u64);
 
         let required_limits = Limits {
             max_storage_buffer_binding_size: max_buffer_size as u32,
@@ -114,8 +122,8 @@ impl GpuPipeline {
 
         // --- Create buffers ---
 
-        // Chain states (current best per chain)
-        let chain_states_bytes: Vec<u8> = initial_states
+        // Chain states (current best per chain) — only use first chain_count entries
+        let chain_states_bytes: Vec<u8> = initial_states[..chain_count as usize]
             .iter()
             .flat_map(|s| bytemuck::bytes_of(s).to_vec())
             .collect();

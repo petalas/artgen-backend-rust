@@ -51,12 +51,19 @@ impl GpuEvolver {
         )
         .await;
 
+        let actual_chains = pipeline.chain_count;
+        if actual_chains < chain_count {
+            println!(
+                "GPU chain count capped: {} → {} (adapter max_storage_buffer_binding_size limit)",
+                chain_count, actual_chains,
+            );
+        }
         println!(
             "GPU evolver initialized: {} chains, {}x{} image, {:.1} MB GPU memory",
-            chain_count,
+            actual_chains,
             image_width,
             image_height,
-            estimate_gpu_memory(chain_count, image_width, image_height) as f64 / (1024.0 * 1024.0),
+            estimate_gpu_memory(actual_chains, image_width, image_height) as f64 / (1024.0 * 1024.0),
         );
 
         Self {
