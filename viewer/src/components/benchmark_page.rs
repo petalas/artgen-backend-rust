@@ -131,6 +131,23 @@ fn auto_label(chain_count: u32, island_count: u32, isolate_islands: bool) -> Str
     }
 }
 
+fn deduplicate_label(base: &str, state: &ViewerState) -> String {
+    let existing: Vec<&str> = state.benchmark_results.iter().map(|r| r.label.as_str())
+        .chain(state.benchmark_queue.iter().map(|r| r.label.as_str()))
+        .collect();
+    if !existing.contains(&base) {
+        return base.to_string();
+    }
+    let mut n = 2u32;
+    loop {
+        let candidate = format!("{} #{}", base, n);
+        if !existing.contains(&candidate.as_str()) {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
 #[component]
 fn ConfigureSection(state: RwSignal<ViewerState>) -> impl IntoView {
     let selected_snap = RwSignal::new(0usize);
@@ -149,7 +166,8 @@ fn ConfigureSection(state: RwSignal<ViewerState>) -> impl IntoView {
         let iso = isolate_islands.get();
         let params = build_benchmark_params(&s, cc, ic, iso);
         let lbl = label.get();
-        let lbl = if lbl.trim().is_empty() { auto_label(cc, ic, iso) } else { lbl.trim().to_string() };
+        let base = if lbl.trim().is_empty() { auto_label(cc, ic, iso) } else { lbl.trim().to_string() };
+        let lbl = deduplicate_label(&base, &s);
         let req = BenchmarkRequest {
             drawing_json: snap.drawing_json.clone(),
             params,
@@ -169,7 +187,8 @@ fn ConfigureSection(state: RwSignal<ViewerState>) -> impl IntoView {
         let iso = isolate_islands.get();
         let params = build_benchmark_params(&s, cc, ic, iso);
         let lbl = label.get();
-        let lbl = if lbl.trim().is_empty() { auto_label(cc, ic, iso) } else { lbl.trim().to_string() };
+        let base = if lbl.trim().is_empty() { auto_label(cc, ic, iso) } else { lbl.trim().to_string() };
+        let lbl = deduplicate_label(&base, &s);
         let msg = serde_json::json!({
             "type": "start_benchmark",
             "drawingJson": snap.drawing_json,
