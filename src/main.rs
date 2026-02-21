@@ -1369,6 +1369,7 @@ fn run_benchmark(
         lambda: bench_params.lambda,
         gpu_batch_iters: bench_params.gpu_batch_iters,
         resolution: if w >= h { w as u32 } else { h as u32 },
+        params: bench_params.clone(),
     };
 
     println!(

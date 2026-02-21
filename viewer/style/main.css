@@ -1155,6 +1155,64 @@ body {
     color: #2e7d32 !important;
 }
 
+.bench-cell-actions {
+    white-space: nowrap;
+}
+.bench-cell-actions .btn-icon {
+    display: inline-flex;
+    width: 26px;
+    height: 26px;
+    font-size: 14px;
+}
+
+.bench-detail-row td {
+    padding: 0 10px 8px 10px !important;
+    border-bottom: 2px solid #e0e0e0 !important;
+    background: #fafafa;
+}
+
+.bench-params-detail {
+    padding: 6px 10px;
+    font-family: 'Ubuntu Mono', monospace;
+    font-size: 12px;
+    line-height: 1.6;
+    background: #f5f5f5;
+    border-radius: 4px;
+    border: 1px solid #e8e8e8;
+}
+
+.bench-params-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 2px 10px;
+    align-items: baseline;
+}
+
+.bench-params-group {
+    color: #888;
+    font-weight: 600;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+}
+
+.bench-param-default {
+    color: #999;
+}
+
+.bench-param-changed {
+    color: #1a1a1a;
+    font-weight: 600;
+    background: #fff3cd;
+    padding: 0 3px;
+    border-radius: 2px;
+}
+
+.bench-params-all-default {
+    color: #999;
+    font-style: italic;
+}
+
 .bench-results-actions {
     display: flex;
     justify-content: flex-end;

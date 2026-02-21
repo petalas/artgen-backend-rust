@@ -71,6 +71,8 @@ pub struct BenchmarkResult {
     pub gpu_batch_iters: u32,
     #[serde(default)]
     pub resolution: u32,
+    #[serde(default)]
+    pub params: MutationParams,
 }
 
 /// On-disk store (per-project)

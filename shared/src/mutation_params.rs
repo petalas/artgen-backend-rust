@@ -12,7 +12,7 @@ fn default_gpu_batch_iters() -> u32 {
 
 /// Runtime-configurable mutation parameters.
 /// Sent over WebSocket as JSON (camelCase) and used to build `GpuParams`.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MutationParams {
     // Probabilities (expressed as fraction, e.g. 0.02 = 1 in 50)

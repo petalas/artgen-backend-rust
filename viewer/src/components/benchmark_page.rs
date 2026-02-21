@@ -7,17 +7,22 @@ use std::collections::HashSet;
 use crate::benchmark::{BenchmarkExport, BenchmarkRequest, BenchmarkResult, BenchmarkSnapshot};
 use crate::components::benchmark_chart::{color_for_index, BenchmarkChart};
 use crate::components::controls::download_blob;
+use crate::components::mutation_panel::ParamsEditor;
 use crate::mutation_params::MutationParams;
 use crate::ws::{send_ws_json, ViewerState};
 
 #[component]
 pub fn BenchmarkPage(state: RwSignal<ViewerState>) -> impl IntoView {
+    // Shared benchmark config signals — written by ConfigureSection, also writable by ResultsSection "apply"
+    let bench_params = RwSignal::new(MutationParams::default());
+    let bench_resolution = RwSignal::new(state.get_untracked().target_resolution);
+
     view! {
         <div class="benchmark-page">
             <SnapshotsSection state={state}/>
-            <ConfigureSection state={state}/>
+            <ConfigureSection state={state} bench_params={bench_params} bench_resolution={bench_resolution}/>
             <QueueSection state={state}/>
-            <ResultsSection state={state}/>
+            <ResultsSection state={state} bench_params={bench_params} bench_resolution={bench_resolution}/>
         </div>
     }
 }
@@ -117,55 +122,20 @@ fn SnapshotsSection(state: RwSignal<ViewerState>) -> impl IntoView {
 
 // ── Configure Run ──────────────────────────────────────────
 
-// Chains: exponent 0..9 → 1,2,4,...,512
-fn chains_from_exp(exp: u32) -> u32 { 1u32 << exp }
-
-// Lambda: exponent 0..6 → 1,2,4,8,16,32,64
-fn lambda_from_exp(exp: u32) -> u32 { 1u32 << exp }
-
-// Workgroup size options: index -> [wg_x, wg_y]
-const WG_OPTIONS: &[[u32; 2]] = &[[32, 16], [16, 16], [32, 8], [16, 8], [8, 8]];
-
-fn wg_label(wg: &[u32; 2]) -> String {
-    let threads = wg[0] * wg[1];
-    format!("{}x{} ({})", wg[0], wg[1], threads)
-}
-
-fn build_benchmark_params(
-    state: &ViewerState,
-    chain_count: u32,
-    lambda: u32,
-    single_mutation_mode: bool,
-    adaptive_mutation: bool,
-    tile_culling: bool,
-    rasterize_wg: [u32; 2],
-    gpu_batch_iters: u32,
-) -> crate::mutation_params::MutationParams {
-    let mut params = state.mutation_params.clone();
-    params.chain_count = chain_count;
-    params.lambda = lambda;
-    params.single_mutation_mode = single_mutation_mode;
-    params.adaptive_mutation = adaptive_mutation;
-    params.tile_culling = tile_culling;
-    params.rasterize_wg = rasterize_wg;
-    params.gpu_batch_iters = gpu_batch_iters;
-    params
-}
-
-fn auto_label(chain_count: u32, lambda: u32, single_mutation_mode: bool, adaptive_mutation: bool, tile_culling: bool, rasterize_wg: [u32; 2], gpu_batch_iters: u32, resolution: u32) -> String {
-    let mode = if single_mutation_mode { "single" } else { "multi" };
-    let lambda_str = if lambda > 1 { format!("-{}\u{03BB}", lambda) } else { String::new() };
-    let adaptive_str = if adaptive_mutation { "-adaptive" } else { "" };
-    let tile_str = if tile_culling { "-tiled" } else { "" };
+fn auto_label(params: &MutationParams, resolution: u32) -> String {
+    let mode = if params.single_mutation_mode { "single" } else { "multi" };
+    let lambda_str = if params.lambda > 1 { format!("-{}\u{03BB}", params.lambda) } else { String::new() };
+    let adaptive_str = if params.adaptive_mutation { "-adaptive" } else { "" };
+    let tile_str = if params.tile_culling { "-tiled" } else { "" };
     let defaults = MutationParams::default();
-    let wg_str = format!("-wg{}x{}", rasterize_wg[0], rasterize_wg[1]);
-    let batch_str = if gpu_batch_iters != defaults.gpu_batch_iters {
-        format!("-b{}", gpu_batch_iters)
+    let wg_str = format!("-wg{}x{}", params.rasterize_wg[0], params.rasterize_wg[1]);
+    let batch_str = if params.gpu_batch_iters != defaults.gpu_batch_iters {
+        format!("-b{}", params.gpu_batch_iters)
     } else {
         String::new()
     };
     let res_str = format!("-{}px", resolution);
-    format!("{}c{}-{}{}{}{}{}{}", chain_count, lambda_str, mode, adaptive_str, tile_str, wg_str, batch_str, res_str)
+    format!("{}c{}-{}{}{}{}{}{}", params.chain_count, lambda_str, mode, adaptive_str, tile_str, wg_str, batch_str, res_str)
 }
 
 fn deduplicate_label(base: &str, state: &ViewerState) -> String {
@@ -186,36 +156,26 @@ fn deduplicate_label(base: &str, state: &ViewerState) -> String {
 }
 
 #[component]
-fn ConfigureSection(state: RwSignal<ViewerState>) -> impl IntoView {
+fn ConfigureSection(
+    state: RwSignal<ViewerState>,
+    bench_params: RwSignal<MutationParams>,
+    bench_resolution: RwSignal<u32>,
+) -> impl IntoView {
     let selected_snap = RwSignal::new(0usize);
     let duration_secs = RwSignal::new(60u32);
     let label = RwSignal::new(String::new());
-    let defaults = MutationParams::default();
-    let chain_exp = RwSignal::new(defaults.chain_count.max(1).ilog2());
-    let lambda_exp = RwSignal::new(defaults.lambda.max(1).ilog2());
-    let single_mutation = RwSignal::new(defaults.single_mutation_mode);
-    let adaptive_mutation = RwSignal::new(defaults.adaptive_mutation);
-    let tile_culling = RwSignal::new(defaults.tile_culling);
-    let default_wg_idx = WG_OPTIONS.iter().position(|w| *w == defaults.rasterize_wg).unwrap_or(0);
-    let rasterize_wg_idx = RwSignal::new(default_wg_idx);
-    let batch_iters = RwSignal::new(defaults.gpu_batch_iters);
-    let resolution = RwSignal::new(state.get_untracked().target_resolution);
+    let resolution = bench_resolution;
+    let params_collapsed = RwSignal::new(true);
 
     let build_request = move || -> Option<(BenchmarkRequest, String)> {
         let s = state.get();
         let idx = selected_snap.get();
         let snap = s.benchmark_snapshots.get(idx)?;
-        let cc = chains_from_exp(chain_exp.get());
-        let lam = lambda_from_exp(lambda_exp.get());
-        let sm = single_mutation.get();
-        let am = adaptive_mutation.get();
-        let tc = tile_culling.get();
-        let wg = WG_OPTIONS[rasterize_wg_idx.get()];
-        let bi = batch_iters.get();
+        let mut params = bench_params.get();
+        params.sanitize();
         let res = resolution.get();
-        let params = build_benchmark_params(&s, cc, lam, sm, am, tc, wg, bi);
         let lbl = label.get();
-        let base = if lbl.trim().is_empty() { auto_label(cc, lam, sm, am, tc, wg, bi, res) } else { lbl.trim().to_string() };
+        let base = if lbl.trim().is_empty() { auto_label(&params, res) } else { lbl.trim().to_string() };
         let lbl = deduplicate_label(&base, &s);
         let req = BenchmarkRequest {
             drawing_json: snap.drawing_json.clone(),
@@ -254,6 +214,11 @@ fn ConfigureSection(state: RwSignal<ViewerState>) -> impl IntoView {
 
     let has_snapshots = move || !state.get().benchmark_snapshots.is_empty();
     let is_active = move || { let s = state.get(); s.benchmark_active || s.benchmark_initializing };
+
+    let copy_from_live = move |_| {
+        bench_params.set(state.get_untracked().mutation_params.clone());
+        resolution.set(state.get_untracked().target_resolution);
+    };
 
     view! {
         <div class="bench-section">
@@ -318,117 +283,6 @@ fn ConfigureSection(state: RwSignal<ViewerState>) -> impl IntoView {
                     />
                 </div>
                 <div class="bench-config-row">
-                    <label class="bench-config-label">"Chains"</label>
-                    <input
-                        type="range"
-                        class="mutation-slider"
-                        min="0" max="10" step="1"
-                        prop:value={move || chain_exp.get().to_string()}
-                        on:input={move |ev| {
-                            if let Ok(v) = event_target_value(&ev).parse::<u32>() {
-                                chain_exp.set(v);
-                            }
-                        }}
-                    />
-                    <span class="mutation-value">{move || chains_from_exp(chain_exp.get()).to_string()}</span>
-                </div>
-                <div class="bench-config-row">
-                    <label class="bench-config-label">"Lambda"</label>
-                    <input
-                        type="range"
-                        class="mutation-slider"
-                        min="0" max="6" step="1"
-                        prop:value={move || lambda_exp.get().to_string()}
-                        on:input={move |ev| {
-                            if let Ok(v) = event_target_value(&ev).parse::<u32>() {
-                                lambda_exp.set(v);
-                            }
-                        }}
-                    />
-                    <span class="mutation-value">{move || {
-                        let lam = lambda_from_exp(lambda_exp.get());
-                        if lam == 1 { "1 (1+1)".to_string() } else { format!("{} (1+\u{03BB})", lam) }
-                    }}</span>
-                </div>
-                <div class="bench-config-row">
-                    <label class="bench-config-label">"Mutation"</label>
-                    <label class="bench-checkbox-label">
-                        <input
-                            type="checkbox"
-                            prop:checked={move || single_mutation.get()}
-                            on:change={move |_| {
-                                single_mutation.set(!single_mutation.get_untracked());
-                            }}
-                        />
-                        "Single mutation per iteration"
-                    </label>
-                </div>
-                <div class="bench-config-row">
-                    <label class="bench-config-label">"Adaptive"</label>
-                    <label class="bench-checkbox-label">
-                        <input
-                            type="checkbox"
-                            prop:checked={move || adaptive_mutation.get()}
-                            on:change={move |_| {
-                                adaptive_mutation.set(!adaptive_mutation.get_untracked());
-                            }}
-                        />
-                        "Adaptive mutation scale (\u{03BB}>1 offspring only)"
-                    </label>
-                </div>
-                <div class="bench-config-row">
-                    <label class="bench-config-label">"Tile cull"</label>
-                    <label class="bench-checkbox-label">
-                        <input
-                            type="checkbox"
-                            prop:checked={move || tile_culling.get()}
-                            on:change={move |_| {
-                                tile_culling.set(!tile_culling.get_untracked());
-                            }}
-                        />
-                        "Spatial tile culling (polygon binning)"
-                    </label>
-                </div>
-                <div class="bench-config-row">
-                    <label class="bench-config-label">"Workgroup"</label>
-                    <select
-                        class="bench-select"
-                        prop:value={move || rasterize_wg_idx.get().to_string()}
-                        on:change={move |ev| {
-                            if let Ok(v) = event_target_value(&ev).parse::<usize>() {
-                                rasterize_wg_idx.set(v);
-                            }
-                        }}
-                    >
-                        {WG_OPTIONS.iter().enumerate().map(|(i, wg)| {
-                            let label_text = wg_label(wg);
-                            let val = i.to_string();
-                            view! {
-                                <option value={val}>{label_text}</option>
-                            }
-                        }).collect::<Vec<_>>()}
-                    </select>
-                    <span class="mutation-value">{move || {
-                        let wg = WG_OPTIONS[rasterize_wg_idx.get()];
-                        format!("{} threads", wg[0] * wg[1])
-                    }}</span>
-                </div>
-                <div class="bench-config-row">
-                    <label class="bench-config-label">"Batch iters"</label>
-                    <input
-                        type="range"
-                        class="mutation-slider"
-                        min="0" max="12" step="1"
-                        prop:value={move || batch_iters.get().max(1).ilog2().to_string()}
-                        on:input={move |ev| {
-                            if let Ok(exp) = event_target_value(&ev).parse::<u32>() {
-                                batch_iters.set(1u32 << exp);
-                            }
-                        }}
-                    />
-                    <span class="mutation-value">{move || batch_iters.get().to_string()}</span>
-                </div>
-                <div class="bench-config-row">
                     <label class="bench-config-label">"Resolution"</label>
                     <select
                         class="resolution-select"
@@ -448,7 +302,39 @@ fn ConfigureSection(state: RwSignal<ViewerState>) -> impl IntoView {
                         }).collect::<Vec<_>>()}
                     </select>
                 </div>
+                <div class="bench-config-row">
+                    <button
+                        class="btn btn-secondary btn-sm"
+                        on:click={copy_from_live}
+                        disabled={move || !state.get().init_received}
+                    >
+                        "Copy from live"
+                    </button>
+                </div>
             </div>
+
+            // Collapsible evolution parameters
+            <div class="mutation-panel" style="margin-top: 8px;">
+                <div class="mutation-panel-header" on:click={move |_| params_collapsed.set(!params_collapsed.get())}>
+                    <span class="mutation-panel-toggle">{move || if params_collapsed.get() { "\u{25B6}" } else { "\u{25BC}" }}</span>
+                    <span class="mutation-panel-title">"Evolution Parameters"</span>
+                </div>
+                {move || {
+                    if params_collapsed.get() {
+                        view! { <div></div> }.into_any()
+                    } else {
+                        view! {
+                            <div class="mutation-panel-body">
+                                <ParamsEditor params={bench_params}/>
+                                <div class="mutation-section mutation-section-actions">
+                                    <button class="btn btn-secondary" on:click={move |_| bench_params.set(MutationParams::default())}>"Reset to Defaults"</button>
+                                </div>
+                            </div>
+                        }.into_any()
+                    }
+                }}
+            </div>
+
             <div class="bench-config-actions">
                 <button
                     class="btn btn-secondary"
@@ -721,7 +607,11 @@ fn sort_results(items: &mut [(usize, BenchmarkResult)], col: SortCol, ascending:
 }
 
 #[component]
-fn ResultsSection(state: RwSignal<ViewerState>) -> impl IntoView {
+fn ResultsSection(
+    state: RwSignal<ViewerState>,
+    bench_params: RwSignal<MutationParams>,
+    bench_resolution: RwSignal<u32>,
+) -> impl IntoView {
     let clear_results = move |_| {
         let msg = serde_json::json!({ "type": "clear_benchmarks" });
         send_ws_json(&msg);
@@ -738,6 +628,7 @@ fn ResultsSection(state: RwSignal<ViewerState>) -> impl IntoView {
     let results_signal = Signal::derive(move || state.get().benchmark_results.clone());
     let hidden_ids: RwSignal<HashSet<String>> = RwSignal::new(HashSet::new());
     let hidden_signal = Signal::derive(move || hidden_ids.get());
+    let expanded_ids: RwSignal<HashSet<String>> = RwSignal::new(HashSet::new());
 
     let toggle_visibility = move |id: String| {
         hidden_ids.update(|set| {
@@ -745,6 +636,19 @@ fn ResultsSection(state: RwSignal<ViewerState>) -> impl IntoView {
                 set.insert(id);
             }
         });
+    };
+
+    let toggle_expanded = move |id: String| {
+        expanded_ids.update(|set| {
+            if !set.remove(&id) {
+                set.insert(id);
+            }
+        });
+    };
+
+    let apply_params = move |params: MutationParams, resolution: u32| {
+        bench_params.set(params);
+        bench_resolution.set(resolution);
     };
 
     let sort_col: RwSignal<SortCol> = RwSignal::new(SortCol::None);
@@ -801,16 +705,25 @@ fn ResultsSection(state: RwSignal<ViewerState>) -> impl IntoView {
                 // Build table body: grouped when unsorted, flat when sorted
                 let body_rows = if is_sorted {
                     // Flat sorted — no group headers
-                    indexed.iter().map(|(i, r)| {
+                    indexed.iter().flat_map(|(i, r)| {
                         let rid = r.id.clone();
                         let rid2 = r.id.clone();
+                        let rid4 = r.id.clone();
+                        let r_params = r.params.clone();
+                        let r_res = r.resolution;
                         let del = move |_| delete_result(rid.clone());
                         let toggle = move |_: leptos::ev::MouseEvent| toggle_visibility(rid2.clone());
+                        let expand = move |_: leptos::ev::MouseEvent| toggle_expanded(rid4.clone());
+                        let apply = move |_: leptos::ev::MouseEvent| apply_params(r_params.clone(), r_res);
                         let is_hidden = {
                             let rid3 = r.id.clone();
                             Signal::derive(move || hidden_ids.get().contains(&rid3))
                         };
-                        result_row(*i, r, del, toggle, is_hidden).into_any()
+                        let is_expanded = {
+                            let rid5 = r.id.clone();
+                            Signal::derive(move || expanded_ids.get().contains(&rid5))
+                        };
+                        result_row(*i, r, del, toggle, is_hidden, apply, expand, is_expanded)
                     }).collect::<Vec<_>>()
                 } else {
                     // Grouped by snapshot_id
@@ -871,13 +784,22 @@ fn ResultsSection(state: RwSignal<ViewerState>) -> impl IntoView {
                         for (i, r) in &group_results {
                             let rid = r.id.clone();
                             let rid2 = r.id.clone();
+                            let rid4 = r.id.clone();
+                            let r_params = r.params.clone();
+                            let r_res = r.resolution;
                             let del = move |_| delete_result(rid.clone());
                             let toggle = move |_: leptos::ev::MouseEvent| toggle_visibility(rid2.clone());
+                            let expand = move |_: leptos::ev::MouseEvent| toggle_expanded(rid4.clone());
+                            let apply = move |_: leptos::ev::MouseEvent| apply_params(r_params.clone(), r_res);
                             let is_hidden = {
                                 let rid3 = r.id.clone();
                                 Signal::derive(move || hidden_ids.get().contains(&rid3))
                             };
-                            rows.push(result_row(*i, r, del, toggle, is_hidden).into_any());
+                            let is_expanded = {
+                                let rid5 = r.id.clone();
+                                Signal::derive(move || expanded_ids.get().contains(&rid5))
+                            };
+                            rows.extend(result_row(*i, r, del, toggle, is_hidden, apply, expand, is_expanded));
                         }
                     }
                     rows
@@ -1095,16 +1017,102 @@ fn import_results_from_file() {
     input.click();
 }
 
-fn result_row<F, G>(
+/// Format a probability as compact "1:N" or "OFF".
+fn fmt_prob(p: f32) -> String {
+    if p <= 0.0 {
+        "off".to_string()
+    } else {
+        let n = (1.0 / p).round() as u32;
+        if n <= 1 { "1:1".to_string() } else { format!("1:{}", n) }
+    }
+}
+
+/// Render a single param value, highlighted if it differs from default.
+fn pv(label: &str, value: String, changed: bool) -> AnyView {
+    if changed {
+        view! { <span class="bench-param-changed">{format!("{} {}", label, value)}</span> }.into_any()
+    } else {
+        view! { <span class="bench-param-default">{format!("{} {}", label, value)}</span> }.into_any()
+    }
+}
+
+/// Build params detail view with non-default values highlighted.
+fn params_detail_view(p: &MutationParams, resolution: u32) -> impl IntoView {
+    let d = MutationParams::default();
+    let is_all_default = *p == d;
+
+    let mode_str = if p.single_mutation_mode { "single" } else { "multi" };
+    let d_mode_str = if d.single_mutation_mode { "single" } else { "multi" };
+
+    view! {
+        <div class="bench-params-detail">
+            <div class="bench-params-row">
+                {pv("Mode", mode_str.to_string(), mode_str != d_mode_str)}
+                {pv("Adaptive", if p.adaptive_mutation { "on" } else { "off" }.to_string(), p.adaptive_mutation != d.adaptive_mutation)}
+                {pv("Tiled", if p.tile_culling { "on" } else { "off" }.to_string(), p.tile_culling != d.tile_culling)}
+                {pv("Chains", p.chain_count.to_string(), p.chain_count != d.chain_count)}
+                {pv("Lambda", p.lambda.to_string(), p.lambda != d.lambda)}
+                {pv("Batch", p.gpu_batch_iters.to_string(), p.gpu_batch_iters != d.gpu_batch_iters)}
+                {pv("WG", format!("{}x{}", p.rasterize_wg[0], p.rasterize_wg[1]), p.rasterize_wg != d.rasterize_wg)}
+                {pv("Res", format!("{}px", resolution), false)}
+            </div>
+            <div class="bench-params-row">
+                {pv("Polygons", format!("{}\u{2013}{}", p.min_polygons, p.max_polygons), p.min_polygons != d.min_polygons || p.max_polygons != d.max_polygons)}
+                {pv("Alpha", format!("{}\u{2013}{}", p.min_alpha, p.max_alpha), p.min_alpha != d.min_alpha || p.max_alpha != d.max_alpha)}
+            </div>
+            <div class="bench-params-row">
+                <span class="bench-params-group">"Structure: "</span>
+                {pv("add", fmt_prob(p.add_polygon_prob), p.add_polygon_prob != d.add_polygon_prob)}
+                {pv("remove", fmt_prob(p.remove_polygon_prob), p.remove_polygon_prob != d.remove_polygon_prob)}
+                {pv("reorder", fmt_prob(p.reorder_polygon_prob), p.reorder_polygon_prob != d.reorder_polygon_prob)}
+            </div>
+            <div class="bench-params-row">
+                <span class="bench-params-group">"Movement: "</span>
+                {pv("offset", fmt_prob(p.offset_polygon_prob), p.offset_polygon_prob != d.offset_polygon_prob)}
+                {pv("move", fmt_prob(p.move_point_prob), p.move_point_prob != d.move_point_prob)}
+                {pv("micro", fmt_prob(p.micro_adjust_prob), p.micro_adjust_prob != d.micro_adjust_prob)}
+            </div>
+            <div class="bench-params-row">
+                <span class="bench-params-group">"Color: "</span>
+                {pv("change", fmt_prob(p.change_color_prob), p.change_color_prob != d.change_color_prob)}
+                {pv("lighten", fmt_prob(p.lighten_color_prob), p.lighten_color_prob != d.lighten_color_prob)}
+                {pv("darken", fmt_prob(p.darken_color_prob), p.darken_color_prob != d.darken_color_prob)}
+            </div>
+            <div class="bench-params-row">
+                <span class="bench-params-group">"Deltas: "</span>
+                {pv("move", format!("{:.3}", p.move_point_max_delta), p.move_point_max_delta != d.move_point_max_delta)}
+                {pv("micro", format!("{:.3}", p.micro_adjust_delta), p.micro_adjust_delta != d.micro_adjust_delta)}
+                {pv("newpt", format!("{:.3}", p.new_point_max_distance), p.new_point_max_distance != d.new_point_max_distance)}
+                {pv("offset", format!("{:.3}", p.offset_polygon_magnitude), p.offset_polygon_magnitude != d.offset_polygon_magnitude)}
+            </div>
+            <div class="bench-params-row">
+                <span class="bench-params-group">"Crossover: "</span>
+                {pv("prob", fmt_prob(p.crossover_prob), p.crossover_prob != d.crossover_prob)}
+                {pv("spatial", format!("{:.2}", p.spatial_crossover_weight), p.spatial_crossover_weight != d.spatial_crossover_weight)}
+                {pv("tournament", p.tournament_size.to_string(), p.tournament_size != d.tournament_size)}
+            </div>
+            {is_all_default.then(|| view! {
+                <div class="bench-params-row bench-params-all-default">"(all defaults)"</div>
+            })}
+        </div>
+    }
+}
+
+fn result_row<F, G, H, J>(
     i: usize,
     r: &BenchmarkResult,
     on_delete: F,
     on_toggle: G,
     is_hidden: Signal<bool>,
-) -> impl IntoView
+    on_apply: H,
+    on_expand: J,
+    is_expanded: Signal<bool>,
+) -> Vec<AnyView>
 where
     F: Fn(leptos::ev::MouseEvent) + 'static,
     G: Fn(leptos::ev::MouseEvent) + 'static,
+    H: Fn(leptos::ev::MouseEvent) + 'static,
+    J: Fn(leptos::ev::MouseEvent) + 'static,
 {
     let color = color_for_index(i);
     let actual = if r.actual_duration_secs > 0.0 { r.actual_duration_secs } else { r.duration_secs as f32 };
@@ -1134,38 +1142,56 @@ where
 
     let color_owned = color.to_string();
     let res_str = if r.resolution > 0 { format!("{}px", r.resolution) } else { "-".to_string() };
-    view! {
-        <tr class:bench-row-hidden={move || is_hidden.get()}>
-            <td>
-                <span
-                    class="bench-color-dot bench-color-dot-toggle"
-                    style={move || {
-                        if is_hidden.get() {
-                            format!("background: {}; opacity: 0.25", color_owned)
-                        } else {
-                            format!("background: {}", color_owned)
-                        }
-                    }}
-                    on:click={on_toggle}
-                    title="Toggle chart visibility"
-                />
-            </td>
-            <td class="bench-cell-label">{r.label.clone()}</td>
-            <td>{res_str}</td>
-            <td>{r.chain_count.to_string()}</td>
-            <td>{r.lambda.to_string()}</td>
-            <td>{r.gpu_batch_iters.to_string()}</td>
-            <td>{duration_str}</td>
-            <td>{format!("{:.2}%", r.start_fitness)}</td>
-            <td class="bench-cell-fitness">{format!("{:.2}%", r.final_fitness)}</td>
-            <td>{r.total_improvements.to_string()}</td>
-            <td>{format!("{:.2}", r.improvements_per_sec)}</td>
-            <td>{evals_str}</td>
-            <td>
-                <button class="btn-icon btn-icon-danger" on:click={on_delete} title="Delete result">
-                    "\u{2715}"
-                </button>
-            </td>
-        </tr>
-    }
+    let detail_view = params_detail_view(&r.params, r.resolution);
+    let has_params = r.params != MutationParams::default() || r.resolution > 0;
+
+    vec![
+        view! {
+            <tr class:bench-row-hidden={move || is_hidden.get()}>
+                <td>
+                    <span
+                        class="bench-color-dot bench-color-dot-toggle"
+                        style={move || {
+                            if is_hidden.get() {
+                                format!("background: {}; opacity: 0.25", color_owned)
+                            } else {
+                                format!("background: {}", color_owned)
+                            }
+                        }}
+                        on:click={on_toggle}
+                        title="Toggle chart visibility"
+                    />
+                </td>
+                <td class="bench-cell-label">{r.label.clone()}</td>
+                <td>{res_str}</td>
+                <td>{r.chain_count.to_string()}</td>
+                <td>{r.lambda.to_string()}</td>
+                <td>{r.gpu_batch_iters.to_string()}</td>
+                <td>{duration_str}</td>
+                <td>{format!("{:.2}%", r.start_fitness)}</td>
+                <td class="bench-cell-fitness">{format!("{:.2}%", r.final_fitness)}</td>
+                <td>{r.total_improvements.to_string()}</td>
+                <td>{format!("{:.2}", r.improvements_per_sec)}</td>
+                <td>{evals_str}</td>
+                <td class="bench-cell-actions">
+                    <button class="btn-icon" on:click={on_expand} title="Show parameters">
+                        {move || if is_expanded.get() { "\u{25BC}" } else { "\u{2139}" }}
+                    </button>
+                    <button class="btn-icon" on:click={on_apply} title="Copy parameters to benchmark config" disabled={move || !has_params}>
+                        "\u{21BB}"
+                    </button>
+                    <button class="btn-icon btn-icon-danger" on:click={on_delete} title="Delete result">
+                        "\u{2715}"
+                    </button>
+                </td>
+            </tr>
+        }.into_any(),
+        view! {
+            <tr class="bench-detail-row" style={move || if is_expanded.get() { "" } else { "display:none" }}>
+                <td colspan="13">
+                    {detail_view}
+                </td>
+            </tr>
+        }.into_any(),
+    ]
 }

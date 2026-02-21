@@ -72,14 +72,34 @@ pub fn MutationPanel(state: RwSignal<ViewerState>) -> impl IntoView {
 
 #[component]
 fn MutationPanelBody(state: RwSignal<ViewerState>) -> impl IntoView {
-    let controls_disabled = move || {
+    let disabled = Signal::derive(move || {
         let s = state.get();
         !s.connected || s.engine_loading || !s.init_received
-    };
+    });
+
+    // Local params signal — initialized from state, synced via effect
+    let params = RwSignal::new(state.get_untracked().mutation_params.clone());
+
+    // Sync state → local params when server pushes updates (e.g. init)
+    Effect::new(move |_| {
+        let server_params = state.get().mutation_params.clone();
+        if params.get_untracked() != server_params {
+            params.set(server_params);
+        }
+    });
+
+    // When local params change via slider, push to state + WS
+    let on_change = Callback::new(move |_: ()| {
+        let p = params.get_untracked();
+        state.update(|s| s.mutation_params = p.clone());
+        send_params(&p);
+    });
 
     let on_reset = move |_| {
         send_ws_json(&serde_json::json!({ "type": "reset_params" }));
-        state.update(|s| s.mutation_params = MutationParams::default());
+        let defaults = MutationParams::default();
+        params.set(defaults.clone());
+        state.update(|s| s.mutation_params = defaults);
     };
 
     let on_resolution_change = move |ev: web_sys::Event| {
@@ -102,7 +122,7 @@ fn MutationPanelBody(state: RwSignal<ViewerState>) -> impl IntoView {
                     <label class="mutation-label">"Internal resolution"</label>
                     <select
                         class="resolution-select"
-                        disabled={controls_disabled}
+                        disabled={move || disabled.get()}
                         on:change={on_resolution_change}
                         prop:value={move || state.get().target_resolution.to_string()}
                     >
@@ -116,127 +136,162 @@ fn MutationPanelBody(state: RwSignal<ViewerState>) -> impl IntoView {
                     </select>
                 </div>
             </div>
-            <div class="mutation-section">
-                <div class="mutation-section-title">"Mode"</div>
-                <div class="mutation-row">
-                    <label class="bench-checkbox-label">
-                        <input
-                            type="checkbox"
-                            prop:checked={move || state.get().mutation_params.single_mutation_mode}
-                            on:change={move |_| {
-                                state.update(|s| {
-                                    s.mutation_params.single_mutation_mode = !s.mutation_params.single_mutation_mode;
-                                });
-                                send_params(&state.get_untracked().mutation_params);
-                            }}
-                        />
-                        "Single mutation per iteration"
-                    </label>
-                </div>
-                <div class="mutation-row">
-                    <label class="bench-checkbox-label">
-                        <input
-                            type="checkbox"
-                            prop:checked={move || state.get().mutation_params.adaptive_mutation}
-                            on:change={move |_| {
-                                state.update(|s| {
-                                    s.mutation_params.adaptive_mutation = !s.mutation_params.adaptive_mutation;
-                                });
-                                send_params(&state.get_untracked().mutation_params);
-                            }}
-                        />
-                        "Adaptive mutation scale (\u{03BB}>1 offspring only)"
-                    </label>
-                </div>
-                <div class="mutation-row">
-                    <label class="bench-checkbox-label">
-                        <input
-                            type="checkbox"
-                            prop:checked={move || state.get().mutation_params.tile_culling}
-                            on:change={move |_| {
-                                state.update(|s| {
-                                    s.mutation_params.tile_culling = !s.mutation_params.tile_culling;
-                                });
-                                send_params(&state.get_untracked().mutation_params);
-                            }}
-                        />
-                        "Tile culling (spatial polygon binning)"
-                    </label>
-                </div>
-            </div>
-            <div class="mutation-section">
-                <div class="mutation-section-title">"Polygons"</div>
-                <IntSlider state={state} label="Min polygons" get={|mp| mp.min_polygons as i64} set={|mp, v| { mp.min_polygons = v as u32; if mp.max_polygons < mp.min_polygons { mp.max_polygons = mp.min_polygons; } }} min=1 max=1000 step=1/>
-                <IntSlider state={state} label="Max polygons" get={|mp| mp.max_polygons as i64} set={|mp, v| { mp.max_polygons = v as u32; if mp.min_polygons > mp.max_polygons { mp.min_polygons = mp.max_polygons; } }} min=1 max=1000 step=1/>
-            </div>
-            <div class="mutation-section">
-                <div class="mutation-section-title">"Structure"</div>
-                <ProbSlider state={state} label="Add polygon" field="add_polygon_prob"/>
-                <ProbSlider state={state} label="Remove polygon" field="remove_polygon_prob"/>
-                <ProbSlider state={state} label="Reorder polygon" field="reorder_polygon_prob"/>
-            </div>
-            <div class="mutation-section">
-                <div class="mutation-section-title">"Movement"</div>
-                <ProbSlider state={state} label="Offset polygon" field="offset_polygon_prob"/>
-                <ProbSlider state={state} label="Move point" field="move_point_prob"/>
-                <ProbSlider state={state} label="Micro adjust" field="micro_adjust_prob"/>
-            </div>
-            <div class="mutation-section">
-                <div class="mutation-section-title">"Color"</div>
-                <ProbSlider state={state} label="Change color" field="change_color_prob"/>
-                <ProbSlider state={state} label="Lighten color" field="lighten_color_prob"/>
-                <ProbSlider state={state} label="Darken color" field="darken_color_prob"/>
-            </div>
-            <div class="mutation-section">
-                <div class="mutation-section-title">"Deltas"</div>
-                <DeltaSlider state={state} label="Move point delta" field="move_point_max_delta" min=0.001 max=0.5 step=0.001/>
-                <DeltaSlider state={state} label="Micro adjust delta" field="micro_adjust_delta" min=0.001 max=0.1 step=0.001/>
-                <DeltaSlider state={state} label="New point distance" field="new_point_max_distance" min=0.001 max=0.2 step=0.001/>
-                <DeltaSlider state={state} label="Offset magnitude" field="offset_polygon_magnitude" min=0.001 max=0.5 step=0.001/>
-            </div>
-            <div class="mutation-section">
-                <div class="mutation-section-title">"Crossover"</div>
-                <ProbSlider state={state} label="Crossover prob" field="crossover_prob"/>
-                <DeltaSlider state={state} label="Spatial weight" field="spatial_crossover_weight" min=0.0 max=1.0 step=0.05/>
-                <IntSlider state={state} label="Tournament size" get={|mp| mp.tournament_size as i64} set={|mp, v| { mp.tournament_size = v as u32; }} min=1 max=16 step=1/>
-                <Pow2Slider state={state} label="Chains" get={|mp| mp.chain_count} set={|mp, v| { mp.chain_count = v; }} min_exp=0 max_exp=10/>
-                <Pow2Slider state={state} label="Lambda (\u{03BB})" get={|mp| mp.lambda} set={|mp, v| { mp.lambda = v; }} min_exp=0 max_exp=6/>
-                <Pow2Slider state={state} label="Batch iters" get={|mp| mp.gpu_batch_iters} set={|mp, v| { mp.gpu_batch_iters = v; }} min_exp=0 max_exp=12/>
-                <div class="mutation-row">
-                    <label class="mutation-label">"Rasterize WG"</label>
-                    <select
-                        class="resolution-select"
-                        prop:value={move || {
-                            let wg = state.get().mutation_params.rasterize_wg;
-                            format!("{}x{}", wg[0], wg[1])
-                        }}
-                        on:change={move |ev: web_sys::Event| {
-                            let target = ev.target().unwrap();
-                            let select: web_sys::HtmlSelectElement = target.dyn_into().unwrap();
-                            let val = select.value();
-                            let parts: Vec<u32> = val.split('x').filter_map(|s| s.parse().ok()).collect();
-                            if parts.len() == 2 {
-                                state.update(|s| s.mutation_params.rasterize_wg = [parts[0], parts[1]]);
-                                send_params(&state.get_untracked().mutation_params);
-                            }
-                        }}
-                    >
-                        <option value="32x16">"32x16 (512 threads)"</option>
-                        <option value="16x16">"16x16 (256 threads)"</option>
-                        <option value="32x8">"32x8 (256 threads)"</option>
-                        <option value="16x8">"16x8 (128 threads)"</option>
-                        <option value="8x8">"8x8 (64 threads)"</option>
-                    </select>
-                </div>
-            </div>
-            <div class="mutation-section">
-                <div class="mutation-section-title">"Alpha"</div>
-                <IntSlider state={state} label="Min alpha" get={|mp| mp.min_alpha as i64} set={|mp, v| { mp.min_alpha = v as u8; if mp.max_alpha < mp.min_alpha { mp.max_alpha = mp.min_alpha; } }} min=0 max=255 step=1/>
-                <IntSlider state={state} label="Max alpha" get={|mp| mp.max_alpha as i64} set={|mp, v| { mp.max_alpha = v as u8; if mp.min_alpha > mp.max_alpha { mp.min_alpha = mp.max_alpha; } }} min=0 max=255 step=1/>
-            </div>
+            <ParamsEditor params={params} on_change={on_change} disabled={disabled}/>
             <div class="mutation-section mutation-section-actions">
-                <button class="btn btn-secondary" disabled={controls_disabled} on:click={on_reset}>"Reset to Defaults"</button>
+                <button class="btn btn-secondary" disabled={move || disabled.get()} on:click={on_reset}>"Reset to Defaults"</button>
             </div>
+        </div>
+    }
+}
+
+/// Reusable editor for all MutationParams fields.
+/// Used by both the main mutation panel and the benchmark configuration page.
+#[component]
+pub fn ParamsEditor(
+    params: RwSignal<MutationParams>,
+    #[prop(optional)] on_change: Option<Callback<()>>,
+    #[prop(optional)] disabled: Option<Signal<bool>>,
+) -> impl IntoView {
+    let notify = move || {
+        if let Some(cb) = on_change {
+            cb.run(());
+        }
+    };
+
+    let is_disabled = move || disabled.map_or(false, |d| d.get());
+
+    view! {
+        <div class="mutation-section">
+            <div class="mutation-section-title">"Mode"</div>
+            <div class="mutation-row">
+                <label class="bench-checkbox-label">
+                    <input
+                        type="checkbox"
+                        disabled={move || is_disabled()}
+                        prop:checked={move || params.get().single_mutation_mode}
+                        on:change={move |_| {
+                            params.update(|p| p.single_mutation_mode = !p.single_mutation_mode);
+                            notify();
+                        }}
+                    />
+                    "Single mutation per iteration"
+                </label>
+            </div>
+            <div class="mutation-row">
+                <label class="bench-checkbox-label">
+                    <input
+                        type="checkbox"
+                        disabled={move || is_disabled()}
+                        prop:checked={move || params.get().adaptive_mutation}
+                        on:change={move |_| {
+                            params.update(|p| p.adaptive_mutation = !p.adaptive_mutation);
+                            notify();
+                        }}
+                    />
+                    "Adaptive mutation scale (\u{03BB}>1 offspring only)"
+                </label>
+            </div>
+            <div class="mutation-row">
+                <label class="bench-checkbox-label">
+                    <input
+                        type="checkbox"
+                        disabled={move || is_disabled()}
+                        prop:checked={move || params.get().tile_culling}
+                        on:change={move |_| {
+                            params.update(|p| p.tile_culling = !p.tile_culling);
+                            notify();
+                        }}
+                    />
+                    "Tile culling (spatial polygon binning)"
+                </label>
+            </div>
+        </div>
+        <div class="mutation-section">
+            <div class="mutation-section-title">"Polygons"</div>
+            <IntSlider params={params} on_change={on_change} label="Min polygons" get={|mp| mp.min_polygons as i64} set={|mp, v| { mp.min_polygons = v as u32; if mp.max_polygons < mp.min_polygons { mp.max_polygons = mp.min_polygons; } }} min=1 max=1000 step=1/>
+            <IntSlider params={params} on_change={on_change} label="Max polygons" get={|mp| mp.max_polygons as i64} set={|mp, v| { mp.max_polygons = v as u32; if mp.min_polygons > mp.max_polygons { mp.min_polygons = mp.max_polygons; } }} min=1 max=1000 step=1/>
+        </div>
+        <div class="mutation-section">
+            <div class="mutation-section-title">"Structure"</div>
+            <ProbSlider params={params} on_change={on_change} label="Add polygon" field="add_polygon_prob"/>
+            <ProbSlider params={params} on_change={on_change} label="Remove polygon" field="remove_polygon_prob"/>
+            <ProbSlider params={params} on_change={on_change} label="Reorder polygon" field="reorder_polygon_prob"/>
+        </div>
+        <div class="mutation-section">
+            <div class="mutation-section-title">"Movement"</div>
+            <ProbSlider params={params} on_change={on_change} label="Offset polygon" field="offset_polygon_prob"/>
+            <ProbSlider params={params} on_change={on_change} label="Move point" field="move_point_prob"/>
+            <ProbSlider params={params} on_change={on_change} label="Micro adjust" field="micro_adjust_prob"/>
+        </div>
+        <div class="mutation-section">
+            <div class="mutation-section-title">"Color"</div>
+            <ProbSlider params={params} on_change={on_change} label="Change color" field="change_color_prob"/>
+            <ProbSlider params={params} on_change={on_change} label="Lighten color" field="lighten_color_prob"/>
+            <ProbSlider params={params} on_change={on_change} label="Darken color" field="darken_color_prob"/>
+        </div>
+        <div class="mutation-section">
+            <div class="mutation-section-title">"Deltas"</div>
+            <DeltaSlider params={params} on_change={on_change} label="Move point delta" field="move_point_max_delta" min=0.001 max=0.5 step=0.001/>
+            <DeltaSlider params={params} on_change={on_change} label="Micro adjust delta" field="micro_adjust_delta" min=0.001 max=0.1 step=0.001/>
+            <DeltaSlider params={params} on_change={on_change} label="New point distance" field="new_point_max_distance" min=0.001 max=0.2 step=0.001/>
+            <DeltaSlider params={params} on_change={on_change} label="Offset magnitude" field="offset_polygon_magnitude" min=0.001 max=0.5 step=0.001/>
+        </div>
+        <div class="mutation-section">
+            <div class="mutation-section-title">"Crossover"</div>
+            <ProbSlider params={params} on_change={on_change} label="Crossover prob" field="crossover_prob"/>
+            <DeltaSlider params={params} on_change={on_change} label="Spatial weight" field="spatial_crossover_weight" min=0.0 max=1.0 step=0.05/>
+            <IntSlider params={params} on_change={on_change} label="Tournament size" get={|mp| mp.tournament_size as i64} set={|mp, v| { mp.tournament_size = v as u32; }} min=1 max=16 step=1/>
+            <Pow2Slider params={params} on_change={on_change} label="Chains" get={|mp| mp.chain_count} set={|mp, v| { mp.chain_count = v; }} min_exp=0 max_exp=10/>
+            <Pow2Slider params={params} on_change={on_change} label="Lambda (\u{03BB})" get={|mp| mp.lambda} set={|mp, v| { mp.lambda = v; }} min_exp=0 max_exp=6/>
+            <Pow2Slider params={params} on_change={on_change} label="Batch iters" get={|mp| mp.gpu_batch_iters} set={|mp, v| { mp.gpu_batch_iters = v; }} min_exp=0 max_exp=12/>
+            <WgSelect params={params} on_change={on_change}/>
+        </div>
+        <div class="mutation-section">
+            <div class="mutation-section-title">"Alpha"</div>
+            <IntSlider params={params} on_change={on_change} label="Min alpha" get={|mp| mp.min_alpha as i64} set={|mp, v| { mp.min_alpha = v as u8; if mp.max_alpha < mp.min_alpha { mp.max_alpha = mp.min_alpha; } }} min=0 max=255 step=1/>
+            <IntSlider params={params} on_change={on_change} label="Max alpha" get={|mp| mp.max_alpha as i64} set={|mp, v| { mp.max_alpha = v as u8; if mp.min_alpha > mp.max_alpha { mp.min_alpha = mp.max_alpha; } }} min=0 max=255 step=1/>
+        </div>
+    }
+}
+
+/// Rasterize workgroup size selector.
+#[component]
+fn WgSelect(
+    params: RwSignal<MutationParams>,
+    on_change: Option<Callback<()>>,
+) -> impl IntoView {
+    let notify = move || {
+        if let Some(cb) = on_change {
+            cb.run(());
+        }
+    };
+
+    view! {
+        <div class="mutation-row">
+            <label class="mutation-label">"Rasterize WG"</label>
+            <select
+                class="resolution-select"
+                prop:value={move || {
+                    let wg = params.get().rasterize_wg;
+                    format!("{}x{}", wg[0], wg[1])
+                }}
+                on:change={move |ev: web_sys::Event| {
+                    let target = ev.target().unwrap();
+                    let select: web_sys::HtmlSelectElement = target.dyn_into().unwrap();
+                    let val = select.value();
+                    let parts: Vec<u32> = val.split('x').filter_map(|s| s.parse().ok()).collect();
+                    if parts.len() == 2 {
+                        params.update(|p| p.rasterize_wg = [parts[0], parts[1]]);
+                        notify();
+                    }
+                }}
+            >
+                <option value="32x16">"32x16 (512 threads)"</option>
+                <option value="16x16">"16x16 (256 threads)"</option>
+                <option value="32x8">"32x8 (256 threads)"</option>
+                <option value="16x8">"16x8 (128 threads)"</option>
+                <option value="8x8">"8x8 (64 threads)"</option>
+            </select>
         </div>
     }
 }
@@ -244,7 +299,8 @@ fn MutationPanelBody(state: RwSignal<ViewerState>) -> impl IntoView {
 /// Probability slider with log scale and "1 in N" display.
 #[component]
 fn ProbSlider(
-    state: RwSignal<ViewerState>,
+    params: RwSignal<MutationParams>,
+    on_change: Option<Callback<()>>,
     #[prop(into)] label: String,
     #[prop(into)] field: String,
 ) -> impl IntoView {
@@ -252,13 +308,19 @@ fn ProbSlider(
     let f2 = field.clone();
     let f3 = field.clone();
 
+    let notify = move || {
+        if let Some(cb) = on_change {
+            cb.run(());
+        }
+    };
+
     let on_input = move |ev: web_sys::Event| {
         let target = ev.target().unwrap();
         let input: web_sys::HtmlInputElement = target.dyn_into().unwrap();
         let slider_val: f64 = input.value().parse().unwrap_or(0.0);
         let prob = slider_to_prob(slider_val);
-        state.update(|s| set_prob_field(&mut s.mutation_params, &f1, prob));
-        send_params(&state.get_untracked().mutation_params);
+        params.update(|p| set_prob_field(p, &f1, prob));
+        notify();
     };
 
     view! {
@@ -270,10 +332,10 @@ fn ProbSlider(
                 min="0"
                 max="1000"
                 step="1"
-                prop:value={move || prob_to_slider(get_prob_field(&state.get().mutation_params, &f2)).to_string()}
+                prop:value={move || prob_to_slider(get_prob_field(&params.get(), &f2)).to_string()}
                 on:input={on_input}
             />
-            <span class="mutation-value">{move || format_prob(get_prob_field(&state.get().mutation_params, &f3))}</span>
+            <span class="mutation-value">{move || format_prob(get_prob_field(&params.get(), &f3))}</span>
         </div>
     }
 }
@@ -281,7 +343,8 @@ fn ProbSlider(
 /// Linear delta/magnitude slider.
 #[component]
 fn DeltaSlider(
-    state: RwSignal<ViewerState>,
+    params: RwSignal<MutationParams>,
+    on_change: Option<Callback<()>>,
     #[prop(into)] label: String,
     #[prop(into)] field: String,
     min: f64,
@@ -292,12 +355,18 @@ fn DeltaSlider(
     let f2 = field.clone();
     let f3 = field.clone();
 
+    let notify = move || {
+        if let Some(cb) = on_change {
+            cb.run(());
+        }
+    };
+
     let on_input = move |ev: web_sys::Event| {
         let target = ev.target().unwrap();
         let input: web_sys::HtmlInputElement = target.dyn_into().unwrap();
         let val: f32 = input.value().parse().unwrap_or(0.0);
-        state.update(|s| set_delta_field(&mut s.mutation_params, &f1, val));
-        send_params(&state.get_untracked().mutation_params);
+        params.update(|p| set_delta_field(p, &f1, val));
+        notify();
     };
 
     view! {
@@ -309,10 +378,10 @@ fn DeltaSlider(
                 min={min.to_string()}
                 max={max.to_string()}
                 step={step.to_string()}
-                prop:value={move || get_delta_field(&state.get().mutation_params, &f2).to_string()}
+                prop:value={move || get_delta_field(&params.get(), &f2).to_string()}
                 on:input={on_input}
             />
-            <span class="mutation-value">{move || format!("{:.3}", get_delta_field(&state.get().mutation_params, &f3))}</span>
+            <span class="mutation-value">{move || format!("{:.3}", get_delta_field(&params.get(), &f3))}</span>
         </div>
     }
 }
@@ -320,7 +389,8 @@ fn DeltaSlider(
 /// Generic integer slider using getter/setter closures.
 #[component]
 fn IntSlider(
-    state: RwSignal<ViewerState>,
+    params: RwSignal<MutationParams>,
+    on_change: Option<Callback<()>>,
     #[prop(into)] label: String,
     get: fn(&MutationParams) -> i64,
     set: fn(&mut MutationParams, i64),
@@ -328,12 +398,18 @@ fn IntSlider(
     max: i64,
     step: i64,
 ) -> impl IntoView {
+    let notify = move || {
+        if let Some(cb) = on_change {
+            cb.run(());
+        }
+    };
+
     let on_input = move |ev: web_sys::Event| {
         let target = ev.target().unwrap();
         let input: web_sys::HtmlInputElement = target.dyn_into().unwrap();
         let val: i64 = input.value().parse().unwrap_or(0);
-        state.update(|s| set(&mut s.mutation_params, val));
-        send_params(&state.get_untracked().mutation_params);
+        params.update(|p| set(p, val));
+        notify();
     };
 
     view! {
@@ -345,10 +421,10 @@ fn IntSlider(
                 min={min.to_string()}
                 max={max.to_string()}
                 step={step.to_string()}
-                prop:value={move || get(&state.get().mutation_params).to_string()}
+                prop:value={move || get(&params.get()).to_string()}
                 on:input={on_input}
             />
-            <span class="mutation-value">{move || get(&state.get().mutation_params).to_string()}</span>
+            <span class="mutation-value">{move || get(&params.get()).to_string()}</span>
         </div>
     }
 }
@@ -356,20 +432,27 @@ fn IntSlider(
 /// Power-of-2 slider: exponent maps to 2^exp.
 #[component]
 fn Pow2Slider(
-    state: RwSignal<ViewerState>,
+    params: RwSignal<MutationParams>,
+    on_change: Option<Callback<()>>,
     #[prop(into)] label: String,
     get: fn(&MutationParams) -> u32,
     set: fn(&mut MutationParams, u32),
     min_exp: u32,
     max_exp: u32,
 ) -> impl IntoView {
+    let notify = move || {
+        if let Some(cb) = on_change {
+            cb.run(());
+        }
+    };
+
     let on_input = move |ev: web_sys::Event| {
         let target = ev.target().unwrap();
         let input: web_sys::HtmlInputElement = target.dyn_into().unwrap();
         let exp: u32 = input.value().parse().unwrap_or(min_exp);
         let val = 1u32 << exp;
-        state.update(|s| set(&mut s.mutation_params, val));
-        send_params(&state.get_untracked().mutation_params);
+        params.update(|p| set(p, val));
+        notify();
     };
 
     view! {
@@ -382,12 +465,12 @@ fn Pow2Slider(
                 max={max_exp.to_string()}
                 step="1"
                 prop:value={move || {
-                    let v = get(&state.get().mutation_params).max(1);
+                    let v = get(&params.get()).max(1);
                     v.ilog2().clamp(min_exp, max_exp).to_string()
                 }}
                 on:input={on_input}
             />
-            <span class="mutation-value">{move || get(&state.get().mutation_params).to_string()}</span>
+            <span class="mutation-value">{move || get(&params.get()).to_string()}</span>
         </div>
     }
 }
