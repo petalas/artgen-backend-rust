@@ -1099,6 +1099,15 @@ body {
     border-bottom: 2px solid #eee;
 }
 
+.bench-th-sortable {
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+}
+.bench-th-sortable:hover {
+    color: #333;
+}
+
 .bench-results-table td {
     padding: 8px 10px;
     border-bottom: 1px solid #f0f0f0;
@@ -1115,6 +1124,24 @@ body {
     width: 10px;
     height: 10px;
     border-radius: 50%;
+}
+
+.bench-color-dot-toggle {
+    cursor: pointer;
+    width: 12px;
+    height: 12px;
+    transition: opacity 0.15s;
+}
+.bench-color-dot-toggle:hover {
+    outline: 2px solid rgba(0,0,0,0.2);
+    outline-offset: 1px;
+}
+
+.bench-row-hidden td {
+    opacity: 0.4;
+}
+.bench-row-hidden td:first-child {
+    opacity: 1;
 }
 
 .bench-cell-label {

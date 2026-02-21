@@ -1,1 +1,4 @@
-pub use artgen_shared::benchmark::{BenchmarkRequest, BenchmarkResult, BenchmarkSample};
+pub use artgen_shared::benchmark::{
+    BenchmarkExport, BenchmarkRequest, BenchmarkResult, BenchmarkSample, BenchmarkSnapshot,
+    BenchmarkStore,
+};

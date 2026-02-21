@@ -4,6 +4,18 @@ use crate::mutation_params::MutationParams;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct BenchmarkSnapshot {
+    pub id: String,
+    pub name: String,
+    pub drawing_json: String,
+    pub fitness: f32,
+    pub polygon_count: u32,
+    #[serde(default)]
+    pub created_at: String, // ISO 8601
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BenchmarkRequest {
     pub drawing_json: String,
     pub params: MutationParams,
@@ -11,6 +23,8 @@ pub struct BenchmarkRequest {
     pub label: String,
     #[serde(default)]
     pub resolution: u32,
+    #[serde(default)]
+    pub snapshot_id: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -36,6 +50,10 @@ fn default_gpu_batch_iters() -> u32 {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BenchmarkResult {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub snapshot_id: String,
     pub label: String,
     pub start_fitness: f32,
     pub final_fitness: f32,
@@ -53,4 +71,23 @@ pub struct BenchmarkResult {
     pub gpu_batch_iters: u32,
     #[serde(default)]
     pub resolution: u32,
+}
+
+/// On-disk store (per-project)
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BenchmarkStore {
+    #[serde(default)]
+    pub snapshots: Vec<BenchmarkSnapshot>,
+    #[serde(default)]
+    pub results: Vec<BenchmarkResult>,
+}
+
+/// Export envelope — self-contained bundle
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BenchmarkExport {
+    pub project_name: String,
+    pub snapshots: Vec<BenchmarkSnapshot>,
+    pub results: Vec<BenchmarkResult>,
 }

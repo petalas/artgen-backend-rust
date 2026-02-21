@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::HtmlCanvasElement;
@@ -10,8 +12,14 @@ pub fn color_for_index(i: usize) -> &'static str {
     COLORS[i % COLORS.len()]
 }
 
+/// display_order: original indices in the order the table shows them (for legend ordering).
+/// If not provided, uses the natural order from results.
 #[component]
-pub fn BenchmarkChart(results: Signal<Vec<BenchmarkResult>>) -> impl IntoView {
+pub fn BenchmarkChart(
+    results: Signal<Vec<BenchmarkResult>>,
+    #[prop(optional)] hidden: Option<Signal<HashSet<String>>>,
+    #[prop(optional)] display_order: Option<Signal<Vec<usize>>>,
+) -> impl IntoView {
     let canvas_ref = NodeRef::<leptos::html::Canvas>::new();
 
     Effect::new(move |_| {
@@ -19,9 +27,11 @@ pub fn BenchmarkChart(results: Signal<Vec<BenchmarkResult>>) -> impl IntoView {
         if results.is_empty() {
             return;
         }
+        let hidden_set = hidden.map(|s| s.get()).unwrap_or_default();
+        let order = display_order.map(|s| s.get());
         let Some(el) = canvas_ref.get() else { return };
         let canvas: HtmlCanvasElement = el.into();
-        draw_chart(&canvas, &results);
+        draw_chart(&canvas, &results, &hidden_set, order.as_deref());
     });
 
     view! {
@@ -34,7 +44,12 @@ pub fn BenchmarkChart(results: Signal<Vec<BenchmarkResult>>) -> impl IntoView {
     }
 }
 
-fn draw_chart(canvas: &HtmlCanvasElement, results: &[BenchmarkResult]) {
+fn draw_chart(
+    canvas: &HtmlCanvasElement,
+    results: &[BenchmarkResult],
+    hidden: &HashSet<String>,
+    display_order: Option<&[usize]>,
+) {
     let ctx = canvas
         .get_context("2d")
         .ok()
@@ -50,11 +65,22 @@ fn draw_chart(canvas: &HtmlCanvasElement, results: &[BenchmarkResult]) {
     ctx.set_fill_style_str("#fff");
     ctx.fill_rect(0.0, 0.0, w, h);
 
-    // Compute data ranges
-    let max_time = results.iter().map(|r| r.duration_secs).max().unwrap_or(60) as f64;
+    // Only consider visible results for axis ranges
+    let visible: Vec<(usize, &BenchmarkResult)> = results
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| !hidden.contains(&r.id))
+        .collect();
+
+    if visible.is_empty() {
+        return;
+    }
+
+    // Compute data ranges from visible results only
+    let max_time = visible.iter().map(|(_, r)| r.duration_secs).max().unwrap_or(60) as f64;
     let mut min_fitness = f64::MAX;
     let mut max_fitness = f64::MIN;
-    for r in results {
+    for (_, r) in &visible {
         for s in &r.samples {
             let f = s.best_fitness as f64;
             if f < min_fitness { min_fitness = f; }
@@ -132,8 +158,8 @@ fn draw_chart(canvas: &HtmlCanvasElement, results: &[BenchmarkResult]) {
     ctx.line_to(w - right, h - bottom);
     ctx.stroke();
 
-    // Draw lines for each result
-    for (i, r) in results.iter().enumerate() {
+    // Draw lines for visible results (using original index for color)
+    for &(i, r) in &visible {
         let color = color_for_index(i);
         ctx.set_stroke_style_str(color);
         ctx.set_line_width(2.0);
@@ -153,10 +179,20 @@ fn draw_chart(canvas: &HtmlCanvasElement, results: &[BenchmarkResult]) {
         ctx.stroke();
     }
 
-    // Legend
+    // Legend — use display_order if provided, otherwise natural order
+    // Only show visible (non-hidden) results
+    let legend_indices: Vec<usize> = if let Some(order) = display_order {
+        order.iter().copied()
+            .filter(|&i| i < results.len() && !hidden.contains(&results[i].id))
+            .collect()
+    } else {
+        visible.iter().map(|&(i, _)| i).collect()
+    };
+
     let legend_x = left + 10.0;
     let mut legend_y = top + 14.0;
-    for (i, r) in results.iter().enumerate() {
+    for i in legend_indices {
+        let r = &results[i];
         let color = color_for_index(i);
         ctx.set_fill_style_str(color);
         ctx.fill_rect(legend_x, legend_y - 4.0, 16.0, 3.0);

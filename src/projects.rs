@@ -41,6 +41,10 @@ pub fn project_best_png_path(name: &str) -> PathBuf {
     project_dir(name).join("best.png")
 }
 
+pub fn project_benchmarks_path(name: &str) -> PathBuf {
+    project_dir(name).join("benchmarks.json")
+}
+
 fn validate_name(name: &str) -> Result<(), String> {
     if name.is_empty() {
         return Err("Project name cannot be empty".into());

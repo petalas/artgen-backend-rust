@@ -1,13 +1,6 @@
-pub use artgen_shared::benchmark::{BenchmarkRequest, BenchmarkResult};
-
-/// UI-only snapshot state (not sent over WebSocket).
-#[derive(Clone, Debug)]
-pub struct BenchmarkSnapshot {
-    pub name: String,
-    pub drawing_json: String,
-    pub fitness: f32,
-    pub polygon_count: u32,
-}
+pub use artgen_shared::benchmark::{
+    BenchmarkExport, BenchmarkRequest, BenchmarkResult, BenchmarkSnapshot,
+};
 
 /// UI-only progress state (received from WebSocket, not sent back).
 #[derive(Clone, Debug, Default)]

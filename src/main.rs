@@ -1,5 +1,5 @@
 use artgen_backend_rust::{
-    benchmark::{BenchmarkRequest, BenchmarkResult, BenchmarkSample},
+    benchmark::{BenchmarkExport, BenchmarkRequest, BenchmarkResult, BenchmarkSample, BenchmarkSnapshot, BenchmarkStore},
     engine::{Engine, Rasterizer},
     evaluator::{Evaluator, EvaluatorPayload},
     gpu_evolver::GpuEvolver,
@@ -381,7 +381,7 @@ struct WsState {
     gpu_stats: Option<GpuStatsWs>,
     // Benchmark
     benchmark_request: Option<BenchmarkRequest>,
-    benchmark_results: Vec<BenchmarkResult>,
+    benchmark_store: BenchmarkStore,
     benchmark_active: bool,
     benchmark_events: Vec<serde_json::Value>, // queued events for WS clients
 }
@@ -394,6 +394,92 @@ fn encode_rgba_as_png(rgba: &[u8], w: usize, h: usize) -> Vec<u8> {
         .write_image(rgba, w as u32, h as u32, image::ExtendedColorType::Rgba8)
         .expect("PNG encoding failed");
     buf
+}
+
+fn chrono_now_iso() -> String {
+    // Simple ISO 8601 timestamp without chrono dependency
+    let now = std::time::SystemTime::now();
+    let secs = now.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+    // Format as basic ISO 8601
+    let days = secs / 86400;
+    let time_of_day = secs % 86400;
+    let hours = time_of_day / 3600;
+    let minutes = (time_of_day % 3600) / 60;
+    let seconds = time_of_day % 60;
+    // Compute date from days since epoch (1970-01-01)
+    let (y, m, d) = days_to_ymd(days);
+    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, m, d, hours, minutes, seconds)
+}
+
+fn days_to_ymd(days: u64) -> (u64, u64, u64) {
+    // Simple Gregorian calendar conversion
+    let mut y = 1970;
+    let mut remaining = days;
+    loop {
+        let days_in_year = if is_leap(y) { 366 } else { 365 };
+        if remaining < days_in_year {
+            break;
+        }
+        remaining -= days_in_year;
+        y += 1;
+    }
+    let months = if is_leap(y) {
+        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    } else {
+        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    };
+    let mut m = 1u64;
+    for &dim in &months {
+        if remaining < dim {
+            break;
+        }
+        remaining -= dim;
+        m += 1;
+    }
+    (y, m, remaining + 1)
+}
+
+fn is_leap(y: u64) -> bool {
+    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+}
+
+fn load_benchmark_store(project: &str) -> BenchmarkStore {
+    let path = projects::project_benchmarks_path(project);
+    if !path.exists() {
+        return BenchmarkStore::default();
+    }
+    match std::fs::read_to_string(&path) {
+        Ok(data) => serde_json::from_str(&data).unwrap_or_default(),
+        Err(_) => BenchmarkStore::default(),
+    }
+}
+
+fn save_benchmark_store(project: &str, store: &BenchmarkStore) {
+    let path = projects::project_benchmarks_path(project);
+    let json = match serde_json::to_string_pretty(store) {
+        Ok(j) => j,
+        Err(e) => {
+            eprintln!("[Benchmarks] Failed to serialize store: {}", e);
+            return;
+        }
+    };
+    // Atomic write: tmp + rename
+    let tmp_path = path.with_extension("json.tmp");
+    if let Err(e) = std::fs::write(&tmp_path, &json) {
+        eprintln!("[Benchmarks] Failed to write tmp file: {}", e);
+        return;
+    }
+    if let Err(e) = std::fs::rename(&tmp_path, &path) {
+        eprintln!("[Benchmarks] Failed to rename tmp -> benchmarks.json: {}", e);
+    }
+}
+
+fn benchmarks_loaded_event(store: &BenchmarkStore) -> serde_json::Value {
+    serde_json::json!({
+        "type": "benchmarks_loaded",
+        "snapshots": serde_json::to_value(&store.snapshots).unwrap_or_default(),
+        "results": serde_json::to_value(&store.results).unwrap_or_default(),
+    })
 }
 
 fn ws_server(state: SharedWsState) {
@@ -480,6 +566,8 @@ fn ws_handle_client(stream: std::net::TcpStream, state: SharedWsState) {
             "mutationParams": s.mutation_params,
             "gpuStats": gpu_stats_json,
             "targetResolution": s.target_resolution,
+            "snapshots": serde_json::to_value(&s.benchmark_store.snapshots).unwrap_or_default(),
+            "results": serde_json::to_value(&s.benchmark_store.results).unwrap_or_default(),
         });
         if ws
             .send(tungstenite::Message::Text(msg.to_string().into()))
@@ -608,6 +696,8 @@ fn ws_handle_client(stream: std::net::TcpStream, state: SharedWsState) {
                     "imageHeight": s.image_height,
                     "mutationParams": s.mutation_params,
                     "targetResolution": s.target_resolution,
+                    "snapshots": serde_json::to_value(&s.benchmark_store.snapshots).unwrap_or_default(),
+                    "results": serde_json::to_value(&s.benchmark_store.results).unwrap_or_default(),
                 });
                 msg.to_string()
             } else if s.generation == last_gen {
@@ -869,6 +959,7 @@ fn handle_ws_command(
                 duration_secs: 33,
                 label: "standard-bench".to_string(),
                 resolution: s.target_resolution,
+                snapshot_id: String::new(),
             };
             s.benchmark_request = Some(req);
             s.generation += 1;
@@ -876,11 +967,158 @@ fn handle_ws_command(
             println!("[WS] Standard benchmark requested by {:?}", peer);
             None
         }
-        Some("clear_benchmarks") => {
+        Some("save_snapshot") => {
+            let name = cmd["name"].as_str().unwrap_or("").to_string();
+            let drawing_json = cmd["drawingJson"].as_str().unwrap_or("").to_string();
+            let fitness = cmd["fitness"].as_f64().unwrap_or(0.0) as f32;
+            let polygon_count = cmd["polygonCount"].as_u64().unwrap_or(0) as u32;
+            let snapshot = BenchmarkSnapshot {
+                id: uuid::Uuid::new_v4().to_string(),
+                name,
+                drawing_json,
+                fitness,
+                polygon_count,
+                created_at: chrono_now_iso(),
+            };
             let mut s = lock.lock().unwrap();
-            s.benchmark_results.clear();
+            let project = s.active_project.clone();
+            s.benchmark_store.snapshots.push(snapshot.clone());
+            s.benchmark_events.push(serde_json::json!({
+                "type": "snapshot_saved",
+                "snapshot": serde_json::to_value(&snapshot).unwrap(),
+            }));
             s.generation += 1;
             cvar.notify_all();
+            if let Some(ref proj) = project {
+                let store = s.benchmark_store.clone();
+                drop(s);
+                save_benchmark_store(proj, &store);
+            }
+            println!("[WS] Snapshot saved by {:?}", peer);
+            None
+        }
+        Some("delete_snapshot") => {
+            let snapshot_id = cmd["snapshotId"].as_str().unwrap_or("").to_string();
+            let mut s = lock.lock().unwrap();
+            let project = s.active_project.clone();
+            s.benchmark_store.snapshots.retain(|snap| snap.id != snapshot_id);
+            s.benchmark_store.results.retain(|r| r.snapshot_id != snapshot_id);
+            s.benchmark_events.push(serde_json::json!({
+                "type": "snapshot_deleted",
+                "snapshotId": snapshot_id,
+            }));
+            s.generation += 1;
+            cvar.notify_all();
+            if let Some(ref proj) = project {
+                let store = s.benchmark_store.clone();
+                drop(s);
+                save_benchmark_store(proj, &store);
+            }
+            println!("[WS] Snapshot deleted by {:?}", peer);
+            None
+        }
+        Some("delete_benchmark_result") => {
+            let result_id = cmd["resultId"].as_str().unwrap_or("").to_string();
+            let mut s = lock.lock().unwrap();
+            let project = s.active_project.clone();
+            s.benchmark_store.results.retain(|r| r.id != result_id);
+            s.benchmark_events.push(serde_json::json!({
+                "type": "benchmark_result_deleted",
+                "resultId": result_id,
+            }));
+            s.generation += 1;
+            cvar.notify_all();
+            if let Some(ref proj) = project {
+                let store = s.benchmark_store.clone();
+                drop(s);
+                save_benchmark_store(proj, &store);
+            }
+            println!("[WS] Benchmark result deleted by {:?}", peer);
+            None
+        }
+        Some("assign_results_to_snapshot") => {
+            let snapshot_id = cmd["snapshotId"].as_str().unwrap_or("").to_string();
+            let result_ids: Vec<String> = cmd["resultIds"]
+                .as_array()
+                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            let mut s = lock.lock().unwrap();
+            let project = s.active_project.clone();
+            for result in &mut s.benchmark_store.results {
+                if result_ids.contains(&result.id) {
+                    result.snapshot_id = snapshot_id.clone();
+                }
+            }
+            let event = benchmarks_loaded_event(&s.benchmark_store);
+            s.benchmark_events.push(event);
+            s.generation += 1;
+            cvar.notify_all();
+            if let Some(ref proj) = project {
+                let store = s.benchmark_store.clone();
+                drop(s);
+                save_benchmark_store(proj, &store);
+            }
+            println!("[WS] Results assigned to snapshot by {:?}", peer);
+            None
+        }
+        Some("import_benchmarks") => {
+            let mut s = lock.lock().unwrap();
+            let project = s.active_project.clone();
+            if let Some(data) = cmd.get("data") {
+                // Try BenchmarkExport first, then Vec<BenchmarkResult>
+                if let Ok(export) = serde_json::from_value::<BenchmarkExport>(data.clone()) {
+                    let existing_snap_ids: std::collections::HashSet<String> =
+                        s.benchmark_store.snapshots.iter().map(|snap| snap.id.clone()).collect();
+                    let existing_result_ids: std::collections::HashSet<String> =
+                        s.benchmark_store.results.iter().map(|r| r.id.clone()).collect();
+                    for snap in export.snapshots {
+                        if !existing_snap_ids.contains(&snap.id) {
+                            s.benchmark_store.snapshots.push(snap);
+                        }
+                    }
+                    for mut result in export.results {
+                        if result.id.is_empty() {
+                            result.id = uuid::Uuid::new_v4().to_string();
+                        }
+                        if !existing_result_ids.contains(&result.id) {
+                            s.benchmark_store.results.push(result);
+                        }
+                    }
+                } else if let Ok(results) = serde_json::from_value::<Vec<BenchmarkResult>>(data.clone()) {
+                    // Old format: Vec<BenchmarkResult>
+                    for mut result in results {
+                        if result.id.is_empty() {
+                            result.id = uuid::Uuid::new_v4().to_string();
+                        }
+                        s.benchmark_store.results.push(result);
+                    }
+                }
+            }
+            let event = benchmarks_loaded_event(&s.benchmark_store);
+            s.benchmark_events.push(event);
+            s.generation += 1;
+            cvar.notify_all();
+            if let Some(ref proj) = project {
+                let store = s.benchmark_store.clone();
+                drop(s);
+                save_benchmark_store(proj, &store);
+            }
+            println!("[WS] Benchmarks imported by {:?}", peer);
+            None
+        }
+        Some("clear_benchmarks") => {
+            let mut s = lock.lock().unwrap();
+            let project = s.active_project.clone();
+            s.benchmark_store = BenchmarkStore::default();
+            let event = benchmarks_loaded_event(&s.benchmark_store);
+            s.benchmark_events.push(event);
+            s.generation += 1;
+            cvar.notify_all();
+            if let Some(ref proj) = project {
+                let store = s.benchmark_store.clone();
+                drop(s);
+                save_benchmark_store(proj, &store);
+            }
             println!("[WS] Benchmarks cleared by {:?}", peer);
             None
         }
@@ -1112,6 +1350,8 @@ fn run_benchmark(
     let total_elapsed = bench_start.elapsed();
     let total_evals = evolver.total_evaluations();
     let result = BenchmarkResult {
+        id: uuid::Uuid::new_v4().to_string(),
+        snapshot_id: req.snapshot_id.clone(),
         label: req.label.clone(),
         start_fitness,
         final_fitness: bench_best.fitness,
@@ -1151,10 +1391,16 @@ fn run_benchmark(
             "type": "benchmark_complete",
             "result": serde_json::to_value(&result).unwrap(),
         }));
-        s.benchmark_results.push(result);
+        s.benchmark_store.results.push(result);
+        let project = s.active_project.clone();
+        let store = s.benchmark_store.clone();
         s.benchmark_active = false;
         s.generation += 1;
         cvar.notify_all();
+        drop(s);
+        if let Some(ref proj) = project {
+            save_benchmark_store(proj, &store);
+        }
     }
 }
 
@@ -1299,7 +1545,9 @@ fn gpu_main_loop_headless(legacy_image: Option<&str>, gpu_batch_iters_override: 
     projects::ensure_projects_dir();
 
     // Legacy migration
-    let migrated_project = projects::migrate_legacy(legacy_image);
+    // Auto-select: migration first, otherwise first existing project
+    let initial_project = projects::migrate_legacy(legacy_image)
+        .or_else(|| projects::list_projects().first().map(|p| p.name.clone()));
 
     // Apply CLI overrides to default mutation params
     let mut initial_params = MutationParams::default();
@@ -1328,14 +1576,14 @@ fn gpu_main_loop_headless(legacy_image: Option<&str>, gpu_batch_iters_override: 
             image_height: 0,
             active_project: None,
             project_list_generation: 0,
-            switch_request: migrated_project,
+            switch_request: initial_project,
             reset_active: false,
             pending_delete: None,
             target_resolution: 256,
             mutation_params: initial_params,
             gpu_stats: None,
             benchmark_request: None,
-            benchmark_results: vec![],
+            benchmark_store: BenchmarkStore::default(),
             benchmark_active: false,
             benchmark_events: vec![],
         }),
@@ -1461,6 +1709,9 @@ fn gpu_main_loop_headless(legacy_image: Option<&str>, gpu_batch_iters_override: 
             eprintln!("Failed to save PNG: {}", e);
         }
 
+        // Load benchmark store for new project
+        let benchmark_store = load_benchmark_store(&project_name);
+
         // Update WS state with new project info
         {
             let (lock, cvar) = &*ws_state;
@@ -1477,6 +1728,7 @@ fn gpu_main_loop_headless(legacy_image: Option<&str>, gpu_batch_iters_override: 
             s.image_width = w as u32;
             s.image_height = h as u32;
             s.active_project = Some(project_name.clone());
+            s.benchmark_store = benchmark_store;
             s.paused = true;
             s.generation += 1;
             s.image_generation += 1;

@@ -272,6 +272,20 @@ fn parse_gpu_stats(data: &serde_json::Value) -> Option<GpuStats> {
     })
 }
 
+fn parse_snapshots(data: &serde_json::Value) -> Vec<BenchmarkSnapshot> {
+    data["snapshots"]
+        .as_array()
+        .and_then(|arr| serde_json::from_value::<Vec<BenchmarkSnapshot>>(serde_json::Value::Array(arr.clone())).ok())
+        .unwrap_or_default()
+}
+
+fn parse_results(data: &serde_json::Value) -> Vec<BenchmarkResult> {
+    data["results"]
+        .as_array()
+        .and_then(|arr| serde_json::from_value::<Vec<BenchmarkResult>>(serde_json::Value::Array(arr.clone())).ok())
+        .unwrap_or_default()
+}
+
 fn handle_message(data: &serde_json::Value, state: RwSignal<ViewerState>) {
     let msg_type = data["type"].as_str().unwrap_or("");
 
@@ -331,6 +345,8 @@ fn handle_message(data: &serde_json::Value, state: RwSignal<ViewerState>) {
                 if let Some(res) = data["targetResolution"].as_u64() {
                     s.target_resolution = res as u32;
                 }
+                s.benchmark_snapshots = parse_snapshots(data);
+                s.benchmark_results = parse_results(data);
             }
             "update" => {
                 if let Some(img) = data["image"].as_str() {
@@ -379,11 +395,33 @@ fn handle_message(data: &serde_json::Value, state: RwSignal<ViewerState>) {
                 if let Some(res) = data["targetResolution"].as_u64() {
                     s.target_resolution = res as u32;
                 }
+                s.benchmark_snapshots = parse_snapshots(data);
+                s.benchmark_results = parse_results(data);
             }
             "project_error" => {
                 s.engine_loading = false;
                 if let Some(err) = data["error"].as_str() {
                     s.project_error = Some(err.to_string());
+                }
+            }
+            "benchmarks_loaded" => {
+                s.benchmark_snapshots = parse_snapshots(data);
+                s.benchmark_results = parse_results(data);
+            }
+            "snapshot_saved" => {
+                if let Ok(snap) = serde_json::from_value::<BenchmarkSnapshot>(data["snapshot"].clone()) {
+                    s.benchmark_snapshots.push(snap);
+                }
+            }
+            "snapshot_deleted" => {
+                if let Some(id) = data["snapshotId"].as_str() {
+                    s.benchmark_snapshots.retain(|snap| snap.id != id);
+                    s.benchmark_results.retain(|r| r.snapshot_id != id);
+                }
+            }
+            "benchmark_result_deleted" => {
+                if let Some(id) = data["resultId"].as_str() {
+                    s.benchmark_results.retain(|r| r.id != id);
                 }
             }
             "benchmark_started" => {
@@ -444,6 +482,7 @@ fn handle_message(data: &serde_json::Value, state: RwSignal<ViewerState>) {
                 "durationSecs": req.duration_secs,
                 "label": req.label,
                 "resolution": req.resolution,
+                "snapshotId": req.snapshot_id,
             });
             send_ws_json(&msg);
         }

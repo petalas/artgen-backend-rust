@@ -2,7 +2,9 @@ use leptos::prelude::*;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 
-use crate::benchmark::{BenchmarkRequest, BenchmarkResult, BenchmarkSnapshot};
+use std::collections::HashSet;
+
+use crate::benchmark::{BenchmarkExport, BenchmarkRequest, BenchmarkResult, BenchmarkSnapshot};
 use crate::components::benchmark_chart::{color_for_index, BenchmarkChart};
 use crate::components::controls::download_blob;
 use crate::mutation_params::MutationParams;
@@ -35,18 +37,23 @@ fn SnapshotsSection(state: RwSignal<ViewerState>) -> impl IntoView {
         } else {
             name.trim().to_string()
         };
-        let snapshot = BenchmarkSnapshot {
-            name,
-            drawing_json: drawing_json.clone(),
-            fitness: s.fitness as f32,
-            polygon_count: s.polygons,
-        };
-        state.update(|s| s.benchmark_snapshots.push(snapshot));
+        let msg = serde_json::json!({
+            "type": "save_snapshot",
+            "name": name,
+            "drawingJson": drawing_json,
+            "fitness": s.fitness,
+            "polygonCount": s.polygons,
+        });
+        send_ws_json(&msg);
         snap_name.set(String::new());
     };
 
-    let delete_snapshot = move |idx: usize| {
-        state.update(|s| { s.benchmark_snapshots.remove(idx); });
+    let delete_snapshot = move |id: String| {
+        let msg = serde_json::json!({
+            "type": "delete_snapshot",
+            "snapshotId": id,
+        });
+        send_ws_json(&msg);
     };
 
     view! {
@@ -78,14 +85,20 @@ fn SnapshotsSection(state: RwSignal<ViewerState>) -> impl IntoView {
                     }
                     view! {
                         <div>
-                            {snaps.into_iter().enumerate().map(|(i, snap)| {
-                                let del = move |_| delete_snapshot(i);
+                            {snaps.into_iter().map(|snap| {
+                                let id = snap.id.clone();
+                                let del = move |_| delete_snapshot(id.clone());
+                                let created_str = if snap.created_at.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!(" | {}", &snap.created_at[..16.min(snap.created_at.len())])
+                                };
                                 view! {
                                     <div class="bench-snapshot-item">
                                         <div class="bench-snapshot-info">
                                             <span class="bench-snapshot-name">{snap.name.clone()}</span>
                                             <span class="bench-snapshot-meta">
-                                                {format!("{:.2}% | {} polygons", snap.fitness, snap.polygon_count)}
+                                                {format!("{:.2}% | {} polygons{}", snap.fitness, snap.polygon_count, created_str)}
                                             </span>
                                         </div>
                                         <button class="btn-icon btn-icon-danger" on:click={del} title="Delete">
@@ -188,10 +201,10 @@ fn ConfigureSection(state: RwSignal<ViewerState>) -> impl IntoView {
     let batch_iters = RwSignal::new(defaults.gpu_batch_iters);
     let resolution = RwSignal::new(state.get_untracked().target_resolution);
 
-    let add_to_queue = move |_| {
+    let build_request = move || -> Option<(BenchmarkRequest, String)> {
         let s = state.get();
         let idx = selected_snap.get();
-        let Some(snap) = s.benchmark_snapshots.get(idx) else { return };
+        let snap = s.benchmark_snapshots.get(idx)?;
         let cc = chains_from_exp(chain_exp.get());
         let lam = lambda_from_exp(lambda_exp.get());
         let sm = single_mutation.get();
@@ -210,38 +223,33 @@ fn ConfigureSection(state: RwSignal<ViewerState>) -> impl IntoView {
             duration_secs: duration_secs.get(),
             label: lbl,
             resolution: res,
+            snapshot_id: snap.id.clone(),
         };
-        state.update(|s| s.benchmark_queue.push(req));
-        label.set(String::new());
+        Some((req, snap.id.clone()))
+    };
+
+    let add_to_queue = move |_| {
+        if let Some((req, _)) = build_request() {
+            state.update(|s| s.benchmark_queue.push(req));
+            label.set(String::new());
+        }
     };
 
     let run_now = move |_| {
-        let s = state.get();
-        let idx = selected_snap.get();
-        let Some(snap) = s.benchmark_snapshots.get(idx) else { return };
-        let cc = chains_from_exp(chain_exp.get());
-        let lam = lambda_from_exp(lambda_exp.get());
-        let sm = single_mutation.get();
-        let am = adaptive_mutation.get();
-        let tc = tile_culling.get();
-        let wg = WG_OPTIONS[rasterize_wg_idx.get()];
-        let bi = batch_iters.get();
-        let res = resolution.get();
-        let params = build_benchmark_params(&s, cc, lam, sm, am, tc, wg, bi);
-        let lbl = label.get();
-        let base = if lbl.trim().is_empty() { auto_label(cc, lam, sm, am, tc, wg, bi, res) } else { lbl.trim().to_string() };
-        let lbl = deduplicate_label(&base, &s);
-        let msg = serde_json::json!({
-            "type": "start_benchmark",
-            "drawingJson": snap.drawing_json,
-            "params": params,
-            "durationSecs": duration_secs.get(),
-            "label": lbl,
-            "resolution": res,
-        });
-        state.update(|s| s.benchmark_initializing = true);
-        send_ws_json(&msg);
-        label.set(String::new());
+        if let Some((req, _)) = build_request() {
+            let msg = serde_json::json!({
+                "type": "start_benchmark",
+                "drawingJson": req.drawing_json,
+                "params": req.params,
+                "durationSecs": req.duration_secs,
+                "label": req.label,
+                "resolution": req.resolution,
+                "snapshotId": req.snapshot_id,
+            });
+            state.update(|s| s.benchmark_initializing = true);
+            send_ws_json(&msg);
+            label.set(String::new());
+        }
     };
 
     let has_snapshots = move || !state.get().benchmark_snapshots.is_empty();
@@ -507,6 +515,7 @@ fn QueueSection(state: RwSignal<ViewerState>) -> impl IntoView {
                 "durationSecs": req.duration_secs,
                 "label": req.label,
                 "resolution": req.resolution,
+                "snapshotId": req.snapshot_id,
             });
             send_ws_json(&msg);
         }
@@ -614,17 +623,154 @@ fn QueueSection(state: RwSignal<ViewerState>) -> impl IntoView {
     }
 }
 
+// ── Assign unassociated results ────────────────────────────
+
+#[component]
+fn UnassociatedHeader(
+    snapshots: Vec<BenchmarkSnapshot>,
+    result_ids: Vec<String>,
+) -> impl IntoView {
+    let assign_target = RwSignal::new(String::new());
+
+    // Initialize with first snapshot id
+    if let Some(first) = snapshots.first() {
+        assign_target.set(first.id.clone());
+    }
+
+    let snaps = snapshots.clone();
+    let ids = result_ids.clone();
+    let assign = move |_| {
+        let target = assign_target.get();
+        if target.is_empty() {
+            return;
+        }
+        let msg = serde_json::json!({
+            "type": "assign_results_to_snapshot",
+            "snapshotId": target,
+            "resultIds": ids,
+        });
+        send_ws_json(&msg);
+    };
+
+    view! {
+        <span class="bench-unassociated-header">
+            <span>"Unassociated results"</span>
+            <select
+                class="bench-assign-select"
+                prop:value={move || assign_target.get()}
+                on:change={move |ev| assign_target.set(event_target_value(&ev))}
+            >
+                {snaps.iter().map(|s| {
+                    let id = s.id.clone();
+                    let label = format!("{} ({:.2}%)", s.name, s.fitness);
+                    view! {
+                        <option value={id}>{label}</option>
+                    }
+                }).collect::<Vec<_>>()}
+            </select>
+            <button class="btn btn-secondary btn-sm" on:click={assign}>"Assign"</button>
+        </span>
+    }
+}
+
 // ── Results ────────────────────────────────────────────────
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SortCol {
+    None,
+    Label,
+    Resolution,
+    Chains,
+    Lambda,
+    Batch,
+    Duration,
+    Start,
+    Final,
+    Improvements,
+    ImprovPerSec,
+    EvalsPerSec,
+}
+
+fn result_evals_per_sec(r: &BenchmarkResult) -> f64 {
+    let secs = if r.actual_duration_secs > 0.0 { r.actual_duration_secs as f64 } else { r.duration_secs as f64 };
+    if secs > 0.0 { r.total_evals as f64 / secs } else { 0.0 }
+}
+
+fn result_actual_duration(r: &BenchmarkResult) -> f32 {
+    if r.actual_duration_secs > 0.0 { r.actual_duration_secs } else { r.duration_secs as f32 }
+}
+
+fn sort_results(items: &mut [(usize, BenchmarkResult)], col: SortCol, ascending: bool) {
+    items.sort_by(|(_, a), (_, b)| {
+        let ord = match col {
+            SortCol::Label => a.label.to_lowercase().cmp(&b.label.to_lowercase()),
+            SortCol::Resolution => a.resolution.cmp(&b.resolution),
+            SortCol::Chains => a.chain_count.cmp(&b.chain_count),
+            SortCol::Lambda => a.lambda.cmp(&b.lambda),
+            SortCol::Batch => a.gpu_batch_iters.cmp(&b.gpu_batch_iters),
+            SortCol::Duration => result_actual_duration(a).partial_cmp(&result_actual_duration(b)).unwrap_or(std::cmp::Ordering::Equal),
+            SortCol::Start => a.start_fitness.partial_cmp(&b.start_fitness).unwrap_or(std::cmp::Ordering::Equal),
+            SortCol::Final => a.final_fitness.partial_cmp(&b.final_fitness).unwrap_or(std::cmp::Ordering::Equal),
+            SortCol::Improvements => a.total_improvements.cmp(&b.total_improvements),
+            SortCol::ImprovPerSec => a.improvements_per_sec.partial_cmp(&b.improvements_per_sec).unwrap_or(std::cmp::Ordering::Equal),
+            SortCol::EvalsPerSec => result_evals_per_sec(a).partial_cmp(&result_evals_per_sec(b)).unwrap_or(std::cmp::Ordering::Equal),
+            SortCol::None => std::cmp::Ordering::Equal,
+        };
+        if ascending { ord } else { ord.reverse() }
+    });
+}
 
 #[component]
 fn ResultsSection(state: RwSignal<ViewerState>) -> impl IntoView {
     let clear_results = move |_| {
-        state.update(|s| s.benchmark_results.clear());
         let msg = serde_json::json!({ "type": "clear_benchmarks" });
         send_ws_json(&msg);
     };
 
+    let delete_result = move |id: String| {
+        let msg = serde_json::json!({
+            "type": "delete_benchmark_result",
+            "resultId": id,
+        });
+        send_ws_json(&msg);
+    };
+
     let results_signal = Signal::derive(move || state.get().benchmark_results.clone());
+    let hidden_ids: RwSignal<HashSet<String>> = RwSignal::new(HashSet::new());
+    let hidden_signal = Signal::derive(move || hidden_ids.get());
+
+    let toggle_visibility = move |id: String| {
+        hidden_ids.update(|set| {
+            if !set.remove(&id) {
+                set.insert(id);
+            }
+        });
+    };
+
+    let sort_col: RwSignal<SortCol> = RwSignal::new(SortCol::None);
+    let sort_asc: RwSignal<bool> = RwSignal::new(true);
+
+    let click_sort = move |col: SortCol| {
+        if sort_col.get_untracked() == col {
+            sort_asc.set(!sort_asc.get_untracked());
+        } else {
+            sort_col.set(col);
+            // Default: descending for numeric, ascending for label
+            sort_asc.set(col == SortCol::Label);
+        }
+    };
+
+    // Derive display order (original indices in sorted order) for chart legend
+    let display_order_signal = Signal::derive(move || {
+        let results = state.get().benchmark_results;
+        let col = sort_col.get();
+        let asc = sort_asc.get();
+        let mut indexed: Vec<(usize, BenchmarkResult)> = results.into_iter().enumerate().collect();
+        if col != SortCol::None {
+            sort_results(&mut indexed, col, asc);
+        }
+        indexed.into_iter().map(|(i, _)| i).collect::<Vec<usize>>()
+    });
 
     view! {
         <div class="bench-section">
@@ -632,65 +778,202 @@ fn ResultsSection(state: RwSignal<ViewerState>) -> impl IntoView {
 
             {move || {
                 let results = state.get().benchmark_results.clone();
+                let snapshots = state.get().benchmark_snapshots.clone();
+                let cur_sort = sort_col.get();
+                let cur_asc = sort_asc.get();
+
                 if results.is_empty() {
                     return view! {
-                        <div class="bench-queue-empty">"No results yet. Run a benchmark to see comparisons."</div>
+                        <div class="bench-queue-empty">"No results yet. Run a benchmark or import existing results."</div>
                     }.into_any();
                 }
+
+                // Build indexed list (original index for color stability)
+                let mut indexed: Vec<(usize, BenchmarkResult)> = results.iter().enumerate()
+                    .map(|(i, r)| (i, r.clone()))
+                    .collect();
+
+                let is_sorted = cur_sort != SortCol::None;
+                if is_sorted {
+                    sort_results(&mut indexed, cur_sort, cur_asc);
+                }
+
+                // Build table body: grouped when unsorted, flat when sorted
+                let body_rows = if is_sorted {
+                    // Flat sorted — no group headers
+                    indexed.iter().map(|(i, r)| {
+                        let rid = r.id.clone();
+                        let rid2 = r.id.clone();
+                        let del = move |_| delete_result(rid.clone());
+                        let toggle = move |_: leptos::ev::MouseEvent| toggle_visibility(rid2.clone());
+                        let is_hidden = {
+                            let rid3 = r.id.clone();
+                            Signal::derive(move || hidden_ids.get().contains(&rid3))
+                        };
+                        result_row(*i, r, del, toggle, is_hidden).into_any()
+                    }).collect::<Vec<_>>()
+                } else {
+                    // Grouped by snapshot_id
+                    let mut grouped: Vec<(Option<BenchmarkSnapshot>, Vec<(usize, BenchmarkResult)>)> = vec![];
+                    let mut seen_snapshots: Vec<String> = vec![];
+                    for (i, r) in &indexed {
+                        let snap_id = &r.snapshot_id;
+                        if let Some(pos) = seen_snapshots.iter().position(|id| id == snap_id) {
+                            grouped[pos].1.push((*i, r.clone()));
+                        } else {
+                            seen_snapshots.push(snap_id.clone());
+                            let snap = snapshots.iter().find(|s| s.id == *snap_id).cloned();
+                            grouped.push((snap, vec![(*i, r.clone())]));
+                        }
+                    }
+
+                    let mut rows: Vec<leptos::prelude::AnyView> = vec![];
+                    for (snap, group_results) in grouped {
+                        let snap_id = group_results.first().map(|(_, r)| r.snapshot_id.clone()).unwrap_or_default();
+                        let is_unassociated = snap.is_none() && snap_id.is_empty();
+                        let result_ids: Vec<String> = group_results.iter().map(|(_, r)| r.id.clone()).collect();
+
+                        let header = if let Some(ref s) = snap {
+                            view! {
+                                <tr class="bench-snapshot-group-header">
+                                    <td colspan="13">
+                                        {format!("\u{1F4F7} {}", s.name)}
+                                    </td>
+                                </tr>
+                            }.into_any()
+                        } else if is_unassociated && !snapshots.is_empty() {
+                            let snaps_for_assign = snapshots.clone();
+                            view! {
+                                <tr class="bench-snapshot-group-header">
+                                    <td colspan="13">
+                                        <UnassociatedHeader
+                                            snapshots={snaps_for_assign}
+                                            result_ids={result_ids}
+                                        />
+                                    </td>
+                                </tr>
+                            }.into_any()
+                        } else if is_unassociated {
+                            view! {
+                                <tr class="bench-snapshot-group-header">
+                                    <td colspan="13">"Unassociated results \u{2014} save a snapshot above to assign them"</td>
+                                </tr>
+                            }.into_any()
+                        } else {
+                            view! {
+                                <tr class="bench-snapshot-group-header">
+                                    <td colspan="13">{format!("(deleted snapshot {})", &snap_id[..8.min(snap_id.len())])}</td>
+                                </tr>
+                            }.into_any()
+                        };
+                        rows.push(header);
+
+                        for (i, r) in &group_results {
+                            let rid = r.id.clone();
+                            let rid2 = r.id.clone();
+                            let del = move |_| delete_result(rid.clone());
+                            let toggle = move |_: leptos::ev::MouseEvent| toggle_visibility(rid2.clone());
+                            let is_hidden = {
+                                let rid3 = r.id.clone();
+                                Signal::derive(move || hidden_ids.get().contains(&rid3))
+                            };
+                            rows.push(result_row(*i, r, del, toggle, is_hidden).into_any());
+                        }
+                    }
+                    rows
+                };
+
+                let sort_indicator = move |col: SortCol| -> &'static str {
+                    if cur_sort == col {
+                        if cur_asc { " \u{25B2}" } else { " \u{25BC}" }
+                    } else {
+                        ""
+                    }
+                };
+
                 view! {
                     <div>
-                        <BenchmarkChart results={results_signal}/>
+                        <BenchmarkChart results={results_signal} hidden={hidden_signal} display_order={display_order_signal}/>
                         <div class="bench-results-table-wrap">
                             <table class="bench-results-table">
                                 <thead>
                                     <tr>
                                         <th></th>
-                                        <th>"Label"</th>
-                                        <th>"Res"</th>
-                                        <th>"Chains"</th>
-                                        <th>"\u{03BB}"</th>
-                                        <th>"Batch"</th>
-                                        <th>"Duration"</th>
-                                        <th>"Start"</th>
-                                        <th>"Final"</th>
-                                        <th>"Improv"</th>
-                                        <th>"Improv/s"</th>
-                                        <th>"Evals/s"</th>
+                                        <th class="bench-th-sortable" on:click={move |_| click_sort(SortCol::Label)}>
+                                            {format!("Label{}", sort_indicator(SortCol::Label))}
+                                        </th>
+                                        <th class="bench-th-sortable" on:click={move |_| click_sort(SortCol::Resolution)}>
+                                            {format!("Res{}", sort_indicator(SortCol::Resolution))}
+                                        </th>
+                                        <th class="bench-th-sortable" on:click={move |_| click_sort(SortCol::Chains)}>
+                                            {format!("Chains{}", sort_indicator(SortCol::Chains))}
+                                        </th>
+                                        <th class="bench-th-sortable" on:click={move |_| click_sort(SortCol::Lambda)}>
+                                            {format!("\u{03BB}{}", sort_indicator(SortCol::Lambda))}
+                                        </th>
+                                        <th class="bench-th-sortable" on:click={move |_| click_sort(SortCol::Batch)}>
+                                            {format!("Batch{}", sort_indicator(SortCol::Batch))}
+                                        </th>
+                                        <th class="bench-th-sortable" on:click={move |_| click_sort(SortCol::Duration)}>
+                                            {format!("Duration{}", sort_indicator(SortCol::Duration))}
+                                        </th>
+                                        <th class="bench-th-sortable" on:click={move |_| click_sort(SortCol::Start)}>
+                                            {format!("Start{}", sort_indicator(SortCol::Start))}
+                                        </th>
+                                        <th class="bench-th-sortable" on:click={move |_| click_sort(SortCol::Final)}>
+                                            {format!("Final{}", sort_indicator(SortCol::Final))}
+                                        </th>
+                                        <th class="bench-th-sortable" on:click={move |_| click_sort(SortCol::Improvements)}>
+                                            {format!("Improv{}", sort_indicator(SortCol::Improvements))}
+                                        </th>
+                                        <th class="bench-th-sortable" on:click={move |_| click_sort(SortCol::ImprovPerSec)}>
+                                            {format!("Improv/s{}", sort_indicator(SortCol::ImprovPerSec))}
+                                        </th>
+                                        <th class="bench-th-sortable" on:click={move |_| click_sort(SortCol::EvalsPerSec)}>
+                                            {format!("Evals/s{}", sort_indicator(SortCol::EvalsPerSec))}
+                                        </th>
+                                        <th></th>
                                     </tr>
                                 </thead>
                                 <tbody>
-                                    {results.iter().enumerate().map(|(i, r)| {
-                                        result_row(i, r)
-                                    }).collect::<Vec<_>>()}
+                                    {body_rows}
                                 </tbody>
                             </table>
-                        </div>
-                        <div class="bench-results-actions">
-                            <button class="btn btn-secondary" on:click={move |_| {
-                                let results = state.get().benchmark_results.clone();
-                                let text = export_results_text(&results);
-                                copy_to_clipboard(&text);
-                            }}>
-                                "Copy as Text"
-                            </button>
-                            <button class="btn btn-secondary" on:click={move |_| {
-                                let results = state.get().benchmark_results.clone();
-                                export_results_json(&results);
-                            }}>
-                                "Export JSON"
-                            </button>
-                            <button class="btn btn-secondary" on:click={move |_| {
-                                import_results_from_file(state);
-                            }}>
-                                "Import JSON"
-                            </button>
-                            <button class="btn btn-danger" on:click={clear_results}>
-                                "Clear Results"
-                            </button>
                         </div>
                     </div>
                 }.into_any()
             }}
+
+            // Always-visible action buttons (import works even with no results)
+            <div class="bench-results-actions">
+                <button class="btn btn-secondary" on:click={move |_| {
+                    let results = state.get().benchmark_results.clone();
+                    let text = export_results_text(&results);
+                    copy_to_clipboard(&text);
+                }}
+                    disabled={move || state.get().benchmark_results.is_empty()}
+                >
+                    "Copy as Text"
+                </button>
+                <button class="btn btn-secondary" on:click={move |_| {
+                    let s = state.get();
+                    export_results_json(&s);
+                }}
+                    disabled={move || state.get().benchmark_results.is_empty()}
+                >
+                    "Export JSON"
+                </button>
+                <button class="btn btn-secondary" on:click={move |_| {
+                    import_results_from_file();
+                }}>
+                    "Import JSON"
+                </button>
+                <button class="btn btn-danger" on:click={clear_results}
+                    disabled={move || state.get().benchmark_results.is_empty() && state.get().benchmark_snapshots.is_empty()}
+                >
+                    "Clear All"
+                </button>
+            </div>
         </div>
     }
 }
@@ -748,12 +1031,19 @@ fn copy_to_clipboard(text: &str) {
     let _ = js_sys::eval(&format!("navigator.clipboard.writeText(`{}`)", escaped));
 }
 
-fn export_results_json(results: &[BenchmarkResult]) {
-    let json = serde_json::to_string_pretty(results).unwrap_or_default();
-    download_blob(&json, "benchmark-results.json", "application/json");
+fn export_results_json(viewer_state: &ViewerState) {
+    let project_name = viewer_state.active_project.as_deref().unwrap_or("unknown").to_string();
+    let export = BenchmarkExport {
+        project_name: project_name.clone(),
+        snapshots: viewer_state.benchmark_snapshots.clone(),
+        results: viewer_state.benchmark_results.clone(),
+    };
+    let json = serde_json::to_string_pretty(&export).unwrap_or_default();
+    let filename = format!("benchmarks-{}.json", project_name);
+    download_blob(&json, &filename, "application/json");
 }
 
-fn import_results_from_file(state: RwSignal<ViewerState>) {
+fn import_results_from_file() {
     let window = web_sys::window().expect("no window");
     let document = window.document().expect("no document");
 
@@ -776,14 +1066,23 @@ fn import_results_from_file(state: RwSignal<ViewerState>) {
         let onload = Closure::<dyn Fn()>::new(move || {
             let result = reader_clone.result().unwrap();
             let text = result.as_string().unwrap_or_default();
-            match serde_json::from_str::<Vec<BenchmarkResult>>(&text) {
-                Ok(imported) => {
-                    state.update(|s| s.benchmark_results.extend(imported));
-                }
-                Err(e) => {
-                    web_sys::console::error_1(&format!("Failed to parse benchmark JSON: {}", e).into());
-                }
-            }
+
+            // Try BenchmarkExport first, then Vec<BenchmarkResult> for backwards compat
+            let data: serde_json::Value = if let Ok(export) = serde_json::from_str::<BenchmarkExport>(&text) {
+                serde_json::to_value(&export).unwrap()
+            } else if let Ok(results) = serde_json::from_str::<Vec<BenchmarkResult>>(&text) {
+                // Wrap old format — send as-is, backend handles it
+                serde_json::Value::Array(results.into_iter().map(|r| serde_json::to_value(r).unwrap()).collect())
+            } else {
+                web_sys::console::error_1(&"Failed to parse benchmark JSON: not a BenchmarkExport or Vec<BenchmarkResult>".into());
+                return;
+            };
+
+            let msg = serde_json::json!({
+                "type": "import_benchmarks",
+                "data": data,
+            });
+            send_ws_json(&msg);
         });
 
         reader.set_onload(Some(onload.as_ref().unchecked_ref()));
@@ -796,7 +1095,17 @@ fn import_results_from_file(state: RwSignal<ViewerState>) {
     input.click();
 }
 
-fn result_row(i: usize, r: &BenchmarkResult) -> impl IntoView {
+fn result_row<F, G>(
+    i: usize,
+    r: &BenchmarkResult,
+    on_delete: F,
+    on_toggle: G,
+    is_hidden: Signal<bool>,
+) -> impl IntoView
+where
+    F: Fn(leptos::ev::MouseEvent) + 'static,
+    G: Fn(leptos::ev::MouseEvent) + 'static,
+{
     let color = color_for_index(i);
     let actual = if r.actual_duration_secs > 0.0 { r.actual_duration_secs } else { r.duration_secs as f32 };
     let total_secs = actual.round() as u32;
@@ -823,13 +1132,22 @@ fn result_row(i: usize, r: &BenchmarkResult) -> impl IntoView {
         format!("{:.0}", evals_per_sec)
     };
 
+    let color_owned = color.to_string();
     let res_str = if r.resolution > 0 { format!("{}px", r.resolution) } else { "-".to_string() };
     view! {
-        <tr>
+        <tr class:bench-row-hidden={move || is_hidden.get()}>
             <td>
                 <span
-                    class="bench-color-dot"
-                    style={format!("background: {}", color)}
+                    class="bench-color-dot bench-color-dot-toggle"
+                    style={move || {
+                        if is_hidden.get() {
+                            format!("background: {}; opacity: 0.25", color_owned)
+                        } else {
+                            format!("background: {}", color_owned)
+                        }
+                    }}
+                    on:click={on_toggle}
+                    title="Toggle chart visibility"
                 />
             </td>
             <td class="bench-cell-label">{r.label.clone()}</td>
@@ -843,6 +1161,11 @@ fn result_row(i: usize, r: &BenchmarkResult) -> impl IntoView {
             <td>{r.total_improvements.to_string()}</td>
             <td>{format!("{:.2}", r.improvements_per_sec)}</td>
             <td>{evals_str}</td>
+            <td>
+                <button class="btn-icon btn-icon-danger" on:click={on_delete} title="Delete result">
+                    "\u{2715}"
+                </button>
+            </td>
         </tr>
     }
 }
