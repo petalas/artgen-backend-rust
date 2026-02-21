@@ -14,6 +14,7 @@ pub fn ImageRow(state: RwSignal<ViewerState>) -> impl IntoView {
     let gen_canvas_ref = NodeRef::<leptos::html::Canvas>::new();
     let heatmap_canvas_ref = NodeRef::<leptos::html::Canvas>::new();
     let error_pct = RwSignal::new(0.0f64);
+    let preview_src = RwSignal::new(Option::<String>::None);
 
     let ref_src = move || {
         let s = state.get();
@@ -112,7 +113,17 @@ pub fn ImageRow(state: RwSignal<ViewerState>) -> impl IntoView {
                     <img class="panel-image" src={ref_src} alt="Reference image"/>
                 </div>
 
-                <div class="image-container">
+                <div class="image-container image-hoverable"
+                    on:mouseenter=move |_| {
+                        if let Some(canvas) = gen_canvas_ref.get() {
+                            let canvas_el: &HtmlCanvasElement = &canvas;
+                            if let Ok(url) = canvas_el.to_data_url() {
+                                preview_src.set(Some(url));
+                            }
+                        }
+                    }
+                    on:mouseleave=move |_| preview_src.set(None)
+                >
                     <div class="card-header">
                         <span class="card-title">"Generated"</span>
                         <span class="card-subtitle">{move || {
@@ -136,6 +147,11 @@ pub fn ImageRow(state: RwSignal<ViewerState>) -> impl IntoView {
                     </div>
                 </div>
             </div>
+            {move || preview_src.get().map(|src| view! {
+                <div class="image-preview-overlay">
+                    <img class="image-preview-img" src={src} />
+                </div>
+            })}
             {move || show_overlay().then(|| view! {
                 <div class="loading-overlay">
                     <div class="spinner"></div>
