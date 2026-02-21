@@ -5,6 +5,7 @@ use wasm_bindgen::JsCast;
 use crate::benchmark::{BenchmarkRequest, BenchmarkResult, BenchmarkSnapshot};
 use crate::components::benchmark_chart::{color_for_index, BenchmarkChart};
 use crate::components::controls::download_blob;
+use crate::mutation_params::MutationParams;
 use crate::ws::{send_ws_json, send_ws_loading, ViewerState};
 
 #[component]
@@ -141,12 +142,13 @@ fn auto_label(chain_count: u32, lambda: u32, single_mutation_mode: bool, adaptiv
     let mode = if single_mutation_mode { "single" } else { "multi" };
     let lambda_str = if lambda > 1 { format!("-{}\u{03BB}", lambda) } else { String::new() };
     let adaptive_str = if adaptive_mutation { "-adaptive" } else { "" };
-    let wg_str = if rasterize_wg != [16, 16] {
+    let defaults = MutationParams::default();
+    let wg_str = if rasterize_wg != defaults.rasterize_wg {
         format!("-wg{}x{}", rasterize_wg[0], rasterize_wg[1])
     } else {
         String::new()
     };
-    let batch_str = if gpu_batch_iters != 50 {
+    let batch_str = if gpu_batch_iters != defaults.gpu_batch_iters {
         format!("-b{}", gpu_batch_iters)
     } else {
         String::new()
@@ -176,12 +178,14 @@ fn ConfigureSection(state: RwSignal<ViewerState>) -> impl IntoView {
     let selected_snap = RwSignal::new(0usize);
     let duration_secs = RwSignal::new(60u32);
     let label = RwSignal::new(String::new());
-    let chain_exp = RwSignal::new(7u32); // 2^7 = 128
-    let lambda_exp = RwSignal::new(3u32); // 2^3 = 8 (default lambda=8)
-    let single_mutation = RwSignal::new(false);
-    let adaptive_mutation = RwSignal::new(true);
-    let rasterize_wg_idx = RwSignal::new(1usize); // index into WG_OPTIONS, default 1 = 16x16
-    let batch_iters = RwSignal::new(state.get_untracked().mutation_params.gpu_batch_iters); // GPU batch iterations per submission
+    let defaults = MutationParams::default();
+    let chain_exp = RwSignal::new(defaults.chain_count.max(1).ilog2());
+    let lambda_exp = RwSignal::new(defaults.lambda.max(1).ilog2());
+    let single_mutation = RwSignal::new(defaults.single_mutation_mode);
+    let adaptive_mutation = RwSignal::new(defaults.adaptive_mutation);
+    let default_wg_idx = WG_OPTIONS.iter().position(|w| *w == defaults.rasterize_wg).unwrap_or(0);
+    let rasterize_wg_idx = RwSignal::new(default_wg_idx);
+    let batch_iters = RwSignal::new(defaults.gpu_batch_iters);
 
     let add_to_queue = move |_| {
         let s = state.get();

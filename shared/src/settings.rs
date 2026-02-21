@@ -26,10 +26,10 @@ pub const MIN_POLYGONS_PER_IMAGE: usize = 1;
 
 // GPU evolution settings
 pub const GPU_MAX_CHAIN_COUNT: u32 = 1024;
-pub const GPU_DEFAULT_CHAIN_COUNT: u32 = 16;
-pub const GPU_DEFAULT_LAMBDA: u32 = 8;
+pub const GPU_DEFAULT_CHAIN_COUNT: u32 = 2;
+pub const GPU_DEFAULT_LAMBDA: u32 = 32;
 pub const GPU_MAX_LAMBDA: u32 = 64;
-pub const GPU_DEFAULT_BATCH_ITERS: u32 = 50;
+pub const GPU_DEFAULT_BATCH_ITERS: u32 = 64;
 pub const GPU_MAX_BATCH_ITERS: u32 = 4096;
 
 // Crossover defaults
@@ -39,7 +39,7 @@ pub const TOURNAMENT_SIZE: u32 = 3;
 
 // Mutation mode defaults
 pub const SINGLE_MUTATION_MODE: bool = true;
-pub const ADAPTIVE_MUTATION: bool = true;
+pub const ADAPTIVE_MUTATION: bool = false;
 
 // Rasterize workgroup size defaults
 pub const RASTERIZE_WG_X_DEFAULT: u32 = 16;
