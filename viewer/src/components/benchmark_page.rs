@@ -6,7 +6,7 @@ use crate::benchmark::{BenchmarkRequest, BenchmarkResult, BenchmarkSnapshot};
 use crate::components::benchmark_chart::{color_for_index, BenchmarkChart};
 use crate::components::controls::download_blob;
 use crate::mutation_params::MutationParams;
-use crate::ws::{send_ws_json, send_ws_loading, ViewerState};
+use crate::ws::{send_ws_json, ViewerState};
 
 #[component]
 pub fn BenchmarkPage(state: RwSignal<ViewerState>) -> impl IntoView {
@@ -138,7 +138,7 @@ fn build_benchmark_params(
     params
 }
 
-fn auto_label(chain_count: u32, lambda: u32, single_mutation_mode: bool, adaptive_mutation: bool, rasterize_wg: [u32; 2], gpu_batch_iters: u32) -> String {
+fn auto_label(chain_count: u32, lambda: u32, single_mutation_mode: bool, adaptive_mutation: bool, rasterize_wg: [u32; 2], gpu_batch_iters: u32, resolution: u32) -> String {
     let mode = if single_mutation_mode { "single" } else { "multi" };
     let lambda_str = if lambda > 1 { format!("-{}\u{03BB}", lambda) } else { String::new() };
     let adaptive_str = if adaptive_mutation { "-adaptive" } else { "" };
@@ -153,7 +153,8 @@ fn auto_label(chain_count: u32, lambda: u32, single_mutation_mode: bool, adaptiv
     } else {
         String::new()
     };
-    format!("{}c{}-{}{}{}{}", chain_count, lambda_str, mode, adaptive_str, wg_str, batch_str)
+    let res_str = format!("-{}px", resolution);
+    format!("{}c{}-{}{}{}{}{}", chain_count, lambda_str, mode, adaptive_str, wg_str, batch_str, res_str)
 }
 
 fn deduplicate_label(base: &str, state: &ViewerState) -> String {
@@ -186,6 +187,7 @@ fn ConfigureSection(state: RwSignal<ViewerState>) -> impl IntoView {
     let default_wg_idx = WG_OPTIONS.iter().position(|w| *w == defaults.rasterize_wg).unwrap_or(0);
     let rasterize_wg_idx = RwSignal::new(default_wg_idx);
     let batch_iters = RwSignal::new(defaults.gpu_batch_iters);
+    let resolution = RwSignal::new(state.get_untracked().target_resolution);
 
     let add_to_queue = move |_| {
         let s = state.get();
@@ -197,15 +199,17 @@ fn ConfigureSection(state: RwSignal<ViewerState>) -> impl IntoView {
         let am = adaptive_mutation.get();
         let wg = WG_OPTIONS[rasterize_wg_idx.get()];
         let bi = batch_iters.get();
+        let res = resolution.get();
         let params = build_benchmark_params(&s, cc, lam, sm, am, wg, bi);
         let lbl = label.get();
-        let base = if lbl.trim().is_empty() { auto_label(cc, lam, sm, am, wg, bi) } else { lbl.trim().to_string() };
+        let base = if lbl.trim().is_empty() { auto_label(cc, lam, sm, am, wg, bi, res) } else { lbl.trim().to_string() };
         let lbl = deduplicate_label(&base, &s);
         let req = BenchmarkRequest {
             drawing_json: snap.drawing_json.clone(),
             params,
             duration_secs: duration_secs.get(),
             label: lbl,
+            resolution: res,
         };
         state.update(|s| s.benchmark_queue.push(req));
         label.set(String::new());
@@ -221,9 +225,10 @@ fn ConfigureSection(state: RwSignal<ViewerState>) -> impl IntoView {
         let am = adaptive_mutation.get();
         let wg = WG_OPTIONS[rasterize_wg_idx.get()];
         let bi = batch_iters.get();
+        let res = resolution.get();
         let params = build_benchmark_params(&s, cc, lam, sm, am, wg, bi);
         let lbl = label.get();
-        let base = if lbl.trim().is_empty() { auto_label(cc, lam, sm, am, wg, bi) } else { lbl.trim().to_string() };
+        let base = if lbl.trim().is_empty() { auto_label(cc, lam, sm, am, wg, bi, res) } else { lbl.trim().to_string() };
         let lbl = deduplicate_label(&base, &s);
         let msg = serde_json::json!({
             "type": "start_benchmark",
@@ -231,6 +236,7 @@ fn ConfigureSection(state: RwSignal<ViewerState>) -> impl IntoView {
             "params": params,
             "durationSecs": duration_secs.get(),
             "label": lbl,
+            "resolution": res,
         });
         send_ws_json(&msg);
         label.set(String::new());
@@ -403,34 +409,21 @@ fn ConfigureSection(state: RwSignal<ViewerState>) -> impl IntoView {
                     <label class="bench-config-label">"Resolution"</label>
                     <select
                         class="resolution-select"
-                        prop:value={move || state.get().target_resolution.to_string()}
-                        on:change={move |ev: web_sys::Event| {
-                            let target = ev.target().unwrap();
-                            let select: web_sys::HtmlSelectElement = target.dyn_into().unwrap();
-                            let val: u32 = select.value().parse().unwrap_or(0);
-                            send_ws_loading(state, &serde_json::json!({
-                                "type": "update_resolution",
-                                "resolution": val,
-                            }));
+                        prop:value={move || resolution.get().to_string()}
+                        on:change={move |ev| {
+                            if let Ok(v) = event_target_value(&ev).parse::<u32>() {
+                                resolution.set(v);
+                            }
                         }}
-                        disabled={move || state.get().engine_loading}
                     >
-                        {[0u32, 64, 128, 256, 384, 512, 768, 1024].into_iter().map(|r| {
-                            let label = if r == 0 { "Auto (256-512)".to_string() } else { format!("{}px", r) };
+                        {[64u32, 128, 256, 384, 512, 768, 1024].into_iter().map(|r| {
+                            let label_text = format!("{}px", r);
                             let val = r.to_string();
                             view! {
-                                <option value={val.clone()} selected={move || state.get().target_resolution == r}>{label}</option>
+                                <option value={val.clone()} selected={move || resolution.get() == r}>{label_text}</option>
                             }
                         }).collect::<Vec<_>>()}
                     </select>
-                    <span class="mutation-value">{move || {
-                        let s = state.get();
-                        if s.image_width > 0 && s.image_height > 0 {
-                            format!("{}x{}", s.image_width, s.image_height)
-                        } else {
-                            String::new()
-                        }
-                    }}</span>
                 </div>
             </div>
             <div class="bench-config-actions">
@@ -494,6 +487,7 @@ fn QueueSection(state: RwSignal<ViewerState>) -> impl IntoView {
                 "params": req.params,
                 "durationSecs": req.duration_secs,
                 "label": req.label,
+                "resolution": req.resolution,
             });
             send_ws_json(&msg);
         }
@@ -561,7 +555,7 @@ fn QueueSection(state: RwSignal<ViewerState>) -> impl IntoView {
                                 <div class="bench-queue-item">
                                     <span class="bench-queue-label">{req.label.clone()}</span>
                                     <span class="bench-queue-meta">
-                                        {format!("{}s | {}c {}\u{03BB} b{}{}", req.duration_secs, req.params.chain_count, req.params.lambda, req.params.gpu_batch_iters,
+                                        {format!("{}s | {}px {}c {}\u{03BB} b{}{}", req.duration_secs, req.resolution, req.params.chain_count, req.params.lambda, req.params.gpu_batch_iters,
                                             if req.params.rasterize_wg != [16, 16] { format!(" wg{}x{}", req.params.rasterize_wg[0], req.params.rasterize_wg[1]) } else { String::new() }
                                         )}
                                     </span>
@@ -620,6 +614,7 @@ fn ResultsSection(state: RwSignal<ViewerState>) -> impl IntoView {
                                     <tr>
                                         <th></th>
                                         <th>"Label"</th>
+                                        <th>"Res"</th>
                                         <th>"Chains"</th>
                                         <th>"\u{03BB}"</th>
                                         <th>"Batch"</th>
@@ -673,9 +668,9 @@ fn export_results_text(results: &[BenchmarkResult]) -> String {
 
     // Summary table
     out.push_str("=== Benchmark Results ===\n\n");
-    out.push_str(&format!("{:<24} {:>6} {:>3} {:>5} {:>8} {:>8} {:>8} {:>6} {:>8} {:>8}\n",
-        "Label", "Chains", "\u{03BB}", "Batch", "Duration", "Start", "Final", "Impr", "Impr/s", "Evals/s"));
-    out.push_str(&"-".repeat(104));
+    out.push_str(&format!("{:<24} {:>5} {:>6} {:>3} {:>5} {:>8} {:>8} {:>8} {:>6} {:>8} {:>8}\n",
+        "Label", "Res", "Chains", "\u{03BB}", "Batch", "Duration", "Start", "Final", "Impr", "Impr/s", "Evals/s"));
+    out.push_str(&"-".repeat(110));
     out.push('\n');
     for r in results {
         let actual_secs = if r.actual_duration_secs > 0.0 {
@@ -693,8 +688,9 @@ fn export_results_text(results: &[BenchmarkResult]) -> String {
         } else {
             format!("{}s", r.duration_secs)
         };
-        out.push_str(&format!("{:<24} {:>6} {:>3} {:>5} {:>8} {:>8} {:>8} {:>6} {:>8.2} {:>8.0}\n",
-            r.label, r.chain_count, r.lambda, r.gpu_batch_iters, duration_str,
+        let res_str = if r.resolution > 0 { format!("{}px", r.resolution) } else { "-".to_string() };
+        out.push_str(&format!("{:<24} {:>5} {:>6} {:>3} {:>5} {:>8} {:>8} {:>8} {:>6} {:>8.2} {:>8.0}\n",
+            r.label, res_str, r.chain_count, r.lambda, r.gpu_batch_iters, duration_str,
             r.start_fitness, r.final_fitness,
             r.total_improvements, r.improvements_per_sec, evals_per_sec));
     }
@@ -795,6 +791,7 @@ fn result_row(i: usize, r: &BenchmarkResult) -> impl IntoView {
         format!("{:.0}", evals_per_sec)
     };
 
+    let res_str = if r.resolution > 0 { format!("{}px", r.resolution) } else { "-".to_string() };
     view! {
         <tr>
             <td>
@@ -804,6 +801,7 @@ fn result_row(i: usize, r: &BenchmarkResult) -> impl IntoView {
                 />
             </td>
             <td class="bench-cell-label">{r.label.clone()}</td>
+            <td>{res_str}</td>
             <td>{r.chain_count.to_string()}</td>
             <td>{r.lambda.to_string()}</td>
             <td>{r.gpu_batch_iters.to_string()}</td>

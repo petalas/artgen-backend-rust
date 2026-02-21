@@ -9,6 +9,8 @@ pub struct BenchmarkRequest {
     pub params: MutationParams,
     pub duration_secs: u32,
     pub label: String,
+    #[serde(default)]
+    pub resolution: u32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -49,4 +51,6 @@ pub struct BenchmarkResult {
     pub lambda: u32,
     #[serde(default = "default_gpu_batch_iters")]
     pub gpu_batch_iters: u32,
+    #[serde(default)]
+    pub resolution: u32,
 }

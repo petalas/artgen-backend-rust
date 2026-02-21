@@ -435,6 +435,7 @@ fn handle_message(data: &serde_json::Value, state: RwSignal<ViewerState>) {
                 "params": req.params,
                 "durationSecs": req.duration_secs,
                 "label": req.label,
+                "resolution": req.resolution,
             });
             send_ws_json(&msg);
         }

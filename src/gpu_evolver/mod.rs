@@ -11,8 +11,8 @@ use crate::mutation_params::MutationParams;
 use crate::settings::{GPU_MAX_CHAIN_COUNT, GPU_DEFAULT_CHAIN_COUNT};
 
 use buffers::{
-    gpu_params_from, drawing_to_gpu, gpu_to_drawing, ControlFlags, GpuDrawingState,
-    GpuParams, GPU_DRAWING_STATE_SIZE,
+    gpu_params_from, default_gpu_params, drawing_to_gpu, gpu_to_drawing, ControlFlags,
+    GpuDrawingState, GpuParams, GPU_DRAWING_STATE_SIZE,
 };
 use pipeline::GpuPipeline;
 
@@ -598,6 +598,120 @@ impl GpuEvolver {
         self.chain_fitness.fill(0.0);
     }
 
+    /// Evaluate fitness of the current chain_states on the GPU without running
+    /// any mutations. Copies chain_states → working_states, dispatches
+    /// rasterize_error, reads back error accumulators, computes fitness,
+    /// and updates both chain_fitness[] and chain_states[].fitness_bits.
+    ///
+    /// This is synchronous — blocks until the GPU readback completes.
+    /// Returns the best fitness across all active chains.
+    pub fn evaluate_chain_fitness(&mut self, chain_count: u32) -> f32 {
+        self.flush_pending();
+
+        let p = &self.pipeline;
+        let active = chain_count.min(p.chain_count);
+        self.active_chain_count = active;
+
+        let state_size = GPU_DRAWING_STATE_SIZE as u64;
+        let copy_bytes = active as u64 * state_size;
+
+        // Zero error accumulators for the active chains
+        let zeros = vec![0u8; active as usize * 4];
+        p.queue.write_buffer(&p.error_accumulators_buf, 0, &zeros);
+
+        // Copy chain_states → working_states (rasterize_error reads working_states)
+        let mut encoder = p.device.create_command_encoder(&CommandEncoderDescriptor {
+            label: Some("evaluate_fitness"),
+        });
+        encoder.copy_buffer_to_buffer(
+            &p.chain_states_buf, 0,
+            &p.working_states_buf, 0,
+            copy_bytes,
+        );
+
+        // Dispatch rasterize_error: treat each chain as a single offspring (lambda=1)
+        let rwg = p.rasterize_wg;
+        let wg_x = (p.image_width + rwg[0] - 1) / rwg[0];
+        let wg_y = (p.image_height + rwg[1] - 1) / rwg[1];
+
+        let params = default_gpu_params(p.image_width, p.image_height, active);
+        let params_bytes: &[u8] = bytemuck::bytes_of(&params);
+
+        {
+            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                label: Some("evaluate_rasterize_error"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&p.rasterize_error_pipeline);
+            pass.set_bind_group(0, &p.rasterize_error_bind_group, &[]);
+            pass.set_push_constants(0, params_bytes);
+            pass.dispatch_workgroups(wg_x, wg_y, active);
+        }
+
+        // Copy error accumulators to a temporary staging buffer for readback
+        let staging_size = active as u64 * 4;
+        let staging = p.device.create_buffer(&BufferDescriptor {
+            label: Some("error_readback_staging"),
+            size: staging_size,
+            usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        encoder.copy_buffer_to_buffer(
+            &p.error_accumulators_buf, 0,
+            &staging, 0,
+            staging_size,
+        );
+
+        p.queue.submit(std::iter::once(encoder.finish()));
+
+        // Map and read error values
+        let slice = staging.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(MapMode::Read, move |r| { tx.send(r).unwrap(); });
+        p.device.poll(Maintain::Wait);
+        rx.recv().unwrap().expect("Failed to map error readback staging buffer");
+
+        let data = slice.get_mapped_range();
+        let errors: &[u32] = bytemuck::cast_slice(&data);
+
+        // Compute fitness from errors and update chain state
+        let max_error = crate::settings::GPU_MAX_ERROR_PER_PIXEL
+            * (p.image_width * p.image_height) as f32;
+
+        let mut best_fitness = 0.0f32;
+        for i in 0..active as usize {
+            let total_error = errors[i];
+            // Note: point penalty is not applied here — it's computed in select.wgsl
+            // using the polygon count. The fitness here is the pure rasterization fitness,
+            // which is what select.wgsl uses for acceptance comparisons after subtracting
+            // the point penalty. The first run_batch select pass will compute the full
+            // penalized fitness and store it in fitness_bits, so the values converge.
+            let fitness = 100.0 * (1.0 - total_error as f32 / max_error);
+            self.chain_fitness[i] = fitness;
+            if fitness > best_fitness {
+                best_fitness = fitness;
+            }
+        }
+
+        drop(data);
+        staging.unmap();
+
+        // Write fitness_bits back into chain_states so the first run_batch
+        // compares mutations against the correct baseline (not 0.0)
+        for i in 0..active as usize {
+            let fitness_bits = self.chain_fitness[i].to_bits();
+            let offset = i as u64 * state_size + 4; // fitness_bits is at offset 4 in GpuDrawingState
+            p.queue.write_buffer(
+                &p.chain_states_buf,
+                offset,
+                &fitness_bits.to_le_bytes(),
+            );
+        }
+        self.best_fitness_bits = best_fitness.to_bits();
+
+        best_fitness
+    }
+
     pub fn chain_fitness(&self) -> &[f32] {
         &self.chain_fitness[..self.active_chain_count as usize]
     }
@@ -645,34 +759,31 @@ impl GpuEvolver {
     }
 
     /// Prepare for a benchmark: reinitialize chains, trigger pipeline recreation
-    /// if needed, run 2 warmup batches to fill the double-buffer and populate
-    /// chain fitness values, then reset all counters. Returns the GPU-evaluated
-    /// initial fitness so the benchmark uses GPU's fitness scale (not CPU's).
+    /// if needed, evaluate initial fitness on GPU (no mutations), then reset
+    /// all counters. Returns the GPU-evaluated initial fitness.
     pub fn prepare_for_benchmark(&mut self, drawing: &Drawing, params: &MutationParams) -> f32 {
-        // 1. Reinit chains from snapshot (uploads drawing, zeros counters)
+        // 1. Reset iteration before reinit so RNG seeds are deterministic
+        //    across sequential benchmark runs (reinit_chains uses self.iteration
+        //    to seed chain and offspring RNG states).
+        self.iteration = 0;
         self.reinit_chains(drawing);
 
         // 2. Trigger pipeline recreation before timing starts
         self.pipeline.set_rasterize_wg(params.rasterize_wg);
 
-        // 3. Run 2 warmup batches to fill the double-buffer pipeline
-        //    and get initial fitness values read back from GPU
-        self.run_batch(params, false); // batch 1: submits, returns None
-        self.run_batch(params, false); // batch 2: reads back batch 1 results
+        // 3. Evaluate initial fitness on GPU without running mutations.
+        //    This dispatches rasterize_error only (no mutate/select), reads back
+        //    errors, computes fitness, and writes fitness_bits into chain_states.
+        let chain_count = params.chain_count.min(self.pipeline.chain_count);
+        let start_fitness = self.evaluate_chain_fitness(chain_count);
 
         // 4. Reset all counters so the benchmark starts clean
         self.iteration = 0;
         self.total_evaluations = 0;
         self.start_time = Instant::now();
         self.pass_timings = PassTimings::default();
-        // Note: chain_fitness and best_fitness_bits are now populated
-        // from the warmup readback — don't reset them
 
-        // Return GPU-evaluated fitness (best across all chains)
-        self.chain_fitness[..self.active_chain_count as usize]
-            .iter()
-            .cloned()
-            .fold(0.0f32, f32::max)
+        start_fitness
     }
 }
 

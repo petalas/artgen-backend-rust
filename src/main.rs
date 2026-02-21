@@ -836,6 +836,15 @@ fn handle_ws_command(
         Some("start_benchmark") => {
             if let Ok(req) = serde_json::from_value::<BenchmarkRequest>(cmd.clone()) {
                 let mut s = lock.lock().unwrap();
+                // If benchmark specifies a different resolution, trigger project reload first
+                if req.resolution > 0 && req.resolution != s.target_resolution {
+                    println!("[WS] Benchmark needs resolution {} (current {}), triggering reload",
+                        req.resolution, s.target_resolution);
+                    s.target_resolution = req.resolution;
+                    if let Some(name) = s.active_project.clone() {
+                        s.switch_request = Some(name);
+                    }
+                }
                 s.benchmark_request = Some(req);
                 s.generation += 1;
                 cvar.notify_all();
@@ -853,13 +862,14 @@ fn handle_ws_command(
             params.single_mutation_mode = true;
             params.adaptive_mutation = true;
             params.sanitize();
+            let mut s = lock.lock().unwrap();
             let req = BenchmarkRequest {
                 drawing_json,
                 params,
                 duration_secs: 33,
                 label: "standard-bench".to_string(),
+                resolution: s.target_resolution,
             };
-            let mut s = lock.lock().unwrap();
             s.benchmark_request = Some(req);
             s.generation += 1;
             cvar.notify_all();
@@ -1117,6 +1127,7 @@ fn run_benchmark(
         chain_count: bench_params.chain_count,
         lambda: bench_params.lambda,
         gpu_batch_iters: bench_params.gpu_batch_iters,
+        resolution: if w >= h { w as u32 } else { h as u32 },
     };
 
     println!(
@@ -1429,6 +1440,11 @@ fn gpu_main_loop_headless(legacy_image: Option<&str>, gpu_batch_iters_override: 
             engine.h as u32,
             &initial_best,
         ));
+
+        // Evaluate initial fitness on GPU so it matches GPU's error metric
+        // (important after resolution changes where CPU fitness is stale)
+        let gpu_fitness = evolver.evaluate_chain_fitness(mp.chain_count);
+        initial_best.fitness = gpu_fitness;
 
         let mut render_buf = vec![0u8; w * h * 4];
 
