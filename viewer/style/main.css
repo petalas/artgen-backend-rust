@@ -972,6 +972,20 @@ body {
     border-radius: 6px;
 }
 
+.bench-initializing {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 13px;
+    color: #555;
+}
+.bench-initializing .spinner {
+    width: 24px;
+    height: 24px;
+    border-width: 3px;
+    flex-shrink: 0;
+}
+
 .bench-progress-header {
     display: flex;
     justify-content: space-between;

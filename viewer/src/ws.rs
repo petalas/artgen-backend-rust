@@ -69,6 +69,7 @@ pub struct ViewerState {
     pub benchmark_snapshots: Vec<BenchmarkSnapshot>,
     pub benchmark_results: Vec<BenchmarkResult>,
     pub benchmark_active: bool,
+    pub benchmark_initializing: bool,
     pub benchmark_progress: Option<BenchmarkProgress>,
     pub benchmark_queue: Vec<BenchmarkRequest>,
 }
@@ -101,6 +102,7 @@ impl Default for ViewerState {
             benchmark_snapshots: vec![],
             benchmark_results: vec![],
             benchmark_active: false,
+            benchmark_initializing: false,
             benchmark_progress: None,
             benchmark_queue: vec![],
         }
@@ -385,6 +387,7 @@ fn handle_message(data: &serde_json::Value, state: RwSignal<ViewerState>) {
             }
             "benchmark_started" => {
                 s.benchmark_active = true;
+                s.benchmark_initializing = false;
                 let label = data["label"].as_str().unwrap_or("").to_string();
                 s.benchmark_progress = Some(BenchmarkProgress {
                     label,
@@ -405,6 +408,7 @@ fn handle_message(data: &serde_json::Value, state: RwSignal<ViewerState>) {
             }
             "benchmark_complete" => {
                 s.benchmark_active = false;
+                s.benchmark_initializing = false;
                 s.benchmark_progress = None;
                 if let Ok(result) = serde_json::from_value::<BenchmarkResult>(data["result"].clone()) {
                     s.benchmark_results.push(result);
@@ -428,7 +432,10 @@ fn handle_message(data: &serde_json::Value, state: RwSignal<ViewerState>) {
     if should_send_next {
         let next = state.with_untracked(|s| s.benchmark_queue.first().cloned());
         if let Some(req) = next {
-            state.update(|s| { s.benchmark_queue.remove(0); });
+            state.update(|s| {
+                s.benchmark_queue.remove(0);
+                s.benchmark_initializing = true;
+            });
             let msg = serde_json::json!({
                 "type": "start_benchmark",
                 "drawingJson": req.drawing_json,

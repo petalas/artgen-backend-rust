@@ -648,8 +648,9 @@ impl GpuEvolver {
             pass.dispatch_workgroups(wg_x, wg_y, active);
         }
 
-        // Copy error accumulators to a temporary staging buffer for readback
-        let staging_size = active as u64 * 4;
+        // Staging buffer: errors (active * 4 bytes) + polygon_counts (active * 4 bytes)
+        let errors_size = active as u64 * 4;
+        let staging_size = errors_size * 2;
         let staging = p.device.create_buffer(&BufferDescriptor {
             label: Some("error_readback_staging"),
             size: staging_size,
@@ -659,12 +660,22 @@ impl GpuEvolver {
         encoder.copy_buffer_to_buffer(
             &p.error_accumulators_buf, 0,
             &staging, 0,
-            staging_size,
+            errors_size,
         );
+        // Copy polygon_count (first u32) from each chain's working_states
+        for i in 0..active {
+            encoder.copy_buffer_to_buffer(
+                &p.working_states_buf,
+                i as u64 * state_size,
+                &staging,
+                errors_size + i as u64 * 4,
+                4,
+            );
+        }
 
         p.queue.submit(std::iter::once(encoder.finish()));
 
-        // Map and read error values
+        // Map and read error values + polygon counts
         let slice = staging.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
         slice.map_async(MapMode::Read, move |r| { tx.send(r).unwrap(); });
@@ -672,21 +683,22 @@ impl GpuEvolver {
         rx.recv().unwrap().expect("Failed to map error readback staging buffer");
 
         let data = slice.get_mapped_range();
-        let errors: &[u32] = bytemuck::cast_slice(&data);
+        let all_u32s: &[u32] = bytemuck::cast_slice(&data);
+        let errors = &all_u32s[..active as usize];
+        let polygon_counts = &all_u32s[active as usize..];
 
-        // Compute fitness from errors and update chain state
+        // Compute fitness from errors with point penalty (matching select.wgsl's compute_fitness)
         let max_error = crate::settings::GPU_MAX_ERROR_PER_PIXEL
             * (p.image_width * p.image_height) as f32;
+        let per_point_mul = crate::settings::PER_POINT_MULTIPLIER;
 
         let mut best_fitness = 0.0f32;
         for i in 0..active as usize {
             let total_error = errors[i];
-            // Note: point penalty is not applied here — it's computed in select.wgsl
-            // using the polygon count. The fitness here is the pure rasterization fitness,
-            // which is what select.wgsl uses for acceptance comparisons after subtracting
-            // the point penalty. The first run_batch select pass will compute the full
-            // penalized fitness and store it in fitness_bits, so the values converge.
-            let fitness = 100.0 * (1.0 - total_error as f32 / max_error);
+            let polygon_count = polygon_counts[i];
+            let mut fitness = 100.0 * (1.0 - total_error as f32 / max_error);
+            let num_points = polygon_count * 3;
+            fitness -= fitness * per_point_mul * num_points as f32;
             self.chain_fitness[i] = fitness;
             if fitness > best_fitness {
                 best_fitness = fitness;

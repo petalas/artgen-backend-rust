@@ -143,11 +143,7 @@ fn auto_label(chain_count: u32, lambda: u32, single_mutation_mode: bool, adaptiv
     let lambda_str = if lambda > 1 { format!("-{}\u{03BB}", lambda) } else { String::new() };
     let adaptive_str = if adaptive_mutation { "-adaptive" } else { "" };
     let defaults = MutationParams::default();
-    let wg_str = if rasterize_wg != defaults.rasterize_wg {
-        format!("-wg{}x{}", rasterize_wg[0], rasterize_wg[1])
-    } else {
-        String::new()
-    };
+    let wg_str = format!("-wg{}x{}", rasterize_wg[0], rasterize_wg[1]);
     let batch_str = if gpu_batch_iters != defaults.gpu_batch_iters {
         format!("-b{}", gpu_batch_iters)
     } else {
@@ -238,12 +234,13 @@ fn ConfigureSection(state: RwSignal<ViewerState>) -> impl IntoView {
             "label": lbl,
             "resolution": res,
         });
+        state.update(|s| s.benchmark_initializing = true);
         send_ws_json(&msg);
         label.set(String::new());
     };
 
     let has_snapshots = move || !state.get().benchmark_snapshots.is_empty();
-    let is_active = move || state.get().benchmark_active;
+    let is_active = move || { let s = state.get(); s.benchmark_active || s.benchmark_initializing };
 
     view! {
         <div class="bench-section">
@@ -445,6 +442,7 @@ fn ConfigureSection(state: RwSignal<ViewerState>) -> impl IntoView {
                     class="btn btn-primary"
                     style="background: #6366f1;"
                     on:click={move |_| {
+                        state.update(|s| s.benchmark_initializing = true);
                         send_ws_json(&serde_json::json!({
                             "type": "run_standard_benchmark",
                         }));
@@ -480,7 +478,10 @@ fn QueueSection(state: RwSignal<ViewerState>) -> impl IntoView {
         // Take first from queue and send it
         let req = state.with_untracked(|s| s.benchmark_queue.first().cloned());
         if let Some(req) = req {
-            state.update(|s| { s.benchmark_queue.remove(0); });
+            state.update(|s| {
+                s.benchmark_queue.remove(0);
+                s.benchmark_initializing = true;
+            });
             let msg = serde_json::json!({
                 "type": "start_benchmark",
                 "drawingJson": req.drawing_json,
@@ -494,11 +495,24 @@ fn QueueSection(state: RwSignal<ViewerState>) -> impl IntoView {
     };
 
     let has_queue = move || !state.get().benchmark_queue.is_empty();
-    let is_active = move || state.get().benchmark_active;
+    let is_active = move || { let s = state.get(); s.benchmark_active || s.benchmark_initializing };
 
     view! {
         <div class="bench-section">
             <h3 class="bench-section-title">"Queue & Progress"</h3>
+
+            // Initializing spinner (shown while pipeline is being prepared)
+            {move || {
+                let s = state.get();
+                s.benchmark_initializing.then(|| view! {
+                    <div class="bench-progress">
+                        <div class="bench-initializing">
+                            <div class="spinner"></div>
+                            <span>"Initializing pipeline\u{2026}"</span>
+                        </div>
+                    </div>
+                })
+            }}
 
             // Progress display
             {move || {
