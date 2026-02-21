@@ -206,6 +206,7 @@ impl GpuEvolver {
         let wg_x = p.image_width.div_ceil(rwg[0]);
         let wg_y = p.image_height.div_ceil(rwg[1]);
         let lambda = mutation_params.lambda;
+        let tile_culling = mutation_params.tile_culling;
 
         // Runtime check: active * lambda must fit in offspring_capacity
         assert!(active * lambda <= p.offspring_capacity,
@@ -239,6 +240,14 @@ impl GpuEvolver {
                 pass.set_immediates(0, params_bytes);
                 pass.dispatch_workgroups(active, 1, 1);
 
+                // Binning pass: only when tile culling is enabled
+                if tile_culling {
+                    pass.set_pipeline(&p.bin_polygons_pipeline);
+                    pass.set_bind_group(0, &p.bin_polygons_bind_group, &[]);
+                    pass.set_immediates(0, params_bytes);
+                    pass.dispatch_workgroups(active * lambda, 1, 1);
+                }
+
                 pass.set_pipeline(&p.rasterize_error_pipeline);
                 pass.set_bind_group(0, &p.rasterize_error_bind_group, &[]);
                 pass.set_immediates(0, params_bytes);
@@ -251,7 +260,8 @@ impl GpuEvolver {
             }
         }
 
-        // Last iteration with timestamps: 3 separate passes for per-stage profiling
+        // Last iteration with timestamps: separate passes for per-stage profiling
+        // When tile culling is on, binning is included in the rasterize_error timestamp window.
         if collect_timestamps {
             let qs = &p.timestamp_query_set;
 
@@ -279,6 +289,15 @@ impl GpuEvolver {
                         end_of_pass_write_index: Some(3),
                     }),
                 });
+
+                // Binning pass: included in rasterize_error timing window
+                if tile_culling {
+                    pass.set_pipeline(&p.bin_polygons_pipeline);
+                    pass.set_bind_group(0, &p.bin_polygons_bind_group, &[]);
+                    pass.set_immediates(0, params_bytes);
+                    pass.dispatch_workgroups(active * lambda, 1, 1);
+                }
+
                 pass.set_pipeline(&p.rasterize_error_pipeline);
                 pass.set_bind_group(0, &p.rasterize_error_bind_group, &[]);
                 pass.set_immediates(0, params_bytes);
@@ -845,5 +864,10 @@ fn estimate_gpu_memory(chain_count: u32, offspring_capacity: u32, w: u32, h: u32
     let params = std::mem::size_of::<GpuParams>();
     // Double-buffered staging: 2x control (16B each) + 2x fitness (k*4 each) + 2x timestamp (64B each) + readback
     let staging = GPU_DRAWING_STATE_SIZE + 2 * 16 + 2 * (k * 4) + 2 * 64;
-    chain_states + working_states + reference + error_accumulators + control + params + staging
+    // Tile culling buffers (worst-case: 8x8 WG)
+    let max_num_tiles = ((w as usize + 7) / 8) * ((h as usize + 7) / 8);
+    let tile_max_polys = crate::settings::TILE_MAX_POLYS as usize;
+    let tile_data = oc * max_num_tiles * tile_max_polys * 4;
+    let tile_counts = oc * max_num_tiles * 4;
+    chain_states + working_states + reference + error_accumulators + control + params + staging + tile_data + tile_counts
 }

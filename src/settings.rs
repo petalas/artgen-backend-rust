@@ -22,3 +22,6 @@ pub const PER_POINT_MULTIPLIER: f32 = 1.0 / 5000000.0;
 
 pub const MIN_POINTS_PER_POLYGON: usize = 3;
 pub const START_WITH_POLYGONS_PER_IMAGE: usize = 150;
+
+// Tile culling settings
+pub const TILE_MAX_POLYS: u32 = 256; // max polygon indices per tile per offspring

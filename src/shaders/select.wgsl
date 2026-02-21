@@ -49,7 +49,7 @@ struct Params {
     spatial_crossover_weight: f32,
     tournament_size: u32,
     _pad1: u32,
-    _pad2: u32,
+    tile_culling: u32,
 
     // Chain count + lambda + padding
     chain_count_param: u32,

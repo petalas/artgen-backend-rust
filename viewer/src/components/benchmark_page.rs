@@ -124,6 +124,7 @@ fn build_benchmark_params(
     lambda: u32,
     single_mutation_mode: bool,
     adaptive_mutation: bool,
+    tile_culling: bool,
     rasterize_wg: [u32; 2],
     gpu_batch_iters: u32,
 ) -> crate::mutation_params::MutationParams {
@@ -132,15 +133,17 @@ fn build_benchmark_params(
     params.lambda = lambda;
     params.single_mutation_mode = single_mutation_mode;
     params.adaptive_mutation = adaptive_mutation;
+    params.tile_culling = tile_culling;
     params.rasterize_wg = rasterize_wg;
     params.gpu_batch_iters = gpu_batch_iters;
     params
 }
 
-fn auto_label(chain_count: u32, lambda: u32, single_mutation_mode: bool, adaptive_mutation: bool, rasterize_wg: [u32; 2], gpu_batch_iters: u32, resolution: u32) -> String {
+fn auto_label(chain_count: u32, lambda: u32, single_mutation_mode: bool, adaptive_mutation: bool, tile_culling: bool, rasterize_wg: [u32; 2], gpu_batch_iters: u32, resolution: u32) -> String {
     let mode = if single_mutation_mode { "single" } else { "multi" };
     let lambda_str = if lambda > 1 { format!("-{}\u{03BB}", lambda) } else { String::new() };
     let adaptive_str = if adaptive_mutation { "-adaptive" } else { "" };
+    let tile_str = if tile_culling { "-tiled" } else { "" };
     let defaults = MutationParams::default();
     let wg_str = format!("-wg{}x{}", rasterize_wg[0], rasterize_wg[1]);
     let batch_str = if gpu_batch_iters != defaults.gpu_batch_iters {
@@ -149,7 +152,7 @@ fn auto_label(chain_count: u32, lambda: u32, single_mutation_mode: bool, adaptiv
         String::new()
     };
     let res_str = format!("-{}px", resolution);
-    format!("{}c{}-{}{}{}{}{}", chain_count, lambda_str, mode, adaptive_str, wg_str, batch_str, res_str)
+    format!("{}c{}-{}{}{}{}{}{}", chain_count, lambda_str, mode, adaptive_str, tile_str, wg_str, batch_str, res_str)
 }
 
 fn deduplicate_label(base: &str, state: &ViewerState) -> String {
@@ -179,6 +182,7 @@ fn ConfigureSection(state: RwSignal<ViewerState>) -> impl IntoView {
     let lambda_exp = RwSignal::new(defaults.lambda.max(1).ilog2());
     let single_mutation = RwSignal::new(defaults.single_mutation_mode);
     let adaptive_mutation = RwSignal::new(defaults.adaptive_mutation);
+    let tile_culling = RwSignal::new(defaults.tile_culling);
     let default_wg_idx = WG_OPTIONS.iter().position(|w| *w == defaults.rasterize_wg).unwrap_or(0);
     let rasterize_wg_idx = RwSignal::new(default_wg_idx);
     let batch_iters = RwSignal::new(defaults.gpu_batch_iters);
@@ -192,12 +196,13 @@ fn ConfigureSection(state: RwSignal<ViewerState>) -> impl IntoView {
         let lam = lambda_from_exp(lambda_exp.get());
         let sm = single_mutation.get();
         let am = adaptive_mutation.get();
+        let tc = tile_culling.get();
         let wg = WG_OPTIONS[rasterize_wg_idx.get()];
         let bi = batch_iters.get();
         let res = resolution.get();
-        let params = build_benchmark_params(&s, cc, lam, sm, am, wg, bi);
+        let params = build_benchmark_params(&s, cc, lam, sm, am, tc, wg, bi);
         let lbl = label.get();
-        let base = if lbl.trim().is_empty() { auto_label(cc, lam, sm, am, wg, bi, res) } else { lbl.trim().to_string() };
+        let base = if lbl.trim().is_empty() { auto_label(cc, lam, sm, am, tc, wg, bi, res) } else { lbl.trim().to_string() };
         let lbl = deduplicate_label(&base, &s);
         let req = BenchmarkRequest {
             drawing_json: snap.drawing_json.clone(),
@@ -218,12 +223,13 @@ fn ConfigureSection(state: RwSignal<ViewerState>) -> impl IntoView {
         let lam = lambda_from_exp(lambda_exp.get());
         let sm = single_mutation.get();
         let am = adaptive_mutation.get();
+        let tc = tile_culling.get();
         let wg = WG_OPTIONS[rasterize_wg_idx.get()];
         let bi = batch_iters.get();
         let res = resolution.get();
-        let params = build_benchmark_params(&s, cc, lam, sm, am, wg, bi);
+        let params = build_benchmark_params(&s, cc, lam, sm, am, tc, wg, bi);
         let lbl = label.get();
-        let base = if lbl.trim().is_empty() { auto_label(cc, lam, sm, am, wg, bi, res) } else { lbl.trim().to_string() };
+        let base = if lbl.trim().is_empty() { auto_label(cc, lam, sm, am, tc, wg, bi, res) } else { lbl.trim().to_string() };
         let lbl = deduplicate_label(&base, &s);
         let msg = serde_json::json!({
             "type": "start_benchmark",
@@ -360,6 +366,19 @@ fn ConfigureSection(state: RwSignal<ViewerState>) -> impl IntoView {
                             }}
                         />
                         "Adaptive mutation scale (\u{03BB}>1 offspring only)"
+                    </label>
+                </div>
+                <div class="bench-config-row">
+                    <label class="bench-config-label">"Tile cull"</label>
+                    <label class="bench-checkbox-label">
+                        <input
+                            type="checkbox"
+                            prop:checked={move || tile_culling.get()}
+                            on:change={move |_| {
+                                tile_culling.set(!tile_culling.get_untracked());
+                            }}
+                        />
+                        "Spatial tile culling (polygon binning)"
                     </label>
                 </div>
                 <div class="bench-config-row">

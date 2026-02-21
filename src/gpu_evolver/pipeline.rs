@@ -24,14 +24,22 @@ pub struct GpuPipeline {
     pub fitness_packed_buf: Buffer,
     pub fitness_staging_bufs: [Buffer; 2],
 
+    // Tile culling buffers
+    pub tile_data_buf: Buffer,
+    pub tile_counts_buf: Buffer,
+
     // Compute pipelines
     pub mutate_pipeline: ComputePipeline,
     pub rasterize_error_pipeline: ComputePipeline,
     pub select_pipeline: ComputePipeline,
+    pub bin_polygons_pipeline: ComputePipeline,
 
     // Rasterize pipeline recreation support — stored for creating new pipeline variants
     rasterize_error_shader: ShaderModule,
     rasterize_error_pipeline_layout: PipelineLayout,
+
+    // Bin polygons pipeline recreation support (tile size must match rasterize WG)
+    bin_polygons_pipeline_layout: PipelineLayout,
 
     // Pipeline cache — accelerates pipeline creation on subsequent runs (Vulkan only)
     pipeline_cache: PipelineCache,
@@ -41,6 +49,7 @@ pub struct GpuPipeline {
     pub mutate_bind_group: BindGroup,
     pub rasterize_error_bind_group: BindGroup,
     pub select_bind_group: BindGroup,
+    pub bin_polygons_bind_group: BindGroup,
 
     // Timestamp profiling
     pub timestamp_query_set: QuerySet,
@@ -54,6 +63,7 @@ pub struct GpuPipeline {
     pub image_width: u32,
     pub image_height: u32,
     pub rasterize_wg: [u32; 2], // current workgroup size [wg_x, wg_y]
+    pub num_tiles: u32,          // num_tiles_x * num_tiles_y for current rasterize_wg
 }
 
 impl GpuPipeline {
@@ -100,7 +110,7 @@ impl GpuPipeline {
         println!("Selected GPU adapter: {:?}", adapter_info.name);
 
         // Cap chain_count to fit within the adapter's max storage buffer binding size.
-        // Largest buffer is chain_states or working_states (chain_count × GPU_DRAWING_STATE_SIZE).
+        // Largest buffer is chain_states or working_states (chain_count * GPU_DRAWING_STATE_SIZE).
         let adapter_limits = adapter.limits();
         let max_ssbo = adapter_limits.max_storage_buffer_binding_size as u64;
         let max_chains_by_buffer = max_ssbo / (GPU_DRAWING_STATE_SIZE as u64);
@@ -112,13 +122,27 @@ impl GpuPipeline {
         // Clamp to adapter limit (don't request more than hardware supports)
         let max_buffer_size = max_buffer_needed.min(max_ssbo as u64);
 
+        // Tile culling buffers can be large: offspring_capacity * num_tiles * TILE_MAX_POLYS * 4
+        // Compute the max tile buffer size we might need (for max resolution / min WG size)
+        let tile_max_polys = crate::settings::TILE_MAX_POLYS as u64;
+        let max_offspring_capacity = ((max_ssbo as u64) / (GPU_DRAWING_STATE_SIZE as u64))
+            .min((chain_count as u64) * max_lambda);
+        // Worst case tile count: max resolution with smallest WG (8x8)
+        let max_tiles = ((image_width as u64 + 7) / 8) * ((image_height as u64 + 7) / 8);
+        let tile_data_size = max_offspring_capacity * max_tiles * tile_max_polys * 4;
+        let tile_counts_size = max_offspring_capacity * max_tiles * 4;
+        // The tile_data buffer can exceed max_ssbo on large configs — clamp it
+        let tile_data_size = tile_data_size.min(max_ssbo);
+        let tile_counts_size = tile_counts_size.min(max_ssbo);
+        let max_buffer_size = max_buffer_size.max(tile_data_size).max(tile_counts_size);
+
         let required_limits = Limits {
             max_storage_buffer_binding_size: max_buffer_size as u32,
             max_buffer_size,
             max_compute_workgroups_per_dimension: 65535,
             max_compute_invocations_per_workgroup: 512,
             max_compute_workgroup_size_x: 512, // 1D workgroup layout needs up to 512 in x (for 32x16 tile)
-            max_storage_buffers_per_shader_stage: 5, // select shader uses 5 storage bindings (params moved to push constants)
+            max_storage_buffers_per_shader_stage: 5, // rasterize now uses 5 storage bindings (working_states, error_accum, tile_data, tile_counts + texture)
             max_immediate_size: std::mem::size_of::<GpuParams>() as u32, // 128 bytes — Vulkan minimum guarantee
             ..Limits::downlevel_defaults()
         };
@@ -285,16 +309,62 @@ impl GpuPipeline {
             })
         });
 
+        // --- Tile culling buffers ---
+        // Sized for offspring_capacity * num_tiles (worst-case WG) * TILE_MAX_POLYS
+        let rasterize_wg = [
+            crate::settings::RASTERIZE_WG_X_DEFAULT,
+            crate::settings::RASTERIZE_WG_Y_DEFAULT,
+        ];
+        let num_tiles_x = image_width.div_ceil(rasterize_wg[0]);
+        let num_tiles_y = image_height.div_ceil(rasterize_wg[1]);
+        let num_tiles = num_tiles_x * num_tiles_y;
+
+        // Use worst-case (smallest WG = most tiles) for buffer allocation
+        let max_num_tiles_x = image_width.div_ceil(8); // smallest WG_X = 8
+        let max_num_tiles_y = image_height.div_ceil(8); // smallest WG_Y = 8
+        let max_num_tiles = max_num_tiles_x * max_num_tiles_y;
+
+        let tile_max_polys = crate::settings::TILE_MAX_POLYS;
+        let tile_data_buf_size = (offspring_capacity as u64) * (max_num_tiles as u64) * (tile_max_polys as u64) * 4;
+        let tile_counts_buf_size = (offspring_capacity as u64) * (max_num_tiles as u64) * 4;
+
+        // Clamp to device max buffer size
+        let device_max = device.limits().max_buffer_size;
+        let tile_data_buf_size = tile_data_buf_size.min(device_max);
+        let tile_counts_buf_size = tile_counts_buf_size.min(device_max);
+
+        let tile_data_buf = device.create_buffer(&BufferDescriptor {
+            label: Some("tile_data"),
+            size: tile_data_buf_size,
+            usage: BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+
+        let tile_counts_buf = device.create_buffer(&BufferDescriptor {
+            label: Some("tile_counts"),
+            size: tile_counts_buf_size,
+            usage: BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+
+        println!(
+            "Tile culling buffers allocated: tile_data {:.1} MB, tile_counts {:.1} MB (max {} tiles, {} offspring)",
+            tile_data_buf_size as f64 / (1024.0 * 1024.0),
+            tile_counts_buf_size as f64 / (1024.0 * 1024.0),
+            max_num_tiles,
+            offspring_capacity,
+        );
+
         // --- Timestamp query profiling ---
         let timestamp_query_set = device.create_query_set(&QuerySetDescriptor {
             label: Some("timestamp_queries"),
             ty: QueryType::Timestamp,
-            count: 8, // 2 per pass × 4 passes
+            count: 8, // 2 per pass x 4 passes
         });
 
         let timestamp_resolve_buf = device.create_buffer(&BufferDescriptor {
             label: Some("timestamp_resolve"),
-            size: 8 * 8, // 8 × u64
+            size: 8 * 8, // 8 x u64
             usage: BufferUsages::QUERY_RESOLVE | BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
@@ -350,7 +420,8 @@ impl GpuPipeline {
             ],
         });
 
-        // Rasterize+Error: working_states(read), reference_image(texture), error_accumulators(rw); params via push constants
+        // Rasterize+Error: working_states(read), reference_image(texture), error_accumulators(rw),
+        //                   tile_data(read), tile_counts(read); params via push constants
         let rasterize_error_bgl = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some("rasterize_error_bgl"),
             entries: &[
@@ -371,6 +442,63 @@ impl GpuPipeline {
                         sample_type: TextureSampleType::Float { filterable: false },
                         view_dimension: TextureViewDimension::D2,
                         multisampled: false,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: NonZeroU64::new(std::mem::size_of::<u32>() as u64),
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: NonZeroU64::new(std::mem::size_of::<u32>() as u64),
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: NonZeroU64::new(std::mem::size_of::<u32>() as u64),
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        // Bin polygons: working_states(read), tile_data(rw), tile_counts(rw); params via push constants
+        let bin_polygons_bgl = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("bin_polygons_bgl"),
+            entries: &[
+                BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: NonZeroU64::new(GPU_DRAWING_STATE_SIZE as u64),
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: NonZeroU64::new(std::mem::size_of::<u32>() as u64),
                     },
                     count: None,
                 },
@@ -466,13 +594,21 @@ impl GpuPipeline {
             bind_group_layouts: &[&rasterize_error_bgl],
             immediate_size,
         });
-        let rasterize_wg = [
-            crate::settings::RASTERIZE_WG_X_DEFAULT,
-            crate::settings::RASTERIZE_WG_Y_DEFAULT,
-        ];
         let (rasterize_error_pipeline, rasterize_error_shader) = create_rasterize_pipeline(
             &device,
             &rasterize_error_pipeline_layout,
+            rasterize_wg,
+            &pipeline_cache,
+        );
+
+        let bin_polygons_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+            label: Some("bin_polygons_layout"),
+            bind_group_layouts: &[&bin_polygons_bgl],
+            immediate_size,
+        });
+        let bin_polygons_pipeline = create_bin_polygons_pipeline(
+            &device,
+            &bin_polygons_pipeline_layout,
             rasterize_wg,
             &pipeline_cache,
         );
@@ -508,6 +644,18 @@ impl GpuPipeline {
                 BindGroupEntry { binding: 0, resource: working_states_buf.as_entire_binding() },
                 BindGroupEntry { binding: 1, resource: BindingResource::TextureView(&reference_view) },
                 BindGroupEntry { binding: 2, resource: error_accumulators_buf.as_entire_binding() },
+                BindGroupEntry { binding: 3, resource: tile_data_buf.as_entire_binding() },
+                BindGroupEntry { binding: 4, resource: tile_counts_buf.as_entire_binding() },
+            ],
+        });
+
+        let bin_polygons_bind_group = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("bin_polygons_bg"),
+            layout: &bin_polygons_bgl,
+            entries: &[
+                BindGroupEntry { binding: 0, resource: working_states_buf.as_entire_binding() },
+                BindGroupEntry { binding: 1, resource: tile_data_buf.as_entire_binding() },
+                BindGroupEntry { binding: 2, resource: tile_counts_buf.as_entire_binding() },
             ],
         });
 
@@ -536,11 +684,15 @@ impl GpuPipeline {
             control_staging_bufs,
             fitness_packed_buf,
             fitness_staging_bufs,
+            tile_data_buf,
+            tile_counts_buf,
             mutate_pipeline,
             rasterize_error_pipeline,
             select_pipeline,
+            bin_polygons_pipeline,
             rasterize_error_shader,
             rasterize_error_pipeline_layout,
+            bin_polygons_pipeline_layout,
             pipeline_cache,
             pipeline_cache_path: cache_path,
             timestamp_query_set,
@@ -550,22 +702,25 @@ impl GpuPipeline {
             mutate_bind_group,
             rasterize_error_bind_group,
             select_bind_group,
+            bin_polygons_bind_group,
             chain_count,
             offspring_capacity: offspring_capacity as u32,
             image_width,
             image_height,
             rasterize_wg,
+            num_tiles,
         }
     }
 
     /// Recreate the rasterize_error pipeline with a new workgroup size.
+    /// Also recreates the bin_polygons pipeline since tile size must match.
     /// This is called between batches when the user changes the workgroup size.
     pub fn set_rasterize_wg(&mut self, wg: [u32; 2]) {
         if wg == self.rasterize_wg {
             return;
         }
         println!(
-            "Recreating rasterize_error pipeline: {}x{} -> {}x{}",
+            "Recreating rasterize_error + bin_polygons pipelines: {}x{} -> {}x{}",
             self.rasterize_wg[0], self.rasterize_wg[1], wg[0], wg[1]
         );
         let (pipeline, shader) = create_rasterize_pipeline(
@@ -576,7 +731,16 @@ impl GpuPipeline {
         );
         self.rasterize_error_pipeline = pipeline;
         self.rasterize_error_shader = shader;
+
+        self.bin_polygons_pipeline = create_bin_polygons_pipeline(
+            &self.device,
+            &self.bin_polygons_pipeline_layout,
+            wg,
+            &self.pipeline_cache,
+        );
+
         self.rasterize_wg = wg;
+        self.num_tiles = self.image_width.div_ceil(wg[0]) * self.image_height.div_ceil(wg[1]);
     }
 
     /// Save pipeline cache data to disk for faster startup next time.
@@ -630,6 +794,32 @@ fn create_rasterize_pipeline(
     });
 
     (pipeline, shader)
+}
+
+/// Create a bin_polygons compute pipeline with tile size matching the rasterize workgroup.
+fn create_bin_polygons_pipeline(
+    device: &Device,
+    layout: &PipelineLayout,
+    wg: [u32; 2],
+    cache: &PipelineCache,
+) -> ComputePipeline {
+    let source = include_str!("../shaders/bin_polygons.wgsl")
+        .replace("const TILE_W: u32 = 16;", &format!("const TILE_W: u32 = {};", wg[0]))
+        .replace("const TILE_H: u32 = 16;", &format!("const TILE_H: u32 = {};", wg[1]));
+
+    let shader = device.create_shader_module(ShaderModuleDescriptor {
+        label: Some("bin_polygons_shader"),
+        source: ShaderSource::Wgsl(source.into()),
+    });
+
+    device.create_compute_pipeline(&ComputePipelineDescriptor {
+        label: Some("bin_polygons_pipeline"),
+        layout: Some(layout),
+        module: &shader,
+        entry_point: Some("main"),
+        compilation_options: Default::default(),
+        cache: Some(cache),
+    })
 }
 
 /// Get the disk path for storing this adapter's pipeline cache.
