@@ -206,7 +206,9 @@ fn MutationPanelBody(state: RwSignal<ViewerState>) -> impl IntoView {
                             }
                         }}
                     >
+                        <option value="32x16">"32x16 (512 threads)"</option>
                         <option value="16x16">"16x16 (256 threads)"</option>
+                        <option value="32x8">"32x8 (256 threads)"</option>
                         <option value="16x8">"16x8 (128 threads)"</option>
                         <option value="8x8">"8x8 (64 threads)"</option>
                     </select>

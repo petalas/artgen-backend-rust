@@ -1,7 +1,11 @@
 // Fused rasterize + error compute shader — one thread per pixel per offspring
-// Dispatch: (W/WG_X, H/WG_Y, K*λ) workgroups of size (WG_X, WG_Y, 1)
+// Dispatch: (W/WG_X, H/WG_Y, K*λ) workgroups of size (THREAD_COUNT, 1, 1)
+// 1D workgroup layout enables subgroup intrinsics for the error reduction
+// (naga 22 rejects subgroup builtins on multi-dimensional workgroups).
+// Pixel coordinates are derived from workgroup_id + local_invocation_index.
+//
 // Each thread rasterizes all polygons at its pixel, computes L1 error against reference,
-// then workgroup-reduces the error and thread 0 atomicAdds to per-offspring accumulator.
+// then subgroupAdd reduces within each warp/wave and thread 0 sums across subgroups.
 // Polygons are cooperatively loaded into shared memory in tiles (scaled to thread count).
 //
 // Workgroup size is configurable. pipeline.rs uses string replacement on the
@@ -88,23 +92,28 @@ var<push_constant>                             params:             Params;
 
 // Shared memory arrays sized to thread count.
 // shared_polys: TILE_CAP polygons (THREAD_COUNT * 3 * 16 bytes)
-// shared_errors: one u32 per thread for workgroup reduction
-var<workgroup> shared_polys: array<Polygon, 768>;   // max tile cap (256*3) — only TILE_CAP entries used
-var<workgroup> shared_errors: array<u32, 256>;      // max threads — only THREAD_COUNT entries used
+// shared_errors: one u32 per subgroup for cross-subgroup reduction (max 256/4 = 64 subgroups)
+var<workgroup> shared_polys: array<Polygon, 1536>;   // max tile cap (512*3) — only TILE_CAP entries used
+var<workgroup> shared_errors: array<u32, 128>;      // max subgroups — only ceil(THREAD_COUNT/sg_size) used
 
 // Half-space edge function: positive if point (px,py) is on the left side of edge (ax,ay)->(bx,by)
 fn edge_fn(ax: f32, ay: f32, bx: f32, by: f32, px: f32, py: f32) -> f32 {
     return (bx - ax) * (py - ay) - (by - ay) * (px - ax);
 }
 
-@compute @workgroup_size(WG_X, WG_Y, 1)
+@compute @workgroup_size(THREAD_COUNT, 1, 1)
 fn main(
-    @builtin(global_invocation_id) gid: vec3<u32>,
+    @builtin(workgroup_id) wid: vec3<u32>,
     @builtin(local_invocation_index) local_idx: u32,
+    @builtin(subgroup_invocation_id) sg_inv_id: u32,
+    @builtin(subgroup_size) sg_size: u32,
 ) {
-    let px = gid.x;
-    let py = gid.y;
-    let chain_id = gid.z;
+    // Derive 2D pixel coordinates from 1D thread index + workgroup ID
+    let local_x = local_idx % WG_X;
+    let local_y = local_idx / WG_X;
+    let px = wid.x * WG_X + local_x;
+    let py = wid.y * WG_Y + local_y;
+    let chain_id = wid.z;
 
     let w = params.image_width;
     let h = params.image_height;
@@ -202,21 +211,24 @@ fn main(
         }
     }
 
-    // Binary tree reduction in shared memory
-    shared_errors[local_idx] = pixel_error;
+    // Subgroup-accelerated reduction: subgroupAdd within each warp/wave,
+    // then thread 0 sums across subgroups via shared memory.
+    // Replaces 8-step LDS tree reduction (8 barriers) with 1 barrier.
+    let sg_sum = subgroupAdd(pixel_error);
+    let sg_idx = local_idx / sg_size;
+
+    if sg_inv_id == 0u {
+        shared_errors[sg_idx] = sg_sum;
+    }
     workgroupBarrier();
 
-    var stride = THREAD_COUNT / 2u;
-    while stride > 0u {
-        if local_idx < stride {
-            shared_errors[local_idx] += shared_errors[local_idx + stride];
-        }
-        workgroupBarrier();
-        stride >>= 1u;
-    }
-
-    // Thread 0 adds workgroup sum to chain's accumulator
+    // Thread 0 sums across subgroups and atomicAdds to chain's accumulator
     if local_idx == 0u {
-        atomicAdd(&error_accumulators[chain_id], shared_errors[0]);
+        let num_subgroups = (THREAD_COUNT + sg_size - 1u) / sg_size;
+        var total = 0u;
+        for (var i = 0u; i < num_subgroups; i++) {
+            total += shared_errors[i];
+        }
+        atomicAdd(&error_accumulators[chain_id], total);
     }
 }

@@ -165,7 +165,8 @@ impl GpuPipeline {
             max_storage_buffer_binding_size: max_buffer_size as u32,
             max_buffer_size,
             max_compute_workgroups_per_dimension: 65535,
-            max_compute_invocations_per_workgroup: 256,
+            max_compute_invocations_per_workgroup: 512,
+            max_compute_workgroup_size_x: 512, // 1D workgroup layout needs up to 512 in x (for 32x16 tile)
             max_storage_buffers_per_shader_stage: 5, // select shader uses 5 storage bindings (params moved to push constants)
             max_push_constant_size: std::mem::size_of::<GpuParams>() as u32, // 128 bytes — Vulkan minimum guarantee
             ..Limits::downlevel_defaults()
@@ -174,7 +175,14 @@ impl GpuPipeline {
         // Request PIPELINE_CACHE feature if the adapter supports it (Vulkan only)
         let adapter_features = adapter.features();
         let pipeline_cache_supported = adapter_features.contains(Features::PIPELINE_CACHE);
+        let subgroup_supported = adapter_features.contains(Features::SUBGROUP);
         let mut required_features = Features::TIMESTAMP_QUERY | Features::PUSH_CONSTANTS;
+        if subgroup_supported {
+            required_features |= Features::SUBGROUP;
+            println!("Subgroup feature supported — enabling wave intrinsics for error reduction");
+        } else {
+            panic!("GPU adapter does not support subgroups — required for rasterize_error shader");
+        }
         if pipeline_cache_supported {
             required_features |= Features::PIPELINE_CACHE;
             println!("Pipeline cache feature supported — enabling shader cache");

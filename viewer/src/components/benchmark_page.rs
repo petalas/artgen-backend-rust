@@ -111,7 +111,7 @@ fn exp_from_chains(chains: u32) -> u32 { chains.max(1).ilog2() }
 fn lambda_from_exp(exp: u32) -> u32 { 1u32 << exp }
 
 // Workgroup size options: index -> [wg_x, wg_y]
-const WG_OPTIONS: &[[u32; 2]] = &[[16, 16], [16, 8], [8, 8]];
+const WG_OPTIONS: &[[u32; 2]] = &[[32, 16], [16, 16], [32, 8], [16, 8], [8, 8]];
 
 fn wg_label(wg: &[u32; 2]) -> String {
     let threads = wg[0] * wg[1];
@@ -180,7 +180,7 @@ fn ConfigureSection(state: RwSignal<ViewerState>) -> impl IntoView {
     let lambda_exp = RwSignal::new(3u32); // 2^3 = 8 (default lambda=8)
     let single_mutation = RwSignal::new(false);
     let adaptive_mutation = RwSignal::new(true);
-    let rasterize_wg_idx = RwSignal::new(0usize); // index into WG_OPTIONS, default 0 = 16x16
+    let rasterize_wg_idx = RwSignal::new(1usize); // index into WG_OPTIONS, default 1 = 16x16
     let batch_iters = RwSignal::new(state.get_untracked().mutation_params.gpu_batch_iters); // GPU batch iterations per submission
 
     let add_to_queue = move |_| {

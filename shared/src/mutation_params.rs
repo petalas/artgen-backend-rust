@@ -113,7 +113,7 @@ impl MutationParams {
         self.tournament_size = self.tournament_size.clamp(1, 16);
 
         // Rasterize workgroup size: must be one of the supported configurations
-        let valid_wg_sizes: &[[u32; 2]] = &[[16, 16], [16, 8], [8, 8]];
+        let valid_wg_sizes: &[[u32; 2]] = &[[32, 16], [16, 16], [32, 8], [16, 8], [8, 8]];
         if !valid_wg_sizes.contains(&self.rasterize_wg) {
             self.rasterize_wg = [settings::RASTERIZE_WG_X_DEFAULT, settings::RASTERIZE_WG_Y_DEFAULT];
         }
