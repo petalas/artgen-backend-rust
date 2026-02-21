@@ -65,7 +65,7 @@ impl GpuPipeline {
         // --- Device + Queue ---
         // Exclude GL/GLES — EGL conflicts with SDL2's display context.
         // Allow noncompliant adapters for WSL2 dozen (Vulkan-on-D3D12) driver.
-        let instance = Instance::new(InstanceDescriptor {
+        let instance = Instance::new(&InstanceDescriptor {
             backends: Backends::VULKAN | Backends::DX12,
             flags: wgpu::InstanceFlags::default()
                 | wgpu::InstanceFlags::ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER,
@@ -73,7 +73,7 @@ impl GpuPipeline {
         });
 
         // Enumerate all adapters and prefer discrete GPU
-        let adapters: Vec<_> = instance.enumerate_adapters(Backends::VULKAN | Backends::DX12);
+        let adapters: Vec<_> = instance.enumerate_adapters(Backends::VULKAN | Backends::DX12).await;
         println!("Found {} GPU adapter(s):", adapters.len());
         for (i, a) in adapters.iter().enumerate() {
             let info = a.get_info();
@@ -114,13 +114,13 @@ impl GpuPipeline {
             max_compute_invocations_per_workgroup: 512,
             max_compute_workgroup_size_x: 512, // 1D workgroup layout needs up to 512 in x (for 32x16 tile)
             max_storage_buffers_per_shader_stage: 5, // select shader uses 5 storage bindings (params moved to push constants)
-            max_push_constant_size: std::mem::size_of::<GpuParams>() as u32, // 128 bytes — Vulkan minimum guarantee
+            max_immediate_size: std::mem::size_of::<GpuParams>() as u32, // 128 bytes — Vulkan minimum guarantee
             ..Limits::downlevel_defaults()
         };
 
         let adapter_features = adapter.features();
         let subgroup_supported = adapter_features.contains(Features::SUBGROUP);
-        let mut required_features = Features::TIMESTAMP_QUERY | Features::PUSH_CONSTANTS;
+        let mut required_features = Features::TIMESTAMP_QUERY | Features::IMMEDIATES;
         if subgroup_supported {
             required_features |= Features::SUBGROUP;
             println!("Subgroup feature supported — enabling wave intrinsics for error reduction");
@@ -134,12 +134,14 @@ impl GpuPipeline {
                 required_features,
                 required_limits,
                 memory_hints: MemoryHints::Performance,
-            }, None)
+                trace: wgpu::Trace::default(),
+                experimental_features: wgpu::ExperimentalFeatures::default(),
+            })
             .await
             .expect("Failed to create GPU device");
 
         // --- Buffer sizes ---
-        let chain_states_size = (chain_count as usize) * GPU_DRAWING_STATE_SIZE;
+        let _chain_states_size = (chain_count as usize) * GPU_DRAWING_STATE_SIZE;
         // Offspring capacity: chain_count * max_lambda, capped by SSBO limit
         let max_lambda = crate::settings::GPU_MAX_LAMBDA as usize;
         let offspring_capacity = ((max_ssbo as usize) / GPU_DRAWING_STATE_SIZE)
@@ -184,14 +186,14 @@ impl GpuPipeline {
             view_formats: &[],
         });
         queue.write_texture(
-            ImageCopyTexture {
+            wgpu::TexelCopyTextureInfo {
                 texture: &reference_texture,
                 mip_level: 0,
                 origin: Origin3d::ZERO,
                 aspect: TextureAspect::All,
             },
             reference_rgba,
-            ImageDataLayout {
+            wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(image_width * 4),
                 rows_per_image: Some(image_height),
@@ -421,21 +423,18 @@ impl GpuPipeline {
         });
 
         // --- Compute pipelines ---
-        let push_constant_range = PushConstantRange {
-            stages: ShaderStages::COMPUTE,
-            range: 0..std::mem::size_of::<GpuParams>() as u32,
-        };
+        let immediate_size = std::mem::size_of::<GpuParams>() as u32;
 
         let mutate_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: Some("mutate_layout"),
             bind_group_layouts: &[&mutate_bgl],
-            push_constant_ranges: &[push_constant_range.clone()],
+            immediate_size,
         });
         let mutate_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
             label: Some("mutate_pipeline"),
             layout: Some(&mutate_pipeline_layout),
             module: &mutate_shader,
-            entry_point: "main",
+            entry_point: Some("main"),
             compilation_options: Default::default(),
             cache: None,
         });
@@ -443,7 +442,7 @@ impl GpuPipeline {
         let rasterize_error_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: Some("rasterize_error_layout"),
             bind_group_layouts: &[&rasterize_error_bgl],
-            push_constant_ranges: &[push_constant_range.clone()],
+            immediate_size,
         });
         let rasterize_wg = [
             crate::settings::RASTERIZE_WG_X_DEFAULT,
@@ -458,13 +457,13 @@ impl GpuPipeline {
         let select_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: Some("select_layout"),
             bind_group_layouts: &[&select_bgl],
-            push_constant_ranges: &[push_constant_range],
+            immediate_size,
         });
         let select_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
             label: Some("select_pipeline"),
             layout: Some(&select_pipeline_layout),
             module: &select_shader,
-            entry_point: "select_main",
+            entry_point: Some("select_main"),
             compilation_options: Default::default(),
             cache: None,
         });
@@ -576,7 +575,7 @@ fn create_rasterize_pipeline(
         label: Some("rasterize_error_pipeline"),
         layout: Some(layout),
         module: &shader,
-        entry_point: "main",
+        entry_point: Some("main"),
         compilation_options: Default::default(),
         cache: None,
     });

@@ -1,4 +1,4 @@
-use rand::Rng;
+use rand::RngExt;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -57,19 +57,19 @@ impl Polygon {
         if n <= MIN_POINTS_PER_POLYGON {
             return false;
         }
-        let i = rand::thread_rng().gen_range(0..(n - 1));
+        let i = rand::rng().random_range(0..(n - 1));
         self.points.remove(i);
         true
     }
 
     pub fn mutate(&mut self) -> bool {
         let mut mutated = false;
-        if rand::thread_rng().gen::<f32>() < OFFSET_POLYGON_PROBABILITY
+        if rand::rng().random::<f32>() < OFFSET_POLYGON_PROBABILITY
             && self.offset_polygon()
         {
             mutated = true;
         }
-        if rand::thread_rng().gen::<f32>() < REMOVE_POINT_PROBABILITY
+        if rand::rng().random::<f32>() < REMOVE_POINT_PROBABILITY
             && self.remove_point()
         {
             mutated = true;

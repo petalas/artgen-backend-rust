@@ -8,24 +8,24 @@ edition = "2021"
 
 [dependencies]
 artgen-shared = { path = "shared" }
-anyhow = "1.0.86"
+anyhow = "1.0.102"
 base64 = "0.22"
-bytemuck = { version = "1.17.1", features = ["derive"] }
-divan = "0.1.14"
-futures = "0.3.30"
+bytemuck = { version = "1.25.0", features = ["derive"] }
+divan = "0.1.21"
+futures = "0.3.32"
 futures-intrusive = "0.5.0"
-futures-lite = "2.3.0"
-image = "0.25.2"
-num_cpus = "1.16.0"
-rand = "0.8.5"
-sdl2 = "0.37.0"
-serde = { version = "1.0.209", features = ["derive"] }
-serde_json = "1.0.127"
-tokio = { version = "1.40.0", features = ["macros", "rt-multi-thread", "sync"] }
-tracing = "0.1.40"
-tracing-subscriber = { version = "0.3.18", features = ["fmt", "env-filter"] }
-tungstenite = "0.24"
-wgpu = "22.1.0"
+futures-lite = "2.6.1"
+image = "0.25.9"
+num_cpus = "1.17.0"
+rand = "0.10.0"
+sdl2 = "0.38.0"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread", "sync"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.22", features = ["fmt", "env-filter"] }
+tungstenite = "0.28"
+wgpu = "28.0.0"
 
 [[bench]]
 name = "bench"

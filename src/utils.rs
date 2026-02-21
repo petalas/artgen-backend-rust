@@ -1,6 +1,6 @@
 use std::{collections::HashMap, time::Duration};
 
-use rand::Rng;
+use rand::RngExt;
 
 use crate::{
     evaluator::EvaluatorPayload,
@@ -20,15 +20,15 @@ pub struct ImageDimensions {
 }
 
 pub fn randomu8() -> u8 {
-    rand::thread_rng().gen::<u8>()
+    rand::rng().random::<u8>()
 }
 
 pub fn randomf32() -> f32 {
-    rand::thread_rng().gen::<f32>()
+    rand::rng().random::<f32>()
 }
 
 pub fn randomf32_clamped(min: f32, max: f32) -> f32 {
-    rand::thread_rng().gen_range(min..max)
+    rand::rng().random_range(min..max)
 }
 
 pub fn calculate_aspect_ratio_fit(
@@ -128,8 +128,8 @@ pub fn fill_triangle(
     let q = 8;
 
     // Start in corner of 8x8 block
-    minx = minx & !(q - 1);
-    miny = miny & !(q - 1);
+    minx &= !(q - 1);
+    miny &= !(q - 1);
 
     // Constant part of half-edge functions
     let mut C1 = DY12 * X1 - DX12 * Y1;

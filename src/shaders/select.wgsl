@@ -73,7 +73,7 @@ struct ControlFlags {
 @group(0) @binding(1) var<storage, read>       working_states:     array<DrawingState>;
 @group(0) @binding(2) var<storage, read_write> error_accumulators: array<atomic<u32>>;
 @group(0) @binding(3) var<storage, read_write> control:            ControlFlags;
-var<push_constant>                             params:             Params;
+var<immediate>                                 params:             Params;
 @group(0) @binding(4) var<storage, read_write> fitness_packed:     array<u32>;
 
 // Workgroup-shared variables for communicating decisions from thread 0 to all threads

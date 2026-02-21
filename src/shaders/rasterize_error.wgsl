@@ -88,7 +88,7 @@ struct Params {
 @group(0) @binding(0) var<storage, read>       working_states:     array<DrawingState>;
 @group(0) @binding(1)                          var reference_image: texture_2d<f32>;
 @group(0) @binding(2) var<storage, read_write> error_accumulators: array<atomic<u32>>;
-var<push_constant>                             params:             Params;
+var<immediate>                                 params:             Params;
 
 // Shared memory arrays sized to thread count.
 // shared_polys: TILE_CAP polygons (THREAD_COUNT * 3 * 16 bytes)

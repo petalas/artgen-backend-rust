@@ -106,7 +106,6 @@ fn SnapshotsSection(state: RwSignal<ViewerState>) -> impl IntoView {
 
 // Chains: exponent 0..9 → 1,2,4,...,512
 fn chains_from_exp(exp: u32) -> u32 { 1u32 << exp }
-fn exp_from_chains(chains: u32) -> u32 { chains.max(1).ilog2() }
 
 // Lambda: exponent 0..6 → 1,2,4,8,16,32,64
 fn lambda_from_exp(exp: u32) -> u32 { 1u32 << exp }

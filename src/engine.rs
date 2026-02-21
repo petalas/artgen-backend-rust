@@ -284,6 +284,7 @@ impl Engine {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::WHITE), // WHY DOES DRAWING WHITE TRIANGLES ON TOP OF THIS DO ANYTHING?
                         store: wgpu::StoreOp::Store,
@@ -292,6 +293,7 @@ impl Engine {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
 
             rpass.set_pipeline(self.render_pipeline.as_ref().expect("no render_pipeline?"));
@@ -309,12 +311,12 @@ impl Engine {
                     .as_ref()
                     .expect("no drawing_texture?")
                     .as_image_copy(),
-                wgpu::ImageCopyBuffer {
+                wgpu::TexelCopyBufferInfo {
                     buffer: self
                         .drawing_output_buffer
                         .as_ref()
                         .expect("no drawing_output_buffer?"),
-                    layout: wgpu::ImageDataLayout {
+                    layout: wgpu::TexelCopyBufferLayout {
                         offset: 0,
                         bytes_per_row: Some(self.buffer_dimensions.padded_bytes_per_row as u32),
                         rows_per_image: None,
@@ -421,7 +423,7 @@ impl Engine {
         self.device
             .as_ref()
             .expect("no device?")
-            .poll(wgpu::MaintainBase::WaitForSubmissionIndex(si));
+            .poll(wgpu::PollType::Wait { submission_index: Some(si), timeout: None }).unwrap();
 
         if receiver.recv().is_ok() {
             let padded_buffer = buffer_slice.get_mapped_range();
@@ -463,8 +465,9 @@ impl Engine {
                         required_limits: wgpu::Limits::downlevel_defaults()
                             .using_resolution(adapter.limits()),
                         memory_hints: wgpu::MemoryHints::Performance,
+                        trace: wgpu::Trace::default(),
+                        experimental_features: wgpu::ExperimentalFeatures::default(),
                     },
-                    None,
                 )
                 .await
                 .expect("Failed to create device");
@@ -641,7 +644,7 @@ impl Engine {
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: None,
                 bind_group_layouts: &[],
-                push_constant_ranges: &[],
+                immediate_size: 0,
             });
 
         // Load the shaders from disk
@@ -687,13 +690,13 @@ impl Engine {
                 layout: Some(&render_pipeline_layout),
                 vertex: wgpu::VertexState {
                     module: &shader,
-                    entry_point: "vs_main",
+                    entry_point: Some("vs_main"),
                     buffers: &[vertex_buffer_layout],
                     compilation_options: Default::default(), // TODO: investigate if there's a better option
                 },
                 fragment: Some(wgpu::FragmentState {
                     module: &shader,
-                    entry_point: "fs_main",
+                    entry_point: Some("fs_main"),
                     compilation_options: Default::default(), // TODO: investigate if there's a better option
                     targets: &[Some(wgpu::ColorTargetState {
                         format: texture_format,
@@ -704,7 +707,7 @@ impl Engine {
                 primitive,
                 depth_stencil: None,
                 multisample: wgpu::MultisampleState::default(),
-                multiview: None,
+                multiview_mask: None,
                 cache: None,
             });
 
@@ -715,7 +718,7 @@ impl Engine {
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("compute_pipeline_layout"),
                 bind_group_layouts: &[&compute_bind_group_layout],
-                push_constant_ranges: &[],
+                immediate_size: 0,
             });
 
         let compute_module = self
@@ -737,7 +740,7 @@ impl Engine {
                 label: None,
                 layout: Some(&compute_pipeline_layout),
                 module: &compute_module,
-                entry_point: "main",
+                entry_point: Some("main"),
                 compilation_options: Default::default(), // TODO: investigate if there's a better option
                 cache: None,
             });

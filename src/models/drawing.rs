@@ -1,6 +1,6 @@
 use std::{fs::File, io::BufReader, path::Path};
 
-use rand::Rng;
+use rand::RngExt;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -96,7 +96,7 @@ impl Drawing {
             return false;
         }
         let polygon = Polygon::new_random();
-        let index = rand::thread_rng().gen_range(0..self.polygons.len() - 1);
+        let index = rand::rng().random_range(0..self.polygons.len() - 1);
         self.polygons.insert(index, polygon);
         true
     }
@@ -108,7 +108,7 @@ impl Drawing {
         if self.polygons.len() <= MIN_POLYGONS_PER_IMAGE {
             return false;
         }
-        let index = rand::thread_rng().gen_range(0..self.polygons.len() - 1);
+        let index = rand::rng().random_range(0..self.polygons.len() - 1);
         self.polygons.remove(index);
         true
     }
@@ -118,10 +118,10 @@ impl Drawing {
         if self.polygons.len() < 2 {
             return false;
         }
-        let i1 = rand::thread_rng().gen_range(0..l - 1);
-        let mut i2 = rand::thread_rng().gen_range(0..l - 1);
+        let i1 = rand::rng().random_range(0..l - 1);
+        let mut i2 = rand::rng().random_range(0..l - 1);
         while i1 == i2 {
-            i2 = rand::thread_rng().gen_range(0..l - 1);
+            i2 = rand::rng().random_range(0..l - 1);
         }
         self.polygons.swap(i1, i2);
         true

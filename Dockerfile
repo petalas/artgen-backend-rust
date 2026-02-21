@@ -1,4 +1,6 @@
-FROM nvidia/cuda:12.8.1-devel-ubuntu24.04 AS builder
+ARG CUDA_VERSION=13.1.1-cudnn-devel-ubuntu24.04
+
+FROM nvidia/cuda:${CUDA_VERSION} AS builder
 
 # Install build dependencies + kisak-mesa PPA for dozen (Vulkan-on-D3D12) driver
 RUN apt-get update -qq && \
@@ -48,7 +50,7 @@ RUN find src shared/src benches -name '*.rs' -exec touch {} + && \
     cargo build --release -p artgen-backend-rust
 
 # --- Runtime stage ---
-FROM nvidia/cuda:12.8.1-runtime-ubuntu24.04
+FROM nvidia/cuda:${CUDA_VERSION}
 
 RUN apt-get update -qq && \
     apt-get install -y -qq --no-install-recommends \

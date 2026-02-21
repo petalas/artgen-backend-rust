@@ -426,11 +426,9 @@ fn ws_handle_client(stream: std::net::TcpStream, state: SharedWsState) {
     let peer = stream.peer_addr().ok();
 
     // Configure WebSocket to accept large frames (up to 20MB for image uploads)
-    let config = tungstenite::protocol::WebSocketConfig {
-        max_message_size: Some(20 * 1024 * 1024),
-        max_frame_size: Some(20 * 1024 * 1024),
-        ..Default::default()
-    };
+    let mut config = tungstenite::protocol::WebSocketConfig::default();
+    config.max_message_size = Some(20 * 1024 * 1024);
+    config.max_frame_size = Some(20 * 1024 * 1024);
 
     let mut ws = match tungstenite::accept_with_config(stream, Some(config)) {
         Ok(ws) => ws,
@@ -512,7 +510,7 @@ fn ws_handle_client(stream: std::net::TcpStream, state: SharedWsState) {
         loop {
             match ws.read() {
                 Ok(tungstenite::Message::Text(text)) => {
-                    if let Ok(cmd) = serde_json::from_str::<serde_json::Value>(&*text) {
+                    if let Ok(cmd) = serde_json::from_str::<serde_json::Value>(&text) {
                         let reply = handle_ws_command(&cmd, &state, &peer);
                         if let Some(reply_msg) = reply {
                             // Send reply in blocking mode
@@ -856,11 +854,13 @@ fn handle_ws_command(
             // Fixed-settings benchmark from blank start — deterministic baseline
             let blank_drawing = Drawing { polygons: vec![], is_dirty: false, fitness: 0.0 };
             let drawing_json = serde_json::to_string(&blank_drawing).unwrap();
-            let mut params = MutationParams::default();
-            params.chain_count = 4;
-            params.lambda = 64;
-            params.single_mutation_mode = true;
-            params.adaptive_mutation = true;
+            let mut params = MutationParams {
+                chain_count: 4,
+                lambda: 64,
+                single_mutation_mode: true,
+                adaptive_mutation: true,
+                ..Default::default()
+            };
             params.sanitize();
             let mut s = lock.lock().unwrap();
             let req = BenchmarkRequest {
@@ -969,6 +969,7 @@ fn build_gpu_stats(evolver: &GpuEvolver) -> GpuStatsWs {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_benchmark(
     ws_state: &SharedWsState,
     evolver: &mut GpuEvolver,
@@ -1202,11 +1203,13 @@ fn run_cli_benchmark(project: &str, gpu_batch_iters_override: Option<u32>) {
     ));
 
     // Configure benchmark params: 4 chains, 64 lambda, single mutation, adaptive scale
-    let mut params = MutationParams::default();
-    params.chain_count = BENCH_CHAINS;
-    params.lambda = BENCH_LAMBDA;
-    params.single_mutation_mode = true;
-    params.adaptive_mutation = true;
+    let mut params = MutationParams {
+        chain_count: BENCH_CHAINS,
+        lambda: BENCH_LAMBDA,
+        single_mutation_mode: true,
+        adaptive_mutation: true,
+        ..Default::default()
+    };
     if let Some(iters) = gpu_batch_iters_override {
         params.gpu_batch_iters = iters;
     }

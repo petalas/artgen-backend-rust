@@ -24,6 +24,7 @@ pub struct GpuStats {
     pub memory_mb: f32,
     pub timings: GpuTimings,
     pub chain_fitness: Vec<f32>, // sorted desc
+    #[allow(dead_code)]
     pub rasterize_wg: [u32; 2],
 }
 

@@ -1,4 +1,4 @@
-pub use artgen_shared::benchmark::{BenchmarkRequest, BenchmarkResult, BenchmarkSample};
+pub use artgen_shared::benchmark::{BenchmarkRequest, BenchmarkResult};
 
 /// UI-only snapshot state (not sent over WebSocket).
 #[derive(Clone, Debug)]

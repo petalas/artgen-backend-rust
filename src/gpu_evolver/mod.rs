@@ -123,8 +123,8 @@ impl GpuEvolver {
         init_offspring_rng(&pipeline, 0);
 
         let rwg = pipeline.rasterize_wg;
-        let wg_x = (image_width + rwg[0] - 1) / rwg[0];
-        let wg_y = (image_height + rwg[1] - 1) / rwg[1];
+        let wg_x = image_width.div_ceil(rwg[0]);
+        let wg_y = image_height.div_ceil(rwg[1]);
         println!(
             "GPU evolver initialized: {} active chains (max {}), offspring capacity {}, {}x{} image, {:.1} MB GPU memory, rasterize dispatch {}x{}x{} (wg {}x{})",
             active_chains,
@@ -164,11 +164,7 @@ impl GpuEvolver {
     /// Returns `Some(Drawing)` if the previous batch found a new global best.
     pub fn run_batch(&mut self, mutation_params: &MutationParams, collect_timestamps: bool) -> Option<Drawing> {
         // 1. If there's a pending batch from the last call, finish reading its results
-        let prev_result = if let Some(pending) = self.pending_batch.take() {
-            Some(self.finish_pending_readback(&pending))
-        } else {
-            None
-        };
+        let prev_result = self.pending_batch.take().map(|pending| self.finish_pending_readback(&pending));
 
         // Check if rasterize workgroup size needs to change (between batches)
         self.pipeline.set_rasterize_wg(mutation_params.rasterize_wg);
@@ -207,8 +203,8 @@ impl GpuEvolver {
         });
 
         let rwg = p.rasterize_wg;
-        let wg_x = (p.image_width + rwg[0] - 1) / rwg[0];
-        let wg_y = (p.image_height + rwg[1] - 1) / rwg[1];
+        let wg_x = p.image_width.div_ceil(rwg[0]);
+        let wg_y = p.image_height.div_ceil(rwg[1]);
         let lambda = mutation_params.lambda;
 
         // Runtime check: active * lambda must fit in offspring_capacity
@@ -240,17 +236,17 @@ impl GpuEvolver {
             for _ in 0..bulk_count {
                 pass.set_pipeline(&p.mutate_pipeline);
                 pass.set_bind_group(0, &p.mutate_bind_group, &[]);
-                pass.set_push_constants(0, params_bytes);
+                pass.set_immediates(0, params_bytes);
                 pass.dispatch_workgroups(active, 1, 1);
 
                 pass.set_pipeline(&p.rasterize_error_pipeline);
                 pass.set_bind_group(0, &p.rasterize_error_bind_group, &[]);
-                pass.set_push_constants(0, params_bytes);
+                pass.set_immediates(0, params_bytes);
                 pass.dispatch_workgroups(wg_x, wg_y, active * lambda);
 
                 pass.set_pipeline(&p.select_pipeline);
                 pass.set_bind_group(0, &p.select_bind_group, &[]);
-                pass.set_push_constants(0, params_bytes);
+                pass.set_immediates(0, params_bytes);
                 pass.dispatch_workgroups(active, 1, 1);
             }
         }
@@ -270,7 +266,7 @@ impl GpuEvolver {
                 });
                 pass.set_pipeline(&p.mutate_pipeline);
                 pass.set_bind_group(0, &p.mutate_bind_group, &[]);
-                pass.set_push_constants(0, params_bytes);
+                pass.set_immediates(0, params_bytes);
                 pass.dispatch_workgroups(active, 1, 1);
             }
 
@@ -285,7 +281,7 @@ impl GpuEvolver {
                 });
                 pass.set_pipeline(&p.rasterize_error_pipeline);
                 pass.set_bind_group(0, &p.rasterize_error_bind_group, &[]);
-                pass.set_push_constants(0, params_bytes);
+                pass.set_immediates(0, params_bytes);
                 pass.dispatch_workgroups(wg_x, wg_y, active * lambda);
             }
 
@@ -300,7 +296,7 @@ impl GpuEvolver {
                 });
                 pass.set_pipeline(&p.select_pipeline);
                 pass.set_bind_group(0, &p.select_bind_group, &[]);
-                pass.set_push_constants(0, params_bytes);
+                pass.set_immediates(0, params_bytes);
                 pass.dispatch_workgroups(active, 1, 1);
             }
         }
@@ -401,7 +397,7 @@ impl GpuEvolver {
 
         // Single poll waits for ALL pending GPU work — both the previous batch's
         // map_async and any newly submitted command buffer
-        p.device.poll(Maintain::Wait);
+        p.device.poll(PollType::Wait { submission_index: None, timeout: None }).unwrap();
 
         receivers.control_rx.recv().unwrap().expect("Failed to map control staging buffer");
         if let Some(ref ts_rx) = receivers.timestamp_rx {
@@ -489,7 +485,7 @@ impl GpuEvolver {
         slice.map_async(MapMode::Read, move |result| {
             tx.send(result).unwrap();
         });
-        p.device.poll(Maintain::Wait);
+        p.device.poll(PollType::Wait { submission_index: None, timeout: None }).unwrap();
         rx.recv().unwrap().expect("Failed to map readback staging buffer");
 
         let data = slice.get_mapped_range();
@@ -540,7 +536,7 @@ impl GpuEvolver {
         let slice = staging.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
         slice.map_async(MapMode::Read, move |r| { tx.send(r).unwrap(); });
-        p.device.poll(Maintain::Wait);
+        p.device.poll(PollType::Wait { submission_index: None, timeout: None }).unwrap();
         rx.recv().unwrap().expect("Failed to map multi-readback staging buffer");
 
         let data = slice.get_mapped_range();
@@ -631,8 +627,8 @@ impl GpuEvolver {
 
         // Dispatch rasterize_error: treat each chain as a single offspring (lambda=1)
         let rwg = p.rasterize_wg;
-        let wg_x = (p.image_width + rwg[0] - 1) / rwg[0];
-        let wg_y = (p.image_height + rwg[1] - 1) / rwg[1];
+        let wg_x = p.image_width.div_ceil(rwg[0]);
+        let wg_y = p.image_height.div_ceil(rwg[1]);
 
         let params = default_gpu_params(p.image_width, p.image_height, active);
         let params_bytes: &[u8] = bytemuck::bytes_of(&params);
@@ -644,7 +640,7 @@ impl GpuEvolver {
             });
             pass.set_pipeline(&p.rasterize_error_pipeline);
             pass.set_bind_group(0, &p.rasterize_error_bind_group, &[]);
-            pass.set_push_constants(0, params_bytes);
+            pass.set_immediates(0, params_bytes);
             pass.dispatch_workgroups(wg_x, wg_y, active);
         }
 
@@ -679,7 +675,7 @@ impl GpuEvolver {
         let slice = staging.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
         slice.map_async(MapMode::Read, move |r| { tx.send(r).unwrap(); });
-        p.device.poll(Maintain::Wait);
+        p.device.poll(PollType::Wait { submission_index: None, timeout: None }).unwrap();
         rx.recv().unwrap().expect("Failed to map error readback staging buffer");
 
         let data = slice.get_mapped_range();
