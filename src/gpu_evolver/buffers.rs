@@ -51,7 +51,7 @@ pub struct GpuParams {
     pub max_error_per_pixel: f32,
     pub per_point_multiplier: f32,
     pub iteration_number: u32,
-    pub migration_interval: u32,
+    pub _pad0: u32,
 
     // Mutation probabilities
     pub add_polygon_prob: f32,
@@ -74,11 +74,11 @@ pub struct GpuParams {
     pub max_alpha_norm: f32,
     pub crossover_prob: f32,
 
-    // vec4[6] — crossover & island params
+    // vec4[6] — crossover params
     pub spatial_crossover_weight: f32,
     pub tournament_size: u32,
-    pub island_count: u32,
-    pub inter_island_interval: u32,
+    pub _pad1: u32,
+    pub _pad2: u32,
 
     // vec4[7] — chain count + lambda + adaptive mutation
     pub chain_count_param: u32,
@@ -101,7 +101,7 @@ pub const GPU_DRAWING_STATE_SIZE: usize = std::mem::size_of::<GpuDrawingState>()
 pub const GPU_POLYGON_SIZE: usize = std::mem::size_of::<GpuPolygon>();
 
 /// Build GpuParams from runtime MutationParams + image dimensions.
-pub fn gpu_params_from(mp: &MutationParams, w: u32, h: u32, migration_interval: u32, chain_count: u32) -> GpuParams {
+pub fn gpu_params_from(mp: &MutationParams, w: u32, h: u32, chain_count: u32) -> GpuParams {
     use crate::settings::*;
     GpuParams {
         image_width: w,
@@ -111,7 +111,7 @@ pub fn gpu_params_from(mp: &MutationParams, w: u32, h: u32, migration_interval: 
         max_error_per_pixel: GPU_MAX_ERROR_PER_PIXEL,
         per_point_multiplier: PER_POINT_MULTIPLIER,
         iteration_number: 0,
-        migration_interval,
+        _pad0: 0,
         add_polygon_prob: mp.add_polygon_prob,
         remove_polygon_prob: mp.remove_polygon_prob,
         reorder_polygon_prob: mp.reorder_polygon_prob,
@@ -130,8 +130,8 @@ pub fn gpu_params_from(mp: &MutationParams, w: u32, h: u32, migration_interval: 
         crossover_prob: mp.crossover_prob,
         spatial_crossover_weight: mp.spatial_crossover_weight,
         tournament_size: mp.tournament_size,
-        island_count: mp.island_count,
-        inter_island_interval: mp.inter_island_interval,
+        _pad1: 0,
+        _pad2: 0,
         chain_count_param: chain_count,
         single_mutation_mode: if mp.single_mutation_mode { 1 } else { 0 },
         lambda: mp.lambda,
@@ -140,8 +140,8 @@ pub fn gpu_params_from(mp: &MutationParams, w: u32, h: u32, migration_interval: 
 }
 
 /// Build the default GpuParams from settings constants.
-pub fn default_gpu_params(w: u32, h: u32, migration_interval: u32, chain_count: u32) -> GpuParams {
-    gpu_params_from(&MutationParams::default(), w, h, migration_interval, chain_count)
+pub fn default_gpu_params(w: u32, h: u32, chain_count: u32) -> GpuParams {
+    gpu_params_from(&MutationParams::default(), w, h, chain_count)
 }
 
 /// Pack RGBA color (0–255 u8 range) into a single u32, matching WGSL pack4x8unorm layout.

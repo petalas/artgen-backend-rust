@@ -80,8 +80,6 @@ pub struct GpuPipeline {
     pub mutate_pipeline: ComputePipeline,
     pub rasterize_error_pipeline: ComputePipeline,
     pub select_pipeline: ComputePipeline,
-    pub migrate_intra_pipeline: ComputePipeline,
-    pub migrate_inter_pipeline: ComputePipeline,
 
     // Rasterize pipeline recreation support — stored for creating new pipeline variants
     rasterize_error_shader: ShaderModule,
@@ -92,7 +90,6 @@ pub struct GpuPipeline {
     pub mutate_bind_group: BindGroup,
     pub rasterize_error_bind_group: BindGroup,
     pub select_bind_group: BindGroup,
-    pub migrate_bind_group: BindGroup, // same layout as select, reused
 
     // Timestamp profiling
     pub timestamp_query_set: QuerySet,
@@ -546,24 +543,6 @@ impl GpuPipeline {
             cache: pipeline_cache.as_ref(),
         });
 
-        let migrate_intra_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
-            label: Some("migrate_intra_pipeline"),
-            layout: Some(&select_pipeline_layout),
-            module: &select_shader,
-            entry_point: "migrate_intra_main",
-            compilation_options: Default::default(),
-            cache: pipeline_cache.as_ref(),
-        });
-
-        let migrate_inter_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
-            label: Some("migrate_inter_pipeline"),
-            layout: Some(&select_pipeline_layout),
-            module: &select_shader,
-            entry_point: "migrate_inter_main",
-            compilation_options: Default::default(),
-            cache: pipeline_cache.as_ref(),
-        });
-
         // Save compiled pipeline cache to disk after all pipelines are created
         if let Some(ref cache) = pipeline_cache {
             save_pipeline_cache_data(&adapter_info, cache);
@@ -601,19 +580,6 @@ impl GpuPipeline {
             ],
         });
 
-        // Migrate uses the same bind group layout and bindings as select
-        let migrate_bind_group = device.create_bind_group(&BindGroupDescriptor {
-            label: Some("migrate_bg"),
-            layout: &select_bgl,
-            entries: &[
-                BindGroupEntry { binding: 0, resource: chain_states_buf.as_entire_binding() },
-                BindGroupEntry { binding: 1, resource: working_states_buf.as_entire_binding() },
-                BindGroupEntry { binding: 2, resource: error_accumulators_buf.as_entire_binding() },
-                BindGroupEntry { binding: 3, resource: control_flags_buf.as_entire_binding() },
-                BindGroupEntry { binding: 4, resource: fitness_packed_buf.as_entire_binding() },
-            ],
-        });
-
         Self {
             device,
             queue,
@@ -630,8 +596,6 @@ impl GpuPipeline {
             mutate_pipeline,
             rasterize_error_pipeline,
             select_pipeline,
-            migrate_intra_pipeline,
-            migrate_inter_pipeline,
             rasterize_error_shader,
             rasterize_error_pipeline_layout,
             pipeline_cache,
@@ -642,7 +606,6 @@ impl GpuPipeline {
             mutate_bind_group,
             rasterize_error_bind_group,
             select_bind_group,
-            migrate_bind_group,
             chain_count,
             offspring_capacity: offspring_capacity as u32,
             image_width,

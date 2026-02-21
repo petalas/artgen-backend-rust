@@ -27,6 +27,10 @@ fn default_lambda() -> u32 {
     crate::settings::GPU_DEFAULT_LAMBDA
 }
 
+fn default_gpu_batch_iters() -> u32 {
+    crate::settings::GPU_DEFAULT_BATCH_ITERS
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BenchmarkResult {
@@ -39,7 +43,8 @@ pub struct BenchmarkResult {
     pub improvements_per_sec: f64,
     pub samples: Vec<BenchmarkSample>,
     pub chain_count: u32,
-    pub island_count: u32,
     #[serde(default = "default_lambda")]
     pub lambda: u32,
+    #[serde(default = "default_gpu_batch_iters")]
+    pub gpu_batch_iters: u32,
 }

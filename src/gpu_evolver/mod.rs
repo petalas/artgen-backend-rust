@@ -8,7 +8,7 @@ use wgpu::*;
 
 use crate::models::drawing::Drawing;
 use crate::mutation_params::MutationParams;
-use crate::settings::{GPU_MAX_CHAIN_COUNT, GPU_DEFAULT_CHAIN_COUNT, GPU_ITERATIONS_PER_BATCH, GPU_MIGRATION_INTERVAL};
+use crate::settings::{GPU_MAX_CHAIN_COUNT, GPU_DEFAULT_CHAIN_COUNT};
 
 use buffers::{
     gpu_params_from, drawing_to_gpu, gpu_to_drawing, ControlFlags, GpuDrawingState,
@@ -21,14 +21,12 @@ pub struct PassTimings {
     pub mutate_ns: f64,
     pub rasterize_error_ns: f64,
     pub select_ns: f64,
-    pub migrate_ns: f64,
     pub sample_count: u64,
-    pub migrate_sample_count: u64,
 }
 
 impl PassTimings {
     pub fn total_ns(&self) -> f64 {
-        self.mutate_ns + self.rasterize_error_ns + self.select_ns + self.migrate_ns
+        self.mutate_ns + self.rasterize_error_ns + self.select_ns
     }
 
     pub fn print_averages(&self) {
@@ -39,12 +37,7 @@ impl PassTimings {
         let mutate = self.mutate_ns / n / 1_000_000.0;
         let rasterize_error = self.rasterize_error_ns / n / 1_000_000.0;
         let select = self.select_ns / n / 1_000_000.0;
-        let migrate = if self.migrate_sample_count > 0 {
-            self.migrate_ns / self.migrate_sample_count as f64 / 1_000_000.0
-        } else {
-            0.0
-        };
-        let total = mutate + rasterize_error + select + migrate;
+        let total = mutate + rasterize_error + select;
 
         if total <= 0.0 {
             return;
@@ -54,9 +47,6 @@ impl PassTimings {
         println!("  mutate:          {:6.2}ms ({:5.1}%)", mutate, mutate / total * 100.0);
         println!("  rasterize+error: {:6.2}ms ({:5.1}%)", rasterize_error, rasterize_error / total * 100.0);
         println!("  select:          {:6.2}ms ({:5.1}%)", select, select / total * 100.0);
-        if self.migrate_sample_count > 0 {
-            println!("  migrate:         {:6.2}ms ({:5.1}%)", migrate, migrate / total * 100.0);
-        }
         println!("  total:           {:6.2}ms", total);
     }
 
@@ -65,33 +55,10 @@ impl PassTimings {
     }
 }
 
-/// Which migration variant to run this iteration (if any).
-enum MigrationType {
-    Intra,
-    Inter,
-}
-
-impl MigrationType {
-    fn label(&self) -> &'static str {
-        match self {
-            Self::Intra => "migrate_intra",
-            Self::Inter => "migrate_inter",
-        }
-    }
-
-    fn pipeline<'a>(&self, p: &'a GpuPipeline) -> &'a ComputePipeline {
-        match self {
-            Self::Intra => &p.migrate_intra_pipeline,
-            Self::Inter => &p.migrate_inter_pipeline,
-        }
-    }
-}
-
 /// Tracks state for a previously submitted batch whose staging buffers
 /// have map_async issued but haven't been polled/read yet.
 struct PendingBatch {
     staging_idx: usize,
-    migrate_ran: bool,
     collect_timestamps: bool,
     active_chain_count: u32,
 }
@@ -207,7 +174,7 @@ impl GpuEvolver {
         self.pipeline.set_rasterize_wg(mutation_params.rasterize_wg);
 
         let p = &self.pipeline;
-        let iterations = GPU_ITERATIONS_PER_BATCH;
+        let iterations = mutation_params.gpu_batch_iters.max(1);
         let active = mutation_params.chain_count.min(p.chain_count);
         self.active_chain_count = active;
 
@@ -216,7 +183,7 @@ impl GpuEvolver {
         self.staging_idx = 1 - self.staging_idx;
 
         // 3. Build params for push constants
-        let mut params = gpu_params_from(mutation_params, p.image_width, p.image_height, GPU_MIGRATION_INTERVAL, active);
+        let mut params = gpu_params_from(mutation_params, p.image_width, p.image_height, active);
         params.iteration_number = self.iteration;
         let params_bytes: &[u8] = bytemuck::bytes_of(&params);
 
@@ -249,155 +216,104 @@ impl GpuEvolver {
             "active({}) * lambda({}) = {} exceeds offspring_capacity({})",
             active, lambda, active * lambda, p.offspring_capacity);
 
-        let is_last_iter = |i: u32| i == iterations - 1;
-        let mut migrate_ran = false;
-
-        // Determine which iterations need separate passes (for timestamp profiling).
-        // The last iteration uses separate passes when collect_timestamps is true,
-        // so we can get per-stage timing via ComputePassDescriptor::timestamp_writes.
+        // All non-timestamped iterations are consolidated into a single compute pass
+        // to minimize Vulkan command buffer objects (avoids driver crashes on Dozen/D3D12
+        // with thousands of separate passes).
         //
-        // All other iterations are consolidated into single compute passes (one per
-        // iteration) that contain mutate + rasterize_error + select + optional migration
-        // as dispatches within the same pass. This eliminates 2-3 Vulkan pipeline barriers
-        // per iteration that were previously inserted at begin/end_compute_pass boundaries.
+        // The last iteration uses 3 separate passes when collect_timestamps is true,
+        // so we can get per-stage timing via ComputePassDescriptor::timestamp_writes.
         //
         // SAFETY: wgpu's resource tracker inserts vkCmdPipelineBarrier between dispatches
         // within a single compute pass when buffer usage changes (e.g. STORAGE_READ_WRITE
         // -> STORAGE_READ). See flush_states() in wgpu-core/src/command/compute.rs which
-        // calls drain_barriers() before every dispatch. STORAGE_READ_WRITE is in BufferUses::
-        // EXCLUSIVE (not ORDERED), so transitions are never skipped.
+        // calls drain_barriers() before every dispatch.
 
-        for i in 0..iterations {
-            let use_separate_passes = collect_timestamps && is_last_iter(i);
-
-            // Check if migration runs this iteration
-            let global_iter = self.iteration + i;
-            let inter_interval = mutation_params.inter_island_interval;
-            let migration_type = if global_iter > 0 && inter_interval > 0 && global_iter % inter_interval == 0 {
-                Some(MigrationType::Inter)
-            } else if global_iter > 0 && global_iter % GPU_MIGRATION_INTERVAL == 0 {
-                Some(MigrationType::Intra)
-            } else {
-                None
-            };
-
-            if use_separate_passes {
-                // Separate passes for per-stage timestamp profiling
-                let qs = &p.timestamp_query_set;
-
-                // Pass 1: Mutate
-                {
-                    let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                        label: Some("mutate"),
-                        timestamp_writes: Some(ComputePassTimestampWrites {
-                            query_set: qs,
-                            beginning_of_pass_write_index: Some(0),
-                            end_of_pass_write_index: Some(1),
-                        }),
-                    });
-                    pass.set_pipeline(&p.mutate_pipeline);
-                    pass.set_bind_group(0, &p.mutate_bind_group, &[]);
-                    pass.set_push_constants(0, params_bytes);
-                    pass.dispatch_workgroups(active, 1, 1);
-                }
-
-                // Pass 2: Rasterize + Error
-                {
-                    let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                        label: Some("rasterize_error"),
-                        timestamp_writes: Some(ComputePassTimestampWrites {
-                            query_set: qs,
-                            beginning_of_pass_write_index: Some(2),
-                            end_of_pass_write_index: Some(3),
-                        }),
-                    });
-                    pass.set_pipeline(&p.rasterize_error_pipeline);
-                    pass.set_bind_group(0, &p.rasterize_error_bind_group, &[]);
-                    pass.set_push_constants(0, params_bytes);
-                    pass.dispatch_workgroups(wg_x, wg_y, active * lambda);
-                }
-
-                // Pass 3: Select
-                {
-                    let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                        label: Some("select"),
-                        timestamp_writes: Some(ComputePassTimestampWrites {
-                            query_set: qs,
-                            beginning_of_pass_write_index: Some(4),
-                            end_of_pass_write_index: Some(5),
-                        }),
-                    });
-                    pass.set_pipeline(&p.select_pipeline);
-                    pass.set_bind_group(0, &p.select_bind_group, &[]);
-                    pass.set_push_constants(0, params_bytes);
-                    pass.dispatch_workgroups(active, 1, 1);
-                }
-
-                // Pass 4: Migration (separate pass for timestamp)
-                if let Some(mt) = migration_type {
-                    let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                        label: Some(mt.label()),
-                        timestamp_writes: Some(ComputePassTimestampWrites {
-                            query_set: qs,
-                            beginning_of_pass_write_index: Some(6),
-                            end_of_pass_write_index: Some(7),
-                        }),
-                    });
-                    pass.set_pipeline(mt.pipeline(p));
-                    pass.set_bind_group(0, &p.migrate_bind_group, &[]);
-                    pass.set_push_constants(0, params_bytes);
-                    pass.dispatch_workgroups(active, 1, 1);
-                    migrate_ran = true;
-                }
-            } else {
-                // Consolidated: mutate + rasterize + select (+ optional migration)
-                // all within a single compute pass. wgpu inserts Vulkan barriers between
-                // dispatches based on storage buffer usage tracking.
-                let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                    label: Some("iteration"),
-                    timestamp_writes: None,
-                });
-
-                // Dispatch 1: Mutate
+        // Bulk iterations: all non-timestamped iterations go into ONE compute pass
+        // to minimize Vulkan command buffer objects. wgpu inserts pipeline barriers
+        // between dispatches within a pass based on storage buffer usage tracking.
+        let bulk_count = if collect_timestamps { iterations.saturating_sub(1) } else { iterations };
+        if bulk_count > 0 {
+            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                label: Some("bulk_iterations"),
+                timestamp_writes: None,
+            });
+            for _ in 0..bulk_count {
                 pass.set_pipeline(&p.mutate_pipeline);
                 pass.set_bind_group(0, &p.mutate_bind_group, &[]);
                 pass.set_push_constants(0, params_bytes);
                 pass.dispatch_workgroups(active, 1, 1);
 
-                // Dispatch 2: Rasterize + Error
                 pass.set_pipeline(&p.rasterize_error_pipeline);
                 pass.set_bind_group(0, &p.rasterize_error_bind_group, &[]);
                 pass.set_push_constants(0, params_bytes);
                 pass.dispatch_workgroups(wg_x, wg_y, active * lambda);
 
-                // Dispatch 3: Select
                 pass.set_pipeline(&p.select_pipeline);
                 pass.set_bind_group(0, &p.select_bind_group, &[]);
                 pass.set_push_constants(0, params_bytes);
                 pass.dispatch_workgroups(active, 1, 1);
+            }
+        }
 
-                // Dispatch 4: Migration (if needed, same pass)
-                if let Some(mt) = migration_type {
-                    pass.set_pipeline(mt.pipeline(p));
-                    pass.set_bind_group(0, &p.migrate_bind_group, &[]);
-                    pass.set_push_constants(0, params_bytes);
-                    pass.dispatch_workgroups(active, 1, 1);
-                    if is_last_iter(i) {
-                        migrate_ran = true;
-                    }
-                }
+        // Last iteration with timestamps: 3 separate passes for per-stage profiling
+        if collect_timestamps {
+            let qs = &p.timestamp_query_set;
+
+            {
+                let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                    label: Some("mutate"),
+                    timestamp_writes: Some(ComputePassTimestampWrites {
+                        query_set: qs,
+                        beginning_of_pass_write_index: Some(0),
+                        end_of_pass_write_index: Some(1),
+                    }),
+                });
+                pass.set_pipeline(&p.mutate_pipeline);
+                pass.set_bind_group(0, &p.mutate_bind_group, &[]);
+                pass.set_push_constants(0, params_bytes);
+                pass.dispatch_workgroups(active, 1, 1);
+            }
+
+            {
+                let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                    label: Some("rasterize_error"),
+                    timestamp_writes: Some(ComputePassTimestampWrites {
+                        query_set: qs,
+                        beginning_of_pass_write_index: Some(2),
+                        end_of_pass_write_index: Some(3),
+                    }),
+                });
+                pass.set_pipeline(&p.rasterize_error_pipeline);
+                pass.set_bind_group(0, &p.rasterize_error_bind_group, &[]);
+                pass.set_push_constants(0, params_bytes);
+                pass.dispatch_workgroups(wg_x, wg_y, active * lambda);
+            }
+
+            {
+                let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                    label: Some("select"),
+                    timestamp_writes: Some(ComputePassTimestampWrites {
+                        query_set: qs,
+                        beginning_of_pass_write_index: Some(4),
+                        end_of_pass_write_index: Some(5),
+                    }),
+                });
+                pass.set_pipeline(&p.select_pipeline);
+                pass.set_bind_group(0, &p.select_bind_group, &[]);
+                pass.set_push_constants(0, params_bytes);
+                pass.dispatch_workgroups(active, 1, 1);
             }
         }
 
         // 5. Resolve timestamp queries into resolve buffer, then copy to staging[write_idx]
         if collect_timestamps {
-            encoder.resolve_query_set(&p.timestamp_query_set, 0..8, &p.timestamp_resolve_buf, 0);
+            encoder.resolve_query_set(&p.timestamp_query_set, 0..6, &p.timestamp_resolve_buf, 0);
             encoder.copy_buffer_to_buffer(
                 &p.timestamp_resolve_buf,
                 0,
                 &p.timestamp_staging_bufs[write_idx],
                 0,
-                8 * 8,
+                6 * 8,
             );
         }
 
@@ -433,7 +349,6 @@ impl GpuEvolver {
         // 8. Store pending batch info so next call can read results
         self.pending_batch = Some(PendingBatch {
             staging_idx: write_idx,
-            migrate_ran,
             collect_timestamps,
             active_chain_count: active,
         });
@@ -512,10 +427,6 @@ impl GpuEvolver {
             self.pass_timings.rasterize_error_ns += duration(2, 3);
             self.pass_timings.select_ns += duration(4, 5);
             self.pass_timings.sample_count += 1;
-            if pending.migrate_ran {
-                self.pass_timings.migrate_ns += duration(6, 7);
-                self.pass_timings.migrate_sample_count += 1;
-            }
             drop(ts_data);
             p.timestamp_staging_bufs[idx].unmap();
         }
@@ -592,7 +503,7 @@ impl GpuEvolver {
 
 
     /// Batch-readback multiple chains in a single GPU submission.
-    /// Used for island thumbnail display (~every 2s), avoids N separate round-trips.
+    /// Avoids N separate round-trips.
     pub fn readback_chains(&self, chain_ids: &[u32]) -> Vec<Drawing> {
         if chain_ids.is_empty() {
             return Vec::new();
@@ -735,9 +646,9 @@ impl GpuEvolver {
 
     /// Prepare for a benchmark: reinitialize chains, trigger pipeline recreation
     /// if needed, run 2 warmup batches to fill the double-buffer and populate
-    /// chain fitness values, then reset all counters. Returns the initial fitness
-    /// from GPU evaluation so the benchmark starts with accurate data.
-    pub fn prepare_for_benchmark(&mut self, drawing: &Drawing, params: &MutationParams) {
+    /// chain fitness values, then reset all counters. Returns the GPU-evaluated
+    /// initial fitness so the benchmark uses GPU's fitness scale (not CPU's).
+    pub fn prepare_for_benchmark(&mut self, drawing: &Drawing, params: &MutationParams) -> f32 {
         // 1. Reinit chains from snapshot (uploads drawing, zeros counters)
         self.reinit_chains(drawing);
 
@@ -756,6 +667,12 @@ impl GpuEvolver {
         self.pass_timings = PassTimings::default();
         // Note: chain_fitness and best_fitness_bits are now populated
         // from the warmup readback — don't reset them
+
+        // Return GPU-evaluated fitness (best across all chains)
+        self.chain_fitness[..self.active_chain_count as usize]
+            .iter()
+            .cloned()
+            .fold(0.0f32, f32::max)
     }
 }
 

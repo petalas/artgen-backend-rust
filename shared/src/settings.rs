@@ -29,13 +29,13 @@ pub const GPU_MAX_CHAIN_COUNT: u32 = 1024;
 pub const GPU_DEFAULT_CHAIN_COUNT: u32 = 16;
 pub const GPU_DEFAULT_LAMBDA: u32 = 8;
 pub const GPU_MAX_LAMBDA: u32 = 64;
+pub const GPU_DEFAULT_BATCH_ITERS: u32 = 50;
+pub const GPU_MAX_BATCH_ITERS: u32 = 4096;
 
-// Crossover & island defaults
+// Crossover defaults
 pub const CROSSOVER_PROB: f32 = 0.1;
 pub const SPATIAL_CROSSOVER_WEIGHT: f32 = 0.7;
 pub const TOURNAMENT_SIZE: u32 = 3;
-pub const ISLAND_COUNT: u32 = 1;
-pub const INTER_ISLAND_INTERVAL: u32 = 500;
 
 // Mutation mode defaults
 pub const SINGLE_MUTATION_MODE: bool = true;

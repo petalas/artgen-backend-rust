@@ -107,10 +107,6 @@ fn SnapshotsSection(state: RwSignal<ViewerState>) -> impl IntoView {
 fn chains_from_exp(exp: u32) -> u32 { 1u32 << exp }
 fn exp_from_chains(chains: u32) -> u32 { chains.max(1).ilog2() }
 
-// Islands: exponent 0..5 → 1,2,4,8,16,32
-fn islands_from_exp(exp: u32) -> u32 { 1u32 << exp }
-fn exp_from_islands(islands: u32) -> u32 { islands.max(1).ilog2() }
-
 // Lambda: exponent 0..6 → 1,2,4,8,16,32,64
 fn lambda_from_exp(exp: u32) -> u32 { 1u32 << exp }
 
@@ -125,27 +121,23 @@ fn wg_label(wg: &[u32; 2]) -> String {
 fn build_benchmark_params(
     state: &ViewerState,
     chain_count: u32,
-    island_count: u32,
     lambda: u32,
-    isolate_islands: bool,
     single_mutation_mode: bool,
     adaptive_mutation: bool,
     rasterize_wg: [u32; 2],
+    gpu_batch_iters: u32,
 ) -> crate::mutation_params::MutationParams {
     let mut params = state.mutation_params.clone();
     params.chain_count = chain_count;
-    params.island_count = island_count;
     params.lambda = lambda;
-    if isolate_islands {
-        params.inter_island_interval = 0;
-    }
     params.single_mutation_mode = single_mutation_mode;
     params.adaptive_mutation = adaptive_mutation;
     params.rasterize_wg = rasterize_wg;
+    params.gpu_batch_iters = gpu_batch_iters;
     params
 }
 
-fn auto_label(chain_count: u32, island_count: u32, lambda: u32, isolate_islands: bool, single_mutation_mode: bool, adaptive_mutation: bool, rasterize_wg: [u32; 2]) -> String {
+fn auto_label(chain_count: u32, lambda: u32, single_mutation_mode: bool, adaptive_mutation: bool, rasterize_wg: [u32; 2], gpu_batch_iters: u32) -> String {
     let mode = if single_mutation_mode { "single" } else { "multi" };
     let lambda_str = if lambda > 1 { format!("-{}\u{03BB}", lambda) } else { String::new() };
     let adaptive_str = if adaptive_mutation { "-adaptive" } else { "" };
@@ -154,11 +146,12 @@ fn auto_label(chain_count: u32, island_count: u32, lambda: u32, isolate_islands:
     } else {
         String::new()
     };
-    if isolate_islands {
-        format!("{}c{}-{}i-isolated-{}{}{}", chain_count, lambda_str, island_count, mode, adaptive_str, wg_str)
+    let batch_str = if gpu_batch_iters != 50 {
+        format!("-b{}", gpu_batch_iters)
     } else {
-        format!("{}c{}-{}i-{}{}{}", chain_count, lambda_str, island_count, mode, adaptive_str, wg_str)
-    }
+        String::new()
+    };
+    format!("{}c{}-{}{}{}{}", chain_count, lambda_str, mode, adaptive_str, wg_str, batch_str)
 }
 
 fn deduplicate_label(base: &str, state: &ViewerState) -> String {
@@ -184,27 +177,25 @@ fn ConfigureSection(state: RwSignal<ViewerState>) -> impl IntoView {
     let duration_secs = RwSignal::new(60u32);
     let label = RwSignal::new(String::new());
     let chain_exp = RwSignal::new(7u32); // 2^7 = 128
-    let island_exp = RwSignal::new(3u32); // 2^3 = 8
     let lambda_exp = RwSignal::new(3u32); // 2^3 = 8 (default lambda=8)
-    let isolate_islands = RwSignal::new(false);
     let single_mutation = RwSignal::new(false);
     let adaptive_mutation = RwSignal::new(true);
     let rasterize_wg_idx = RwSignal::new(0usize); // index into WG_OPTIONS, default 0 = 16x16
+    let batch_iters = RwSignal::new(state.get_untracked().mutation_params.gpu_batch_iters); // GPU batch iterations per submission
 
     let add_to_queue = move |_| {
         let s = state.get();
         let idx = selected_snap.get();
         let Some(snap) = s.benchmark_snapshots.get(idx) else { return };
         let cc = chains_from_exp(chain_exp.get());
-        let ic = islands_from_exp(island_exp.get());
         let lam = lambda_from_exp(lambda_exp.get());
-        let iso = isolate_islands.get();
         let sm = single_mutation.get();
         let am = adaptive_mutation.get();
         let wg = WG_OPTIONS[rasterize_wg_idx.get()];
-        let params = build_benchmark_params(&s, cc, ic, lam, iso, sm, am, wg);
+        let bi = batch_iters.get();
+        let params = build_benchmark_params(&s, cc, lam, sm, am, wg, bi);
         let lbl = label.get();
-        let base = if lbl.trim().is_empty() { auto_label(cc, ic, lam, iso, sm, am, wg) } else { lbl.trim().to_string() };
+        let base = if lbl.trim().is_empty() { auto_label(cc, lam, sm, am, wg, bi) } else { lbl.trim().to_string() };
         let lbl = deduplicate_label(&base, &s);
         let req = BenchmarkRequest {
             drawing_json: snap.drawing_json.clone(),
@@ -221,15 +212,14 @@ fn ConfigureSection(state: RwSignal<ViewerState>) -> impl IntoView {
         let idx = selected_snap.get();
         let Some(snap) = s.benchmark_snapshots.get(idx) else { return };
         let cc = chains_from_exp(chain_exp.get());
-        let ic = islands_from_exp(island_exp.get());
         let lam = lambda_from_exp(lambda_exp.get());
-        let iso = isolate_islands.get();
         let sm = single_mutation.get();
         let am = adaptive_mutation.get();
         let wg = WG_OPTIONS[rasterize_wg_idx.get()];
-        let params = build_benchmark_params(&s, cc, ic, lam, iso, sm, am, wg);
+        let bi = batch_iters.get();
+        let params = build_benchmark_params(&s, cc, lam, sm, am, wg, bi);
         let lbl = label.get();
-        let base = if lbl.trim().is_empty() { auto_label(cc, ic, lam, iso, sm, am, wg) } else { lbl.trim().to_string() };
+        let base = if lbl.trim().is_empty() { auto_label(cc, lam, sm, am, wg, bi) } else { lbl.trim().to_string() };
         let lbl = deduplicate_label(&base, &s);
         let msg = serde_json::json!({
             "type": "start_benchmark",
@@ -341,34 +331,6 @@ fn ConfigureSection(state: RwSignal<ViewerState>) -> impl IntoView {
                     }}</span>
                 </div>
                 <div class="bench-config-row">
-                    <label class="bench-config-label">"Islands"</label>
-                    <input
-                        type="range"
-                        class="mutation-slider"
-                        min="0" max="5" step="1"
-                        prop:value={move || island_exp.get().to_string()}
-                        on:input={move |ev| {
-                            if let Ok(v) = event_target_value(&ev).parse::<u32>() {
-                                island_exp.set(v);
-                            }
-                        }}
-                    />
-                    <span class="mutation-value">{move || islands_from_exp(island_exp.get()).to_string()}</span>
-                </div>
-                <div class="bench-config-row">
-                    <label class="bench-config-label">"Migration"</label>
-                    <label class="bench-checkbox-label">
-                        <input
-                            type="checkbox"
-                            prop:checked={move || isolate_islands.get()}
-                            on:change={move |_| {
-                                isolate_islands.set(!isolate_islands.get_untracked());
-                            }}
-                        />
-                        "Isolate islands (no inter-island migration)"
-                    </label>
-                </div>
-                <div class="bench-config-row">
                     <label class="bench-config-label">"Mutation"</label>
                     <label class="bench-checkbox-label">
                         <input
@@ -417,6 +379,21 @@ fn ConfigureSection(state: RwSignal<ViewerState>) -> impl IntoView {
                         let wg = WG_OPTIONS[rasterize_wg_idx.get()];
                         format!("{} threads", wg[0] * wg[1])
                     }}</span>
+                </div>
+                <div class="bench-config-row">
+                    <label class="bench-config-label">"Batch iters"</label>
+                    <input
+                        type="range"
+                        class="mutation-slider"
+                        min="0" max="12" step="1"
+                        prop:value={move || batch_iters.get().max(1).ilog2().to_string()}
+                        on:input={move |ev| {
+                            if let Ok(exp) = event_target_value(&ev).parse::<u32>() {
+                                batch_iters.set(1u32 << exp);
+                            }
+                        }}
+                    />
+                    <span class="mutation-value">{move || batch_iters.get().to_string()}</span>
                 </div>
                 <div class="bench-config-row">
                     <label class="bench-config-label">"Resolution"</label>
@@ -476,7 +453,7 @@ fn ConfigureSection(state: RwSignal<ViewerState>) -> impl IntoView {
                         }));
                     }}
                     disabled={move || is_active() || state.get().active_project.is_none()}
-                    title="4 chains, 64 lambda, 1 island, single mutation, adaptive, 33s from random start"
+                    title="4 chains, 64 lambda, single mutation, adaptive, 33s from random start"
                 >
                     {move || {
                         match &state.get().active_project {
@@ -580,7 +557,7 @@ fn QueueSection(state: RwSignal<ViewerState>) -> impl IntoView {
                                 <div class="bench-queue-item">
                                     <span class="bench-queue-label">{req.label.clone()}</span>
                                     <span class="bench-queue-meta">
-                                        {format!("{}s | {}c {}\u{03BB} {}i{}", req.duration_secs, req.params.chain_count, req.params.lambda, req.params.island_count,
+                                        {format!("{}s | {}c {}\u{03BB} b{}{}", req.duration_secs, req.params.chain_count, req.params.lambda, req.params.gpu_batch_iters,
                                             if req.params.rasterize_wg != [16, 16] { format!(" wg{}x{}", req.params.rasterize_wg[0], req.params.rasterize_wg[1]) } else { String::new() }
                                         )}
                                     </span>
@@ -641,12 +618,13 @@ fn ResultsSection(state: RwSignal<ViewerState>) -> impl IntoView {
                                         <th>"Label"</th>
                                         <th>"Chains"</th>
                                         <th>"\u{03BB}"</th>
-                                        <th>"Islands"</th>
+                                        <th>"Batch"</th>
                                         <th>"Duration"</th>
                                         <th>"Start"</th>
                                         <th>"Final"</th>
                                         <th>"Improv"</th>
                                         <th>"Improv/s"</th>
+                                        <th>"Evals/s"</th>
                                     </tr>
                                 </thead>
                                 <tbody>
@@ -691,21 +669,26 @@ fn export_results_text(results: &[BenchmarkResult]) -> String {
 
     // Summary table
     out.push_str("=== Benchmark Results ===\n\n");
-    out.push_str(&format!("{:<24} {:>6} {:>3} {:>7} {:>8} {:>8} {:>8} {:>6} {:>8}\n",
-        "Label", "Chains", "\u{03BB}", "Islands", "Duration", "Start", "Final", "Impr", "Impr/s"));
-    out.push_str(&"-".repeat(96));
+    out.push_str(&format!("{:<24} {:>6} {:>3} {:>5} {:>8} {:>8} {:>8} {:>6} {:>8} {:>8}\n",
+        "Label", "Chains", "\u{03BB}", "Batch", "Duration", "Start", "Final", "Impr", "Impr/s", "Evals/s"));
+    out.push_str(&"-".repeat(104));
     out.push('\n');
     for r in results {
-        out.push_str(&format!("{:<24} {:>6} {:>3} {:>7} {:>7}s {:>7.2}% {:>7.2}% {:>6} {:>8.2}\n",
-            r.label, r.chain_count, r.lambda, r.island_count, r.duration_secs,
+        let evals_per_sec = if r.duration_secs > 0 {
+            r.total_evals as f64 / r.duration_secs as f64
+        } else {
+            0.0
+        };
+        out.push_str(&format!("{:<24} {:>6} {:>3} {:>5} {:>7}s {:>7.2}% {:>7.2}% {:>6} {:>8.2} {:>8.0}\n",
+            r.label, r.chain_count, r.lambda, r.gpu_batch_iters, r.duration_secs,
             r.start_fitness, r.final_fitness,
-            r.total_improvements, r.improvements_per_sec));
+            r.total_improvements, r.improvements_per_sec, evals_per_sec));
     }
 
     // Time series per run
     for r in results {
-        out.push_str(&format!("\n--- {} ({}c {}\u{03BB} {}i {}s) ---\n",
-            r.label, r.chain_count, r.lambda, r.island_count, r.duration_secs));
+        out.push_str(&format!("\n--- {} ({}c {}\u{03BB} {}s) ---\n",
+            r.label, r.chain_count, r.lambda, r.duration_secs));
         out.push_str(&format!("{:>6} {:>10} {:>10} {:>10} {:>8} {:>12} {:>10}\n",
             "time", "best", "avg", "worst", "impr", "evals", "evals/s"));
         for s in &r.samples {
@@ -780,6 +763,16 @@ fn result_row(i: usize, r: &BenchmarkResult) -> impl IntoView {
     } else {
         format!("{}:{:02}", mins, secs)
     };
+    let evals_per_sec = if r.duration_secs > 0 {
+        r.total_evals as f64 / r.duration_secs as f64
+    } else {
+        0.0
+    };
+    let evals_str = if evals_per_sec >= 1000.0 {
+        format!("{:.1}K", evals_per_sec / 1000.0)
+    } else {
+        format!("{:.0}", evals_per_sec)
+    };
 
     view! {
         <tr>
@@ -792,12 +785,13 @@ fn result_row(i: usize, r: &BenchmarkResult) -> impl IntoView {
             <td class="bench-cell-label">{r.label.clone()}</td>
             <td>{r.chain_count.to_string()}</td>
             <td>{r.lambda.to_string()}</td>
-            <td>{r.island_count.to_string()}</td>
+            <td>{r.gpu_batch_iters.to_string()}</td>
             <td>{duration_str}</td>
             <td>{format!("{:.2}%", r.start_fitness)}</td>
             <td class="bench-cell-fitness">{format!("{:.2}%", r.final_fitness)}</td>
             <td>{r.total_improvements.to_string()}</td>
             <td>{format!("{:.2}", r.improvements_per_sec)}</td>
+            <td>{evals_str}</td>
         </tr>
     }
 }

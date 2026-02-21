@@ -43,7 +43,7 @@ struct Params {
     max_error_per_pixel: f32,
     per_point_multiplier: f32,
     iteration_number: u32,
-    migration_interval: u32,
+    _pad0: u32,
 
     add_polygon_prob: f32,
     remove_polygon_prob: f32,
@@ -65,11 +65,11 @@ struct Params {
     max_alpha_norm: f32,
     crossover_prob: f32,
 
-    // Crossover & island params
+    // Crossover params
     spatial_crossover_weight: f32,
     tournament_size: u32,
-    island_count: u32,
-    inter_island_interval: u32,
+    _pad1: u32,
+    _pad2: u32,
 
     // Chain count + lambda + padding
     chain_count_param: u32,
@@ -175,16 +175,13 @@ fn rand_u32(state: ptr<function, vec4<u32>>, max_val: u32) -> u32 {
 
 // --- Crossover ---
 
-/// Tournament selection: pick the fittest chain from `tournament_size` random samples within the same island.
+/// Tournament selection: pick the fittest chain from `tournament_size` random samples across the whole population.
 fn tournament_select(rng: ptr<function, vec4<u32>>, chain_id: u32, chain_count: u32) -> u32 {
-    let island_size = params.chain_count_param / max(params.island_count, 1u);
-    let island_start = (chain_id / island_size) * island_size;
-
-    var best_id = island_start + rand_u32(rng, island_size);
+    var best_id = rand_u32(rng, chain_count);
     var best_fitness = bitcast<f32>(chain_states[best_id].fitness_bits);
 
     for (var t = 1u; t < params.tournament_size; t++) {
-        let candidate_id = island_start + rand_u32(rng, island_size);
+        let candidate_id = rand_u32(rng, chain_count);
         let candidate_fitness = bitcast<f32>(chain_states[candidate_id].fitness_bits);
         if candidate_fitness > best_fitness {
             best_id = candidate_id;
@@ -464,8 +461,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
     }
 
     // --- Crossover path ---
-    let island_size = params.chain_count_param / max(params.island_count, 1u);
-    if params.crossover_prob > 0.0 && rand_f32(&rng) < params.crossover_prob && island_size >= 2u {
+    if params.crossover_prob > 0.0 && rand_f32(&rng) < params.crossover_prob && chain_count >= 2u {
         let parent_b = tournament_select(&rng, chain_id, chain_count);
 
         // Initialize working state header from shared memory

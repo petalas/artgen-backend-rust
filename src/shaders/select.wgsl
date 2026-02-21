@@ -1,5 +1,5 @@
-// Selection + Migration compute shader — 64 threads per chain (parallel polygon copy)
-// Three entry points: `select_main`, `migrate_intra_main`, `migrate_inter_main`
+// Selection compute shader — 64 threads per chain (parallel polygon copy)
+// Entry point: `select_main`
 
 struct Polygon {
     data: vec4<u32>,   // [color_packed, v0_packed, v1_packed, v2_packed] — 16 bytes
@@ -23,7 +23,7 @@ struct Params {
     max_error_per_pixel: f32,
     per_point_multiplier: f32,
     iteration_number: u32,
-    migration_interval: u32,
+    _pad0: u32,
 
     add_polygon_prob: f32,
     remove_polygon_prob: f32,
@@ -45,11 +45,11 @@ struct Params {
     max_alpha_norm: f32,
     crossover_prob: f32,
 
-    // Crossover & island params
+    // Crossover params
     spatial_crossover_weight: f32,
     tournament_size: u32,
-    island_count: u32,
-    inter_island_interval: u32,
+    _pad1: u32,
+    _pad2: u32,
 
     // Chain count + lambda + padding
     chain_count_param: u32,
@@ -242,75 +242,3 @@ fn select_main(@builtin(global_invocation_id) gid: vec3<u32>,
     }
 }
 
-/// Migrate if neighbor is fitter. Shared logic for both intra/inter migration.
-/// Uses module-scope shared_accept and shared_copy_count for workgroup communication.
-fn migrate_from(chain_id: u32, neighbor_id: u32, local_id: u32) {
-    if local_id == 0u {
-        let neighbor_fitness = bitcast<f32>(chain_states[neighbor_id].fitness_bits);
-        let my_fitness = bitcast<f32>(chain_states[chain_id].fitness_bits);
-
-        if neighbor_fitness > my_fitness {
-            // Adopt neighbor's drawing, but keep our own RNG for diversity
-            let saved_rng = chain_states[chain_id].rng_state;
-
-            let pc = min(chain_states[neighbor_id].polygon_count, params.max_polygons);
-            chain_states[chain_id].polygon_count = pc;
-            chain_states[chain_id].fitness_bits = chain_states[neighbor_id].fitness_bits;
-            chain_states[chain_id].mutation_scale = chain_states[neighbor_id].mutation_scale;
-            chain_states[chain_id].stagnation_counter = 0u;
-            chain_states[chain_id].rng_state = saved_rng;
-            shared_accept = 1u;
-            shared_copy_count = pc;
-        } else {
-            shared_accept = 0u;
-        }
-
-        // Update fitness_packed with (possibly migrated) fitness
-        fitness_packed[chain_id] = chain_states[chain_id].fitness_bits;
-    }
-
-    workgroupBarrier();
-
-    if shared_accept == 1u {
-        let pc = shared_copy_count;
-        for (var i = local_id; i < pc; i += 64u) {
-            chain_states[chain_id].polygons[i] = chain_states[neighbor_id].polygons[i];
-        }
-    }
-}
-
-/// Intra-island migration: ring within island boundaries.
-@compute @workgroup_size(64)
-fn migrate_intra_main(@builtin(global_invocation_id) gid: vec3<u32>,
-                      @builtin(local_invocation_id) lid: vec3<u32>,
-                      @builtin(workgroup_id) wid: vec3<u32>) {
-    let chain_id = wid.x;
-    let local_id = lid.x;
-    let chain_count = arrayLength(&chain_states);
-    if chain_id >= chain_count {
-        return;
-    }
-
-    let island_size = params.chain_count_param / max(params.island_count, 1u);
-    let island_start = (chain_id / island_size) * island_size;
-    let local_idx = chain_id - island_start;
-    let neighbor_id = island_start + (local_idx + 1u) % island_size;
-
-    migrate_from(chain_id, neighbor_id, local_id);
-}
-
-/// Inter-island migration: global ring across all chains.
-@compute @workgroup_size(64)
-fn migrate_inter_main(@builtin(global_invocation_id) gid: vec3<u32>,
-                      @builtin(local_invocation_id) lid: vec3<u32>,
-                      @builtin(workgroup_id) wid: vec3<u32>) {
-    let chain_id = wid.x;
-    let local_id = lid.x;
-    let chain_count = arrayLength(&chain_states);
-    if chain_id >= chain_count {
-        return;
-    }
-
-    let neighbor_id = (chain_id + 1u) % chain_count;
-    migrate_from(chain_id, neighbor_id, local_id);
-}

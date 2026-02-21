@@ -6,6 +6,10 @@ fn default_rasterize_wg() -> [u32; 2] {
     [settings::RASTERIZE_WG_X_DEFAULT, settings::RASTERIZE_WG_Y_DEFAULT]
 }
 
+fn default_gpu_batch_iters() -> u32 {
+    settings::GPU_DEFAULT_BATCH_ITERS
+}
+
 /// Runtime-configurable mutation parameters.
 /// Sent over WebSocket as JSON (camelCase) and used to build `GpuParams`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -37,12 +41,10 @@ pub struct MutationParams {
     pub min_polygons: u32,
     pub max_polygons: u32,
 
-    // Crossover & island parameters
+    // Crossover parameters
     pub crossover_prob: f32,
     pub spatial_crossover_weight: f32,
     pub tournament_size: u32,
-    pub island_count: u32,
-    pub inter_island_interval: u32,
 
     // Chain count (runtime-configurable, capped to GPU buffer allocation)
     pub chain_count: u32,
@@ -60,6 +62,11 @@ pub struct MutationParams {
     // Affects SM occupancy vs shared memory tradeoff. Default: [16,16] = 256 threads.
     #[serde(default = "default_rasterize_wg")]
     pub rasterize_wg: [u32; 2],
+
+    // GPU batch iterations: number of mutate->rasterize->select cycles per GPU submission.
+    // Higher values reduce CPU<->GPU round-trip overhead but delay readback/progress reporting.
+    #[serde(default = "default_gpu_batch_iters")]
+    pub gpu_batch_iters: u32,
 }
 
 impl MutationParams {
@@ -100,49 +107,20 @@ impl MutationParams {
         // Round down to nearest power of 2
         self.lambda = 1u32 << self.lambda.ilog2();
 
-        // Crossover & island parameters
+        // Crossover parameters
         self.crossover_prob = self.crossover_prob.clamp(0.0, 1.0);
         self.spatial_crossover_weight = self.spatial_crossover_weight.clamp(0.0, 1.0);
         self.tournament_size = self.tournament_size.clamp(1, 16);
-        // Snap island_count to nearest divisor of chain_count
-        let chain_count = self.chain_count;
-        self.island_count = self.island_count.clamp(1, chain_count);
-        if self.island_count > 1 {
-            // Find nearest divisor of chain_count
-            let target = self.island_count;
-            let mut best = 1u32;
-            let mut best_dist = target.abs_diff(1);
-            let mut d = 2u32;
-            while d * d <= chain_count {
-                if chain_count % d == 0 {
-                    let dist_d = target.abs_diff(d);
-                    if dist_d < best_dist {
-                        best = d;
-                        best_dist = dist_d;
-                    }
-                    let complement = chain_count / d;
-                    let dist_c = target.abs_diff(complement);
-                    if dist_c < best_dist {
-                        best = complement;
-                        best_dist = dist_c;
-                    }
-                }
-                d += 1;
-            }
-            // Also check chain_count itself as a divisor
-            let dist_cc = target.abs_diff(chain_count);
-            if dist_cc < best_dist {
-                best = chain_count;
-            }
-            self.island_count = best;
-        }
-        self.inter_island_interval = self.inter_island_interval.min(10000); // 0 = disabled
 
         // Rasterize workgroup size: must be one of the supported configurations
         let valid_wg_sizes: &[[u32; 2]] = &[[16, 16], [16, 8], [8, 8]];
         if !valid_wg_sizes.contains(&self.rasterize_wg) {
             self.rasterize_wg = [settings::RASTERIZE_WG_X_DEFAULT, settings::RASTERIZE_WG_Y_DEFAULT];
         }
+
+        // GPU batch iterations: clamp to [1, GPU_MAX_BATCH_ITERS], enforce power-of-2
+        self.gpu_batch_iters = self.gpu_batch_iters.clamp(1, settings::GPU_MAX_BATCH_ITERS);
+        self.gpu_batch_iters = 1u32 << self.gpu_batch_iters.ilog2();
     }
 }
 
@@ -170,13 +148,12 @@ impl Default for MutationParams {
             crossover_prob: settings::CROSSOVER_PROB,
             spatial_crossover_weight: settings::SPATIAL_CROSSOVER_WEIGHT,
             tournament_size: settings::TOURNAMENT_SIZE,
-            island_count: settings::ISLAND_COUNT,
-            inter_island_interval: settings::INTER_ISLAND_INTERVAL,
             chain_count: settings::GPU_DEFAULT_CHAIN_COUNT,
             lambda: settings::GPU_DEFAULT_LAMBDA,
             single_mutation_mode: settings::SINGLE_MUTATION_MODE,
             adaptive_mutation: settings::ADAPTIVE_MUTATION,
             rasterize_wg: [settings::RASTERIZE_WG_X_DEFAULT, settings::RASTERIZE_WG_Y_DEFAULT],
+            gpu_batch_iters: settings::GPU_DEFAULT_BATCH_ITERS,
         }
     }
 }

@@ -85,13 +85,33 @@ fn main() {
     let headless = args.iter().any(|a| a == "--headless");
     let run_bench = args.iter().any(|a| a == "--bench");
 
-    // Filter out flags to get positional args
-    let positional: Vec<&String> = args.iter().skip(1).filter(|a| !a.starts_with("--")).collect();
+    // Parse --gpu-batch-iters N (number of iterations per GPU batch submission)
+    let gpu_batch_iters_override: Option<u32> = args
+        .windows(2)
+        .find(|w| w[0] == "--gpu-batch-iters")
+        .and_then(|w| w[1].parse().ok());
+
+    // Filter out flags and their values to get positional args
+    let mut positional: Vec<&String> = Vec::new();
+    let mut skip_next = false;
+    for (_i, a) in args.iter().enumerate().skip(1) {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if a == "--gpu-batch-iters" {
+            skip_next = true;
+            continue;
+        }
+        if !a.starts_with("--") {
+            positional.push(a);
+        }
+    }
 
     if run_bench {
         // Quick GPU benchmark mode — no WS server, no project system
         let project = positional.first().map(|s| s.as_str()).unwrap_or("ff");
-        run_cli_benchmark(project);
+        run_cli_benchmark(project, gpu_batch_iters_override);
         return;
     }
 
@@ -99,7 +119,7 @@ fn main() {
         // Project management mode — image arg is optional
         let legacy_image = positional.first().map(|s| s.as_str());
         println!("Starting GPU evolution pipeline (headless, project management mode)...");
-        gpu_main_loop_headless(legacy_image);
+        gpu_main_loop_headless(legacy_image, gpu_batch_iters_override);
         return;
     }
 
@@ -297,16 +317,7 @@ struct GpuPassTimingsWs {
     rasterize_error_pct: f32,
     select_ms: f32,
     select_pct: f32,
-    migrate_ms: f32,
-    migrate_pct: f32,
     total_ms: f32,
-}
-
-struct IslandStats {
-    best_fitness: f32,
-    avg_fitness: f32,
-    chain_count: u32,
-    best_chain_id: u32,
 }
 
 struct GpuStatsWs {
@@ -314,9 +325,6 @@ struct GpuStatsWs {
     memory_mb: f32,
     timings: Option<GpuPassTimingsWs>,
     chain_fitness: Vec<f32>, // sorted desc
-    island_stats: Vec<IslandStats>,
-    island_count: u32,
-    island_drawings: Vec<Drawing>,
     rasterize_wg: [u32; 2],
 }
 
@@ -330,30 +338,14 @@ impl GpuStatsWs {
                 "rasterizeErrorPct": t.rasterize_error_pct,
                 "selectMs": t.select_ms,
                 "selectPct": t.select_pct,
-                "migrateMs": t.migrate_ms,
-                "migratePct": t.migrate_pct,
                 "totalMs": t.total_ms,
             })
         });
-        let islands: Vec<serde_json::Value> = self.island_stats.iter().enumerate().map(|(i, is)| {
-            serde_json::json!({
-                "island": i,
-                "bestFitness": is.best_fitness,
-                "avgFitness": is.avg_fitness,
-                "chainCount": is.chain_count,
-            })
-        }).collect();
-        let island_drawings: Vec<serde_json::Value> = self.island_drawings.iter()
-            .filter_map(|d| serde_json::to_value(d).ok())
-            .collect();
         serde_json::json!({
             "chainCount": self.chain_count,
             "memoryMb": self.memory_mb,
             "timings": timings,
             "chainFitness": self.chain_fitness,
-            "islandStats": islands,
-            "islandCount": self.island_count,
-            "islandDrawings": island_drawings,
             "rasterizeWg": self.rasterize_wg,
         })
     }
@@ -852,15 +844,14 @@ fn handle_ws_command(
             None
         }
         Some("run_standard_benchmark") => {
-            // Fixed-settings benchmark from random start — no snapshot needed
-            let random_drawing = Drawing::new_random_capped(1000);
-            let drawing_json = serde_json::to_string(&random_drawing).unwrap();
+            // Fixed-settings benchmark from blank start — deterministic baseline
+            let blank_drawing = Drawing { polygons: vec![], is_dirty: false, fitness: 0.0 };
+            let drawing_json = serde_json::to_string(&blank_drawing).unwrap();
             let mut params = MutationParams::default();
             params.chain_count = 4;
             params.lambda = 64;
             params.single_mutation_mode = true;
             params.adaptive_mutation = true;
-            params.island_count = 1;
             params.sanitize();
             let req = BenchmarkRequest {
                 drawing_json,
@@ -928,19 +919,14 @@ fn handle_ws_command(
     }
 }
 
-fn build_gpu_stats(evolver: &GpuEvolver, island_count: u32) -> GpuStatsWs {
+fn build_gpu_stats(evolver: &GpuEvolver) -> GpuStatsWs {
     let timings = evolver.pass_timings();
     let ws_timings = if timings.sample_count > 0 {
         let n = timings.sample_count as f64;
         let mutate = timings.mutate_ns / n / 1_000_000.0;
         let rasterize_error = timings.rasterize_error_ns / n / 1_000_000.0;
         let select = timings.select_ns / n / 1_000_000.0;
-        let migrate = if timings.migrate_sample_count > 0 {
-            timings.migrate_ns / timings.migrate_sample_count as f64 / 1_000_000.0
-        } else {
-            0.0
-        };
-        let total = mutate + rasterize_error + select + migrate;
+        let total = mutate + rasterize_error + select;
         if total > 0.0 {
             Some(GpuPassTimingsWs {
                 mutate_ms: mutate as f32,
@@ -949,8 +935,6 @@ fn build_gpu_stats(evolver: &GpuEvolver, island_count: u32) -> GpuStatsWs {
                 rasterize_error_pct: (rasterize_error / total * 100.0) as f32,
                 select_ms: select as f32,
                 select_pct: (select / total * 100.0) as f32,
-                migrate_ms: migrate as f32,
-                migrate_pct: (migrate / total * 100.0) as f32,
                 total_ms: total as f32,
             })
         } else {
@@ -963,45 +947,14 @@ fn build_gpu_stats(evolver: &GpuEvolver, island_count: u32) -> GpuStatsWs {
     let raw_fitness = evolver.chain_fitness();
     let chain_count = evolver.chain_count();
 
-    // Compute per-island stats
-    let effective_islands = island_count.max(1).min(chain_count);
-    let island_size = chain_count / effective_islands;
-    let mut island_stats = Vec::with_capacity(effective_islands as usize);
-    for i in 0..effective_islands {
-        let start = (i * island_size) as usize;
-        let end = if i == effective_islands - 1 {
-            chain_count as usize
-        } else {
-            ((i + 1) * island_size) as usize
-        };
-        let slice = &raw_fitness[start..end];
-        let (best_local_idx, &best) = slice.iter().enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-            .unwrap_or((0, &0.0));
-        let avg = slice.iter().sum::<f32>() / slice.len() as f32;
-        island_stats.push(IslandStats {
-            best_fitness: best,
-            avg_fitness: avg,
-            chain_count: (end - start) as u32,
-            best_chain_id: (start + best_local_idx) as u32,
-        });
-    }
-
     let mut fitness: Vec<f32> = raw_fitness.to_vec();
     fitness.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
-
-    // Readback best drawing from each island (single batched GPU submission)
-    let chain_ids: Vec<u32> = island_stats.iter().map(|is| is.best_chain_id).collect();
-    let island_drawings = evolver.readback_chains(&chain_ids);
 
     GpuStatsWs {
         chain_count,
         memory_mb: evolver.estimated_memory_bytes() as f32 / (1024.0 * 1024.0),
         timings: ws_timings,
         chain_fitness: fitness,
-        island_stats,
-        island_count: effective_islands,
-        island_drawings,
         rasterize_wg: evolver.rasterize_wg(),
     }
 }
@@ -1025,7 +978,6 @@ fn run_benchmark(
         }
     };
 
-    let start_fitness = drawing.fitness;
     let mut bench_params = req.params.clone();
     bench_params.sanitize();
 
@@ -1041,20 +993,25 @@ fn run_benchmark(
         s.generation += 1;
         cvar.notify_all();
     }
-    println!("[Benchmark] Started: '{}' ({}s, {} chains, {} islands)",
-        req.label, req.duration_secs, bench_params.chain_count, bench_params.island_count);
+    println!("[Benchmark] Started: '{}' ({}s, {} chains)",
+        req.label, req.duration_secs, bench_params.chain_count);
 
     // Prepare: reinit chains, recreate pipeline if needed, run 2 warmup batches,
     // then reset counters. This ensures pipeline compilation and warmup time
     // are NOT counted in the benchmark duration.
-    evolver.prepare_for_benchmark(&drawing, &bench_params);
+    let gpu_start_fitness = evolver.prepare_for_benchmark(&drawing, &bench_params);
+    let start_fitness = gpu_start_fitness;
 
     let bench_start = Instant::now();
     let duration = Duration::from_secs(req.duration_secs as u64);
     let mut samples: Vec<BenchmarkSample> = vec![];
     let mut bench_improvements = 0u64;
     let mut last_sample = Instant::now();
+    // Use GPU-evaluated fitness as the threshold — CPU and GPU compute different
+    // fitness values (L2 vs L1, different float accumulation per workgroup size),
+    // so using CPU fitness here would cause improvements to be undercounted or zero.
     let mut bench_best = drawing.clone();
+    bench_best.fitness = gpu_start_fitness;
     let sample_interval = Duration::from_secs(1);
     let image_render_interval = Duration::from_millis(200);
     let mut last_image_render = Instant::now();
@@ -1155,8 +1112,8 @@ fn run_benchmark(
         },
         samples,
         chain_count: bench_params.chain_count,
-        island_count: bench_params.island_count,
         lambda: bench_params.lambda,
+        gpu_batch_iters: bench_params.gpu_batch_iters,
     };
 
     println!(
@@ -1192,17 +1149,16 @@ fn run_benchmark(
 ///
 /// Usage: cargo run --release -- --bench [project_name]
 ///   project_name defaults to "ff"
-fn run_cli_benchmark(project: &str) {
-    use artgen_backend_rust::settings::GPU_ITERATIONS_PER_BATCH;
-
+fn run_cli_benchmark(project: &str, gpu_batch_iters_override: Option<u32>) {
     const DURATION_SECS: u64 = 33;
     const BENCH_CHAINS: u32 = 4;
     const BENCH_LAMBDA: u32 = 64;
     const BENCH_RESOLUTION: u32 = 256;
 
     println!("=== GPU CLI Benchmark ===");
-    println!("Project: {}, Duration: {}s, Chains: {}, Lambda: {}, Resolution: {}",
-        project, DURATION_SECS, BENCH_CHAINS, BENCH_LAMBDA, BENCH_RESOLUTION);
+    println!("Project: {}, Duration: {}s, Chains: {}, Lambda: {}, Resolution: {}, BatchIters: {}",
+        project, DURATION_SECS, BENCH_CHAINS, BENCH_LAMBDA, BENCH_RESOLUTION,
+        gpu_batch_iters_override.unwrap_or(artgen_backend_rust::settings::GPU_DEFAULT_BATCH_ITERS));
 
     // Load reference image from project directory
     projects::ensure_projects_dir();
@@ -1220,8 +1176,8 @@ fn run_cli_benchmark(project: &str) {
         .expect("Failed to normalize image");
     println!("Image: {}x{}", w, h);
 
-    // Create random starting drawing
-    let initial = Drawing::new_random_capped(1000);
+    // Start from blank — deterministic baseline, no random variance
+    let initial = Drawing { polygons: vec![], is_dirty: false, fitness: 0.0 };
 
     // Initialize GPU evolver
     let mut evolver = futures_lite::future::block_on(GpuEvolver::new(
@@ -1237,16 +1193,19 @@ fn run_cli_benchmark(project: &str) {
     params.lambda = BENCH_LAMBDA;
     params.single_mutation_mode = true;
     params.adaptive_mutation = true;
-    params.island_count = 1;
+    if let Some(iters) = gpu_batch_iters_override {
+        params.gpu_batch_iters = iters;
+    }
     params.sanitize();
 
-    let evals_per_batch = GPU_ITERATIONS_PER_BATCH as u64
+    let evals_per_batch = params.gpu_batch_iters as u64
         * params.chain_count as u64
         * params.lambda as u64;
 
     // Warm up: pipeline setup + 2 batches to fill double-buffer
     println!("Warming up...");
-    evolver.prepare_for_benchmark(&initial, &params);
+    let gpu_start_fitness = evolver.prepare_for_benchmark(&initial, &params);
+    println!("GPU start fitness: {:.4}%", gpu_start_fitness * 100.0);
 
     // Run benchmark
     println!("Running evolution for {}s...\n", DURATION_SECS);
@@ -1254,7 +1213,7 @@ fn run_cli_benchmark(project: &str) {
     let duration = Duration::from_secs(DURATION_SECS);
     let mut improvements = 0u64;
     let mut best = initial;
-    best.fitness = 0.0;
+    best.fitness = gpu_start_fitness;
     let mut batches = 0u64;
     let mut last_print = Instant::now();
 
@@ -1317,11 +1276,18 @@ fn run_cli_benchmark(project: &str) {
     println!("\nJSON: {}", serde_json::to_string(&result).unwrap());
 }
 
-fn gpu_main_loop_headless(legacy_image: Option<&str>) {
+fn gpu_main_loop_headless(legacy_image: Option<&str>, gpu_batch_iters_override: Option<u32>) {
     projects::ensure_projects_dir();
 
     // Legacy migration
     let migrated_project = projects::migrate_legacy(legacy_image);
+
+    // Apply CLI overrides to default mutation params
+    let mut initial_params = MutationParams::default();
+    if let Some(iters) = gpu_batch_iters_override {
+        initial_params.gpu_batch_iters = iters;
+    }
+    initial_params.sanitize();
 
     // Create shared state for WS server
     let ws_state: SharedWsState = Arc::new((
@@ -1347,7 +1313,7 @@ fn gpu_main_loop_headless(legacy_image: Option<&str>) {
             reset_active: false,
             pending_delete: None,
             target_resolution: 256,
-            mutation_params: MutationParams::default(),
+            mutation_params: initial_params,
             gpu_stats: None,
             benchmark_request: None,
             benchmark_results: vec![],
@@ -1669,7 +1635,7 @@ fn gpu_main_loop_headless(legacy_image: Option<&str>) {
                 let active_secs = active_elapsed.as_secs_f64();
                 let evals = evolver.total_evaluations();
                 let evals_per_sec = if active_secs > 0.0 { evals as f64 / active_secs } else { 0.0 };
-                let gpu_stats = build_gpu_stats(&evolver, mp.island_count);
+                let gpu_stats = build_gpu_stats(&evolver);
                 {
                     let (lock, cvar) = &*ws_state;
                     let mut s = lock.lock().unwrap();

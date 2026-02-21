@@ -46,7 +46,7 @@ struct Params {
     max_error_per_pixel: f32,
     per_point_multiplier: f32,
     iteration_number: u32,
-    migration_interval: u32,
+    _pad0: u32,
 
     add_polygon_prob: f32,
     remove_polygon_prob: f32,
@@ -68,11 +68,11 @@ struct Params {
     max_alpha_norm: f32,
     crossover_prob: f32,
 
-    // Crossover & island params
+    // Crossover params
     spatial_crossover_weight: f32,
     tournament_size: u32,
-    island_count: u32,
-    inter_island_interval: u32,
+    _pad1: u32,
+    _pad2: u32,
 
     // Chain count + lambda + padding
     chain_count_param: u32,

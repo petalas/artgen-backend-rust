@@ -22,6 +22,3 @@ pub const PER_POINT_MULTIPLIER: f32 = 1.0 / 5000000.0;
 
 pub const MIN_POINTS_PER_POLYGON: usize = 3;
 pub const START_WITH_POLYGONS_PER_IMAGE: usize = 150;
-
-pub const GPU_ITERATIONS_PER_BATCH: u32 = 50;
-pub const GPU_MIGRATION_INTERVAL: u32 = 50;

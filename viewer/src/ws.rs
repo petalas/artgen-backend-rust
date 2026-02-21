@@ -15,16 +15,7 @@ pub struct GpuTimings {
     pub rasterize_error_pct: f32,
     pub select_ms: f32,
     pub select_pct: f32,
-    pub migrate_ms: f32,
-    pub migrate_pct: f32,
     pub total_ms: f32,
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct IslandStats {
-    pub best_fitness: f32,
-    pub avg_fitness: f32,
-    pub chain_count: u32,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -33,9 +24,6 @@ pub struct GpuStats {
     pub memory_mb: f32,
     pub timings: GpuTimings,
     pub chain_fitness: Vec<f32>, // sorted desc
-    pub island_stats: Vec<IslandStats>,
-    pub island_count: u32,
-    pub island_drawings: Vec<crate::models::Drawing>,
     pub rasterize_wg: [u32; 2],
 }
 
@@ -250,8 +238,6 @@ fn parse_gpu_stats(data: &serde_json::Value) -> Option<GpuStats> {
             rasterize_error_pct: t.get("rasterizeErrorPct").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
             select_ms: t.get("selectMs").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
             select_pct: t.get("selectPct").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
-            migrate_ms: t.get("migrateMs").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
-            migrate_pct: t.get("migratePct").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
             total_ms: t.get("totalMs").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
         }
     } else {
@@ -260,27 +246,6 @@ fn parse_gpu_stats(data: &serde_json::Value) -> Option<GpuStats> {
     let chain_fitness = gs["chainFitness"]
         .as_array()
         .map(|arr| arr.iter().filter_map(|v| v.as_f64().map(|f| f as f32)).collect())
-        .unwrap_or_default();
-    let island_stats = gs["islandStats"]
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .map(|is| IslandStats {
-                    best_fitness: is["bestFitness"].as_f64().unwrap_or(0.0) as f32,
-                    avg_fitness: is["avgFitness"].as_f64().unwrap_or(0.0) as f32,
-                    chain_count: is["chainCount"].as_u64().unwrap_or(0) as u32,
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    let island_count = gs["islandCount"].as_u64().unwrap_or(0) as u32;
-    let island_drawings = gs["islandDrawings"]
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| serde_json::from_value::<crate::models::Drawing>(v.clone()).ok())
-                .collect()
-        })
         .unwrap_or_default();
     let rasterize_wg = gs["rasterizeWg"]
         .as_array()
@@ -300,9 +265,6 @@ fn parse_gpu_stats(data: &serde_json::Value) -> Option<GpuStats> {
         memory_mb: gs["memoryMb"].as_f64().unwrap_or(0.0) as f32,
         timings,
         chain_fitness,
-        island_stats,
-        island_count,
-        island_drawings,
         rasterize_wg,
     })
 }
