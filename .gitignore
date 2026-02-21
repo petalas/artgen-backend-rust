@@ -4,3 +4,4 @@ projects/
 viewer/dist/
 *.best.json
 .cache/
+pipeline_cache_*.bin

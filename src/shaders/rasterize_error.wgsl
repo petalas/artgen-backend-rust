@@ -1,7 +1,6 @@
 // Fused rasterize + error compute shader — one thread per pixel per offspring
 // Dispatch: (W/WG_X, H/WG_Y, K*λ) workgroups of size (THREAD_COUNT, 1, 1)
-// 1D workgroup layout enables subgroup intrinsics for the error reduction
-// (naga 22 rejects subgroup builtins on multi-dimensional workgroups).
+// 1D workgroup layout required for subgroup intrinsics (naga constraint).
 // Pixel coordinates are derived from workgroup_id + local_invocation_index.
 //
 // Each thread rasterizes all polygons at its pixel, computes L1 error against reference,

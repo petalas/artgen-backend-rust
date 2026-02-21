@@ -766,6 +766,11 @@ impl GpuEvolver {
         self.pipeline.rasterize_wg
     }
 
+    /// Save the pipeline cache to disk for faster startup next time.
+    pub fn save_pipeline_cache(&self) {
+        self.pipeline.save_pipeline_cache();
+    }
+
     /// Prepare for a benchmark: reinitialize chains, trigger pipeline recreation
     /// if needed, evaluate initial fitness on GPU (no mutations), then reset
     /// all counters. Returns the GPU-evaluated initial fitness.
@@ -792,6 +797,12 @@ impl GpuEvolver {
         self.pass_timings = PassTimings::default();
 
         start_fitness
+    }
+}
+
+impl Drop for GpuEvolver {
+    fn drop(&mut self) {
+        self.pipeline.save_pipeline_cache();
     }
 }
 

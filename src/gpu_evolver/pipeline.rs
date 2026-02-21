@@ -1,4 +1,5 @@
 use std::num::NonZeroU64;
+use std::path::PathBuf;
 
 use wgpu::*;
 use wgpu::util::DeviceExt;
@@ -31,6 +32,10 @@ pub struct GpuPipeline {
     // Rasterize pipeline recreation support — stored for creating new pipeline variants
     rasterize_error_shader: ShaderModule,
     rasterize_error_pipeline_layout: PipelineLayout,
+
+    // Pipeline cache — accelerates pipeline creation on subsequent runs (Vulkan only)
+    pipeline_cache: PipelineCache,
+    pipeline_cache_path: Option<PathBuf>,
 
     // Bind groups
     pub mutate_bind_group: BindGroup,
@@ -120,7 +125,7 @@ impl GpuPipeline {
 
         let adapter_features = adapter.features();
         let subgroup_supported = adapter_features.contains(Features::SUBGROUP);
-        let mut required_features = Features::TIMESTAMP_QUERY | Features::IMMEDIATES;
+        let mut required_features = Features::TIMESTAMP_QUERY | Features::IMMEDIATES | Features::PIPELINE_CACHE;
         if subgroup_supported {
             required_features |= Features::SUBGROUP;
             println!("Subgroup feature supported — enabling wave intrinsics for error reduction");
@@ -139,6 +144,23 @@ impl GpuPipeline {
             })
             .await
             .expect("Failed to create GPU device");
+
+        // --- Pipeline cache ---
+        // Load cached pipeline data from disk if available (Vulkan only).
+        // This avoids recompiling shaders from scratch on subsequent runs.
+        let cache_path = pipeline_cache_path(&adapter_info);
+        let cache_data = cache_path.as_ref().and_then(|p| std::fs::read(p).ok());
+        // SAFETY: cache data was either loaded from a previous run on the same adapter
+        // (keyed by pipeline_cache_key) or is None. The fallback flag ensures a fresh
+        // cache is created if the data is invalid.
+        let pipeline_cache = unsafe { device.create_pipeline_cache(&PipelineCacheDescriptor {
+            label: Some("gpu_evolver_cache"),
+            data: cache_data.as_deref(),
+            fallback: true,
+        }) };
+        if cache_data.is_some() {
+            println!("Loaded pipeline cache from disk");
+        }
 
         // --- Buffer sizes ---
         let _chain_states_size = (chain_count as usize) * GPU_DRAWING_STATE_SIZE;
@@ -436,7 +458,7 @@ impl GpuPipeline {
             module: &mutate_shader,
             entry_point: Some("main"),
             compilation_options: Default::default(),
-            cache: None,
+            cache: Some(&pipeline_cache),
         });
 
         let rasterize_error_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
@@ -452,6 +474,7 @@ impl GpuPipeline {
             &device,
             &rasterize_error_pipeline_layout,
             rasterize_wg,
+            &pipeline_cache,
         );
 
         let select_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
@@ -465,7 +488,7 @@ impl GpuPipeline {
             module: &select_shader,
             entry_point: Some("select_main"),
             compilation_options: Default::default(),
-            cache: None,
+            cache: Some(&pipeline_cache),
         });
 
         // --- Bind groups ---
@@ -518,6 +541,8 @@ impl GpuPipeline {
             select_pipeline,
             rasterize_error_shader,
             rasterize_error_pipeline_layout,
+            pipeline_cache,
+            pipeline_cache_path: cache_path,
             timestamp_query_set,
             timestamp_resolve_buf,
             timestamp_staging_bufs,
@@ -547,20 +572,44 @@ impl GpuPipeline {
             &self.device,
             &self.rasterize_error_pipeline_layout,
             wg,
+            &self.pipeline_cache,
         );
         self.rasterize_error_pipeline = pipeline;
         self.rasterize_error_shader = shader;
         self.rasterize_wg = wg;
     }
+
+    /// Save pipeline cache data to disk for faster startup next time.
+    pub fn save_pipeline_cache(&self) {
+        let Some(ref path) = self.pipeline_cache_path else {
+            return;
+        };
+        let Some(data) = self.pipeline_cache.get_data() else {
+            return;
+        };
+        // Atomic write: write to temp file, then rename
+        let tmp = path.with_extension("bin.tmp");
+        if let Err(e) = std::fs::write(&tmp, &data) {
+            eprintln!("Failed to write pipeline cache: {}", e);
+            return;
+        }
+        if let Err(e) = std::fs::rename(&tmp, &path) {
+            eprintln!("Failed to rename pipeline cache: {}", e);
+            let _ = std::fs::remove_file(&tmp);
+            return;
+        }
+        println!("Saved pipeline cache ({} bytes)", data.len());
+    }
 }
 
 /// Create a rasterize_error compute pipeline with the given workgroup size.
-/// Uses string replacement on the shader source since naga 22.x does not support
+/// Uses string replacement on the shader source since naga does not support
 /// override constants in @workgroup_size or const expressions.
 fn create_rasterize_pipeline(
     device: &Device,
     layout: &PipelineLayout,
     wg: [u32; 2],
+    cache: &PipelineCache,
 ) -> (ComputePipeline, ShaderModule) {
     let source = include_str!("../shaders/rasterize_error.wgsl")
         .replace("const WG_X: u32 = 16;", &format!("const WG_X: u32 = {};", wg[0]))
@@ -577,8 +626,15 @@ fn create_rasterize_pipeline(
         module: &shader,
         entry_point: Some("main"),
         compilation_options: Default::default(),
-        cache: None,
+        cache: Some(cache),
     });
 
     (pipeline, shader)
+}
+
+/// Get the disk path for storing this adapter's pipeline cache.
+/// Returns `None` if the backend doesn't support pipeline caching.
+fn pipeline_cache_path(adapter_info: &AdapterInfo) -> Option<PathBuf> {
+    let key = wgpu::util::pipeline_cache_key(adapter_info)?;
+    Some(PathBuf::from(format!("pipeline_cache_{}.bin", key)))
 }

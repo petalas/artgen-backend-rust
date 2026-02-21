@@ -12,8 +12,8 @@ Project-specific gotchas and hard-won knowledge. Search here when you hit unexpe
 
 -->
 
-### wgpu 22.1.0 naga does not support WGSL subgroup operations
+### naga does not support `enable subgroups;` WGSL directive
 
-**Context**: Tried to use `enable subgroups;` + `subgroupAdd()` in rasterize_error.wgsl for faster workgroup reduction.
-**Gotcha**: Naga's WGSL frontend in wgpu 22.x does not recognize the `enable` directive at all -- it fails with "expected global item". Even in naga 28.0.0, `subgroups` is listed as `UnimplementedEnableExtension`. There is no cargo feature flag or workaround.
-**Fix**: Use shared-memory binary tree reduction (8-step `stride >>= 1` loop with `workgroupBarrier()`) instead. Do not request `Features::SUBGROUP` on the device.
+**Context**: Tried to use `enable subgroups;` + `subgroupAdd()` in rasterize_error.wgsl.
+**Gotcha**: Naga's WGSL frontend does not recognize the `enable` directive — it fails with "expected global item" (22.x) or lists `subgroups` as `UnimplementedEnableExtension` (28.x). However, subgroup builtins (`subgroupAdd`, `subgroup_invocation_id`, etc.) work fine WITHOUT the `enable` directive when `Features::SUBGROUP` is requested on the device.
+**Fix**: Just use subgroup builtins directly (no `enable` directive). Requires `Features::SUBGROUP` on the device and 1D workgroup layout (`@workgroup_size(N, 1, 1)`) — naga rejects subgroup builtins on multi-dimensional workgroups.
