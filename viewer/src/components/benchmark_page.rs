@@ -674,13 +674,23 @@ fn export_results_text(results: &[BenchmarkResult]) -> String {
     out.push_str(&"-".repeat(104));
     out.push('\n');
     for r in results {
-        let evals_per_sec = if r.duration_secs > 0 {
-            r.total_evals as f64 / r.duration_secs as f64
+        let actual_secs = if r.actual_duration_secs > 0.0 {
+            r.actual_duration_secs as f64
+        } else {
+            r.duration_secs as f64
+        };
+        let evals_per_sec = if actual_secs > 0.0 {
+            r.total_evals as f64 / actual_secs
         } else {
             0.0
         };
-        out.push_str(&format!("{:<24} {:>6} {:>3} {:>5} {:>7}s {:>7.2}% {:>7.2}% {:>6} {:>8.2} {:>8.0}\n",
-            r.label, r.chain_count, r.lambda, r.gpu_batch_iters, r.duration_secs,
+        let duration_str = if r.actual_duration_secs > 0.0 {
+            format!("{:.0}s", r.actual_duration_secs)
+        } else {
+            format!("{}s", r.duration_secs)
+        };
+        out.push_str(&format!("{:<24} {:>6} {:>3} {:>5} {:>8} {:>8} {:>8} {:>6} {:>8.2} {:>8.0}\n",
+            r.label, r.chain_count, r.lambda, r.gpu_batch_iters, duration_str,
             r.start_fitness, r.final_fitness,
             r.total_improvements, r.improvements_per_sec, evals_per_sec));
     }
@@ -756,15 +766,22 @@ fn import_results_from_file(state: RwSignal<ViewerState>) {
 
 fn result_row(i: usize, r: &BenchmarkResult) -> impl IntoView {
     let color = color_for_index(i);
-    let mins = r.duration_secs / 60;
-    let secs = r.duration_secs % 60;
+    let actual = if r.actual_duration_secs > 0.0 { r.actual_duration_secs } else { r.duration_secs as f32 };
+    let total_secs = actual.round() as u32;
+    let mins = total_secs / 60;
+    let secs = total_secs % 60;
     let duration_str = if secs == 0 {
         format!("{}:00", mins)
     } else {
         format!("{}:{:02}", mins, secs)
     };
-    let evals_per_sec = if r.duration_secs > 0 {
-        r.total_evals as f64 / r.duration_secs as f64
+    let actual_secs = if r.actual_duration_secs > 0.0 {
+        r.actual_duration_secs as f64
+    } else {
+        r.duration_secs as f64
+    };
+    let evals_per_sec = if actual_secs > 0.0 {
+        r.total_evals as f64 / actual_secs
     } else {
         0.0
     };

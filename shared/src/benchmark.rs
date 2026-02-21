@@ -40,6 +40,8 @@ pub struct BenchmarkResult {
     pub total_improvements: u64,
     pub total_evals: u64,
     pub duration_secs: u32,
+    #[serde(default)]
+    pub actual_duration_secs: f32,
     pub improvements_per_sec: f64,
     pub samples: Vec<BenchmarkSample>,
     pub chain_count: u32,

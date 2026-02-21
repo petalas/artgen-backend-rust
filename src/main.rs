@@ -1017,8 +1017,7 @@ fn run_benchmark(
     let mut last_image_render = Instant::now();
 
     loop {
-        let elapsed = bench_start.elapsed();
-        if elapsed >= duration {
+        if bench_start.elapsed() >= duration {
             break;
         }
 
@@ -1035,6 +1034,9 @@ fn run_benchmark(
                 bench_best = new_best;
             }
         }
+
+        // Recapture elapsed AFTER the batch completes so evals/s is accurate
+        let elapsed = bench_start.elapsed();
 
         // Collect sample every second
         if last_sample.elapsed() >= sample_interval {
@@ -1105,6 +1107,7 @@ fn run_benchmark(
         total_improvements: bench_improvements,
         total_evals,
         duration_secs: req.duration_secs,
+        actual_duration_secs: total_elapsed.as_secs_f32(),
         improvements_per_sec: if total_elapsed.as_secs_f64() > 0.0 {
             bench_improvements as f64 / total_elapsed.as_secs_f64()
         } else {
@@ -1218,8 +1221,7 @@ fn run_cli_benchmark(project: &str, gpu_batch_iters_override: Option<u32>) {
     let mut last_print = Instant::now();
 
     loop {
-        let elapsed = bench_start.elapsed();
-        if elapsed >= duration {
+        if bench_start.elapsed() >= duration {
             break;
         }
 
@@ -1230,6 +1232,9 @@ fn run_cli_benchmark(project: &str, gpu_batch_iters_override: Option<u32>) {
             }
         }
         batches += 1;
+
+        // Recapture elapsed AFTER the batch so evals/s is accurate
+        let elapsed = bench_start.elapsed();
 
         // Print progress every 5 seconds
         if last_print.elapsed() >= Duration::from_secs(5) {
@@ -1522,6 +1527,9 @@ fn gpu_main_loop_headless(legacy_image: Option<&str>, gpu_batch_iters_override: 
                     paused_duration += start.elapsed();
                 }
                 run_benchmark(&ws_state, &mut evolver, &req, &mut global_best, &mut improvements, w, h, &mut render_buf);
+                // Benchmark resets evolver.start_time, so paused_duration must reset too
+                // to avoid underflow in `evolver.elapsed() - paused_duration`
+                paused_duration = Duration::ZERO;
                 // After benchmark, stay paused if we were paused
                 if ws_state.0.lock().unwrap().paused {
                     pause_start = Some(Instant::now());
