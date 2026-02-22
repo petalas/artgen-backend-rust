@@ -29,7 +29,7 @@ pub struct GpuDrawingState {
     pub fitness_bits: u32,            // offset 4 — bitcast f32 for atomicMax compatibility
     pub mutation_scale_bits: u32,     // offset 8 — bitcast f32, adaptive mutation scale
     pub stagnation_counter: u32,      // offset 12 — iterations since last improvement
-    pub rng_state: [u32; 4],          // offset 16 — PCG RNG state
+    pub rng_state: [u32; 4],          // offset 16 — only [0] is active RNG state; [1..3] unused padding
     pub polygons: [GpuPolygon; MAX_POLYGONS_PER_IMAGE], // offset 32
 }
 
@@ -163,14 +163,8 @@ fn pack_vertex_u32(x: f32, y: f32) -> u32 {
 pub fn drawing_to_gpu(drawing: &Drawing, seed: u64) -> GpuDrawingState {
     let mut state = GpuDrawingState::zeroed();
 
-    // Initialize RNG state from seed (PCG-style: state and increment)
+    // Initialize RNG state — only [0] is used by the 32-bit PCG hash; [1..3] are unused padding
     state.rng_state[0] = seed as u32;
-    state.rng_state[1] = (seed >> 32) as u32;
-    // Use different bits for increment (must be odd for full PCG period)
-    // The | 1 must be on the LOW word (bit 0 of the full 64-bit increment)
-    let inc = seed.wrapping_mul(6364136223846793005);
-    state.rng_state[2] = inc as u32 | 1;
-    state.rng_state[3] = (inc >> 32) as u32;
 
     state.fitness_bits = 0; // will be computed on GPU
     state.mutation_scale_bits = 1.0f32.to_bits(); // start at scale 1.0

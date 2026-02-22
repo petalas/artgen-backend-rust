@@ -697,7 +697,9 @@ impl GpuEvolver {
         let wg_x = p.image_width.div_ceil(rwg[0]);
         let wg_y = p.image_height.div_ceil(rwg[1]);
 
-        let params = default_gpu_params(p.image_width, p.image_height, active);
+        let mut params = default_gpu_params(p.image_width, p.image_height, active);
+        // Force brute-force rasterization — tile data is stale (no bin_polygons dispatch here)
+        params.tile_culling = 0;
         let params_bytes: &[u8] = bytemuck::bytes_of(&params);
 
         {
@@ -887,11 +889,8 @@ fn init_offspring_rng(pipeline: &GpuPipeline, iteration: u32) {
             let seed = 0xCAFE_BABE_u64
                 .wrapping_add((i as u64).wrapping_mul(0x9E3779B97F4A7C15))
                 .wrapping_add((iteration as u64).wrapping_mul(0x517CC1B727220A95));
+            // Only [0] is used by the 32-bit PCG hash; [1..3] are unused padding
             s.rng_state[0] = seed as u32;
-            s.rng_state[1] = (seed >> 32) as u32;
-            let inc = seed.wrapping_mul(6364136223846793005);
-            s.rng_state[2] = inc as u32 | 1;
-            s.rng_state[3] = (inc >> 32) as u32;
             s.mutation_scale_bits = 1.0f32.to_bits();
             s
         })

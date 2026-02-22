@@ -12,7 +12,7 @@ struct DrawingState {
     fitness_bits: u32,
     mutation_scale: f32,       // adaptive mutation scale
     stagnation_counter: u32,   // iterations since last improvement
-    rng_state: vec4<u32>,      // .xy = state, .zw = increment
+    rng_state: vec4<u32>,      // only .x is active RNG state; .yzw unused padding
     polygons: array<Polygon, 1000>,
 }
 
@@ -128,91 +128,33 @@ var<workgroup> shared_parent_mutation_scale: f32;
 var<workgroup> shared_parent_polygons: array<Polygon, 1000>;
 
 // --- PCG32 RNG ---
-// PCG-XSH-RR: high-quality, fast, minimal state
-fn pcg_step(state: ptr<function, vec4<u32>>) -> u32 {
-    let s64_lo = (*state).x;
-    let s64_hi = (*state).y;
-    let inc_lo = (*state).z;
-    let inc_hi = (*state).w;
-
-    // state = state * 6364136223846793005 + increment
-    // 64-bit multiply: 6364136223846793005 = 0x5851F42D4C957F2D
-    let mul_lo: u32 = 0x4C957F2Du;
-    let mul_hi: u32 = 0x5851F42Du;
-
-    // 64-bit multiply (lo * lo, cross terms, hi * lo)
-    let ll = u64_mul_lo(s64_lo, mul_lo);
-    let ll_hi = u64_mul_hi(s64_lo, mul_lo);
-    let lh = u64_mul_lo(s64_lo, mul_hi);
-    let hl = u64_mul_lo(s64_hi, mul_lo);
-
-    let new_lo = ll;
-    let new_hi = ll_hi + lh + hl;
-
-    // Add increment
-    let add_lo = new_lo + inc_lo;
-    let carry = select(0u, 1u, add_lo < new_lo);
-    let add_hi = new_hi + inc_hi + carry;
-
-    (*state).x = add_lo;
-    (*state).y = add_hi;
-
-    // XSH-RR output function on old 64-bit state (emulated with 32-bit ops)
-    // Step 1: 64-bit right shift by 18
-    let shifted18_lo = (s64_lo >> 18u) | (s64_hi << 14u);
-    let shifted18_hi = s64_hi >> 18u;
-    // Step 2: XOR with original state
-    let xor_lo = shifted18_lo ^ s64_lo;
-    let xor_hi = shifted18_hi ^ s64_hi;
-    // Step 3: 64-bit right shift by 27 → take lower 32 bits
-    let xorshifted = (xor_lo >> 27u) | (xor_hi << 5u);
-    // Step 4: rotation amount = top 5 bits of 64-bit state = hi >> 27
-    let rot = s64_hi >> 27u;
-    return (xorshifted >> rot) | (xorshifted << ((32u - rot) & 31u));
-}
-
-// Unsigned 32×32 → lower 32 bits
-fn u64_mul_lo(a: u32, b: u32) -> u32 {
-    return a * b;
-}
-
-// Unsigned 32×32 → upper 32 bits (via mulhi trick)
-fn u64_mul_hi(a: u32, b: u32) -> u32 {
-    let a_lo = a & 0xFFFFu;
-    let a_hi = a >> 16u;
-    let b_lo = b & 0xFFFFu;
-    let b_hi = b >> 16u;
-
-    let ll = a_lo * b_lo;
-    let lh = a_lo * b_hi;
-    let hl = a_hi * b_lo;
-    let hh = a_hi * b_hi;
-
-    let mid = lh + (ll >> 16u);
-    let mid2 = (mid & 0xFFFFu) + hl;
-
-    return hh + (mid >> 16u) + (mid2 >> 16u);
+// 32-bit PCG hash (PCG-RXS-M-XS): ~8 ALU ops per call, only .x of rng_state used
+fn pcg_step(state: ptr<function, u32>) -> u32 {
+    let old = *state;
+    *state = old * 747796405u + 2891336453u;
+    let word = ((old >> ((old >> 28u) + 4u)) ^ old) * 277803737u;
+    return (word >> 22u) ^ word;
 }
 
 // Random f32 in [0, 1)
-fn rand_f32(state: ptr<function, vec4<u32>>) -> f32 {
+fn rand_f32(state: ptr<function, u32>) -> f32 {
     return f32(pcg_step(state)) / 4294967296.0;
 }
 
 // Random f32 in [min, max)
-fn rand_f32_range(state: ptr<function, vec4<u32>>, min_val: f32, max_val: f32) -> f32 {
+fn rand_f32_range(state: ptr<function, u32>, min_val: f32, max_val: f32) -> f32 {
     return min_val + rand_f32(state) * (max_val - min_val);
 }
 
 // Random u32 in [0, max)
-fn rand_u32(state: ptr<function, vec4<u32>>, max_val: u32) -> u32 {
+fn rand_u32(state: ptr<function, u32>, max_val: u32) -> u32 {
     return pcg_step(state) % max_val;
 }
 
 // --- Crossover ---
 
 /// Tournament selection: pick the fittest chain from `tournament_size` random samples across the whole population.
-fn tournament_select(rng: ptr<function, vec4<u32>>, chain_id: u32, chain_count: u32) -> u32 {
+fn tournament_select(rng: ptr<function, u32>, chain_id: u32, chain_count: u32) -> u32 {
     var best_id = rand_u32(rng, chain_count);
     var best_fitness = bitcast<f32>(chain_states[best_id].fitness_bits);
 
@@ -230,7 +172,7 @@ fn tournament_select(rng: ptr<function, vec4<u32>>, chain_id: u32, chain_count: 
 /// Uniform crossover: walk both parents in lockstep by layer index, coin-flip each slot.
 /// Preserves z-ordering (alpha compositing order) — no centroid math needed.
 /// Parent A from shared memory, parent B from global.
-fn crossover_uniform_offspring(rng: ptr<function, vec4<u32>>, parent_b: u32, offspring_id: u32) {
+fn crossover_uniform_offspring(rng: ptr<function, u32>, parent_b: u32, offspring_id: u32) {
     let count_a = min(shared_parent_poly_count, params.max_polygons);
     let count_b = min(chain_states[parent_b].polygon_count, params.max_polygons);
     let max_count = max(count_a, count_b);
@@ -261,7 +203,7 @@ fn crossover_uniform_offspring(rng: ptr<function, vec4<u32>>, parent_b: u32, off
 
 // --- Single-mutation mode (offspring-aware, with adaptive mutation scale) ---
 // Returns dirty bbox as vec4<u32>(min_x, min_y, max_x, max_y) in pixel coords.
-fn single_mutate_offspring(rng: ptr<function, vec4<u32>>, oid: u32, count: ptr<function, u32>, ms: f32) -> vec4<u32> {
+fn single_mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<function, u32>, ms: f32) -> vec4<u32> {
     let c = *count;
     let w = params.image_width;
     let h = params.image_height;
@@ -517,7 +459,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
     let offspring_id = chain_id * lambda + offspring_local_idx;
 
     // Load per-offspring RNG from working_states (persistent across iterations)
-    var rng = working_states[offspring_id].rng_state;
+    var rng = working_states[offspring_id].rng_state.x;
 
     // Adaptive mutation scale: only for offspring 1..λ-1 when enabled
     // Offspring 0 always uses scale 1.0 so (1+1) behavior is unchanged
@@ -552,7 +494,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
         if params.incremental_eval == 1u {
             write_dirty_bbox(offspring_id, full_image_bbox());
         }
-        working_states[offspring_id].rng_state = rng;
+        working_states[offspring_id].rng_state.x = rng;
         return;
     }
 
@@ -577,7 +519,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
         if params.incremental_eval == 1u {
             write_dirty_bbox(offspring_id, dirty_bbox);
         }
-        working_states[offspring_id].rng_state = rng;
+        working_states[offspring_id].rng_state.x = rng;
         return;
     }
 
@@ -823,5 +765,5 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
     }
 
     // Save per-offspring RNG state
-    working_states[offspring_id].rng_state = rng;
+    working_states[offspring_id].rng_state.x = rng;
 }
