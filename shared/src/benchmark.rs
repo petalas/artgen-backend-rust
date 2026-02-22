@@ -73,6 +73,18 @@ pub struct BenchmarkResult {
     pub resolution: u32,
     #[serde(default)]
     pub params: MutationParams,
+    #[serde(default)]
+    pub pass_timings: Option<PassTimingsResult>,
+}
+
+/// GPU per-pass timing averages (milliseconds per iteration).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PassTimingsResult {
+    pub mutate_ms: f32,
+    pub bin_polygons_ms: f32,
+    pub rasterize_error_ms: f32,
+    pub select_ms: f32,
 }
 
 /// On-disk store (per-project)

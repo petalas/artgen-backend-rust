@@ -114,7 +114,7 @@ struct ControlFlags {
 @group(0) @binding(3) var<storage, read_write> control:            ControlFlags;
 @group(1) @binding(0) var<uniform>             params:             Params;
 @group(0) @binding(4) var<storage, read_write> fitness_packed:     array<u32>;
-@group(0) @binding(5) var<storage, read_write> chain_framebuffers: array<u32>;
+@group(0) @binding(5) var<storage, read_write> chain_update_flags: array<u32>;
 @group(0) @binding(6) var<storage, read_write> chain_total_errors: array<atomic<u32>>;
 
 // Workgroup-shared variables for communicating decisions from thread 0 to all threads
@@ -126,13 +126,6 @@ var<workgroup> shared_best_offspring_id: u32;
 // Each entry holds (error, local_offspring_index) packed so min on error also selects the index
 var<workgroup> reduction_err: array<u32, 64>;
 var<workgroup> reduction_idx: array<u32, 64>;
-var<workgroup> shared_accepted_total_error: u32;  // for incremental eval
-// Dirty bbox for framebuffer update on acceptance (pixel coords)
-var<workgroup> shared_dirty_min_x: u32;
-var<workgroup> shared_dirty_min_y: u32;
-var<workgroup> shared_dirty_max_x: u32;
-var<workgroup> shared_dirty_max_y: u32;
-var<workgroup> shared_final_poly_count: u32;  // polygon count after degenerate culling
 
 /// Compute fitness from total error and polygon count.
 fn compute_fitness(total_error: u32, polygon_count: u32) -> f32 {
@@ -237,16 +230,14 @@ fn select_main(@builtin(global_invocation_id) gid: vec3<u32>,
             shared_copy_count = working_states[best_offspring_id].polygon_count;
             shared_best_offspring_id = best_offspring_id;
 
-            // Incremental eval: store accepted total error + extract dirty bbox for framebuffer update
+            // Incremental eval: store total error + write update flags for update_framebuffers
             if incremental {
-                shared_accepted_total_error = best_error;
-                // Unpack dirty bbox from offspring header (same encoding as rasterize_error)
+                atomicStore(&chain_total_errors[chain_id], best_error);
                 let bbox_lo = working_states[best_offspring_id].fitness_bits;
                 let bbox_hi = working_states[best_offspring_id].stagnation_counter;
-                shared_dirty_min_x = bbox_lo & 0xFFFFu;
-                shared_dirty_min_y = (bbox_lo >> 16u) & 0xFFFFu;
-                shared_dirty_max_x = bbox_hi & 0xFFFFu;
-                shared_dirty_max_y = (bbox_hi >> 16u) & 0xFFFFu;
+                chain_update_flags[chain_id * 4u] = 1u;       // accepted
+                chain_update_flags[chain_id * 4u + 1u] = bbox_lo;
+                chain_update_flags[chain_id * 4u + 2u] = bbox_hi;
             }
 
             // Adaptive mutation scale: only update when enabled
@@ -274,6 +265,9 @@ fn select_main(@builtin(global_invocation_id) gid: vec3<u32>,
             }
 
             shared_accept = 0u;
+            if incremental {
+                chain_update_flags[chain_id * 4u] = 0u;  // not accepted
+            }
         }
 
         // Export actual chain fitness (after acceptance) for CPU readback
@@ -320,84 +314,6 @@ fn select_main(@builtin(global_invocation_id) gid: vec3<u32>,
         }
         if write_idx < count && write_idx >= params.min_polygons {
             chain_states[chain_id].polygon_count = write_idx;
-        }
-        // Store final polygon count for framebuffer update threads
-        shared_final_poly_count = chain_states[chain_id].polygon_count;
-    }
-
-    workgroupBarrier();
-
-    // --- Incremental eval: update total error and framebuffer on acceptance ---
-    if incremental && shared_accept == 1u {
-        if local_id == 0u {
-            atomicStore(&chain_total_errors[chain_id], shared_accepted_total_error);
-        }
-
-        // Update chain_framebuffers for dirty-bbox pixels only.
-        // 64 threads cooperatively re-rasterize the accepted drawing in the dirty region.
-        let w = params.image_width;
-        let h = params.image_height;
-        let dmin_x = shared_dirty_min_x;
-        let dmin_y = shared_dirty_min_y;
-        let dmax_x = min(shared_dirty_max_x, w);
-        let dmax_y = min(shared_dirty_max_y, h);
-        let poly_count = shared_final_poly_count;
-
-        // Guard: skip if dirty bbox is empty or invalid
-        if dmax_x <= dmin_x || dmax_y <= dmin_y {
-            return;
-        }
-        let dirty_w = dmax_x - dmin_x;
-        let dirty_h = dmax_y - dmin_y;
-        let dirty_pixels = dirty_w * dirty_h;
-
-        // Each of 64 threads handles a stripe of dirty-bbox pixels
-        for (var pidx = local_id; pidx < dirty_pixels; pidx += 64u) {
-            let dx = pidx % dirty_w;
-            let dy = pidx / dirty_w;
-            let px = dmin_x + dx;
-            let py = dmin_y + dy;
-
-            let fx = (f32(px) + 0.5) / f32(w);
-            let fy = (f32(py) + 0.5) / f32(h);
-
-            // Rasterize all polygons at this pixel (brute force from chain_states)
-            var r = 255.0;
-            var g = 255.0;
-            var b = 255.0;
-            for (var pi = 0u; pi < poly_count; pi++) {
-                let poly = chain_states[chain_id].polygons[pi];
-
-                let pv0 = unpack_vertex(poly.data.y);
-                let pv1 = unpack_vertex(poly.data.z);
-                let pv2 = unpack_vertex(poly.data.w);
-
-                // AABB culling
-                let bb_min_x = min(pv0.x, min(pv1.x, pv2.x));
-                let bb_max_x = max(pv0.x, max(pv1.x, pv2.x));
-                let bb_min_y = min(pv0.y, min(pv1.y, pv2.y));
-                let bb_max_y = max(pv0.y, max(pv1.y, pv2.y));
-
-                if fx >= bb_min_x && fx <= bb_max_x && fy >= bb_min_y && fy <= bb_max_y {
-                    let e0 = edge_fn(pv0.x, pv0.y, pv1.x, pv1.y, fx, fy);
-                    let e1 = edge_fn(pv1.x, pv1.y, pv2.x, pv2.y, fx, fy);
-                    let e2 = edge_fn(pv2.x, pv2.y, pv0.x, pv0.y, fx, fy);
-                    let all_pos = e0 >= 0.0 && e1 >= 0.0 && e2 >= 0.0;
-                    let all_neg = e0 <= 0.0 && e1 <= 0.0 && e2 <= 0.0;
-                    if all_pos || all_neg {
-                        let pcolor = unpack_color(poly);
-                        let alpha = pcolor.w;
-                        let inv_alpha = 1.0 - alpha;
-                        r = r * inv_alpha + pcolor.x * 255.0 * alpha;
-                        g = g * inv_alpha + pcolor.y * 255.0 * alpha;
-                        b = b * inv_alpha + pcolor.z * 255.0 * alpha;
-                    }
-                }
-            }
-
-            // Write updated pixel to chain framebuffer
-            let fb_idx = chain_id * w * h + py * w + px;
-            chain_framebuffers[fb_idx] = pack_fb_pixel(r, g, b);
         }
     }
 }

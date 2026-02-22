@@ -19,6 +19,7 @@ use pipeline::GpuPipeline;
 #[derive(Default)]
 pub struct PassTimings {
     pub mutate_ns: f64,
+    pub bin_polygons_ns: f64,
     pub rasterize_error_ns: f64,
     pub select_ns: f64,
     pub sample_count: u64,
@@ -26,7 +27,7 @@ pub struct PassTimings {
 
 impl PassTimings {
     pub fn total_ns(&self) -> f64 {
-        self.mutate_ns + self.rasterize_error_ns + self.select_ns
+        self.mutate_ns + self.bin_polygons_ns + self.rasterize_error_ns + self.select_ns
     }
 
     pub fn print_averages(&self) {
@@ -35,9 +36,10 @@ impl PassTimings {
         }
         let n = self.sample_count as f64;
         let mutate = self.mutate_ns / n / 1_000_000.0;
+        let bin = self.bin_polygons_ns / n / 1_000_000.0;
         let rasterize_error = self.rasterize_error_ns / n / 1_000_000.0;
         let select = self.select_ns / n / 1_000_000.0;
-        let total = mutate + rasterize_error + select;
+        let total = mutate + bin + rasterize_error + select;
 
         if total <= 0.0 {
             return;
@@ -45,6 +47,9 @@ impl PassTimings {
 
         println!("GPU pass timings (avg over {} batches):", self.sample_count);
         println!("  mutate:          {:6.2}ms ({:5.1}%)", mutate, mutate / total * 100.0);
+        if bin > 0.001 {
+            println!("  bin_polygons:    {:6.2}ms ({:5.1}%)", bin, bin / total * 100.0);
+        }
         println!("  rasterize+error: {:6.2}ms ({:5.1}%)", rasterize_error, rasterize_error / total * 100.0);
         println!("  select:          {:6.2}ms ({:5.1}%)", select, select / total * 100.0);
         println!("  total:           {:6.2}ms", total);
@@ -60,6 +65,7 @@ impl PassTimings {
 struct PendingBatch {
     staging_idx: usize,
     collect_timestamps: bool,
+    tile_culling: bool,
     active_chain_count: u32,
     submission_index: SubmissionIndex,
 }
@@ -264,9 +270,22 @@ impl GpuEvolver {
         &mut self,
         mutation_params: &MutationParams,
         collect_timestamps: bool,
-        prev_pending: Option<PendingBatch>,
-        prev_receivers: Option<PendingMapReceivers>,
+        mut prev_pending: Option<PendingBatch>,
+        mut prev_receivers: Option<PendingMapReceivers>,
     ) -> Option<Drawing> {
+        // 0. If we'll need readback_staging_buf for a deferred best-chain copy
+        //    but it's still mapped from the previous batch, collect the previous
+        //    batch's results first to unmap it. readback_staging_buf is single-
+        //    buffered (not double-buffered like control/fitness/timestamp staging),
+        //    so we can't overlap its use across batches.
+        let mut early_result: Option<Drawing> = None;
+        if self.pending_best_chain.is_some() && self.deferred_best_readback {
+            if let Some(pending) = prev_pending.take() {
+                self.pending_map_receivers = prev_receivers.take();
+                early_result = self.finish_pending_readback(&pending);
+            }
+        }
+
         let p = &self.pipeline;
         let iterations = mutation_params.gpu_batch_iters.max(1);
         let active = mutation_params.chain_count.min(p.chain_count);
@@ -312,6 +331,7 @@ impl GpuEvolver {
         let wg_y = p.image_height.div_ceil(rwg[1]);
         let lambda = mutation_params.lambda;
         let tile_culling = mutation_params.tile_culling;
+        let incremental_eval = mutation_params.incremental_eval;
 
         // Runtime check: active * lambda must fit in offspring_capacity
         assert!(active * lambda <= p.offspring_capacity,
@@ -362,11 +382,17 @@ impl GpuEvolver {
                 pass.set_bind_group(0, &p.select_bind_group, &[]);
                 pass.set_bind_group(1, &p.params_bind_group, &[]);
                 pass.dispatch_workgroups(active, 1, 1);
+
+                if incremental_eval {
+                    pass.set_pipeline(&p.update_framebuffers_pipeline);
+                    pass.set_bind_group(0, &p.update_framebuffers_bind_group, &[]);
+                    pass.set_bind_group(1, &p.params_bind_group, &[]);
+                    pass.dispatch_workgroups(wg_x, wg_y, active);
+                }
             }
         }
 
         // Last iteration with timestamps: separate passes for per-stage profiling
-        // When tile culling is on, binning is included in the rasterize_error timestamp window.
         if collect_timestamps {
             let qs = &p.timestamp_query_set;
 
@@ -385,24 +411,30 @@ impl GpuEvolver {
                 pass.dispatch_workgroups(active, 1, 1);
             }
 
-            {
+            if tile_culling {
                 let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                    label: Some("rasterize_error"),
+                    label: Some("bin_polygons"),
                     timestamp_writes: Some(ComputePassTimestampWrites {
                         query_set: qs,
                         beginning_of_pass_write_index: Some(2),
                         end_of_pass_write_index: Some(3),
                     }),
                 });
+                pass.set_pipeline(&p.bin_polygons_pipeline);
+                pass.set_bind_group(0, &p.bin_polygons_bind_group, &[]);
+                pass.set_bind_group(1, &p.params_bind_group, &[]);
+                pass.dispatch_workgroups(active * lambda, 1, 1);
+            }
 
-                // Binning pass: included in rasterize_error timing window
-                if tile_culling {
-                    pass.set_pipeline(&p.bin_polygons_pipeline);
-                    pass.set_bind_group(0, &p.bin_polygons_bind_group, &[]);
-                    pass.set_bind_group(1, &p.params_bind_group, &[]);
-                    pass.dispatch_workgroups(active * lambda, 1, 1);
-                }
-
+            {
+                let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                    label: Some("rasterize_error"),
+                    timestamp_writes: Some(ComputePassTimestampWrites {
+                        query_set: qs,
+                        beginning_of_pass_write_index: Some(4),
+                        end_of_pass_write_index: Some(5),
+                    }),
+                });
                 pass.set_pipeline(&p.rasterize_error_pipeline);
                 pass.set_bind_group(0, &p.rasterize_error_bind_group, &[]);
                 pass.set_bind_group(1, &p.params_bind_group, &[]);
@@ -414,26 +446,34 @@ impl GpuEvolver {
                     label: Some("select"),
                     timestamp_writes: Some(ComputePassTimestampWrites {
                         query_set: qs,
-                        beginning_of_pass_write_index: Some(4),
-                        end_of_pass_write_index: Some(5),
+                        beginning_of_pass_write_index: Some(6),
+                        end_of_pass_write_index: Some(7),
                     }),
                 });
                 pass.set_pipeline(&p.select_pipeline);
                 pass.set_bind_group(0, &p.select_bind_group, &[]);
                 pass.set_bind_group(1, &p.params_bind_group, &[]);
                 pass.dispatch_workgroups(active, 1, 1);
+
+                // Update framebuffers in same pass (timestamps cover both)
+                if incremental_eval {
+                    pass.set_pipeline(&p.update_framebuffers_pipeline);
+                    pass.set_bind_group(0, &p.update_framebuffers_bind_group, &[]);
+                    pass.set_bind_group(1, &p.params_bind_group, &[]);
+                    pass.dispatch_workgroups(wg_x, wg_y, active);
+                }
             }
         }
 
         // 4. Resolve timestamp queries into resolve buffer, then copy to staging[write_idx]
         if collect_timestamps {
-            encoder.resolve_query_set(&p.timestamp_query_set, 0..6, &p.timestamp_resolve_buf, 0);
+            encoder.resolve_query_set(&p.timestamp_query_set, 0..8, &p.timestamp_resolve_buf, 0);
             encoder.copy_buffer_to_buffer(
                 &p.timestamp_resolve_buf,
                 0,
                 &p.timestamp_staging_bufs[write_idx],
                 0,
-                6 * 8,
+                8 * 8,
             );
         }
 
@@ -481,12 +521,13 @@ impl GpuEvolver {
 
         // 6. NOW collect the previous batch's results while GPU works on the new batch.
         //    The previous batch uses a different staging set, so no conflicts.
+        //    (Skipped if already collected in step 0 due to readback buffer conflict.)
         let prev_result = if let Some(pending) = prev_pending {
             // Temporarily restore the receivers so finish_pending_readback can consume them
             self.pending_map_receivers = prev_receivers;
             self.finish_pending_readback(&pending)
         } else {
-            None
+            early_result
         };
 
         // 7. Issue map_async on staging set [write_idx] — starts the async map
@@ -498,6 +539,7 @@ impl GpuEvolver {
         self.pending_batch = Some(PendingBatch {
             staging_idx: write_idx,
             collect_timestamps,
+            tile_culling,
             active_chain_count: active,
             submission_index,
         });
@@ -608,9 +650,18 @@ impl GpuEvolver {
                 timestamps[end_idx].wrapping_sub(timestamps[begin_idx]) as f64 * period
             };
             self.pass_timings.mutate_ns += duration(0, 1);
-            self.pass_timings.rasterize_error_ns += duration(2, 3);
-            self.pass_timings.select_ns += duration(4, 5);
+            if pending.tile_culling {
+                self.pass_timings.bin_polygons_ns += duration(2, 3);
+            }
+            self.pass_timings.rasterize_error_ns += duration(4, 5);
+            self.pass_timings.select_ns += duration(6, 7);
             self.pass_timings.sample_count += 1;
+            if self.pass_timings.sample_count <= 3 {
+                eprintln!("[timestamps] sample #{}: mutate={:.2}ns bin={:.2}ns rast={:.2}ns sel={:.2}ns period={:.4}",
+                    self.pass_timings.sample_count,
+                    duration(0, 1), if pending.tile_culling { duration(2, 3) } else { 0.0 },
+                    duration(4, 5), duration(6, 7), period);
+            }
             drop(ts_data);
             p.timestamp_staging_bufs[idx].unmap();
         }
@@ -979,8 +1030,12 @@ impl GpuEvolver {
     }
 
     /// Prepare for a benchmark: reinitialize chains, trigger pipeline recreation
-    /// if needed, evaluate initial fitness on GPU (no mutations), then reset
-    /// all counters. Returns the GPU-evaluated initial fitness.
+    /// if needed, run warmup batches, evaluate initial fitness on GPU, then
+    /// reset all counters. Returns the GPU-evaluated initial fitness.
+    ///
+    /// Warmup ensures GPU shader caches, memory pages, and clock boost are
+    /// at steady state before timing begins. The chains are re-initialized
+    /// after warmup so the benchmark starts from a clean, deterministic state.
     pub fn prepare_for_benchmark(&mut self, drawing: &Drawing, params: &MutationParams) -> f32 {
         // 1. Reset iteration before reinit so RNG seeds are deterministic
         //    across sequential benchmark runs (reinit_chains uses self.iteration
@@ -991,13 +1046,35 @@ impl GpuEvolver {
         // 2. Trigger pipeline recreation before timing starts
         self.pipeline.set_rasterize_wg(params.rasterize_wg);
 
-        // 3. Evaluate initial fitness on GPU without running mutations.
-        //    This dispatches rasterize_error only (no mutate/select), reads back
-        //    errors, computes fitness, and writes fitness_bits into chain_states.
         let chain_count = params.chain_count.min(self.pipeline.chain_count);
+
+        // 3. Evaluate fitness so chains have valid fitness_bits for warmup
+        self.evaluate_chain_fitness(chain_count);
+
+        // 4. Pre-initialize framebuffers so warmup exercises the full
+        //    incremental pipeline (including update_framebuffers)
+        if params.incremental_eval {
+            self.dispatch_init_framebuffers(chain_count);
+        }
+
+        // 5. Run 2 warmup batches to warm GPU shader caches and memory pages,
+        //    then flush results. This ensures the first real batch runs at
+        //    steady-state speed.
+        self.run_batch(params, false);
+        self.run_batch(params, false);
+        self.flush_pending();
+
+        // 6. Reinit to original drawing for a clean, deterministic start
+        self.reinit_chains(drawing);
         let start_fitness = self.evaluate_chain_fitness(chain_count);
 
-        // 4. Reset all counters so the benchmark starts clean
+        // 7. Pre-initialize framebuffers for incremental eval so this cost
+        //    is excluded from benchmark timing
+        if params.incremental_eval {
+            self.dispatch_init_framebuffers(chain_count);
+        }
+
+        // 8. Reset all counters so the benchmark starts clean
         self.iteration = 0;
         self.total_evaluations = 0;
         self.start_time = Instant::now();
@@ -1031,6 +1108,7 @@ fn gpu_memory_bytes(p: &GpuPipeline) -> u64 {
         + p.tile_counts_buf.size()
         + p.chain_framebuffers_buf.size()
         + p.chain_total_errors_buf.size()
+        + p.chain_update_flags_buf.size()
         + p.params_buf.size()
         + p.timestamp_resolve_buf.size()
         + p.timestamp_staging_bufs[0].size()

@@ -12,6 +12,8 @@ use crate::mutation_params::MutationParams;
 pub struct GpuTimings {
     pub mutate_ms: f32,
     pub mutate_pct: f32,
+    pub bin_polygons_ms: f32,
+    pub bin_polygons_pct: f32,
     pub rasterize_error_ms: f32,
     pub rasterize_error_pct: f32,
     pub select_ms: f32,
@@ -239,6 +241,8 @@ fn parse_gpu_stats(data: &serde_json::Value) -> Option<GpuStats> {
     }
     let timings = if let Some(t) = gs["timings"].as_object() {
         GpuTimings {
+            bin_polygons_ms: t.get("binPolygonsMs").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+            bin_polygons_pct: t.get("binPolygonsPct").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
             mutate_ms: t.get("mutateMs").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
             mutate_pct: t.get("mutatePct").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
             rasterize_error_ms: t.get("rasterizeErrorMs").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,

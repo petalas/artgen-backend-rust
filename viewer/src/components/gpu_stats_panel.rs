@@ -90,6 +90,7 @@ fn TimingBar(state: RwSignal<ViewerState>) -> impl IntoView {
 
             let segments: Vec<(&str, f32, f32, &str)> = vec![
                 ("mutate", t.mutate_ms, t.mutate_pct, "#26a69a"),
+                ("bin", t.bin_polygons_ms, t.bin_polygons_pct, "#66bb6a"),
                 ("rasterize", t.rasterize_error_ms, t.rasterize_error_pct, "#ffb74d"),
                 ("select", t.select_ms, t.select_pct, "#7986cb"),
             ];

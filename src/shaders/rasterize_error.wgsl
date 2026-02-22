@@ -338,11 +338,14 @@ fn main(
             let gi = clamp(g, 0.0, 255.0);
             let bi = clamp(b, 0.0, 255.0);
 
-            // L1 error: Manhattan distance in RGB space
-            let dr = ri - refr;
-            let dg = gi - refg;
-            let db = bi - refb;
-            pixel_error = u32(abs(dr) + abs(dg) + abs(db));
+            // L1 error: quantize to u8 integers (floor) so error matches
+            // framebuffer precision (pack_fb_pixel truncates to u8). Both
+            // incremental and non-incremental modes use quantized error
+            // to produce identical, comparable fitness values.
+            let qr = floor(ri);
+            let qg = floor(gi);
+            let qb = floor(bi);
+            pixel_error = u32(abs(qr - refr) + abs(qg - refg) + abs(qb - refb));
         }
     }
 

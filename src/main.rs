@@ -1,6 +1,6 @@
 use artgen_backend_rust::{
     auto_tune::{self, AutoTuner},
-    benchmark::{BenchmarkExport, BenchmarkRequest, BenchmarkResult, BenchmarkSample, BenchmarkSnapshot, BenchmarkStore},
+    benchmark::{BenchmarkExport, BenchmarkRequest, BenchmarkResult, BenchmarkSample, BenchmarkSnapshot, BenchmarkStore, PassTimingsResult},
     engine::{Engine, Rasterizer},
     evaluator::{Evaluator, EvaluatorPayload},
     gpu_evolver::GpuEvolver,
@@ -317,6 +317,8 @@ fn gpu_main_loop(
 struct GpuPassTimingsWs {
     mutate_ms: f32,
     mutate_pct: f32,
+    bin_polygons_ms: f32,
+    bin_polygons_pct: f32,
     rasterize_error_ms: f32,
     rasterize_error_pct: f32,
     select_ms: f32,
@@ -338,6 +340,8 @@ impl GpuStatsWs {
             serde_json::json!({
                 "mutateMs": t.mutate_ms,
                 "mutatePct": t.mutate_pct,
+                "binPolygonsMs": t.bin_polygons_ms,
+                "binPolygonsPct": t.bin_polygons_pct,
                 "rasterizeErrorMs": t.rasterize_error_ms,
                 "rasterizeErrorPct": t.rasterize_error_pct,
                 "selectMs": t.select_ms,
@@ -1317,13 +1321,16 @@ fn build_gpu_stats(evolver: &GpuEvolver) -> GpuStatsWs {
     let ws_timings = if timings.sample_count > 0 {
         let n = timings.sample_count as f64;
         let mutate = timings.mutate_ns / n / 1_000_000.0;
+        let bin = timings.bin_polygons_ns / n / 1_000_000.0;
         let rasterize_error = timings.rasterize_error_ns / n / 1_000_000.0;
         let select = timings.select_ns / n / 1_000_000.0;
-        let total = mutate + rasterize_error + select;
+        let total = mutate + bin + rasterize_error + select;
         if total > 0.0 {
             Some(GpuPassTimingsWs {
                 mutate_ms: mutate as f32,
                 mutate_pct: (mutate / total * 100.0) as f32,
+                bin_polygons_ms: bin as f32,
+                bin_polygons_pct: (bin / total * 100.0) as f32,
                 rasterize_error_ms: rasterize_error as f32,
                 rasterize_error_pct: (rasterize_error / total * 100.0) as f32,
                 select_ms: select as f32,
@@ -1491,6 +1498,16 @@ fn run_benchmark(
         }
     }
 
+    // Flush the last pending GPU batch so its timestamps are included
+    // in pass_timings (run_batch uses a one-batch-behind readback pattern).
+    eprintln!("[benchmark] flushing pending batch, sample_count before flush: {}", evolver.pass_timings().sample_count);
+    if let Some(last_best) = evolver.flush_pending() {
+        if last_best.fitness > bench_best.fitness {
+            bench_improvements += 1;
+            bench_best = last_best;
+        }
+    }
+
     // Build result
     let total_elapsed = bench_start.elapsed();
     let total_evals = evolver.total_evaluations();
@@ -1515,6 +1532,22 @@ fn run_benchmark(
         gpu_batch_iters: bench_params.gpu_batch_iters,
         resolution: if w >= h { w as u32 } else { h as u32 },
         params: bench_params.clone(),
+        pass_timings: {
+            let pt = evolver.pass_timings();
+            eprintln!("[benchmark] pass_timings: sample_count={} mutate={:.0}ns bin={:.0}ns rast={:.0}ns sel={:.0}ns",
+                pt.sample_count, pt.mutate_ns, pt.bin_polygons_ns, pt.rasterize_error_ns, pt.select_ns);
+            if pt.sample_count > 0 {
+                let n = pt.sample_count as f64;
+                Some(PassTimingsResult {
+                    mutate_ms: (pt.mutate_ns / n / 1_000_000.0) as f32,
+                    bin_polygons_ms: (pt.bin_polygons_ns / n / 1_000_000.0) as f32,
+                    rasterize_error_ms: (pt.rasterize_error_ns / n / 1_000_000.0) as f32,
+                    select_ms: (pt.select_ns / n / 1_000_000.0) as f32,
+                })
+            } else {
+                None
+            }
+        },
     };
 
     println!(
@@ -1522,6 +1555,10 @@ fn run_benchmark(
         result.label, result.start_fitness, result.final_fitness,
         result.total_improvements, result.total_evals,
     );
+    evolver.pass_timings().print_averages();
+    // Flush stdout — block-buffered in Docker (no TTY)
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
 
     // Update global best if benchmark found something better
     if bench_best.fitness > global_best.fitness {

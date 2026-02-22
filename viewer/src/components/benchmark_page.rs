@@ -4,7 +4,7 @@ use wasm_bindgen::JsCast;
 
 use std::collections::HashSet;
 
-use crate::benchmark::{BenchmarkExport, BenchmarkRequest, BenchmarkResult, BenchmarkSnapshot};
+use crate::benchmark::{BenchmarkExport, BenchmarkRequest, BenchmarkResult, BenchmarkSnapshot, PassTimingsResult};
 use crate::components::auto_tune_panel::AutoTuneSection;
 use crate::components::benchmark_chart::{color_for_index, BenchmarkChart};
 use crate::components::controls::download_blob;
@@ -1094,16 +1094,65 @@ fn pv(label: &str, value: String, changed: bool) -> AnyView {
     }
 }
 
+/// Render a pipeline timing bar from pass timings data.
+fn timing_bar_view(pt: &PassTimingsResult) -> impl IntoView {
+    let total = pt.mutate_ms + pt.bin_polygons_ms + pt.rasterize_error_ms + pt.select_ms;
+    if total <= 0.0 {
+        return view! { <div></div> }.into_any();
+    }
+    let segments: Vec<(&str, f32, f32, &str)> = vec![
+        ("mutate", pt.mutate_ms, pt.mutate_ms / total * 100.0, "#26a69a"),
+        ("bin", pt.bin_polygons_ms, pt.bin_polygons_ms / total * 100.0, "#66bb6a"),
+        ("rasterize", pt.rasterize_error_ms, pt.rasterize_error_ms / total * 100.0, "#ffb74d"),
+        ("select", pt.select_ms, pt.select_ms / total * 100.0, "#7986cb"),
+    ];
+
+    view! {
+        <div class="gpu-timing-section" style="margin-bottom: 6px">
+            <div class="gpu-timing-bar">
+                {segments.iter().filter(|(_, _, pct, _)| *pct > 0.1).map(|(name, ms, pct, color)| {
+                    let width_pct = format!("{}%", pct);
+                    let bg = color.to_string();
+                    let label = if *pct > 15.0 {
+                        format!("{} {:.0}%", name, pct)
+                    } else if *pct > 8.0 {
+                        format!("{:.0}%", pct)
+                    } else {
+                        String::new()
+                    };
+                    let title = format!("{}: {:.2}ms ({:.1}%)", name, ms, pct);
+                    view! {
+                        <div
+                            class="gpu-timing-segment"
+                            style:width={width_pct}
+                            style:background={bg}
+                            title={title}
+                        >
+                            {label}
+                        </div>
+                    }
+                }).collect::<Vec<_>>()}
+            </div>
+            <div class="gpu-timing-total">
+                {format!("{:.2}ms/iter", total)}
+            </div>
+        </div>
+    }.into_any()
+}
+
 /// Build params detail view with non-default values highlighted.
-fn params_detail_view(p: &MutationParams, resolution: u32) -> impl IntoView {
+fn params_detail_view(p: &MutationParams, resolution: u32, pass_timings: &Option<PassTimingsResult>) -> impl IntoView {
     let d = MutationParams::default();
     let is_all_default = *p == d;
 
     let mode_str = if p.single_mutation_mode { "single" } else { "multi" };
     let d_mode_str = if d.single_mutation_mode { "single" } else { "multi" };
 
+    let timing_bar = pass_timings.as_ref().map(|pt| timing_bar_view(pt));
+
     view! {
         <div class="bench-params-detail">
+            {timing_bar}
             <div class="bench-params-row">
                 {pv("Mode", mode_str.to_string(), mode_str != d_mode_str)}
                 {pv("Adaptive", if p.adaptive_mutation { "on" } else { "off" }.to_string(), p.adaptive_mutation != d.adaptive_mutation)}
@@ -1211,7 +1260,7 @@ where
 
     let color_owned = color.to_string();
     let res_str = if r.resolution > 0 { format!("{}px", r.resolution) } else { "-".to_string() };
-    let detail_view = params_detail_view(&r.params, r.resolution);
+    let detail_view = params_detail_view(&r.params, r.resolution, &r.pass_timings);
     let has_params = r.params != MutationParams::default() || r.resolution > 0;
 
     vec![

@@ -1,5 +1,5 @@
 pub use artgen_shared::benchmark::{
-    BenchmarkExport, BenchmarkRequest, BenchmarkResult, BenchmarkSnapshot,
+    BenchmarkExport, BenchmarkRequest, BenchmarkResult, BenchmarkSnapshot, PassTimingsResult,
 };
 
 /// UI-only progress state (received from WebSocket, not sent back).
