@@ -99,10 +99,10 @@ struct Params {
     medium_move_delta: f32,
     swap_colors_prob: f32,
 
-    // Merge thresholds + padding
+    // Merge thresholds + integer_aabb toggle
     merge_centroid_threshold: f32,
     merge_color_threshold: f32,
-    _pad2: u32,
+    integer_aabb: u32,
     _pad3: u32,
 
     // Reserved padding (vec4[11-15])
@@ -119,6 +119,7 @@ struct Params {
 @group(0) @binding(3) var<storage, read>       tile_data:          array<u32>;
 @group(0) @binding(4) var<storage, read>       tile_counts_buf:    array<u32>;
 @group(0) @binding(5) var<storage, read>       chain_states:       array<DrawingState>;
+@group(0) @binding(6) var<storage, read>       chain_framebuffers: array<u32>;
 @group(1) @binding(0) var<uniform>             params:             Params;
 
 // Shared memory arrays sized to thread count.
@@ -140,7 +141,43 @@ fn edge_fn(ax: f32, ay: f32, bx: f32, by: f32, px: f32, py: f32) -> f32 {
 }
 
 /// Rasterize a polygon and alpha-blend if pixel is inside.
-fn rasterize_blend(poly: Polygon, fx: f32, fy: f32, r: ptr<function, f32>, g: ptr<function, f32>, b: ptr<function, f32>) {
+fn rasterize_blend(poly: Polygon, px: u32, py: u32, fx: f32, fy: f32, r: ptr<function, f32>, g: ptr<function, f32>, b: ptr<function, f32>) {
+    // Integer AABB: early rejection using packed u32 vertex data before float unpack.
+    // Extract u16 x,y from each vertex, compute AABB in pixel space, compare against pixel coords.
+    // Conservative: floor for min, ceil for max — never rejects a polygon that actually overlaps.
+    if params.integer_aabb != 0u {
+        let v0 = poly.data.y;
+        let v1 = poly.data.z;
+        let v2 = poly.data.w;
+        let w = params.image_width;
+        let h = params.image_height;
+
+        // Extract x components (low 16 bits)
+        let x0 = v0 & 0xFFFFu;
+        let x1 = v1 & 0xFFFFu;
+        let x2 = v2 & 0xFFFFu;
+        // Extract y components (high 16 bits)
+        let y0 = v0 >> 16u;
+        let y1 = v1 >> 16u;
+        let y2 = v2 >> 16u;
+
+        // AABB in u16 space
+        let imin_x = min(x0, min(x1, x2));
+        let imax_x = max(x0, max(x1, x2));
+        let imin_y = min(y0, min(y1, y2));
+        let imax_y = max(y0, max(y1, y2));
+
+        // Convert to pixel coords: floor for min (integer div), ceil for max
+        let pmin_x = imin_x * w / 65535u;
+        let pmax_x = (imax_x * w + 65534u) / 65535u;
+        let pmin_y = imin_y * h / 65535u;
+        let pmax_y = (imax_y * h + 65534u) / 65535u;
+
+        if px < pmin_x || px > pmax_x || py < pmin_y || py > pmax_y {
+            return;
+        }
+    }
+
     // Unpack vertices
     let pv0 = unpack_vertex(poly.data.y);
     let pv1 = unpack_vertex(poly.data.z);
@@ -247,20 +284,17 @@ fn main(
             let refg = ref_color.y * 255.0;
             let refb = ref_color.z * 255.0;
 
-            // --- Incremental: re-rasterize parent for old pixel error ---
-            // Uses chain_states (parent) instead of a u8 framebuffer to avoid
-            // quantization mismatch that causes error drift.
+            // --- Incremental: read cached parent pixel from chain_framebuffers ---
+            // The framebuffer stores quantized RGBA (R in bits 0-7, G in 8-15, B in 16-23).
+            // This is O(1) per pixel instead of O(polygon_count) re-rasterization.
+            // The framebuffer is kept in sync by init_framebuffers (on first enable)
+            // and update_framebuffers (after each select pass on acceptance).
             if incremental {
-                var old_r = 255.0;
-                var old_g = 255.0;
-                var old_b = 255.0;
-                let parent_poly_count = chain_states[parent_chain].polygon_count;
-                for (var pi = 0u; pi < parent_poly_count; pi++) {
-                    rasterize_blend(chain_states[parent_chain].polygons[pi], fx, fy, &old_r, &old_g, &old_b);
-                }
-                let old_ri = clamp(old_r, 0.0, 255.0);
-                let old_gi = clamp(old_g, 0.0, 255.0);
-                let old_bi = clamp(old_b, 0.0, 255.0);
+                let fb_idx = parent_chain * w * h + py * w + px;
+                let packed = chain_framebuffers[fb_idx];
+                let old_ri = f32(packed & 0xFFu);
+                let old_gi = f32((packed >> 8u) & 0xFFu);
+                let old_bi = f32((packed >> 16u) & 0xFFu);
                 pixel_error_old = u32(abs(old_ri - refr) + abs(old_gi - refg) + abs(old_bi - refb));
             }
 
@@ -305,7 +339,7 @@ fn main(
 
                     // Each thread tests its pixel against polygons in this shared memory tile
                     for (var i = 0u; i < sm_tile_end; i++) {
-                        rasterize_blend(shared_polys[i], fx, fy, &r, &g, &b);
+                        rasterize_blend(shared_polys[i], px, py, fx, fy, &r, &g, &b);
                     }
                     workgroupBarrier();
                 }
@@ -329,7 +363,7 @@ fn main(
 
                     // Each thread tests its pixel against all polygons in this tile
                     for (var i = 0u; i < tile_end; i++) {
-                        rasterize_blend(shared_polys[i], fx, fy, &r, &g, &b);
+                        rasterize_blend(shared_polys[i], px, py, fx, fy, &r, &g, &b);
                     }
                     workgroupBarrier();
                 }

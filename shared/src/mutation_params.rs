@@ -20,6 +20,7 @@ fn default_swap_colors_prob() -> f32 { settings::SWAP_COLORS_PROB }
 fn default_medium_move_delta() -> f32 { settings::MEDIUM_MOVE_DELTA }
 fn default_merge_centroid_threshold() -> f32 { settings::MERGE_CENTROID_THRESHOLD }
 fn default_merge_color_threshold() -> f32 { settings::MERGE_COLOR_THRESHOLD }
+fn default_integer_aabb() -> bool { settings::INTEGER_AABB }
 
 
 /// Runtime-configurable mutation parameters.
@@ -113,6 +114,11 @@ pub struct MutationParams {
     // Only effective in single_mutation_mode.
     #[serde(default)]
     pub incremental_eval: bool,
+
+    // Integer AABB: early rejection using packed u32 vertex data before float unpack.
+    // Skips the expensive float unpack for polygons that fail AABB in integer pixel space.
+    #[serde(default = "default_integer_aabb")]
+    pub integer_aabb: bool,
 }
 
 impl MutationParams {
@@ -224,6 +230,7 @@ impl Default for MutationParams {
             gpu_batch_iters: settings::GPU_DEFAULT_BATCH_ITERS,
             tile_culling: true,
             incremental_eval: false,
+            integer_aabb: settings::INTEGER_AABB,
         }
     }
 }

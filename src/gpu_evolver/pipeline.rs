@@ -483,7 +483,7 @@ impl GpuPipeline {
         });
 
         // Rasterize+Error: working_states(read), reference_image(texture), error_accumulators(rw),
-        //                   tile_data(read), tile_counts(read), chain_states(read); params via push constants
+        //                   tile_data(read), tile_counts(read), chain_states(read), chain_framebuffers(read); params via push constants
         let rasterize_error_bgl = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some("rasterize_error_bgl"),
             entries: &[
@@ -544,6 +544,16 @@ impl GpuPipeline {
                         ty: BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
                         min_binding_size: NonZeroU64::new(GPU_DRAWING_STATE_SIZE as u64),
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: NonZeroU64::new(std::mem::size_of::<u32>() as u64),
                     },
                     count: None,
                 },
@@ -827,6 +837,7 @@ impl GpuPipeline {
                 BindGroupEntry { binding: 3, resource: tile_data_buf.as_entire_binding() },
                 BindGroupEntry { binding: 4, resource: tile_counts_buf.as_entire_binding() },
                 BindGroupEntry { binding: 5, resource: chain_states_buf.as_entire_binding() },
+                BindGroupEntry { binding: 6, resource: chain_framebuffers_buf.as_entire_binding() },
             ],
         });
 

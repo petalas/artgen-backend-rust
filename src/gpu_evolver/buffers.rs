@@ -98,10 +98,10 @@ pub struct GpuParams {
     pub medium_move_delta: f32,
     pub swap_colors_prob: f32,
 
-    // vec4[10] — merge thresholds + padding
+    // vec4[10] — merge thresholds + integer_aabb toggle
     pub merge_centroid_threshold: f32,
     pub merge_color_threshold: f32,
-    pub _pad2: u32,
+    pub integer_aabb: u32,
     pub _pad3: u32,
 
     // vec4[11-15] — reserved padding to fill 256 bytes
@@ -167,7 +167,7 @@ pub fn gpu_params_from(mp: &MutationParams, w: u32, h: u32, chain_count: u32) ->
         swap_colors_prob: mp.swap_colors_prob,
         merge_centroid_threshold: mp.merge_centroid_threshold,
         merge_color_threshold: mp.merge_color_threshold,
-        _pad2: 0,
+        integer_aabb: if mp.integer_aabb { 1 } else { 0 },
         _pad3: 0,
         _reserved: [0u32; 20],
     }

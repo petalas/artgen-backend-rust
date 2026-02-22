@@ -68,10 +68,10 @@ struct Params {
     medium_move_delta: f32,
     swap_colors_prob: f32,
 
-    // Merge thresholds + padding
+    // Merge thresholds + integer_aabb toggle
     merge_centroid_threshold: f32,
     merge_color_threshold: f32,
-    _pad2: u32,
+    integer_aabb: u32,
     _pad3: u32,
 
     // Reserved padding (vec4[11-15])
@@ -82,8 +82,23 @@ struct Params {
     _reserved4: vec4<u32>,
 }
 
+fn unpack_color(p: Polygon) -> vec4<f32> {
+    return unpack4x8unorm(p.data.x);
+}
+
 fn unpack_vertex(word: u32) -> vec2<f32> {
     return vec2<f32>(f32(word & 0xFFFFu) / 65535.0, f32(word >> 16u) / 65535.0);
+}
+
+fn edge_fn(ax: f32, ay: f32, bx: f32, by: f32, px: f32, py: f32) -> f32 {
+    return (bx - ax) * (py - ay) - (by - ay) * (px - ax);
+}
+
+fn pack_fb_pixel(r: f32, g: f32, b: f32) -> u32 {
+    let ri = u32(clamp(r, 0.0, 255.0));
+    let gi = u32(clamp(g, 0.0, 255.0));
+    let bi = u32(clamp(b, 0.0, 255.0));
+    return ri | (gi << 8u) | (bi << 16u) | (255u << 24u);
 }
 
 struct ControlFlags {
@@ -112,6 +127,12 @@ var<workgroup> shared_best_offspring_id: u32;
 var<workgroup> reduction_err: array<u32, 64>;
 var<workgroup> reduction_idx: array<u32, 64>;
 var<workgroup> shared_accepted_total_error: u32;  // for incremental eval
+// Dirty bbox for framebuffer update on acceptance (pixel coords)
+var<workgroup> shared_dirty_min_x: u32;
+var<workgroup> shared_dirty_min_y: u32;
+var<workgroup> shared_dirty_max_x: u32;
+var<workgroup> shared_dirty_max_y: u32;
+var<workgroup> shared_final_poly_count: u32;  // polygon count after degenerate culling
 
 /// Compute fitness from total error and polygon count.
 fn compute_fitness(total_error: u32, polygon_count: u32) -> f32 {
@@ -216,9 +237,16 @@ fn select_main(@builtin(global_invocation_id) gid: vec3<u32>,
             shared_copy_count = working_states[best_offspring_id].polygon_count;
             shared_best_offspring_id = best_offspring_id;
 
-            // Incremental eval: store accepted total error
+            // Incremental eval: store accepted total error + extract dirty bbox for framebuffer update
             if incremental {
                 shared_accepted_total_error = best_error;
+                // Unpack dirty bbox from offspring header (same encoding as rasterize_error)
+                let bbox_lo = working_states[best_offspring_id].fitness_bits;
+                let bbox_hi = working_states[best_offspring_id].stagnation_counter;
+                shared_dirty_min_x = bbox_lo & 0xFFFFu;
+                shared_dirty_min_y = (bbox_lo >> 16u) & 0xFFFFu;
+                shared_dirty_max_x = bbox_hi & 0xFFFFu;
+                shared_dirty_max_y = (bbox_hi >> 16u) & 0xFFFFu;
             }
 
             // Adaptive mutation scale: only update when enabled
@@ -293,14 +321,99 @@ fn select_main(@builtin(global_invocation_id) gid: vec3<u32>,
         if write_idx < count && write_idx >= params.min_polygons {
             chain_states[chain_id].polygon_count = write_idx;
         }
+        // Store final polygon count for framebuffer update threads
+        shared_final_poly_count = chain_states[chain_id].polygon_count;
     }
 
     workgroupBarrier();
 
-    // --- Incremental eval: update total error on acceptance ---
+    // --- Incremental eval: update total error and framebuffer on acceptance ---
     if incremental && shared_accept == 1u {
         if local_id == 0u {
             atomicStore(&chain_total_errors[chain_id], shared_accepted_total_error);
+        }
+
+        // Update chain_framebuffers for dirty-bbox pixels only.
+        // 64 threads cooperatively re-rasterize the accepted drawing in the dirty region.
+        let w = params.image_width;
+        let h = params.image_height;
+        let dmin_x = shared_dirty_min_x;
+        let dmin_y = shared_dirty_min_y;
+        let dmax_x = min(shared_dirty_max_x, w);
+        let dmax_y = min(shared_dirty_max_y, h);
+        let poly_count = shared_final_poly_count;
+
+        // Guard: skip if dirty bbox is empty or invalid
+        if dmax_x <= dmin_x || dmax_y <= dmin_y {
+            return;
+        }
+        let dirty_w = dmax_x - dmin_x;
+        let dirty_h = dmax_y - dmin_y;
+        let dirty_pixels = dirty_w * dirty_h;
+
+        // Each of 64 threads handles a stripe of dirty-bbox pixels
+        for (var pidx = local_id; pidx < dirty_pixels; pidx += 64u) {
+            let dx = pidx % dirty_w;
+            let dy = pidx / dirty_w;
+            let px = dmin_x + dx;
+            let py = dmin_y + dy;
+
+            let fx = (f32(px) + 0.5) / f32(w);
+            let fy = (f32(py) + 0.5) / f32(h);
+
+            // Rasterize all polygons at this pixel (brute force from chain_states)
+            var r = 255.0;
+            var g = 255.0;
+            var b = 255.0;
+            for (var pi = 0u; pi < poly_count; pi++) {
+                let poly = chain_states[chain_id].polygons[pi];
+
+                // Integer AABB: early rejection using packed u32 vertex data before float unpack
+                if params.integer_aabb != 0u {
+                    let v0w = poly.data.y;
+                    let v1w = poly.data.z;
+                    let v2w = poly.data.w;
+                    let ix0 = v0w & 0xFFFFu; let ix1 = v1w & 0xFFFFu; let ix2 = v2w & 0xFFFFu;
+                    let iy0 = v0w >> 16u;     let iy1 = v1w >> 16u;     let iy2 = v2w >> 16u;
+                    let pmin_x = min(ix0, min(ix1, ix2)) * w / 65535u;
+                    let pmax_x = (max(ix0, max(ix1, ix2)) * w + 65534u) / 65535u;
+                    let pmin_y = min(iy0, min(iy1, iy2)) * h / 65535u;
+                    let pmax_y = (max(iy0, max(iy1, iy2)) * h + 65534u) / 65535u;
+                    if px < pmin_x || px > pmax_x || py < pmin_y || py > pmax_y {
+                        continue;
+                    }
+                }
+
+                let pv0 = unpack_vertex(poly.data.y);
+                let pv1 = unpack_vertex(poly.data.z);
+                let pv2 = unpack_vertex(poly.data.w);
+
+                // AABB culling
+                let bb_min_x = min(pv0.x, min(pv1.x, pv2.x));
+                let bb_max_x = max(pv0.x, max(pv1.x, pv2.x));
+                let bb_min_y = min(pv0.y, min(pv1.y, pv2.y));
+                let bb_max_y = max(pv0.y, max(pv1.y, pv2.y));
+
+                if fx >= bb_min_x && fx <= bb_max_x && fy >= bb_min_y && fy <= bb_max_y {
+                    let e0 = edge_fn(pv0.x, pv0.y, pv1.x, pv1.y, fx, fy);
+                    let e1 = edge_fn(pv1.x, pv1.y, pv2.x, pv2.y, fx, fy);
+                    let e2 = edge_fn(pv2.x, pv2.y, pv0.x, pv0.y, fx, fy);
+                    let all_pos = e0 >= 0.0 && e1 >= 0.0 && e2 >= 0.0;
+                    let all_neg = e0 <= 0.0 && e1 <= 0.0 && e2 <= 0.0;
+                    if all_pos || all_neg {
+                        let pcolor = unpack_color(poly);
+                        let alpha = pcolor.w;
+                        let inv_alpha = 1.0 - alpha;
+                        r = r * inv_alpha + pcolor.x * 255.0 * alpha;
+                        g = g * inv_alpha + pcolor.y * 255.0 * alpha;
+                        b = b * inv_alpha + pcolor.z * 255.0 * alpha;
+                    }
+                }
+            }
+
+            // Write updated pixel to chain framebuffer
+            let fb_idx = chain_id * w * h + py * w + px;
+            chain_framebuffers[fb_idx] = pack_fb_pixel(r, g, b);
         }
     }
 }

@@ -219,6 +219,20 @@ pub fn ParamsEditor(
                     "Incremental eval (cached framebuffer)"
                 </label>
             </div>
+            <div class="mutation-row">
+                <label class="bench-checkbox-label">
+                    <input
+                        type="checkbox"
+                        disabled={move || is_disabled()}
+                        prop:checked={move || params.get().integer_aabb}
+                        on:change={move |_| {
+                            params.update(|p| p.integer_aabb = !p.integer_aabb);
+                            notify();
+                        }}
+                    />
+                    "Integer AABB culling (bit-ops pre-filter)"
+                </label>
+            </div>
         </div>
         <div class="mutation-section">
             <div class="mutation-section-title">"Polygons"</div>

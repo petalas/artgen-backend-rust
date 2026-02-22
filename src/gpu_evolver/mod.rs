@@ -197,42 +197,88 @@ impl GpuEvolver {
     /// Run a batch of N iterations on the GPU using double-buffered staging.
     ///
     /// Returns the PREVIOUS batch's result (one batch behind). The first call
-    /// always returns `None`. This overlap lets the GPU work on batch N+1
-    /// while the CPU reads back batch N's results.
+    /// always returns `None`. The new batch is submitted to the GPU BEFORE
+    /// blocking on the previous batch's readback, so the GPU is already
+    /// computing batch N+1 while the CPU processes batch N's results.
     ///
     /// Returns `Some(Drawing)` if the previous batch found a new global best.
     pub fn run_batch(&mut self, mutation_params: &MutationParams, collect_timestamps: bool) -> Option<Drawing> {
-        // 1. If there's a pending batch from the last call, finish reading its results
-        let prev_result = self.pending_batch.take().map(|pending| self.finish_pending_readback(&pending));
-
         // Check if rasterize workgroup size needs to change (between batches)
         self.pipeline.set_rasterize_wg(mutation_params.rasterize_wg);
 
-        // Incremental eval: initialize framebuffers if needed
+        // Incremental eval: initialize framebuffers if needed.
+        // This must happen before submission and requires a synchronous GPU round-trip,
+        // so flush any pending batch first to avoid conflicting submissions.
         let active_preview = mutation_params.chain_count.min(self.pipeline.chain_count);
         if mutation_params.incremental_eval && !self.framebuffers_initialized {
+            // flush_pending internally checks for None, so safe to call unconditionally
+            let flush_result = self.flush_pending();
             self.dispatch_init_framebuffers(active_preview);
+            // If the flush produced a result, we need to return it. Since we've flushed
+            // the pending batch, there's nothing left to collect after submission below.
+            // We'll store it and return it at the end.
+            return self.run_batch_inner(mutation_params, collect_timestamps, flush_result);
         } else if !mutation_params.incremental_eval {
             self.framebuffers_initialized = false;
         }
 
+        // Save whether we have a previous batch to collect AFTER submitting
+        let prev_pending = self.pending_batch.take();
+        let prev_receivers = self.pending_map_receivers.take();
+
+        self.run_batch_inner_with_pending(mutation_params, collect_timestamps, prev_pending, prev_receivers)
+    }
+
+    /// Inner implementation: encode, submit the new batch, then optionally collect
+    /// the previous batch's results. `prev_result_override` is used when the
+    /// previous batch was already flushed (e.g. for init_framebuffers).
+    fn run_batch_inner(
+        &mut self,
+        mutation_params: &MutationParams,
+        collect_timestamps: bool,
+        prev_result_override: Option<Drawing>,
+    ) -> Option<Drawing> {
+        // No previous pending batch — just submit and return the override result
+        self.run_batch_inner_with_pending(mutation_params, collect_timestamps, None, None)
+            .or(prev_result_override)
+    }
+
+    /// Core batch submission + previous-batch collection.
+    ///
+    /// 1. Encode and submit the new batch (GPU starts immediately)
+    /// 2. Block on the previous batch's readback (if any)
+    /// 3. Issue map_async for the new batch's staging buffers
+    /// 4. Return the previous batch's result
+    fn run_batch_inner_with_pending(
+        &mut self,
+        mutation_params: &MutationParams,
+        collect_timestamps: bool,
+        prev_pending: Option<PendingBatch>,
+        prev_receivers: Option<PendingMapReceivers>,
+    ) -> Option<Drawing> {
         let p = &self.pipeline;
         let iterations = mutation_params.gpu_batch_iters.max(1);
         let active = mutation_params.chain_count.min(p.chain_count);
         self.active_chain_count = active;
 
-        // 2. Pick which staging set to use for THIS batch's copies
+        // 1. Pick which staging set to use for THIS batch's copies.
+        //    The previous batch (if any) uses the OTHER staging set,
+        //    so there's no conflict between the new submission's copy
+        //    destinations and the previous batch's mapped-for-read buffers.
         let write_idx = self.staging_idx;
         self.staging_idx = 1 - self.staging_idx;
 
-        // 3. Build params and upload to uniform buffer
+        // 2. Build params and upload to uniform buffer
         let mut params = gpu_params_from(mutation_params, p.image_width, p.image_height, active);
         params.iteration_number = self.iteration;
         let params_bytes: &[u8] = bytemuck::bytes_of(&params);
         p.queue.write_buffer(&p.params_buf, 0, params_bytes);
 
         // Reset control flags before batch — preserve best_fitness_bits so atomicMax
-        // only triggers new_best_found when fitness actually improves over last known best
+        // only triggers new_best_found when fitness actually improves over last known best.
+        // Note: best_fitness_bits may be one batch stale (from batch N-2 instead of N-1)
+        // since we haven't collected the previous batch yet. This is harmless — worst case
+        // the shader re-detects an improvement already found, causing a redundant readback.
         let control_reset = ControlFlags {
             new_best_found: 0,
             best_chain_id: 0,
@@ -245,7 +291,7 @@ impl GpuEvolver {
         // resets them via atomicExchange after each iteration. They're
         // zero-initialized once at buffer creation and in reinit_chains().
 
-        // 4. Encode N iterations x 5 passes into one command buffer
+        // 3. Encode N iterations into one command buffer
         let mut encoder = p.device.create_command_encoder(&CommandEncoderDescriptor {
             label: Some("gpu_evolver_batch"),
         });
@@ -368,7 +414,7 @@ impl GpuEvolver {
             }
         }
 
-        // 5. Resolve timestamp queries into resolve buffer, then copy to staging[write_idx]
+        // 4. Resolve timestamp queries into resolve buffer, then copy to staging[write_idx]
         if collect_timestamps {
             encoder.resolve_query_set(&p.timestamp_query_set, 0..6, &p.timestamp_resolve_buf, 0);
             encoder.copy_buffer_to_buffer(
@@ -399,14 +445,24 @@ impl GpuEvolver {
             fitness_size,
         );
 
-        // 6. Submit — GPU starts working on this batch
+        // 5. Submit — GPU starts working on this batch IMMEDIATELY
         let submission_index = p.queue.submit(std::iter::once(encoder.finish()));
 
         self.iteration += iterations;
         self.total_evaluations += iterations as u64 * active as u64 * lambda as u64;
 
+        // 6. NOW collect the previous batch's results while GPU works on the new batch.
+        //    The previous batch uses a different staging set, so no conflicts.
+        let prev_result = if let Some(pending) = prev_pending {
+            // Temporarily restore the receivers so finish_pending_readback can consume them
+            self.pending_map_receivers = prev_receivers;
+            self.finish_pending_readback(&pending)
+        } else {
+            None
+        };
+
         // 7. Issue map_async on staging set [write_idx] — starts the async map
-        //    but don't poll yet (that happens at the start of the NEXT run_batch call)
+        //    but don't poll yet (that happens during the NEXT run_batch call)
         self.start_async_map(write_idx, collect_timestamps, active);
 
         // 8. Store pending batch info so next call can read results
@@ -418,7 +474,7 @@ impl GpuEvolver {
         });
 
         // 9. Return the PREVIOUS batch's result (one batch behind)
-        prev_result.flatten()
+        prev_result
     }
 
     /// Issue map_async on the staging buffers at the given index.

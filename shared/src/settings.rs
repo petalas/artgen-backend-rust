@@ -54,6 +54,9 @@ pub const TOURNAMENT_SIZE: u32 = 3;
 pub const SINGLE_MUTATION_MODE: bool = true;
 pub const ADAPTIVE_MUTATION: bool = false;
 
+// Integer AABB: early rejection using packed u32 vertex data before float unpack
+pub const INTEGER_AABB: bool = true;
+
 // Rasterize workgroup size defaults
 pub const RASTERIZE_WG_X_DEFAULT: u32 = 32;
 pub const RASTERIZE_WG_Y_DEFAULT: u32 = 16;

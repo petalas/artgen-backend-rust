@@ -127,7 +127,7 @@ struct Params {
     // Merge thresholds + padding
     merge_centroid_threshold: f32,
     merge_color_threshold: f32,
-    _pad2: u32,
+    integer_aabb: u32,
     _pad3: u32,
 
     // Reserved padding (vec4[11-15])
@@ -274,26 +274,30 @@ fn single_mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<functio
         return polygon_bbox_pixels(new_poly, w, h);
     }
 
-    // Remove, reorder, adjacent swap → full image (z-order changes)
+    // Remove polygon — dirty region is the removed polygon's bbox
     cumulative += w_remove;
     if r < cumulative && c > params.min_polygons {
         let remove_idx = rand_u32(rng, c);
+        let removed_bbox = polygon_bbox_pixels(working_states[oid].polygons[remove_idx], w, h);
         let last_idx = c - 1u;
         if remove_idx != last_idx { working_states[oid].polygons[remove_idx] = working_states[oid].polygons[last_idx]; }
         *count = c - 1u;
         working_states[oid].polygon_count = c - 1u;
-        return full_image_bbox();
+        return removed_bbox;
     }
 
+    // Reorder (swap two) — dirty region is union of both polygons' bboxes
     cumulative += w_reorder;
     if r < cumulative && c >= 2u {
         let i1 = rand_u32(rng, c);
         var i2 = rand_u32(rng, c);
         while i1 == i2 { i2 = rand_u32(rng, c); }
+        let bbox1 = polygon_bbox_pixels(working_states[oid].polygons[i1], w, h);
+        let bbox2 = polygon_bbox_pixels(working_states[oid].polygons[i2], w, h);
         let tmp = working_states[oid].polygons[i1];
         working_states[oid].polygons[i1] = working_states[oid].polygons[i2];
         working_states[oid].polygons[i2] = tmp;
-        return full_image_bbox();
+        return merge_bbox(bbox1, bbox2);
     }
 
     // Scale polygon: union(old bbox, new bbox)
@@ -331,15 +335,17 @@ fn single_mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<functio
         return merge_bbox(old_bbox, polygon_bbox_pixels(poly, w, h));
     }
 
-    // Adjacent swap → full image (z-order changes)
+    // Adjacent swap — dirty region is union of both polygons' bboxes
     cumulative += w_adjacent_swap;
     if r < cumulative && c >= 2u {
         let ai = rand_u32(rng, c);
         let aj = select(ai + 1u, ai - 1u, ai == c - 1u);
+        let bbox_ai = polygon_bbox_pixels(working_states[oid].polygons[ai], w, h);
+        let bbox_aj = polygon_bbox_pixels(working_states[oid].polygons[aj], w, h);
         let tmp = working_states[oid].polygons[ai];
         working_states[oid].polygons[ai] = working_states[oid].polygons[aj];
         working_states[oid].polygons[aj] = tmp;
-        return full_image_bbox();
+        return merge_bbox(bbox_ai, bbox_aj);
     }
 
     // Merge polygons: pick two, check centroid proximity + color similarity, remove smaller
@@ -363,11 +369,12 @@ fn single_mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<functio
             let area_i = abs((ci_v1.x - ci_v0.x) * (ci_v2.y - ci_v0.y) - (ci_v2.x - ci_v0.x) * (ci_v1.y - ci_v0.y));
             let area_j = abs((cj_v1.x - cj_v0.x) * (cj_v2.y - cj_v0.y) - (cj_v2.x - cj_v0.x) * (cj_v1.y - cj_v0.y));
             let remove_idx = select(mi, mj, area_j < area_i);
+            let removed_bbox = polygon_bbox_pixels(working_states[oid].polygons[remove_idx], w, h);
             let last = c - 1u;
             if remove_idx != last { working_states[oid].polygons[remove_idx] = working_states[oid].polygons[last]; }
             *count = c - 1u;
             working_states[oid].polygon_count = c - 1u;
-            return full_image_bbox();
+            return removed_bbox;
         }
         // Criteria not met — fall through to next mutation
     }
@@ -400,19 +407,21 @@ fn single_mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<functio
         working_states[oid].polygons[c] = new_poly;
         *count = c + 1u;
         working_states[oid].polygon_count = c + 1u;
-        return full_image_bbox();
+        return polygon_bbox_pixels(new_poly, w, h);
     }
 
-    // Swap colors between two polygons
+    // Swap colors — dirty region is union of both polygons' bboxes
     cumulative += w_swap_colors;
     if r < cumulative && c >= 2u {
         let sci = rand_u32(rng, c);
         var scj = rand_u32(rng, c);
         while sci == scj { scj = rand_u32(rng, c); }
+        let bbox_sci = polygon_bbox_pixels(working_states[oid].polygons[sci], w, h);
+        let bbox_scj = polygon_bbox_pixels(working_states[oid].polygons[scj], w, h);
         let tmp_color = working_states[oid].polygons[sci].data.x;
         working_states[oid].polygons[sci].data.x = working_states[oid].polygons[scj].data.x;
         working_states[oid].polygons[scj].data.x = tmp_color;
-        return full_image_bbox();
+        return merge_bbox(bbox_sci, bbox_scj);
     }
 
     if c == 0u { return full_image_bbox(); }
