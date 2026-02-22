@@ -1154,9 +1154,10 @@ fn handle_ws_command(
             let snapshot_id = cmd["snapshotId"].as_str().unwrap_or("").to_string();
             let duration_secs = cmd["durationSecs"].as_u64().unwrap_or(30) as u32;
             let resolution = cmd["resolution"].as_u64().unwrap_or(0) as u32;
-            let exploration_trials = cmd["explorationTrials"].as_u64().unwrap_or(20) as u32;
-            let elite_fraction = cmd["eliteFraction"].as_f64().unwrap_or(0.25) as f32;
-            let exploration_rate = cmd["explorationRate"].as_f64().unwrap_or(0.15) as f32;
+            let replicates = cmd["replicates"].as_u64().unwrap_or(1) as u32;
+            let initial_step_size = cmd["initialStepSize"].as_f64().unwrap_or(0.15) as f32;
+            let step_decay = cmd["stepDecay"].as_f64().unwrap_or(0.5) as f32;
+            let min_step_size = cmd["minStepSize"].as_f64().unwrap_or(0.03) as f32;
 
             let mut s = lock.lock().unwrap();
 
@@ -1178,9 +1179,10 @@ fn handle_ws_command(
                 drawing_json,
                 duration_secs,
                 resolution: res,
-                exploration_trials,
-                elite_fraction,
-                exploration_rate,
+                replicates: replicates.clamp(1, 5),
+                initial_step_size: initial_step_size.clamp(0.02, 0.25),
+                step_decay: step_decay.clamp(0.3, 0.8),
+                min_step_size: min_step_size.clamp(0.01, 0.1),
                 param_specs: auto_tune::default_param_specs(),
                 base_params,
             };
@@ -1234,8 +1236,13 @@ fn handle_ws_command(
             let mut s = lock.lock().unwrap();
             let project = s.active_project.clone();
             if let Some(ref proj) = project {
-                if let Some(tuner) = AutoTuner::load(proj) {
-                    let mut tuner = tuner;
+                if let Some(mut tuner) = AutoTuner::load(proj) {
+                    if tuner.is_done() {
+                        return Some(serde_json::json!({
+                            "type": "project_error",
+                            "error": "Auto-tune already completed (step size below minimum)",
+                        }));
+                    }
                     let next = tuner.next_trial();
                     let label = next.label.clone();
                     let res = tuner.config.resolution;
@@ -1535,21 +1542,36 @@ fn run_benchmark(
                     result.improvements_per_sec,
                     &result.label,
                 );
-                // Generate next trial
-                let next = tuner.next_trial();
-                let label = next.label.clone();
-                s.benchmark_request = Some(next);
-                s.auto_tune_label = label;
-                // Broadcast updated status
-                let status = tuner.status(true);
-                s.benchmark_events.push(serde_json::json!({
-                    "type": "auto_tune_status",
-                    "status": serde_json::to_value(&status).unwrap(),
-                }));
-                // Persist periodically (every 5 trials)
-                if tuner.trials.len() % 5 == 0 {
+
+                if tuner.is_done() {
+                    // Coordinate descent finished — auto-stop
+                    s.auto_tune_active = false;
+                    let status = tuner.status(false);
+                    s.benchmark_events.push(serde_json::json!({
+                        "type": "auto_tune_status",
+                        "status": serde_json::to_value(&status).unwrap(),
+                    }));
                     if let Some(ref proj) = s.active_project {
                         tuner.save(proj);
+                    }
+                    println!("[AutoTune] Coordinate descent complete after {} trials", tuner.trials.len());
+                } else {
+                    // Generate next trial
+                    let next = tuner.next_trial();
+                    let label = next.label.clone();
+                    s.benchmark_request = Some(next);
+                    s.auto_tune_label = label;
+                    // Broadcast updated status
+                    let status = tuner.status(true);
+                    s.benchmark_events.push(serde_json::json!({
+                        "type": "auto_tune_status",
+                        "status": serde_json::to_value(&status).unwrap(),
+                    }));
+                    // Persist periodically (every 5 trials)
+                    if tuner.trials.len() % 5 == 0 {
+                        if let Some(ref proj) = s.active_project {
+                            tuner.save(proj);
+                        }
                     }
                 }
                 s.auto_tuner = Some(tuner);

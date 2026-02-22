@@ -35,7 +35,7 @@ pub struct TrialRecord {
     pub final_fitness: f32,
     pub improvements_per_sec: f64,
     pub result_id: String,
-    pub phase: String, // "explore" or "exploit"
+    pub phase: String,
 }
 
 /// Configuration for an auto-tune session.
@@ -46,11 +46,54 @@ pub struct AutoTuneConfig {
     pub drawing_json: String,
     pub duration_secs: u32,
     pub resolution: u32,
-    pub exploration_trials: u32,
-    pub elite_fraction: f32,
-    pub exploration_rate: f32,
+    pub replicates: u32,
+    pub initial_step_size: f32,
+    pub step_decay: f32,
+    pub min_step_size: f32,
     pub param_specs: Vec<ParamSpec>,
     pub base_params: MutationParams,
+}
+
+/// Phase of the coordinate descent optimizer.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum CoordPhase {
+    Baseline,
+    ProbeHigh,
+    ProbeLow,
+    Done,
+}
+
+/// Result of probing a single parameter.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParamProbeResult {
+    pub param_name: String,
+    pub base_fitness: f32,
+    pub high_fitness: Option<f32>,
+    pub low_fitness: Option<f32>,
+    pub chosen: String, // "base", "high", "low"
+    pub improvement: f32,
+}
+
+/// Coordinate descent progress state.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoordDescentProgress {
+    pub pass: u32,
+    pub param_index: usize,
+    pub phase: CoordPhase,
+    pub step_size: f32,
+    pub base_normalized: Vec<f32>,
+    pub base_fitness: f32,
+    /// Accumulated fitness values for the current probe (for replicates > 1).
+    pub replicate_fitnesses: Vec<f32>,
+    /// Fitness from the high probe of the current param (after replicates averaged).
+    pub high_fitness: Option<f32>,
+    /// Fitness from the low probe of the current param (after replicates averaged).
+    pub low_fitness: Option<f32>,
+    /// Results from completed parameter probes in the current pass.
+    pub param_results: Vec<ParamProbeResult>,
 }
 
 /// Persisted state for resume.
@@ -60,8 +103,7 @@ pub struct AutoTuneState {
     pub config: AutoTuneConfig,
     pub trials: Vec<TrialRecord>,
     pub next_trial_number: u32,
-    pub param_means: Vec<f32>,
-    pub param_stds: Vec<f32>,
+    pub progress: CoordDescentProgress,
 }
 
 /// Status broadcast to viewer.
@@ -75,6 +117,11 @@ pub struct AutoTuneStatus {
     pub best_fitness: f32,
     pub best_trial: u32,
     pub snapshot_id: String,
-    pub param_importance: Vec<(String, f32)>,
+    pub current_param: Option<String>,
+    pub current_direction: Option<String>,
+    pub pass: u32,
+    pub step_size: f32,
+    pub base_fitness: f32,
+    pub param_results: Vec<ParamProbeResult>,
     pub config: AutoTuneConfig,
 }

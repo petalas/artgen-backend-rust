@@ -632,6 +632,7 @@ fn ResultsSection(
     let hidden_ids: RwSignal<HashSet<String>> = RwSignal::new(HashSet::new());
     let hidden_signal = Signal::derive(move || hidden_ids.get());
     let expanded_ids: RwSignal<HashSet<String>> = RwSignal::new(HashSet::new());
+    let max_visible: RwSignal<usize> = RwSignal::new(50);
 
     let toggle_visibility = move |id: String| {
         hidden_ids.update(|set| {
@@ -816,8 +817,34 @@ fn ResultsSection(
                     }
                 };
 
+                let total_rows = body_rows.len();
+                let max_vis = max_visible.get();
+                let is_truncated = total_rows > max_vis;
+                let body_rows = if is_truncated {
+                    body_rows.into_iter().take(max_vis).collect::<Vec<_>>()
+                } else {
+                    body_rows
+                };
+
+                let show_all_chart = {
+                    move |_: leptos::ev::MouseEvent| {
+                        hidden_ids.set(HashSet::new());
+                    }
+                };
+                let hide_all_chart = {
+                    let results_for_hide = results.clone();
+                    move |_: leptos::ev::MouseEvent| {
+                        let all_ids: HashSet<String> = results_for_hide.iter().map(|r| r.id.clone()).collect();
+                        hidden_ids.set(all_ids);
+                    }
+                };
+
                 view! {
                     <div>
+                        <div class="bench-chart-controls">
+                            <button class="btn btn-secondary btn-sm" on:click={show_all_chart}>"Show All"</button>
+                            <button class="btn btn-secondary btn-sm" on:click={hide_all_chart}>"Hide All"</button>
+                        </div>
                         <BenchmarkChart results={results_signal} hidden={hidden_signal} display_order={display_order_signal}/>
                         <div class="bench-results-table-wrap">
                             <table class="bench-results-table">
@@ -864,6 +891,33 @@ fn ResultsSection(
                                     {body_rows}
                                 </tbody>
                             </table>
+                            {if is_truncated {
+                                view! {
+                                    <div class="bench-table-footer">
+                                        {format!("Showing {} of {} rows \u{2014} ", max_vis, total_rows)}
+                                        <button
+                                            class="btn btn-secondary btn-sm"
+                                            on:click={move |_| max_visible.set(usize::MAX)}
+                                        >
+                                            "Show all"
+                                        </button>
+                                    </div>
+                                }.into_any()
+                            } else if max_vis == usize::MAX && total_rows > 50 {
+                                view! {
+                                    <div class="bench-table-footer">
+                                        {format!("Showing all {} rows \u{2014} ", total_rows)}
+                                        <button
+                                            class="btn btn-secondary btn-sm"
+                                            on:click={move |_| max_visible.set(50)}
+                                        >
+                                            "Show less"
+                                        </button>
+                                    </div>
+                                }.into_any()
+                            } else {
+                                view! { <div></div> }.into_any()
+                            }}
                         </div>
                     </div>
                 }.into_any()

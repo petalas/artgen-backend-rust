@@ -66,7 +66,7 @@ fn draw_chart(
     ctx.fill_rect(0.0, 0.0, w, h);
 
     // Only consider visible results for axis ranges
-    let visible: Vec<(usize, &BenchmarkResult)> = results
+    let mut visible: Vec<(usize, &BenchmarkResult)> = results
         .iter()
         .enumerate()
         .filter(|(_, r)| !hidden.contains(&r.id))
@@ -74,6 +74,16 @@ fn draw_chart(
 
     if visible.is_empty() {
         return;
+    }
+
+    // Auto-limit: when more than 10 visible, keep only top 10 by final_fitness
+    if visible.len() > 10 {
+        visible.sort_by(|(_, a), (_, b)| {
+            b.final_fitness.partial_cmp(&a.final_fitness).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        visible.truncate(10);
+        // Re-sort by original index for stable rendering
+        visible.sort_by_key(|(i, _)| *i);
     }
 
     // Compute data ranges from visible results only

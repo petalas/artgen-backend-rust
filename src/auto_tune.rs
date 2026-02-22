@@ -1,62 +1,58 @@
 use artgen_shared::auto_tune::*;
 use artgen_shared::benchmark::BenchmarkRequest;
 use artgen_shared::mutation_params::MutationParams;
-use rand::{Rng, RngExt};
 
-/// Autonomous parameter optimizer using EDA (Estimation of Distribution Algorithm).
+/// Coordinate descent parameter optimizer.
+/// Optimizes one parameter at a time: for each enabled param, probe base ± step_size
+/// in normalized [0,1] space, pick the best, then move to the next param.
+/// After all params, shrink step and repeat until step_size < min_step_size.
 pub struct AutoTuner {
     pub config: AutoTuneConfig,
     pub trials: Vec<TrialRecord>,
     next_trial_number: u32,
-    /// Pre-generated LHS samples for exploration phase (each is a Vec<f32> of normalized values).
-    lhs_samples: Vec<Vec<f32>>,
-    /// EDA distribution: mean per enabled param in normalized space.
-    param_means: Vec<f32>,
-    /// EDA distribution: std per enabled param in normalized space.
-    param_stds: Vec<f32>,
-    /// Normalized params of the currently pending trial (stored after next_trial()).
+    pub progress: CoordDescentProgress,
+    /// Normalized params of the currently pending trial.
     pending_normalized: Vec<f32>,
 }
 
 impl AutoTuner {
     pub fn new(config: AutoTuneConfig) -> Self {
-        let enabled_count = config.param_specs.iter().filter(|p| p.enabled).count();
-        let mut rng = rand::rng();
-        let lhs_samples = latin_hypercube(config.exploration_trials as usize, enabled_count, &mut rng);
-        let param_means = vec![0.5; enabled_count];
-        let param_stds = vec![0.25; enabled_count];
+        let base_normalized = params_to_normalized(&config.base_params, &config.param_specs);
+        let progress = CoordDescentProgress {
+            pass: 1,
+            param_index: 0,
+            phase: CoordPhase::Baseline,
+            step_size: config.initial_step_size,
+            base_normalized,
+            base_fitness: 0.0,
+            replicate_fitnesses: Vec::new(),
+            high_fitness: None,
+            low_fitness: None,
+            param_results: Vec::new(),
+        };
         Self {
             config,
             trials: Vec::new(),
             next_trial_number: 1,
-            lhs_samples,
-            param_means,
-            param_stds,
+            progress,
             pending_normalized: Vec::new(),
         }
     }
 
     /// Restore from persisted state.
     pub fn from_state(state: AutoTuneState) -> Self {
-        let enabled_count = state.config.param_specs.iter().filter(|p| p.enabled).count();
-        let mut rng = rand::rng();
-        // Regenerate any remaining LHS samples needed
-        let exploration_done = state.trials.len() as u32 >= state.config.exploration_trials;
-        let lhs_samples = if exploration_done {
-            vec![]
-        } else {
-            let remaining = state.config.exploration_trials as usize - state.trials.len();
-            latin_hypercube(remaining, enabled_count, &mut rng)
-        };
         Self {
             config: state.config,
             trials: state.trials,
             next_trial_number: state.next_trial_number,
-            lhs_samples,
-            param_means: state.param_means,
-            param_stds: state.param_stds,
+            progress: state.progress,
             pending_normalized: Vec::new(),
         }
+    }
+
+    /// Whether the optimizer has finished (step_size below minimum).
+    pub fn is_done(&self) -> bool {
+        self.progress.phase == CoordPhase::Done
     }
 
     /// Generate the next trial as a BenchmarkRequest.
@@ -64,37 +60,53 @@ impl AutoTuner {
         let trial_num = self.next_trial_number;
         self.next_trial_number += 1;
 
-        let enabled_count = self.config.param_specs.iter().filter(|p| p.enabled).count();
-        let in_exploration = (self.trials.len() as u32) < self.config.exploration_trials
-            && !self.lhs_samples.is_empty();
-
-        let (normalized, phase) = if in_exploration {
-            // Use pre-generated LHS sample
-            let sample = self.lhs_samples.remove(0);
-            (sample, "explore")
-        } else {
-            let mut rng = rand::rng();
-            // ~exploration_rate chance of pure random
-            if rng.random::<f32>() < self.config.exploration_rate {
-                let sample: Vec<f32> = (0..enabled_count).map(|_| rng.random::<f32>()).collect();
-                (sample, "exploit-random")
-            } else {
-                // EDA: sample from N(mean, std), clamped to [0,1]
-                let sample: Vec<f32> = self
-                    .param_means
-                    .iter()
-                    .zip(self.param_stds.iter())
-                    .map(|(&mean, &std)| {
-                        let v = mean + std * sample_standard_normal(&mut rng);
-                        v.clamp(0.0, 1.0)
-                    })
-                    .collect();
-                (sample, "exploit")
+        let (normalized, label) = match self.progress.phase {
+            CoordPhase::Baseline => {
+                let normalized = self.progress.base_normalized.clone();
+                let label = format!("cd-{:03} baseline", trial_num);
+                (normalized, label)
+            }
+            CoordPhase::ProbeHigh => {
+                let mut normalized = self.progress.base_normalized.clone();
+                let enabled_idx = self.progress.param_index;
+                let spec = self.enabled_spec(enabled_idx);
+                let base_val = normalized[enabled_idx];
+                normalized[enabled_idx] = (base_val + self.progress.step_size).min(1.0);
+                let native = denormalize(normalized[enabled_idx], &spec.kind);
+                let label = format!(
+                    "cd-{:03} {} +{:.0}% ({:.4})",
+                    trial_num,
+                    spec.name,
+                    self.progress.step_size * 100.0,
+                    native
+                );
+                (normalized, label)
+            }
+            CoordPhase::ProbeLow => {
+                let mut normalized = self.progress.base_normalized.clone();
+                let enabled_idx = self.progress.param_index;
+                let spec = self.enabled_spec(enabled_idx);
+                let base_val = normalized[enabled_idx];
+                normalized[enabled_idx] = (base_val - self.progress.step_size).max(0.0);
+                let native = denormalize(normalized[enabled_idx], &spec.kind);
+                let label = format!(
+                    "cd-{:03} {} -{:.0}% ({:.4})",
+                    trial_num,
+                    spec.name,
+                    self.progress.step_size * 100.0,
+                    native
+                );
+                (normalized, label)
+            }
+            CoordPhase::Done => {
+                // Shouldn't be called when done, but return baseline as safety
+                let normalized = self.progress.base_normalized.clone();
+                let label = format!("cd-{:03} done", trial_num);
+                (normalized, label)
             }
         };
 
         let params = normalized_to_params(&normalized, &self.config.param_specs, &self.config.base_params);
-        let label = format!("auto-{:03} ({})", trial_num, phase);
         self.pending_normalized = normalized;
 
         BenchmarkRequest {
@@ -107,16 +119,10 @@ impl AutoTuner {
         }
     }
 
-    /// Record a completed trial result, using the pending_normalized params
-    /// stored from the most recent next_trial() call.
+    /// Record a completed trial result.
     pub fn record_result(&mut self, result_id: &str, final_fitness: f32, improvements_per_sec: f64, label: &str) {
         let trial_num = self.trials.len() as u32 + 1;
-        let phase = if label.contains("explore") {
-            "explore"
-        } else {
-            "exploit"
-        };
-
+        let phase_str = format!("{:?}", self.progress.phase);
         let normalized = std::mem::take(&mut self.pending_normalized);
 
         self.trials.push(TrialRecord {
@@ -126,98 +132,257 @@ impl AutoTuner {
             final_fitness,
             improvements_per_sec,
             result_id: result_id.to_string(),
-            phase: phase.to_string(),
+            phase: phase_str,
         });
 
-        self.update_distribution();
+        self.progress.replicate_fitnesses.push(final_fitness);
+
+        // Check if we have enough replicates
+        if self.progress.replicate_fitnesses.len() >= self.config.replicates as usize {
+            let median = median_fitness(&self.progress.replicate_fitnesses);
+            self.progress.replicate_fitnesses.clear();
+            self.decide_phase(median);
+        }
     }
 
-    /// Recompute EDA distribution from elite trials.
-    fn update_distribution(&mut self) {
-        let n = self.trials.len();
-        if n < 3 {
-            return; // Not enough data
+    /// Process the median fitness for the current phase and advance.
+    fn decide_phase(&mut self, fitness: f32) {
+        match self.progress.phase {
+            CoordPhase::Baseline => {
+                self.progress.base_fitness = fitness;
+                // Start probing the first enabled param
+                self.advance_to_first_probeable_param();
+            }
+            CoordPhase::ProbeHigh => {
+                self.progress.high_fitness = Some(fitness);
+                // Now try low probe — but check if it would clamp to same as base
+                let enabled_idx = self.progress.param_index;
+                let base_val = self.progress.base_normalized[enabled_idx];
+                let low_val = (base_val - self.progress.step_size).max(0.0);
+                let spec = self.enabled_spec(enabled_idx);
+                if values_same_after_denorm(base_val, low_val, &spec.kind) {
+                    // Skip low probe, decide with just high
+                    self.progress.low_fitness = None;
+                    self.decide_and_advance();
+                } else {
+                    self.progress.phase = CoordPhase::ProbeLow;
+                }
+            }
+            CoordPhase::ProbeLow => {
+                self.progress.low_fitness = Some(fitness);
+                self.decide_and_advance();
+            }
+            CoordPhase::Done => {}
         }
-
-        let enabled_count = self.config.param_specs.iter().filter(|p| p.enabled).count();
-        if enabled_count == 0 {
-            return;
-        }
-
-        // Filter trials that have normalized params
-        let valid_trials: Vec<&TrialRecord> = self
-            .trials
-            .iter()
-            .filter(|t| t.normalized_params.len() == enabled_count)
-            .collect();
-
-        if valid_trials.len() < 3 {
-            return;
-        }
-
-        // Sort by fitness descending, take top elite_fraction
-        let mut sorted: Vec<&TrialRecord> = valid_trials;
-        sorted.sort_by(|a, b| b.final_fitness.partial_cmp(&a.final_fitness).unwrap_or(std::cmp::Ordering::Equal));
-
-        let elite_count = ((sorted.len() as f32 * self.config.elite_fraction).ceil() as usize).max(2);
-        let elites = &sorted[..elite_count.min(sorted.len())];
-
-        // Compute mean and std for each param dimension
-        let mut means = vec![0.0f32; enabled_count];
-        let mut stds = vec![0.0f32; enabled_count];
-
-        for i in 0..enabled_count {
-            let values: Vec<f32> = elites.iter().map(|t| t.normalized_params[i]).collect();
-            let n = values.len() as f32;
-            let mean = values.iter().sum::<f32>() / n;
-            let variance = values.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / n;
-            let std = variance.sqrt().max(0.02); // Floor to prevent premature convergence
-            means[i] = mean;
-            stds[i] = std;
-        }
-
-        self.param_means = means;
-        self.param_stds = stds;
     }
 
-    /// Compute Spearman rank correlation for parameter importance.
-    pub fn compute_importance(&self) -> Vec<(String, f32)> {
-        let enabled_specs: Vec<&ParamSpec> = self.config.param_specs.iter().filter(|p| p.enabled).collect();
-        let enabled_count = enabled_specs.len();
-        if enabled_count == 0 {
-            return vec![];
+    /// Pick best of {base, high, low}, update base if improved, advance to next param.
+    fn decide_and_advance(&mut self) {
+        let enabled_idx = self.progress.param_index;
+        let spec = self.enabled_spec(enabled_idx);
+        let param_name = spec.name.clone();
+        let base_fitness = self.progress.base_fitness;
+
+        let high_fitness = self.progress.high_fitness;
+        let low_fitness = self.progress.low_fitness;
+
+        // Find best
+        let mut best_fitness = base_fitness;
+        let mut best_choice = "base";
+        if let Some(hf) = high_fitness {
+            if hf > best_fitness {
+                best_fitness = hf;
+                best_choice = "high";
+            }
+        }
+        if let Some(lf) = low_fitness {
+            if lf > best_fitness {
+                best_fitness = lf;
+                best_choice = "low";
+            }
         }
 
-        // Filter trials with valid normalized params
-        let valid_trials: Vec<&TrialRecord> = self
-            .trials
-            .iter()
-            .filter(|t| t.normalized_params.len() == enabled_count)
-            .collect();
+        let improvement = best_fitness - base_fitness;
 
-        let n = valid_trials.len();
-        if n < 3 {
-            return enabled_specs.iter().map(|s| (s.name.clone(), 0.0)).collect();
+        // Update base params if improved
+        match best_choice {
+            "high" => {
+                let base_val = self.progress.base_normalized[enabled_idx];
+                self.progress.base_normalized[enabled_idx] = (base_val + self.progress.step_size).min(1.0);
+                self.progress.base_fitness = best_fitness;
+            }
+            "low" => {
+                let base_val = self.progress.base_normalized[enabled_idx];
+                self.progress.base_normalized[enabled_idx] = (base_val - self.progress.step_size).max(0.0);
+                self.progress.base_fitness = best_fitness;
+            }
+            _ => {} // keep base
         }
 
-        // Rank fitness values
-        let fitness_ranks = rank_values(&valid_trials.iter().map(|t| t.final_fitness).collect::<Vec<_>>());
-
-        let mut importance = Vec::with_capacity(enabled_count);
-        for i in 0..enabled_count {
-            let param_values: Vec<f32> = valid_trials.iter().map(|t| t.normalized_params[i]).collect();
-            let param_ranks = rank_values(&param_values);
-            let corr = spearman_correlation(&param_ranks, &fitness_ranks);
-            importance.push((enabled_specs[i].name.clone(), corr));
-        }
-
-        // Sort by absolute correlation descending
-        importance.sort_by(|a, b| {
-            b.1.abs()
-                .partial_cmp(&a.1.abs())
-                .unwrap_or(std::cmp::Ordering::Equal)
+        self.progress.param_results.push(ParamProbeResult {
+            param_name,
+            base_fitness,
+            high_fitness,
+            low_fitness,
+            chosen: best_choice.to_string(),
+            improvement,
         });
-        importance
+
+        // Clear probe fitnesses for next param
+        self.progress.high_fitness = None;
+        self.progress.low_fitness = None;
+
+        // Advance to next param
+        self.advance_to_next_param();
+    }
+
+    /// Move to the next enabled param, or start a new pass if all done.
+    fn advance_to_next_param(&mut self) {
+        let enabled_count = self.enabled_count();
+        let mut next_idx = self.progress.param_index + 1;
+
+        // Skip params that can't be probed at current step_size
+        while next_idx < enabled_count {
+            if !self.should_skip_param(next_idx) {
+                break;
+            }
+            next_idx += 1;
+        }
+
+        if next_idx < enabled_count {
+            self.progress.param_index = next_idx;
+            self.start_probing_current_param();
+        } else {
+            // All params done for this pass — shrink step and start new pass
+            self.progress.step_size *= self.config.step_decay;
+            if self.progress.step_size < self.config.min_step_size {
+                self.progress.phase = CoordPhase::Done;
+                println!(
+                    "[AutoTune] Done after {} passes, step_size {:.4} < min {:.4}",
+                    self.progress.pass, self.progress.step_size, self.config.min_step_size
+                );
+            } else {
+                self.progress.pass += 1;
+                self.progress.param_index = 0;
+                self.progress.param_results.clear();
+                // Re-baseline at start of each pass
+                self.progress.phase = CoordPhase::Baseline;
+                println!(
+                    "[AutoTune] Pass {} starting, step_size={:.4}",
+                    self.progress.pass, self.progress.step_size
+                );
+            }
+        }
+    }
+
+    /// Find the first enabled param that can be probed, starting from index 0.
+    fn advance_to_first_probeable_param(&mut self) {
+        let enabled_count = self.enabled_count();
+        let mut idx = 0;
+        while idx < enabled_count {
+            if !self.should_skip_param(idx) {
+                break;
+            }
+            idx += 1;
+        }
+        if idx < enabled_count {
+            self.progress.param_index = idx;
+            self.start_probing_current_param();
+        } else {
+            // No params can be probed at this step size — shrink and try again
+            self.progress.step_size *= self.config.step_decay;
+            if self.progress.step_size < self.config.min_step_size {
+                self.progress.phase = CoordPhase::Done;
+            } else {
+                self.progress.pass += 1;
+                self.progress.param_results.clear();
+                self.advance_to_first_probeable_param();
+            }
+        }
+    }
+
+    /// Begin probing the current param — start with high, skip if clamped to same.
+    fn start_probing_current_param(&mut self) {
+        let enabled_idx = self.progress.param_index;
+        let base_val = self.progress.base_normalized[enabled_idx];
+        let high_val = (base_val + self.progress.step_size).min(1.0);
+        let spec = self.enabled_spec(enabled_idx);
+
+        if values_same_after_denorm(base_val, high_val, &spec.kind) {
+            // High clamped to same — try low directly
+            let low_val = (base_val - self.progress.step_size).max(0.0);
+            if values_same_after_denorm(base_val, low_val, &spec.kind) {
+                // Both directions clamp to same — skip this param entirely
+                self.progress.param_results.push(ParamProbeResult {
+                    param_name: spec.name.clone(),
+                    base_fitness: self.progress.base_fitness,
+                    high_fitness: None,
+                    low_fitness: None,
+                    chosen: "skip".to_string(),
+                    improvement: 0.0,
+                });
+                self.advance_to_next_param();
+            } else {
+                // Only low is viable
+                self.progress.high_fitness = None;
+                self.progress.phase = CoordPhase::ProbeLow;
+            }
+        } else {
+            self.progress.phase = CoordPhase::ProbeHigh;
+        }
+    }
+
+    /// Whether a param should be skipped at the current step size.
+    fn should_skip_param(&self, enabled_idx: usize) -> bool {
+        let spec = self.enabled_spec(enabled_idx);
+        let base_val = self.progress.base_normalized[enabled_idx];
+
+        // For Pow2 params, skip if step_size can't change the exponent
+        if let ParamKind::Pow2 { min_exp, max_exp } = &spec.kind {
+            if max_exp > min_exp {
+                let min_step = 0.5 / (max_exp - min_exp) as f32;
+                if self.progress.step_size < min_step {
+                    return true;
+                }
+            }
+        }
+
+        // Skip if both high and low clamp to same value as base
+        let high_val = (base_val + self.progress.step_size).min(1.0);
+        let low_val = (base_val - self.progress.step_size).max(0.0);
+        values_same_after_denorm(base_val, high_val, &spec.kind)
+            && values_same_after_denorm(base_val, low_val, &spec.kind)
+    }
+
+    /// Get the enabled ParamSpec at the given enabled-index.
+    fn enabled_spec(&self, enabled_idx: usize) -> &ParamSpec {
+        self.config
+            .param_specs
+            .iter()
+            .filter(|p| p.enabled)
+            .nth(enabled_idx)
+            .expect("enabled_idx out of bounds")
+    }
+
+    /// Count of enabled params.
+    fn enabled_count(&self) -> usize {
+        self.config.param_specs.iter().filter(|p| p.enabled).count()
+    }
+
+    /// Estimate total trials for the current configuration.
+    fn estimate_total_trials(&self) -> u32 {
+        let enabled = self.enabled_count() as u32;
+        let reps = self.config.replicates;
+        // Each pass: 1 baseline + up to enabled*2 probes, each repeated `reps` times
+        let trials_per_pass = (1 + enabled * 2) * reps;
+        // Estimate number of passes
+        let mut step = self.config.initial_step_size;
+        let mut passes = 0u32;
+        while step >= self.config.min_step_size {
+            passes += 1;
+            step *= self.config.step_decay;
+        }
+        trials_per_pass * passes.max(1)
     }
 
     /// Build status for WS broadcast.
@@ -231,21 +396,40 @@ impl AutoTuner {
             .map(|t| (t.final_fitness, t.trial_number))
             .unwrap_or((0.0, 0));
 
-        let phase = if (self.trials.len() as u32) < self.config.exploration_trials {
-            "exploration".to_string()
+        let phase_str = match self.progress.phase {
+            CoordPhase::Baseline => "baseline".to_string(),
+            CoordPhase::ProbeHigh => "probe-high".to_string(),
+            CoordPhase::ProbeLow => "probe-low".to_string(),
+            CoordPhase::Done => "done".to_string(),
+        };
+
+        let current_param = if self.progress.phase != CoordPhase::Baseline && self.progress.phase != CoordPhase::Done {
+            let spec = self.enabled_spec(self.progress.param_index);
+            Some(spec.name.clone())
         } else {
-            "exploitation".to_string()
+            None
+        };
+
+        let current_direction = match self.progress.phase {
+            CoordPhase::ProbeHigh => Some("high".to_string()),
+            CoordPhase::ProbeLow => Some("low".to_string()),
+            _ => None,
         };
 
         AutoTuneStatus {
             running,
             trial_number: self.trials.len() as u32,
-            total_trials: self.config.exploration_trials,
-            phase,
+            total_trials: self.estimate_total_trials(),
+            phase: phase_str,
             best_fitness,
             best_trial,
             snapshot_id: self.config.snapshot_id.clone(),
-            param_importance: self.compute_importance(),
+            current_param,
+            current_direction,
+            pass: self.progress.pass,
+            step_size: self.progress.step_size,
+            base_fitness: self.progress.base_fitness,
+            param_results: self.progress.param_results.clone(),
             config: self.config.clone(),
         }
     }
@@ -256,8 +440,7 @@ impl AutoTuner {
             config: self.config.clone(),
             trials: self.trials.clone(),
             next_trial_number: self.next_trial_number,
-            param_means: self.param_means.clone(),
-            param_stds: self.param_stds.clone(),
+            progress: self.progress.clone(),
         }
     }
 
@@ -287,7 +470,6 @@ impl AutoTuner {
         let state: AutoTuneState = serde_json::from_str(&data).ok()?;
         Some(Self::from_state(state))
     }
-
 }
 
 /// File path for auto-tune state.
@@ -295,32 +477,26 @@ fn auto_tune_path(project: &str) -> std::path::PathBuf {
     std::path::Path::new("projects").join(project).join("auto_tune.json")
 }
 
-/// Latin Hypercube Sampling: generate `n` samples in `d` dimensions, each in [0,1].
-fn latin_hypercube(n: usize, d: usize, rng: &mut impl Rng) -> Vec<Vec<f32>> {
-    if n == 0 || d == 0 {
-        return vec![];
+/// Compute median of a slice of f32 values.
+fn median_fitness(values: &[f32]) -> f32 {
+    let mut sorted = values.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = sorted.len();
+    if n == 0 {
+        return 0.0;
     }
-
-    let mut samples = vec![vec![0.0f32; d]; n];
-
-    for dim in 0..d {
-        // Create permutation of 0..n
-        let mut perm: Vec<usize> = (0..n).collect();
-        // Fisher-Yates shuffle
-        for i in (1..n).rev() {
-            let j = rng.random_range(0..=i);
-            perm.swap(i, j);
-        }
-
-        for i in 0..n {
-            // Each sample gets a random point within its stratum
-            let stratum = perm[i] as f32;
-            let u: f32 = rng.random();
-            samples[i][dim] = (stratum + u) / n as f32;
-        }
+    if n % 2 == 1 {
+        sorted[n / 2]
+    } else {
+        (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
     }
+}
 
-    samples
+/// Check if two normalized values produce the same denormalized result.
+fn values_same_after_denorm(a: f32, b: f32, kind: &ParamKind) -> bool {
+    let da = denormalize(a, kind);
+    let db = denormalize(b, kind);
+    (da - db).abs() < 1e-7
 }
 
 /// Convert normalized [0,1] vector to MutationParams.
@@ -382,7 +558,6 @@ fn normalize(native: f32, kind: &ParamKind) -> f32 {
             if max_exp == min_exp {
                 0.5
             } else {
-                // native is a power of 2, find its exponent
                 let exp = if native > 0.0 { (native.log2().round() as u32).clamp(*min_exp, *max_exp) } else { *min_exp };
                 (exp - min_exp) as f32 / (max_exp - min_exp) as f32
             }
@@ -492,68 +667,8 @@ pub fn default_param_specs() -> Vec<ParamSpec> {
         ParamSpec { name: "spatial_crossover_weight".into(), kind: ParamKind::Linear { min: 0.0, max: 1.0 }, enabled: true },
         // Lambda (Pow2)
         ParamSpec { name: "lambda".into(), kind: ParamKind::Pow2 { min_exp: 0, max_exp: 6 }, enabled: true },
-        // Booleans
-        ParamSpec { name: "single_mutation_mode".into(), kind: ParamKind::Boolean, enabled: true },
-        ParamSpec { name: "adaptive_mutation".into(), kind: ParamKind::Boolean, enabled: true },
+        // Booleans — disabled by default (single_mutation_mode always on, adaptive always off)
+        ParamSpec { name: "single_mutation_mode".into(), kind: ParamKind::Boolean, enabled: false },
+        ParamSpec { name: "adaptive_mutation".into(), kind: ParamKind::Boolean, enabled: false },
     ]
-}
-
-/// Rank values (average rank for ties). Higher values get higher ranks.
-fn rank_values(values: &[f32]) -> Vec<f32> {
-    let n = values.len();
-    let mut indexed: Vec<(usize, f32)> = values.iter().enumerate().map(|(i, &v)| (i, v)).collect();
-    indexed.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-
-    let mut ranks = vec![0.0f32; n];
-    let mut i = 0;
-    while i < n {
-        let mut j = i;
-        while j < n && (indexed[j].1 - indexed[i].1).abs() < 1e-10 {
-            j += 1;
-        }
-        // Average rank for tied values
-        let avg_rank = (i + j - 1) as f32 / 2.0 + 1.0;
-        for k in i..j {
-            ranks[indexed[k].0] = avg_rank;
-        }
-        i = j;
-    }
-    ranks
-}
-
-/// Spearman rank correlation coefficient.
-fn spearman_correlation(x_ranks: &[f32], y_ranks: &[f32]) -> f32 {
-    let n = x_ranks.len() as f32;
-    if n < 3.0 {
-        return 0.0;
-    }
-
-    let x_mean = x_ranks.iter().sum::<f32>() / n;
-    let y_mean = y_ranks.iter().sum::<f32>() / n;
-
-    let mut cov = 0.0f32;
-    let mut var_x = 0.0f32;
-    let mut var_y = 0.0f32;
-
-    for i in 0..x_ranks.len() {
-        let dx = x_ranks[i] - x_mean;
-        let dy = y_ranks[i] - y_mean;
-        cov += dx * dy;
-        var_x += dx * dx;
-        var_y += dy * dy;
-    }
-
-    let denom = (var_x * var_y).sqrt();
-    if denom < 1e-10 {
-        0.0
-    } else {
-        (cov / denom).clamp(-1.0, 1.0)
-    }
-}
-
-/// Sample from standard normal distribution using Box-Muller transform.
-fn sample_standard_normal(rng: &mut impl Rng) -> f32 {
-    let u1: f32 = rng.random::<f32>().max(1e-10);
-    let u2: f32 = rng.random();
-    (-2.0 * u1.ln()).sqrt() * (2.0 * std::f32::consts::PI * u2).cos()
 }
