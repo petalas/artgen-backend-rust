@@ -58,8 +58,16 @@ fn draw_chart(
         .dyn_into::<web_sys::CanvasRenderingContext2d>()
         .unwrap();
 
-    let w = canvas.width() as f64;
-    let h = canvas.height() as f64;
+    // HiDPI: scale canvas backing store by devicePixelRatio for crisp rendering
+    let dpr = web_sys::window().map(|w| w.device_pixel_ratio()).unwrap_or(1.0);
+    let css_w = 800.0;
+    let css_h = 300.0;
+    canvas.set_width((css_w * dpr) as u32);
+    canvas.set_height((css_h * dpr) as u32);
+    let _ = ctx.scale(dpr, dpr);
+
+    let w = css_w;
+    let h = css_h;
 
     // Clear
     ctx.set_fill_style_str("#fff");
@@ -189,28 +197,28 @@ fn draw_chart(
         ctx.stroke();
     }
 
-    // Legend — use display_order if provided, otherwise natural order
-    // Only show visible (non-hidden) results
+    // Legend — only include results that are actually graphed (visible set)
+    let visible_set: HashSet<usize> = visible.iter().map(|&(i, _)| i).collect();
     let legend_indices: Vec<usize> = if let Some(order) = display_order {
         order.iter().copied()
-            .filter(|&i| i < results.len() && !hidden.contains(&results[i].id))
+            .filter(|&i| visible_set.contains(&i))
             .collect()
     } else {
         visible.iter().map(|&(i, _)| i).collect()
     };
 
-    let legend_x = left + 10.0;
-    let mut legend_y = top + 14.0;
+    let legend_x = left + 8.0;
+    let mut legend_y = top + 10.0;
     for i in legend_indices {
         let r = &results[i];
         let color = color_for_index(i);
         ctx.set_fill_style_str(color);
-        ctx.fill_rect(legend_x, legend_y - 4.0, 16.0, 3.0);
-        ctx.set_fill_style_str("#333");
-        ctx.set_font("12px 'Ubuntu', sans-serif");
+        ctx.fill_rect(legend_x, legend_y - 2.0, 10.0, 2.0);
+        ctx.set_fill_style_str("#666");
+        ctx.set_font("8px 'Ubuntu', sans-serif");
         ctx.set_text_align("left");
         ctx.set_text_baseline("middle");
-        ctx.fill_text(&r.label, legend_x + 22.0, legend_y).ok();
-        legend_y += 18.0;
+        ctx.fill_text(&r.label, legend_x + 14.0, legend_y).ok();
+        legend_y += 11.0;
     }
 }
