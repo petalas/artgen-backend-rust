@@ -1123,11 +1123,18 @@ fn params_detail_view(p: &MutationParams, resolution: u32) -> impl IntoView {
                 {pv("add", fmt_prob(p.add_polygon_prob), p.add_polygon_prob != d.add_polygon_prob)}
                 {pv("remove", fmt_prob(p.remove_polygon_prob), p.remove_polygon_prob != d.remove_polygon_prob)}
                 {pv("reorder", fmt_prob(p.reorder_polygon_prob), p.reorder_polygon_prob != d.reorder_polygon_prob)}
+                {pv("adj-swap", fmt_prob(p.adjacent_swap_prob), p.adjacent_swap_prob != d.adjacent_swap_prob)}
+                {pv("merge", fmt_prob(p.merge_polygon_prob), p.merge_polygon_prob != d.merge_polygon_prob)}
+                {pv("clone", fmt_prob(p.clone_polygon_prob), p.clone_polygon_prob != d.clone_polygon_prob)}
+                {pv("swap-col", fmt_prob(p.swap_colors_prob), p.swap_colors_prob != d.swap_colors_prob)}
             </div>
             <div class="bench-params-row">
                 <span class="bench-params-group">"Movement: "</span>
                 {pv("offset", fmt_prob(p.offset_polygon_prob), p.offset_polygon_prob != d.offset_polygon_prob)}
+                {pv("scale", fmt_prob(p.scale_polygon_prob), p.scale_polygon_prob != d.scale_polygon_prob)}
+                {pv("rotate", fmt_prob(p.rotate_polygon_prob), p.rotate_polygon_prob != d.rotate_polygon_prob)}
                 {pv("move", fmt_prob(p.move_point_prob), p.move_point_prob != d.move_point_prob)}
+                {pv("medium", fmt_prob(p.medium_move_prob), p.medium_move_prob != d.medium_move_prob)}
                 {pv("micro", fmt_prob(p.micro_adjust_prob), p.micro_adjust_prob != d.micro_adjust_prob)}
             </div>
             <div class="bench-params-row">
@@ -1142,6 +1149,9 @@ fn params_detail_view(p: &MutationParams, resolution: u32) -> impl IntoView {
                 {pv("micro", format!("{:.3}", p.micro_adjust_delta), p.micro_adjust_delta != d.micro_adjust_delta)}
                 {pv("newpt", format!("{:.3}", p.new_point_max_distance), p.new_point_max_distance != d.new_point_max_distance)}
                 {pv("offset", format!("{:.3}", p.offset_polygon_magnitude), p.offset_polygon_magnitude != d.offset_polygon_magnitude)}
+                {pv("med", format!("{:.3}", p.medium_move_delta), p.medium_move_delta != d.medium_move_delta)}
+                {pv("merge-cd", format!("{:.2}", p.merge_centroid_threshold), p.merge_centroid_threshold != d.merge_centroid_threshold)}
+                {pv("merge-cc", format!("{:.2}", p.merge_color_threshold), p.merge_color_threshold != d.merge_color_threshold)}
             </div>
             <div class="bench-params-row">
                 <span class="bench-params-group">"Crossover: "</span>
