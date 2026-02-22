@@ -34,6 +34,42 @@ fn pack_vertex(v: vec2<f32>) -> u32 {
     return u32(round(clamp(v.x, 0.0, 1.0) * 65535.0)) | (u32(round(clamp(v.y, 0.0, 1.0) * 65535.0)) << 16u);
 }
 
+// --- Dirty bounding box helpers for incremental evaluation ---
+// Bbox is packed as two u32s: bbox_lo = (min_x | min_y << 16), bbox_hi = (max_x | max_y << 16)
+// Coordinates are in pixel space (u16).
+
+fn polygon_bbox_pixels(poly: Polygon, w: u32, h: u32) -> vec4<u32> {
+    let v0 = unpack_vertex(poly.data.y);
+    let v1 = unpack_vertex(poly.data.z);
+    let v2 = unpack_vertex(poly.data.w);
+    let min_x = u32(floor(min(v0.x, min(v1.x, v2.x)) * f32(w)));
+    let min_y = u32(floor(min(v0.y, min(v1.y, v2.y)) * f32(h)));
+    let max_x = min(u32(ceil(max(v0.x, max(v1.x, v2.x)) * f32(w))), w);
+    let max_y = min(u32(ceil(max(v0.y, max(v1.y, v2.y)) * f32(h))), h);
+    return vec4<u32>(min_x, min_y, max_x, max_y);
+}
+
+fn merge_bbox(a: vec4<u32>, b: vec4<u32>) -> vec4<u32> {
+    return vec4<u32>(min(a.x, b.x), min(a.y, b.y), max(a.z, b.z), max(a.w, b.w));
+}
+
+fn full_image_bbox() -> vec4<u32> {
+    return vec4<u32>(0u, 0u, params.image_width, params.image_height);
+}
+
+fn pack_bbox(bb: vec4<u32>) -> vec2<u32> {
+    return vec2<u32>(
+        (bb.x & 0xFFFFu) | ((bb.y & 0xFFFFu) << 16u),
+        (bb.z & 0xFFFFu) | ((bb.w & 0xFFFFu) << 16u),
+    );
+}
+
+fn write_dirty_bbox(oid: u32, bb: vec4<u32>) {
+    let packed = pack_bbox(bb);
+    working_states[oid].fitness_bits = packed.x;
+    working_states[oid].stagnation_counter = packed.y;
+}
+
 struct Params {
     image_width: u32,
     image_height: u32,
@@ -68,7 +104,7 @@ struct Params {
     // Crossover params
     spatial_crossover_weight: f32,
     tournament_size: u32,
-    _pad1: u32,
+    incremental_eval: u32,
     tile_culling: u32,
 
     // Chain count + lambda + padding
@@ -224,8 +260,11 @@ fn crossover_uniform_offspring(rng: ptr<function, vec4<u32>>, parent_b: u32, off
 }
 
 // --- Single-mutation mode (offspring-aware, with adaptive mutation scale) ---
-fn single_mutate_offspring(rng: ptr<function, vec4<u32>>, oid: u32, count: ptr<function, u32>, ms: f32) {
+// Returns dirty bbox as vec4<u32>(min_x, min_y, max_x, max_y) in pixel coords.
+fn single_mutate_offspring(rng: ptr<function, vec4<u32>>, oid: u32, count: ptr<function, u32>, ms: f32) -> vec4<u32> {
     let c = *count;
+    let w = params.image_width;
+    let h = params.image_height;
 
     let w_add = params.add_polygon_prob;
     let w_remove = params.remove_polygon_prob;
@@ -262,9 +301,10 @@ fn single_mutate_offspring(rng: ptr<function, vec4<u32>>, oid: u32, count: ptr<f
         working_states[oid].polygons[c] = new_poly;
         *count = c + 1u;
         working_states[oid].polygon_count = c + 1u;
-        return;
+        return polygon_bbox_pixels(new_poly, w, h);
     }
 
+    // Remove, reorder, adjacent swap → full image (z-order changes)
     cumulative += w_remove;
     if r < cumulative && c > params.min_polygons {
         let remove_idx = rand_u32(rng, c);
@@ -272,7 +312,7 @@ fn single_mutate_offspring(rng: ptr<function, vec4<u32>>, oid: u32, count: ptr<f
         if remove_idx != last_idx { working_states[oid].polygons[remove_idx] = working_states[oid].polygons[last_idx]; }
         *count = c - 1u;
         working_states[oid].polygon_count = c - 1u;
-        return;
+        return full_image_bbox();
     }
 
     cumulative += w_reorder;
@@ -283,13 +323,15 @@ fn single_mutate_offspring(rng: ptr<function, vec4<u32>>, oid: u32, count: ptr<f
         let tmp = working_states[oid].polygons[i1];
         working_states[oid].polygons[i1] = working_states[oid].polygons[i2];
         working_states[oid].polygons[i2] = tmp;
-        return;
+        return full_image_bbox();
     }
 
+    // Scale polygon: union(old bbox, new bbox)
     cumulative += w_scale;
     if r < cumulative && c >= 1u {
         let si = rand_u32(rng, c);
         var poly = working_states[oid].polygons[si];
+        let old_bbox = polygon_bbox_pixels(poly, w, h);
         var sv0 = unpack_vertex(poly.data.y); var sv1 = unpack_vertex(poly.data.z); var sv2 = unpack_vertex(poly.data.w);
         let sc = (sv0 + sv1 + sv2) / 3.0;
         let scale = rand_f32_range(rng, 0.8, 1.2);
@@ -298,13 +340,15 @@ fn single_mutate_offspring(rng: ptr<function, vec4<u32>>, oid: u32, count: ptr<f
         sv2 = clamp(sc + (sv2 - sc) * scale, vec2<f32>(0.0), vec2<f32>(1.0));
         poly.data.y = pack_vertex(sv0); poly.data.z = pack_vertex(sv1); poly.data.w = pack_vertex(sv2);
         working_states[oid].polygons[si] = poly;
-        return;
+        return merge_bbox(old_bbox, polygon_bbox_pixels(poly, w, h));
     }
 
+    // Rotate polygon: union(old bbox, new bbox)
     cumulative += w_rotate;
     if r < cumulative && c >= 1u {
         let ri = rand_u32(rng, c);
         var poly = working_states[oid].polygons[ri];
+        let old_bbox = polygon_bbox_pixels(poly, w, h);
         var rv0 = unpack_vertex(poly.data.y); var rv1 = unpack_vertex(poly.data.z); var rv2 = unpack_vertex(poly.data.w);
         let rc = (rv0 + rv1 + rv2) / 3.0;
         let angle = rand_f32_range(rng, -0.2618, 0.2618);
@@ -314,9 +358,10 @@ fn single_mutate_offspring(rng: ptr<function, vec4<u32>>, oid: u32, count: ptr<f
         let rd2 = rv2 - rc; rv2 = clamp(rc + vec2<f32>(rd2.x * cos_a - rd2.y * sin_a, rd2.x * sin_a + rd2.y * cos_a), vec2<f32>(0.0), vec2<f32>(1.0));
         poly.data.y = pack_vertex(rv0); poly.data.z = pack_vertex(rv1); poly.data.w = pack_vertex(rv2);
         working_states[oid].polygons[ri] = poly;
-        return;
+        return merge_bbox(old_bbox, polygon_bbox_pixels(poly, w, h));
     }
 
+    // Adjacent swap → full image (z-order changes)
     cumulative += w_adjacent_swap;
     if r < cumulative && c >= 2u {
         let ai = rand_u32(rng, c);
@@ -324,12 +369,13 @@ fn single_mutate_offspring(rng: ptr<function, vec4<u32>>, oid: u32, count: ptr<f
         let tmp = working_states[oid].polygons[ai];
         working_states[oid].polygons[ai] = working_states[oid].polygons[aj];
         working_states[oid].polygons[aj] = tmp;
-        return;
+        return full_image_bbox();
     }
 
-    if c == 0u { return; }
+    if c == 0u { return full_image_bbox(); }
     let pi = rand_u32(rng, c);
     var poly = working_states[oid].polygons[pi];
+    let old_bbox = polygon_bbox_pixels(poly, w, h);
     var color = unpack_color(poly);
     var v0 = unpack_vertex(poly.data.y);
     var v1 = unpack_vertex(poly.data.z);
@@ -410,6 +456,8 @@ fn single_mutate_offspring(rng: ptr<function, vec4<u32>>, oid: u32, count: ptr<f
     // Repack and write back
     poly.data = vec4<u32>(pack_color(color), pack_vertex(v0), pack_vertex(v1), pack_vertex(v2));
     working_states[oid].polygons[pi] = poly;
+    // For per-polygon mutations (vertex/color changes), dirty region is union of old and new bbox
+    return merge_bbox(old_bbox, polygon_bbox_pixels(poly, w, h));
 }
 
 @compute @workgroup_size(64, 1, 1)
@@ -483,6 +531,9 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
         }
 
         // Save RNG to offspring slot
+        if params.incremental_eval == 1u {
+            write_dirty_bbox(offspring_id, full_image_bbox());
+        }
         working_states[offspring_id].rng_state = rng;
         return;
     }
@@ -504,7 +555,10 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
     var count = working_states[offspring_id].polygon_count;
 
     if params.single_mutation_mode == 1u {
-        single_mutate_offspring(&rng, offspring_id, &count, mutation_scale);
+        let dirty_bbox = single_mutate_offspring(&rng, offspring_id, &count, mutation_scale);
+        if params.incremental_eval == 1u {
+            write_dirty_bbox(offspring_id, dirty_bbox);
+        }
         working_states[offspring_id].rng_state = rng;
         return;
     }
@@ -729,6 +783,11 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
             }
             working_states[offspring_id].polygons[target_idx] = poly;
         }
+    }
+
+    // Multi-mutation mode always dirties the full image
+    if params.incremental_eval == 1u {
+        write_dirty_bbox(offspring_id, full_image_bbox());
     }
 
     // Save per-offspring RNG state

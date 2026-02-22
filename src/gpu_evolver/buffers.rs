@@ -77,7 +77,7 @@ pub struct GpuParams {
     // vec4[6] — crossover params
     pub spatial_crossover_weight: f32,
     pub tournament_size: u32,
-    pub _pad1: u32,
+    pub incremental_eval: u32,
     pub tile_culling: u32,
 
     // vec4[7] — chain count + lambda + adaptive mutation
@@ -130,7 +130,7 @@ pub fn gpu_params_from(mp: &MutationParams, w: u32, h: u32, chain_count: u32) ->
         crossover_prob: mp.crossover_prob,
         spatial_crossover_weight: mp.spatial_crossover_weight,
         tournament_size: mp.tournament_size,
-        _pad1: 0,
+        incremental_eval: if mp.incremental_eval { 1 } else { 0 },
         tile_culling: if mp.tile_culling { 1 } else { 0 },
         chain_count_param: chain_count,
         single_mutation_mode: if mp.single_mutation_mode { 1 } else { 0 },

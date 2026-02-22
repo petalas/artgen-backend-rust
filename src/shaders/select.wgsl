@@ -48,7 +48,7 @@ struct Params {
     // Crossover params
     spatial_crossover_weight: f32,
     tournament_size: u32,
-    _pad1: u32,
+    incremental_eval: u32,
     tile_culling: u32,
 
     // Chain count + lambda + padding
@@ -75,6 +75,8 @@ struct ControlFlags {
 @group(0) @binding(3) var<storage, read_write> control:            ControlFlags;
 var<immediate>                                 params:             Params;
 @group(0) @binding(4) var<storage, read_write> fitness_packed:     array<u32>;
+@group(0) @binding(5) var<storage, read_write> chain_framebuffers: array<u32>;
+@group(0) @binding(6) var<storage, read_write> chain_total_errors: array<atomic<u32>>;
 
 // Workgroup-shared variables for communicating decisions from thread 0 to all threads
 var<workgroup> shared_accept: u32;
@@ -85,6 +87,7 @@ var<workgroup> shared_best_offspring_id: u32;
 // Each entry holds (error, local_offspring_index) packed so min on error also selects the index
 var<workgroup> reduction_err: array<u32, 64>;
 var<workgroup> reduction_idx: array<u32, 64>;
+var<workgroup> shared_accepted_total_error: u32;  // for incremental eval
 
 /// Compute fitness from total error and polygon count.
 fn compute_fitness(total_error: u32, polygon_count: u32) -> f32 {
@@ -111,12 +114,25 @@ fn select_main(@builtin(global_invocation_id) gid: vec3<u32>,
     // --- Parallel min-reduction to find best offspring among λ candidates ---
     let lambda = params.lambda;
 
+    let incremental = params.incremental_eval == 1u;
+
     // Phase 1: Each thread loads its error value (or sentinel if beyond lambda)
     // Threads 0..lambda-1 each read one error accumulator via atomicExchange (resets to 0)
     // Threads lambda..63 load MAX_U32 sentinel so they lose all comparisons
+    // Error accumulators are stride-2: [new_error, old_error] per offspring
     if local_id < lambda {
         let oid = chain_id * lambda + local_id;
-        reduction_err[local_id] = atomicExchange(&error_accumulators[oid], 0u);
+        let new_err = atomicExchange(&error_accumulators[oid * 2u], 0u);
+        let old_err = atomicExchange(&error_accumulators[oid * 2u + 1u], 0u);
+        if incremental {
+            // final_error = parent_total - old_dirty + new_dirty
+            let parent_total = atomicLoad(&chain_total_errors[chain_id]);
+            // Saturating subtraction to avoid underflow
+            let base = select(parent_total - old_err, 0u, old_err > parent_total);
+            reduction_err[local_id] = base + new_err;
+        } else {
+            reduction_err[local_id] = new_err;
+        }
         reduction_idx[local_id] = local_id;
     } else {
         reduction_err[local_id] = 0xFFFFFFFFu;
@@ -150,8 +166,17 @@ fn select_main(@builtin(global_invocation_id) gid: vec3<u32>,
         let fitness_bits = bitcast<u32>(fitness);
 
         // Compare against chain's current best
-        let current_fitness_bits = chain_states[chain_id].fitness_bits;
-        let current_fitness = bitcast<f32>(current_fitness_bits);
+        // When incremental eval is on, recompute parent fitness from chain_total_errors
+        // (quantized precision) so it's consistent with offspring error computation.
+        // Otherwise the parent retains a stale fitness from float-precision error.
+        var current_fitness: f32;
+        if incremental {
+            let parent_error = atomicLoad(&chain_total_errors[chain_id]);
+            current_fitness = compute_fitness(parent_error, chain_states[chain_id].polygon_count);
+            chain_states[chain_id].fitness_bits = bitcast<u32>(current_fitness);
+        } else {
+            current_fitness = bitcast<f32>(chain_states[chain_id].fitness_bits);
+        }
 
         // Accept if strictly better, or with 50% probability if equal (plateau traversal)
         // Use the best offspring's RNG for neutral acceptance
@@ -166,6 +191,11 @@ fn select_main(@builtin(global_invocation_id) gid: vec3<u32>,
             shared_accept = 1u;
             shared_copy_count = working_states[best_offspring_id].polygon_count;
             shared_best_offspring_id = best_offspring_id;
+
+            // Incremental eval: store accepted total error
+            if incremental {
+                shared_accepted_total_error = best_error;
+            }
 
             // Adaptive mutation scale: only update when enabled
             if params.adaptive_mutation == 1u {
@@ -238,6 +268,15 @@ fn select_main(@builtin(global_invocation_id) gid: vec3<u32>,
         }
         if write_idx < count && write_idx >= params.min_polygons {
             chain_states[chain_id].polygon_count = write_idx;
+        }
+    }
+
+    workgroupBarrier();
+
+    // --- Incremental eval: update total error on acceptance ---
+    if incremental && shared_accept == 1u {
+        if local_id == 0u {
+            atomicStore(&chain_total_errors[chain_id], shared_accepted_total_error);
         }
     }
 }

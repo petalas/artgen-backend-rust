@@ -127,6 +127,7 @@ fn auto_label(params: &MutationParams, resolution: u32) -> String {
     let lambda_str = if params.lambda > 1 { format!("-{}\u{03BB}", params.lambda) } else { String::new() };
     let adaptive_str = if params.adaptive_mutation { "-adaptive" } else { "" };
     let tile_str = if params.tile_culling { "-tiled" } else { "" };
+    let incr_str = if params.incremental_eval { "-incr" } else { "" };
     let defaults = MutationParams::default();
     let wg_str = format!("-wg{}x{}", params.rasterize_wg[0], params.rasterize_wg[1]);
     let batch_str = if params.gpu_batch_iters != defaults.gpu_batch_iters {
@@ -135,7 +136,7 @@ fn auto_label(params: &MutationParams, resolution: u32) -> String {
         String::new()
     };
     let res_str = format!("-{}px", resolution);
-    format!("{}c{}-{}{}{}{}{}{}", params.chain_count, lambda_str, mode, adaptive_str, tile_str, wg_str, batch_str, res_str)
+    format!("{}c{}-{}{}{}{}{}{}{}", params.chain_count, lambda_str, mode, adaptive_str, tile_str, incr_str, wg_str, batch_str, res_str)
 }
 
 fn deduplicate_label(base: &str, state: &ViewerState) -> String {
@@ -1050,6 +1051,7 @@ fn params_detail_view(p: &MutationParams, resolution: u32) -> impl IntoView {
                 {pv("Mode", mode_str.to_string(), mode_str != d_mode_str)}
                 {pv("Adaptive", if p.adaptive_mutation { "on" } else { "off" }.to_string(), p.adaptive_mutation != d.adaptive_mutation)}
                 {pv("Tiled", if p.tile_culling { "on" } else { "off" }.to_string(), p.tile_culling != d.tile_culling)}
+                {pv("Incr", if p.incremental_eval { "on" } else { "off" }.to_string(), p.incremental_eval != d.incremental_eval)}
                 {pv("Chains", p.chain_count.to_string(), p.chain_count != d.chain_count)}
                 {pv("Lambda", p.lambda.to_string(), p.lambda != d.lambda)}
                 {pv("Batch", p.gpu_batch_iters.to_string(), p.gpu_batch_iters != d.gpu_batch_iters)}

@@ -73,6 +73,12 @@ pub struct MutationParams {
     // and the rasterize shader only processes polygons in its tile's list.
     #[serde(default)]
     pub tile_culling: bool,
+
+    // Incremental evaluation: cache the rasterized framebuffer per chain and only
+    // re-rasterize the dirty region (bounding box of the changed polygon).
+    // Only effective in single_mutation_mode.
+    #[serde(default)]
+    pub incremental_eval: bool,
 }
 
 impl MutationParams {
@@ -161,6 +167,7 @@ impl Default for MutationParams {
             rasterize_wg: [settings::RASTERIZE_WG_X_DEFAULT, settings::RASTERIZE_WG_Y_DEFAULT],
             gpu_batch_iters: settings::GPU_DEFAULT_BATCH_ITERS,
             tile_culling: false,
+            incremental_eval: false,
         }
     }
 }

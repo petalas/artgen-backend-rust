@@ -28,11 +28,16 @@ pub struct GpuPipeline {
     pub tile_data_buf: Buffer,
     pub tile_counts_buf: Buffer,
 
+    // Incremental evaluation buffers
+    pub chain_framebuffers_buf: Buffer,
+    pub chain_total_errors_buf: Buffer,
+
     // Compute pipelines
     pub mutate_pipeline: ComputePipeline,
     pub rasterize_error_pipeline: ComputePipeline,
     pub select_pipeline: ComputePipeline,
     pub bin_polygons_pipeline: ComputePipeline,
+    pub init_framebuffers_pipeline: ComputePipeline,
 
     // Rasterize pipeline recreation support — stored for creating new pipeline variants
     rasterize_error_shader: ShaderModule,
@@ -40,6 +45,9 @@ pub struct GpuPipeline {
 
     // Bin polygons pipeline recreation support (tile size must match rasterize WG)
     bin_polygons_pipeline_layout: PipelineLayout,
+
+    // Init framebuffers pipeline recreation support
+    init_framebuffers_pipeline_layout: PipelineLayout,
 
     // Pipeline cache — accelerates pipeline creation on subsequent runs (Vulkan only)
     pipeline_cache: PipelineCache,
@@ -50,6 +58,7 @@ pub struct GpuPipeline {
     pub rasterize_error_bind_group: BindGroup,
     pub select_bind_group: BindGroup,
     pub bin_polygons_bind_group: BindGroup,
+    pub init_framebuffers_bind_group: BindGroup,
 
     // Timestamp profiling
     pub timestamp_query_set: QuerySet,
@@ -142,7 +151,7 @@ impl GpuPipeline {
             max_compute_workgroups_per_dimension: 65535,
             max_compute_invocations_per_workgroup: 512,
             max_compute_workgroup_size_x: 512, // 1D workgroup layout needs up to 512 in x (for 32x16 tile)
-            max_storage_buffers_per_shader_stage: 5, // rasterize now uses 5 storage bindings (working_states, error_accum, tile_data, tile_counts + texture)
+            max_storage_buffers_per_shader_stage: 7, // select uses 7 bindings (chain_states, working_states, error_accum, control, fitness, chain_framebuffers, chain_total_errors)
             max_immediate_size: std::mem::size_of::<GpuParams>() as u32, // 128 bytes — Vulkan minimum guarantee
             ..Limits::downlevel_defaults()
         };
@@ -193,7 +202,7 @@ impl GpuPipeline {
         let offspring_capacity = ((max_ssbo as usize) / GPU_DRAWING_STATE_SIZE)
             .min(chain_count as usize * max_lambda);
         let working_states_size = offspring_capacity * GPU_DRAWING_STATE_SIZE;
-        let error_accumulators_size = offspring_capacity * 4; // u32 per offspring
+        let error_accumulators_size = offspring_capacity * 8; // 2x u32 per offspring (stride-2: new error + old error for incremental eval)
 
         // --- Create buffers ---
 
@@ -355,6 +364,37 @@ impl GpuPipeline {
             offspring_capacity,
         );
 
+        // --- Incremental evaluation buffers ---
+        // Chain framebuffers: cached RGBA per chain (chain_count * W * H * 4 bytes)
+        // Clamp to device limits — fewer chains may be usable for incremental eval
+        let pixels_per_chain = (image_width as u64) * (image_height as u64);
+        let chain_framebuffers_ideal = (chain_count as u64) * pixels_per_chain * 4;
+        let ssbo_limit = device.limits().max_storage_buffer_binding_size as u64;
+        let chain_framebuffers_size = chain_framebuffers_ideal.min(device_max).min(ssbo_limit);
+        let chain_framebuffers_buf = device.create_buffer(&BufferDescriptor {
+            label: Some("chain_framebuffers"),
+            size: chain_framebuffers_size,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // Chain total errors: raw u32 error sum per chain
+        let chain_total_errors_size = (chain_count as u64) * 4;
+        let chain_total_errors_buf = device.create_buffer(&BufferDescriptor {
+            label: Some("chain_total_errors"),
+            size: chain_total_errors_size,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let max_incr_chains = chain_framebuffers_size / (pixels_per_chain * 4);
+        println!(
+            "Incremental eval buffers allocated: framebuffers {:.1} MB ({} chains max), total_errors {} bytes",
+            chain_framebuffers_size as f64 / (1024.0 * 1024.0),
+            max_incr_chains,
+            chain_total_errors_size,
+        );
+
         // --- Timestamp query profiling ---
         let timestamp_query_set = device.create_query_set(&QuerySetDescriptor {
             label: Some("timestamp_queries"),
@@ -421,7 +461,7 @@ impl GpuPipeline {
         });
 
         // Rasterize+Error: working_states(read), reference_image(texture), error_accumulators(rw),
-        //                   tile_data(read), tile_counts(read); params via push constants
+        //                   tile_data(read), tile_counts(read), chain_states(read); params via push constants
         let rasterize_error_bgl = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some("rasterize_error_bgl"),
             entries: &[
@@ -475,6 +515,16 @@ impl GpuPipeline {
                     },
                     count: None,
                 },
+                BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: NonZeroU64::new(GPU_DRAWING_STATE_SIZE as u64),
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -515,7 +565,8 @@ impl GpuPipeline {
             ],
         });
 
-        // Select: chain_states(rw), working_states(read), error_accumulators(rw), control(rw), fitness_packed(rw); params via push constants
+        // Select: chain_states(rw), working_states(read), error_accumulators(rw), control(rw), fitness_packed(rw),
+        //         chain_framebuffers(rw), chain_total_errors(rw); params via push constants
         let select_bgl = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some("select_bgl"),
             entries: &[
@@ -561,6 +612,26 @@ impl GpuPipeline {
                 },
                 BindGroupLayoutEntry {
                     binding: 4,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: NonZeroU64::new(std::mem::size_of::<u32>() as u64),
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: NonZeroU64::new(std::mem::size_of::<u32>() as u64),
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 6,
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Storage { read_only: false },
@@ -627,6 +698,64 @@ impl GpuPipeline {
             cache: Some(&pipeline_cache),
         });
 
+        // Init framebuffers: chain_states(read), reference(texture), chain_framebuffers(rw), chain_total_errors(rw)
+        let init_framebuffers_bgl = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("init_framebuffers_bgl"),
+            entries: &[
+                BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: NonZeroU64::new(GPU_DRAWING_STATE_SIZE as u64),
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Texture {
+                        sample_type: TextureSampleType::Float { filterable: false },
+                        view_dimension: TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: NonZeroU64::new(std::mem::size_of::<u32>() as u64),
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: NonZeroU64::new(std::mem::size_of::<u32>() as u64),
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let init_framebuffers_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+            label: Some("init_framebuffers_layout"),
+            bind_group_layouts: &[&init_framebuffers_bgl],
+            immediate_size,
+        });
+        let init_framebuffers_pipeline = create_init_framebuffers_pipeline(
+            &device,
+            &init_framebuffers_pipeline_layout,
+            rasterize_wg,
+            &pipeline_cache,
+        );
+
         // --- Bind groups ---
         let mutate_bind_group = device.create_bind_group(&BindGroupDescriptor {
             label: Some("mutate_bg"),
@@ -646,6 +775,7 @@ impl GpuPipeline {
                 BindGroupEntry { binding: 2, resource: error_accumulators_buf.as_entire_binding() },
                 BindGroupEntry { binding: 3, resource: tile_data_buf.as_entire_binding() },
                 BindGroupEntry { binding: 4, resource: tile_counts_buf.as_entire_binding() },
+                BindGroupEntry { binding: 5, resource: chain_states_buf.as_entire_binding() },
             ],
         });
 
@@ -668,6 +798,19 @@ impl GpuPipeline {
                 BindGroupEntry { binding: 2, resource: error_accumulators_buf.as_entire_binding() },
                 BindGroupEntry { binding: 3, resource: control_flags_buf.as_entire_binding() },
                 BindGroupEntry { binding: 4, resource: fitness_packed_buf.as_entire_binding() },
+                BindGroupEntry { binding: 5, resource: chain_framebuffers_buf.as_entire_binding() },
+                BindGroupEntry { binding: 6, resource: chain_total_errors_buf.as_entire_binding() },
+            ],
+        });
+
+        let init_framebuffers_bind_group = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("init_framebuffers_bg"),
+            layout: &init_framebuffers_bgl,
+            entries: &[
+                BindGroupEntry { binding: 0, resource: chain_states_buf.as_entire_binding() },
+                BindGroupEntry { binding: 1, resource: BindingResource::TextureView(&reference_view) },
+                BindGroupEntry { binding: 2, resource: chain_framebuffers_buf.as_entire_binding() },
+                BindGroupEntry { binding: 3, resource: chain_total_errors_buf.as_entire_binding() },
             ],
         });
 
@@ -686,13 +829,17 @@ impl GpuPipeline {
             fitness_staging_bufs,
             tile_data_buf,
             tile_counts_buf,
+            chain_framebuffers_buf,
+            chain_total_errors_buf,
             mutate_pipeline,
             rasterize_error_pipeline,
             select_pipeline,
             bin_polygons_pipeline,
+            init_framebuffers_pipeline,
             rasterize_error_shader,
             rasterize_error_pipeline_layout,
             bin_polygons_pipeline_layout,
+            init_framebuffers_pipeline_layout,
             pipeline_cache,
             pipeline_cache_path: cache_path,
             timestamp_query_set,
@@ -703,6 +850,7 @@ impl GpuPipeline {
             rasterize_error_bind_group,
             select_bind_group,
             bin_polygons_bind_group,
+            init_framebuffers_bind_group,
             chain_count,
             offspring_capacity: offspring_capacity as u32,
             image_width,
@@ -735,6 +883,13 @@ impl GpuPipeline {
         self.bin_polygons_pipeline = create_bin_polygons_pipeline(
             &self.device,
             &self.bin_polygons_pipeline_layout,
+            wg,
+            &self.pipeline_cache,
+        );
+
+        self.init_framebuffers_pipeline = create_init_framebuffers_pipeline(
+            &self.device,
+            &self.init_framebuffers_pipeline_layout,
             wg,
             &self.pipeline_cache,
         );
@@ -814,6 +969,32 @@ fn create_bin_polygons_pipeline(
 
     device.create_compute_pipeline(&ComputePipelineDescriptor {
         label: Some("bin_polygons_pipeline"),
+        layout: Some(layout),
+        module: &shader,
+        entry_point: Some("main"),
+        compilation_options: Default::default(),
+        cache: Some(cache),
+    })
+}
+
+/// Create an init_framebuffers compute pipeline with the given workgroup size.
+fn create_init_framebuffers_pipeline(
+    device: &Device,
+    layout: &PipelineLayout,
+    wg: [u32; 2],
+    cache: &PipelineCache,
+) -> ComputePipeline {
+    let source = include_str!("../shaders/init_framebuffers.wgsl")
+        .replace("const WG_X: u32 = 16;", &format!("const WG_X: u32 = {};", wg[0]))
+        .replace("const WG_Y: u32 = 16;", &format!("const WG_Y: u32 = {};", wg[1]));
+
+    let shader = device.create_shader_module(ShaderModuleDescriptor {
+        label: Some("init_framebuffers_shader"),
+        source: ShaderSource::Wgsl(source.into()),
+    });
+
+    device.create_compute_pipeline(&ComputePipelineDescriptor {
+        label: Some("init_framebuffers_pipeline"),
         layout: Some(layout),
         module: &shader,
         entry_point: Some("main"),

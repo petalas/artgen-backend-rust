@@ -82,6 +82,7 @@ pub struct GpuEvolver {
     staging_idx: usize,      // alternates 0/1 for double-buffered staging
     pending_batch: Option<PendingBatch>,
     pending_map_receivers: Option<PendingMapReceivers>,
+    framebuffers_initialized: bool, // incremental eval: has init_framebuffers been dispatched?
 }
 
 impl GpuEvolver {
@@ -152,7 +153,43 @@ impl GpuEvolver {
             staging_idx: 0,
             pending_batch: None,
             pending_map_receivers: None,
+            framebuffers_initialized: false,
         }
+    }
+
+    /// Dispatch the init_framebuffers shader: full rasterize from chain_states → framebuffers + total errors.
+    /// Blocks until the GPU work completes.
+    fn dispatch_init_framebuffers(&mut self, active_chains: u32) {
+        let p = &self.pipeline;
+        let rwg = p.rasterize_wg;
+        let wg_x = p.image_width.div_ceil(rwg[0]);
+        let wg_y = p.image_height.div_ceil(rwg[1]);
+
+        // Zero chain_total_errors before init
+        let zeros = vec![0u8; p.chain_count as usize * 4];
+        p.queue.write_buffer(&p.chain_total_errors_buf, 0, &zeros);
+
+        let params = default_gpu_params(p.image_width, p.image_height, active_chains);
+        let params_bytes: &[u8] = bytemuck::bytes_of(&params);
+
+        let mut encoder = p.device.create_command_encoder(&CommandEncoderDescriptor {
+            label: Some("init_framebuffers"),
+        });
+        {
+            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                label: Some("init_framebuffers"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&p.init_framebuffers_pipeline);
+            pass.set_bind_group(0, &p.init_framebuffers_bind_group, &[]);
+            pass.set_immediates(0, params_bytes);
+            pass.dispatch_workgroups(wg_x, wg_y, active_chains);
+        }
+        p.queue.submit(std::iter::once(encoder.finish()));
+        p.device.poll(PollType::Wait { submission_index: None, timeout: None }).unwrap();
+
+        self.framebuffers_initialized = true;
+        println!("Initialized chain framebuffers ({} chains)", active_chains);
     }
 
     /// Run a batch of N iterations on the GPU using double-buffered staging.
@@ -168,6 +205,14 @@ impl GpuEvolver {
 
         // Check if rasterize workgroup size needs to change (between batches)
         self.pipeline.set_rasterize_wg(mutation_params.rasterize_wg);
+
+        // Incremental eval: initialize framebuffers if needed
+        let active_preview = mutation_params.chain_count.min(self.pipeline.chain_count);
+        if mutation_params.incremental_eval && !self.framebuffers_initialized {
+            self.dispatch_init_framebuffers(active_preview);
+        } else if !mutation_params.incremental_eval {
+            self.framebuffers_initialized = false;
+        }
 
         let p = &self.pipeline;
         let iterations = mutation_params.gpu_batch_iters.max(1);
@@ -596,14 +641,17 @@ impl GpuEvolver {
             .queue
             .write_buffer(&self.pipeline.chain_states_buf, 0, &bytes);
 
-        // Reset error accumulators so the first batch after reinit starts clean
-        let zeros = vec![0u8; self.pipeline.offspring_capacity as usize * 4];
+        // Reset error accumulators so the first batch after reinit starts clean (stride-2)
+        let zeros = vec![0u8; self.pipeline.offspring_capacity as usize * 8];
         self.pipeline
             .queue
             .write_buffer(&self.pipeline.error_accumulators_buf, 0, &zeros);
 
         // Reinitialize offspring RNG states
         init_offspring_rng(&self.pipeline, self.iteration);
+
+        // Reset framebuffers so they get re-initialized on next incremental_eval batch
+        self.framebuffers_initialized = false;
 
         self.iteration = 0;
         self.total_evaluations = 0;
@@ -630,8 +678,8 @@ impl GpuEvolver {
         let state_size = GPU_DRAWING_STATE_SIZE as u64;
         let copy_bytes = active as u64 * state_size;
 
-        // Zero error accumulators for the active chains
-        let zeros = vec![0u8; active as usize * 4];
+        // Zero error accumulators for the active chains (stride-2)
+        let zeros = vec![0u8; active as usize * 8];
         p.queue.write_buffer(&p.error_accumulators_buf, 0, &zeros);
 
         // Copy chain_states → working_states (rasterize_error reads working_states)
@@ -663,9 +711,10 @@ impl GpuEvolver {
             pass.dispatch_workgroups(wg_x, wg_y, active);
         }
 
-        // Staging buffer: errors (active * 4 bytes) + polygon_counts (active * 4 bytes)
-        let errors_size = active as u64 * 4;
-        let staging_size = errors_size * 2;
+        // Staging buffer: errors (active * 8 bytes, stride-2) + polygon_counts (active * 4 bytes)
+        let errors_size = active as u64 * 8; // stride-2: 2 u32s per offspring
+        let polygon_counts_size = active as u64 * 4;
+        let staging_size = errors_size + polygon_counts_size;
         let staging = p.device.create_buffer(&BufferDescriptor {
             label: Some("error_readback_staging"),
             size: staging_size,
@@ -699,8 +748,10 @@ impl GpuEvolver {
 
         let data = slice.get_mapped_range();
         let all_u32s: &[u32] = bytemuck::cast_slice(&data);
-        let errors = &all_u32s[..active as usize];
-        let polygon_counts = &all_u32s[active as usize..];
+        // Errors are at stride-2 (slot 0 = new error, slot 1 = old error); pick slot 0 for each
+        let error_u32s = &all_u32s[..active as usize * 2];
+        let errors: Vec<u32> = (0..active as usize).map(|i| error_u32s[i * 2]).collect();
+        let polygon_counts = &all_u32s[active as usize * 2..];
 
         // Compute fitness from errors with point penalty (matching select.wgsl's compute_fitness)
         let max_error = crate::settings::GPU_MAX_ERROR_PER_PIXEL
@@ -709,7 +760,7 @@ impl GpuEvolver {
 
         let mut best_fitness = 0.0f32;
         for i in 0..active as usize {
-            let total_error = errors[i];
+            let total_error = errors[i]; // already extracted from stride-2
             let polygon_count = polygon_counts[i];
             let mut fitness = 100.0 * (1.0 - total_error as f32 / max_error);
             let num_points = polygon_count * 3;
@@ -859,7 +910,7 @@ fn estimate_gpu_memory(chain_count: u32, offspring_capacity: u32, w: u32, h: u32
     let chain_states = k * GPU_DRAWING_STATE_SIZE;
     let working_states = oc * GPU_DRAWING_STATE_SIZE;
     let reference = pixels * 4;
-    let error_accumulators = oc * 4;
+    let error_accumulators = oc * 8; // stride-2: 2 u32s per offspring
     let control = 16;
     let params = std::mem::size_of::<GpuParams>();
     // Double-buffered staging: 2x control (16B each) + 2x fitness (k*4 each) + 2x timestamp (64B each) + readback
@@ -869,5 +920,8 @@ fn estimate_gpu_memory(chain_count: u32, offspring_capacity: u32, w: u32, h: u32
     let tile_max_polys = crate::settings::TILE_MAX_POLYS as usize;
     let tile_data = oc * max_num_tiles * tile_max_polys * 4;
     let tile_counts = oc * max_num_tiles * 4;
-    chain_states + working_states + reference + error_accumulators + control + params + staging + tile_data + tile_counts
+    // Incremental eval buffers
+    let chain_framebuffers = k * pixels * 4;
+    let chain_total_errors = k * 4;
+    chain_states + working_states + reference + error_accumulators + control + params + staging + tile_data + tile_counts + chain_framebuffers + chain_total_errors
 }

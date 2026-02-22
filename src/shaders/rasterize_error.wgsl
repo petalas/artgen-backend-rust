@@ -79,7 +79,7 @@ struct Params {
     // Crossover params
     spatial_crossover_weight: f32,
     tournament_size: u32,
-    _pad1: u32,
+    incremental_eval: u32,
     tile_culling: u32,
 
     // Chain count + lambda + padding
@@ -94,6 +94,7 @@ struct Params {
 @group(0) @binding(2) var<storage, read_write> error_accumulators: array<atomic<u32>>;
 @group(0) @binding(3) var<storage, read>       tile_data:          array<u32>;
 @group(0) @binding(4) var<storage, read>       tile_counts_buf:    array<u32>;
+@group(0) @binding(5) var<storage, read>       chain_states:       array<DrawingState>;
 var<immediate>                                 params:             Params;
 
 // Shared memory arrays sized to thread count.
@@ -101,6 +102,13 @@ var<immediate>                                 params:             Params;
 // shared_errors: one u32 per subgroup for cross-subgroup reduction (max 256/4 = 64 subgroups)
 var<workgroup> shared_polys: array<Polygon, 1536>;   // max tile cap (512*3) — only TILE_CAP entries used
 var<workgroup> shared_errors: array<u32, 128>;      // max subgroups — only ceil(THREAD_COUNT/sg_size) used
+var<workgroup> shared_errors_old: array<u32, 128>;  // old errors for incremental eval
+var<workgroup> shared_skip_tile: u32;               // set by thread 0 if tile is outside dirty bbox
+// Dirty bbox unpacked from offspring header (set by thread 0, read after barrier)
+var<workgroup> shared_dirty_min_x: u32;
+var<workgroup> shared_dirty_min_y: u32;
+var<workgroup> shared_dirty_max_x: u32;
+var<workgroup> shared_dirty_max_y: u32;
 
 // Half-space edge function: positive if point (px,py) is on the left side of edge (ax,ay)->(bx,by)
 fn edge_fn(ax: f32, ay: f32, bx: f32, by: f32, px: f32, py: f32) -> f32 {
@@ -163,8 +171,44 @@ fn main(
 
     let w = params.image_width;
     let h = params.image_height;
+    let lambda = params.lambda;
+    let incremental = params.incremental_eval == 1u;
+
+    // --- Incremental eval: dirty bbox tile skip ---
+    // Thread 0 reads the dirty bbox from offspring header and checks if this tile overlaps.
+    // Parent chain for this offspring: chain_id / lambda
+    let parent_chain = chain_id / lambda;
+
+    if incremental && local_idx == 0u {
+        // Unpack dirty bbox from offspring header
+        let bbox_lo = working_states[chain_id].fitness_bits;
+        let bbox_hi = working_states[chain_id].stagnation_counter;
+        shared_dirty_min_x = bbox_lo & 0xFFFFu;
+        shared_dirty_min_y = (bbox_lo >> 16u) & 0xFFFFu;
+        shared_dirty_max_x = bbox_hi & 0xFFFFu;
+        shared_dirty_max_y = (bbox_hi >> 16u) & 0xFFFFu;
+
+        // This tile's pixel range
+        let tile_min_x = wid.x * WG_X;
+        let tile_min_y = wid.y * WG_Y;
+        let tile_max_x = min(tile_min_x + WG_X, w);
+        let tile_max_y = min(tile_min_y + WG_Y, h);
+
+        // Check overlap: skip if tile and dirty bbox don't intersect
+        let no_overlap = tile_max_x <= shared_dirty_min_x || tile_min_x >= shared_dirty_max_x ||
+                         tile_max_y <= shared_dirty_min_y || tile_min_y >= shared_dirty_max_y;
+        shared_skip_tile = select(0u, 1u, no_overlap);
+    }
+
+    if incremental {
+        workgroupBarrier();
+        if shared_skip_tile == 1u {
+            return;
+        }
+    }
 
     var pixel_error = 0u;
+    var pixel_error_old = 0u;
 
     if px < w && py < h {
         let chain_count = arrayLength(&working_states);
@@ -172,6 +216,29 @@ fn main(
             // Pixel center in normalized coordinates
             let fx = (f32(px) + 0.5) / f32(w);
             let fy = (f32(py) + 0.5) / f32(h);
+
+            // Load reference pixel from texture (Rgba8Unorm: automatically [0,1] float)
+            let ref_color = textureLoad(reference_image, vec2<i32>(i32(px), i32(py)), 0);
+            let refr = ref_color.x * 255.0;
+            let refg = ref_color.y * 255.0;
+            let refb = ref_color.z * 255.0;
+
+            // --- Incremental: re-rasterize parent for old pixel error ---
+            // Uses chain_states (parent) instead of a u8 framebuffer to avoid
+            // quantization mismatch that causes error drift.
+            if incremental {
+                var old_r = 255.0;
+                var old_g = 255.0;
+                var old_b = 255.0;
+                let parent_poly_count = chain_states[parent_chain].polygon_count;
+                for (var pi = 0u; pi < parent_poly_count; pi++) {
+                    rasterize_blend(chain_states[parent_chain].polygons[pi], fx, fy, &old_r, &old_g, &old_b);
+                }
+                let old_ri = clamp(old_r, 0.0, 255.0);
+                let old_gi = clamp(old_g, 0.0, 255.0);
+                let old_bi = clamp(old_b, 0.0, 255.0);
+                pixel_error_old = u32(abs(old_ri - refr) + abs(old_gi - refg) + abs(old_bi - refb));
+            }
 
             // Start with white background, accumulate in registers
             var r = 255.0;
@@ -249,12 +316,6 @@ fn main(
             let gi = clamp(g, 0.0, 255.0);
             let bi = clamp(b, 0.0, 255.0);
 
-            // Load reference pixel from texture (Rgba8Unorm: automatically [0,1] float)
-            let ref_color = textureLoad(reference_image, vec2<i32>(i32(px), i32(py)), 0);
-            let refr = ref_color.x * 255.0;
-            let refg = ref_color.y * 255.0;
-            let refb = ref_color.z * 255.0;
-
             // L1 error: Manhattan distance in RGB space
             let dr = ri - refr;
             let dg = gi - refg;
@@ -265,22 +326,38 @@ fn main(
 
     // Subgroup-accelerated reduction: subgroupAdd within each warp/wave,
     // then thread 0 sums across subgroups via shared memory.
-    // Replaces 8-step LDS tree reduction (8 barriers) with 1 barrier.
     let sg_sum = subgroupAdd(pixel_error);
     let sg_idx = local_idx / sg_size;
 
     if sg_inv_id == 0u {
         shared_errors[sg_idx] = sg_sum;
     }
+
+    // Also reduce old errors for incremental eval
+    if incremental {
+        let sg_sum_old = subgroupAdd(pixel_error_old);
+        if sg_inv_id == 0u {
+            shared_errors_old[sg_idx] = sg_sum_old;
+        }
+    }
+
     workgroupBarrier();
 
-    // Thread 0 sums across subgroups and atomicAdds to chain's accumulator
+    // Thread 0 sums across subgroups and atomicAdds to chain's accumulator (stride-2)
     if local_idx == 0u {
         let num_subgroups = (THREAD_COUNT + sg_size - 1u) / sg_size;
         var total = 0u;
         for (var i = 0u; i < num_subgroups; i++) {
             total += shared_errors[i];
         }
-        atomicAdd(&error_accumulators[chain_id], total);
+        atomicAdd(&error_accumulators[chain_id * 2u], total);
+
+        if incremental {
+            var total_old = 0u;
+            for (var i = 0u; i < num_subgroups; i++) {
+                total_old += shared_errors_old[i];
+            }
+            atomicAdd(&error_accumulators[chain_id * 2u + 1u], total_old);
+        }
     }
 }
