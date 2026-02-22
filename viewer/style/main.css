@@ -22,7 +22,7 @@ body {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 12px 24px;
+    padding: 12px 12px;
     background: #fff;
     box-shadow: 0 2px 4px rgba(0, 0, 0, 0.08);
     z-index: 10;
@@ -128,8 +128,8 @@ body {
 /* Main Content */
 .main-content {
     flex: 1;
-    padding: 20px 24px;
-    max-width: 1200px;
+    padding: 20px 12px;
+    max-width: 1400px;
     margin: 0 auto;
     width: 100%;
 }
@@ -842,7 +842,7 @@ body {
 
 /* Benchmark Page */
 .benchmark-page {
-    max-width: 900px;
+    max-width: 1400px;
     margin: 0 auto;
 }
 

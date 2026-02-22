@@ -12,7 +12,7 @@ use crate::settings::{GPU_MAX_CHAIN_COUNT, GPU_DEFAULT_CHAIN_COUNT};
 
 use buffers::{
     gpu_params_from, default_gpu_params, drawing_to_gpu, gpu_to_drawing, ControlFlags,
-    GpuDrawingState, GpuParams, GPU_DRAWING_STATE_SIZE,
+    GpuDrawingState, GPU_DRAWING_STATE_SIZE,
 };
 use pipeline::GpuPipeline;
 
@@ -69,6 +69,7 @@ struct PendingMapReceivers {
     control_rx: std::sync::mpsc::Receiver<Result<(), BufferAsyncError>>,
     timestamp_rx: Option<std::sync::mpsc::Receiver<Result<(), BufferAsyncError>>>,
     fitness_rx: std::sync::mpsc::Receiver<Result<(), BufferAsyncError>>,
+    readback_rx: Option<std::sync::mpsc::Receiver<Result<(), BufferAsyncError>>>,
 }
 
 pub struct GpuEvolver {
@@ -84,6 +85,14 @@ pub struct GpuEvolver {
     pending_batch: Option<PendingBatch>,
     pending_map_receivers: Option<PendingMapReceivers>,
     framebuffers_initialized: bool, // incremental eval: has init_framebuffers been dispatched?
+    /// Chain index whose state needs to be copied to readback_staging_buf
+    /// in the next batch submission. Set when finish_pending_readback detects
+    /// a new best but defers the actual GPU copy to avoid a synchronous round-trip.
+    pending_best_chain: Option<u32>,
+    /// True when the current in-flight batch includes a copy of the best chain's
+    /// state to readback_staging_buf. The data will be read in the next
+    /// finish_pending_readback call.
+    deferred_best_readback: bool,
 }
 
 impl GpuEvolver {
@@ -134,7 +143,7 @@ impl GpuEvolver {
             pipeline.offspring_capacity,
             image_width,
             image_height,
-            estimate_gpu_memory(actual_max, pipeline.offspring_capacity, image_width, image_height) as f64 / (1024.0 * 1024.0),
+            gpu_memory_bytes(&pipeline) as f64 / (1024.0 * 1024.0),
             wg_x,
             wg_y,
             active_chains,
@@ -155,6 +164,8 @@ impl GpuEvolver {
             pending_batch: None,
             pending_map_receivers: None,
             framebuffers_initialized: false,
+            pending_best_chain: None,
+            deferred_best_readback: false,
         }
     }
 
@@ -445,6 +456,23 @@ impl GpuEvolver {
             fitness_size,
         );
 
+        // Piggyback deferred best-chain readback: if a previous batch detected a
+        // new global best, copy that chain's state to readback_staging_buf now
+        // instead of doing a separate synchronous GPU round-trip.
+        let has_deferred_readback = if let Some(chain_id) = self.pending_best_chain.take() {
+            let src_offset = chain_id as u64 * GPU_DRAWING_STATE_SIZE as u64;
+            encoder.copy_buffer_to_buffer(
+                &p.chain_states_buf,
+                src_offset,
+                &p.readback_staging_buf,
+                0,
+                GPU_DRAWING_STATE_SIZE as u64,
+            );
+            true
+        } else {
+            false
+        };
+
         // 5. Submit — GPU starts working on this batch IMMEDIATELY
         let submission_index = p.queue.submit(std::iter::once(encoder.finish()));
 
@@ -463,7 +491,8 @@ impl GpuEvolver {
 
         // 7. Issue map_async on staging set [write_idx] — starts the async map
         //    but don't poll yet (that happens during the NEXT run_batch call)
-        self.start_async_map(write_idx, collect_timestamps, active);
+        self.start_async_map(write_idx, collect_timestamps, active, has_deferred_readback);
+        self.deferred_best_readback = has_deferred_readback;
 
         // 8. Store pending batch info so next call can read results
         self.pending_batch = Some(PendingBatch {
@@ -479,7 +508,9 @@ impl GpuEvolver {
 
     /// Issue map_async on the staging buffers at the given index.
     /// Stores the receiver channels so finish_pending_readback can poll them.
-    fn start_async_map(&mut self, idx: usize, collect_timestamps: bool, active: u32) {
+    /// If `deferred_readback` is true, also issues map_async on readback_staging_buf
+    /// for the piggybacked best-chain copy.
+    fn start_async_map(&mut self, idx: usize, collect_timestamps: bool, active: u32, deferred_readback: bool) {
         let p = &self.pipeline;
 
         let control_slice = p.control_staging_bufs[idx].slice(..);
@@ -501,16 +532,31 @@ impl GpuEvolver {
 
         fitness_slice.map_async(MapMode::Read, move |r| { tx3.send(r).unwrap(); });
 
+        let rb_rx = if deferred_readback {
+            let readback_slice = p.readback_staging_buf.slice(..);
+            let (tx4, rx4) = std::sync::mpsc::channel();
+            readback_slice.map_async(MapMode::Read, move |r| { tx4.send(r).unwrap(); });
+            Some(rx4)
+        } else {
+            None
+        };
+
         self.pending_map_receivers = Some(PendingMapReceivers {
             control_rx: rx1,
             timestamp_rx: ts_rx,
             fitness_rx: rx3,
+            readback_rx: rb_rx,
         });
     }
 
     /// Poll the device, wait for all pending GPU work to complete, then read
     /// the mapped staging buffers from a previously submitted batch.
-    /// Returns `Some(Drawing)` if that batch found a new global best.
+    /// Returns `Some(Drawing)` if a deferred best-chain readback completed
+    /// (from the batch BEFORE this one).
+    ///
+    /// If this batch detected a new global best, the chain index is stored in
+    /// `pending_best_chain` for piggybacking onto the next batch's encoder —
+    /// the drawing data itself arrives one batch later.
     fn finish_pending_readback(&mut self, pending: &PendingBatch) -> Option<Drawing> {
         let receivers = self.pending_map_receivers.take()
             .expect("finish_pending_readback called without pending map receivers");
@@ -528,6 +574,24 @@ impl GpuEvolver {
             ts_rx.recv().unwrap().expect("Failed to map timestamp staging buffer");
         }
         receivers.fitness_rx.recv().unwrap().expect("Failed to map fitness staging buffer");
+
+        // Read deferred best-chain drawing if this batch included a readback copy
+        let deferred_drawing = if self.deferred_best_readback {
+            self.deferred_best_readback = false;
+            let readback_rx = receivers.readback_rx
+                .expect("deferred_best_readback set but no readback_rx");
+            readback_rx.recv().unwrap().expect("Failed to map readback staging buffer");
+
+            let slice = p.readback_staging_buf.slice(..);
+            let data = slice.get_mapped_range();
+            let state: &GpuDrawingState = bytemuck::from_bytes(&data);
+            let drawing = gpu_to_drawing(state);
+            drop(data);
+            p.readback_staging_buf.unmap();
+            Some(drawing)
+        } else {
+            None
+        };
 
         // Read control flags
         let control_slice = p.control_staging_bufs[idx].slice(..);
@@ -565,23 +629,41 @@ impl GpuEvolver {
         p.fitness_staging_bufs[idx].unmap();
 
         if flags.new_best_found != 0 {
+            // Record the best fitness immediately for accurate timing/benchmarks.
+            // The actual drawing data will be piggybacked onto the next batch.
             self.best_fitness_bits = flags.best_fitness_bits;
-            let drawing = self.readback_chain(flags.best_chain_id);
-            Some(drawing)
-        } else {
-            None
+
+            // If there was already a pending best chain (from a previous batch that
+            // we hadn't copied yet), the newer best supersedes it.
+            self.pending_best_chain = Some(flags.best_chain_id);
         }
+
+        deferred_drawing
     }
 
     /// Flush any pending batch results immediately. Call this before operations
     /// that need the GPU state to be fully resolved (e.g., reinit_chains).
-    /// Returns `Some(Drawing)` if the pending batch found a new global best.
+    /// Returns `Some(Drawing)` if any pending readback (deferred or in-flight)
+    /// produced a new global best.
     pub fn flush_pending(&mut self) -> Option<Drawing> {
-        if let Some(pending) = self.pending_batch.take() {
+        let batch_result = if let Some(pending) = self.pending_batch.take() {
             self.finish_pending_readback(&pending)
         } else {
             None
-        }
+        };
+
+        // If finish_pending_readback stored a new pending_best_chain (detected in
+        // the batch we just flushed) but there's no next batch to piggyback onto,
+        // fall back to synchronous readback so the data isn't lost.
+        let sync_result = if let Some(chain_id) = self.pending_best_chain.take() {
+            Some(self.readback_chain(chain_id))
+        } else {
+            None
+        };
+
+        // Prefer the synchronous result (more recent best) over the batch result
+        // (deferred from an earlier batch).
+        sync_result.or(batch_result)
     }
 
     pub fn readback_chain(&self, chain_id: u32) -> Drawing {
@@ -859,8 +941,7 @@ impl GpuEvolver {
     }
 
     pub fn estimated_memory_bytes(&self) -> u64 {
-        let p = &self.pipeline;
-        estimate_gpu_memory(p.chain_count, p.offspring_capacity, p.image_width, p.image_height) as u64
+        gpu_memory_bytes(&self.pipeline)
     }
 
     pub fn pass_timings(&self) -> &PassTimings {
@@ -932,6 +1013,31 @@ impl Drop for GpuEvolver {
     }
 }
 
+/// Sum actual allocated GPU buffer sizes.
+fn gpu_memory_bytes(p: &GpuPipeline) -> u64 {
+    p.chain_states_buf.size()
+        + p.working_states_buf.size()
+        + p.error_accumulators_buf.size()
+        + p.control_flags_buf.size()
+        + p.readback_staging_buf.size()
+        + p.multi_readback_staging_buf.size()
+        + p.eval_fitness_staging_buf.size()
+        + p.control_staging_bufs[0].size()
+        + p.control_staging_bufs[1].size()
+        + p.fitness_packed_buf.size()
+        + p.fitness_staging_bufs[0].size()
+        + p.fitness_staging_bufs[1].size()
+        + p.tile_data_buf.size()
+        + p.tile_counts_buf.size()
+        + p.chain_framebuffers_buf.size()
+        + p.chain_total_errors_buf.size()
+        + p.params_buf.size()
+        + p.timestamp_resolve_buf.size()
+        + p.timestamp_staging_bufs[0].size()
+        + p.timestamp_staging_bufs[1].size()
+        + (p.image_width as u64 * p.image_height as u64 * 4) // reference texture
+}
+
 /// Initialize offspring RNG states in the working_states buffer.
 /// Each offspring slot gets a unique persistent RNG seed.
 fn init_offspring_rng(pipeline: &GpuPipeline, iteration: u32) {
@@ -956,27 +1062,3 @@ fn init_offspring_rng(pipeline: &GpuPipeline, iteration: u32) {
     pipeline.queue.write_buffer(&pipeline.working_states_buf, 0, &bytes);
 }
 
-fn estimate_gpu_memory(chain_count: u32, offspring_capacity: u32, w: u32, h: u32) -> usize {
-    let k = chain_count as usize;
-    let oc = offspring_capacity as usize;
-    let pixels = (w * h) as usize;
-    let chain_states = k * GPU_DRAWING_STATE_SIZE;
-    let working_states = oc * GPU_DRAWING_STATE_SIZE;
-    let reference = pixels * 4;
-    let error_accumulators = oc * 8; // stride-2: 2 u32s per offspring
-    let control = 16;
-    let params = std::mem::size_of::<GpuParams>();
-    // Staging buffers: readback (1 state) + multi-readback (k states) + eval fitness (k*12)
-    //                + double-buffered: 2x control (16B) + 2x fitness (k*4) + 2x timestamp (64B)
-    let staging = GPU_DRAWING_STATE_SIZE + k * GPU_DRAWING_STATE_SIZE + k * 12
-        + 2 * 16 + 2 * (k * 4) + 2 * 64;
-    // Tile culling buffers (worst-case: 8x8 WG)
-    let max_num_tiles = ((w as usize + 7) / 8) * ((h as usize + 7) / 8);
-    let tile_max_polys = crate::settings::TILE_MAX_POLYS as usize;
-    let tile_data = oc * max_num_tiles * tile_max_polys * 4;
-    let tile_counts = oc * max_num_tiles * 4;
-    // Incremental eval buffers
-    let chain_framebuffers = k * pixels * 4;
-    let chain_total_errors = k * 4;
-    chain_states + working_states + reference + error_accumulators + control + params + staging + tile_data + tile_counts + chain_framebuffers + chain_total_errors
-}

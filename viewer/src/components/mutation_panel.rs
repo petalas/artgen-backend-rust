@@ -253,9 +253,9 @@ pub fn ParamsEditor(
         <div class="mutation-section">
             <div class="mutation-section-title">"Deltas"</div>
             <DeltaSlider params={params} on_change={on_change} label="Move point delta" field="move_point_max_delta" min=0.03 max=0.3 step=0.005/>
-            <DeltaSlider params={params} on_change={on_change} label="Micro adjust delta" field="micro_adjust_delta" min=0.0005 max=0.006 step=0.0005/>
-            <DeltaSlider params={params} on_change={on_change} label="New point distance" field="new_point_max_distance" min=0.005 max=0.06 step=0.005/>
-            <DeltaSlider params={params} on_change={on_change} label="Offset magnitude" field="offset_polygon_magnitude" min=0.005 max=0.16 step=0.005/>
+            <DeltaSlider params={params} on_change={on_change} label="Micro adjust delta" field="micro_adjust_delta" min=0.0001 max=0.003 step=0.0001/>
+            <DeltaSlider params={params} on_change={on_change} label="New point distance" field="new_point_max_distance" min=0.001 max=0.02 step=0.001/>
+            <DeltaSlider params={params} on_change={on_change} label="Offset magnitude" field="offset_polygon_magnitude" min=0.001 max=0.03 step=0.001/>
             <DeltaSlider params={params} on_change={on_change} label="Medium move delta" field="medium_move_delta" min=0.005 max=0.06 step=0.005/>
             <DeltaSlider params={params} on_change={on_change} label="Merge centroid dist" field="merge_centroid_threshold" min=0.03 max=0.3 step=0.01/>
             <DeltaSlider params={params} on_change={on_change} label="Merge color dist" field="merge_color_threshold" min=0.04 max=0.4 step=0.01/>

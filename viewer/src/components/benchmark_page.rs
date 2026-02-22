@@ -457,7 +457,7 @@ fn QueueSection(state: RwSignal<ViewerState>) -> impl IntoView {
                             </div>
                             <div class="bench-progress-time">
                                 {format!(
-                                    "{:.0}s / {}s",
+                                    "{:.3}s / {}s",
                                     prog.elapsed_secs,
                                     prog.duration_secs,
                                 )}
@@ -993,10 +993,10 @@ fn export_results_text(results: &[BenchmarkResult]) -> String {
     for r in results {
         out.push_str(&format!("\n--- {} ({}c {}\u{03BB} {}s) ---\n",
             r.label, r.chain_count, r.lambda, r.duration_secs));
-        out.push_str(&format!("{:>6} {:>10} {:>10} {:>10} {:>8} {:>12} {:>10}\n",
+        out.push_str(&format!("{:>9} {:>10} {:>10} {:>10} {:>8} {:>12} {:>10}\n",
             "time", "best", "avg", "worst", "impr", "evals", "evals/s"));
         for s in &r.samples {
-            out.push_str(&format!("{:>5.0}s {:>9.4}% {:>9.4}% {:>9.4}% {:>8} {:>12} {:>10.0}\n",
+            out.push_str(&format!("{:>8.3}s {:>9.4}% {:>9.4}% {:>9.4}% {:>8} {:>12} {:>10.0}\n",
                 s.elapsed_secs, s.best_fitness, s.avg_fitness, s.worst_fitness,
                 s.improvements, s.total_evals, s.evals_per_sec));
         }

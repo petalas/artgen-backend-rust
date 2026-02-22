@@ -12,16 +12,19 @@ fn format_number(n: u64) -> String {
     }
 }
 
-fn format_time(secs: u64) -> String {
-    if secs < 60 {
-        format!("{}s", secs)
-    } else if secs < 3600 {
-        format!("{}m {}s", secs / 60, secs % 60)
+fn format_time(total_secs: f64) -> String {
+    if total_secs < 60.0 {
+        format!("{:.3}s", total_secs)
+    } else if total_secs < 3600.0 {
+        let mins = (total_secs / 60.0).floor() as u64;
+        let secs = total_secs - (mins as f64 * 60.0);
+        format!("{}m {:.3}s", mins, secs)
     } else {
-        let h = secs / 3600;
-        let m = (secs % 3600) / 60;
-        let s = secs % 60;
-        format!("{}h {}m {}s", h, m, s)
+        let hours = (total_secs / 3600.0).floor() as u64;
+        let remainder = total_secs - (hours as f64 * 3600.0);
+        let mins = (remainder / 60.0).floor() as u64;
+        let secs = remainder - (mins as f64 * 60.0);
+        format!("{}h {}m {:.3}s", hours, mins, secs)
     }
 }
 
@@ -48,8 +51,8 @@ pub fn Stats(state: RwSignal<ViewerState>) -> impl IntoView {
             <div class="stat-item">
                 <div class="stat-value">{move || {
                     let s = state.get();
-                    if s.elapsed_secs > 0 {
-                        format!("{:.1}", s.improvements as f64 / s.elapsed_secs as f64)
+                    if s.elapsed_secs > 0.0 {
+                        format!("{:.1}", s.improvements as f64 / s.elapsed_secs)
                     } else {
                         "0".to_string()
                     }

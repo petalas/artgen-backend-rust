@@ -363,7 +363,7 @@ struct WsState {
     improvements: u64,
     evals_per_sec: f64,
     total_evals: u64,
-    elapsed_secs: u64,
+    elapsed_secs: f64,
     generation: u64,
     image_generation: u64,
     ref_image_generation: u64, // bumped when reference image changes (project switch)
@@ -1461,7 +1461,7 @@ fn run_benchmark(
                 s.improvements = *improvements + bench_improvements;
                 s.evals_per_sec = evals_per_sec;
                 s.total_evals = total_evals;
-                s.elapsed_secs = elapsed_secs as u64;
+                s.elapsed_secs = elapsed_secs as f64;
                 s.benchmark_events.push(serde_json::json!({
                     "type": "benchmark_progress",
                     "label": req.label,
@@ -1759,7 +1759,7 @@ fn gpu_main_loop_headless(legacy_image: Option<&str>, gpu_batch_iters_override: 
             improvements: 0,
             evals_per_sec: 0.0,
             total_evals: 0,
-            elapsed_secs: 0,
+            elapsed_secs: 0.0,
             generation: 0,
             image_generation: 0,
             ref_image_generation: 0,
@@ -1919,7 +1919,7 @@ fn gpu_main_loop_headless(legacy_image: Option<&str>, gpu_batch_iters_override: 
             s.improvements = 0;
             s.evals_per_sec = 0.0;
             s.total_evals = 0;
-            s.elapsed_secs = 0;
+            s.elapsed_secs = 0.0;
             s.drawing_json = serde_json::to_string(&initial_best).unwrap_or_default();
             s.image_width = w as u32;
             s.image_height = h as u32;
@@ -2035,7 +2035,7 @@ fn gpu_main_loop_headless(legacy_image: Option<&str>, gpu_batch_iters_override: 
                     let mut s = lock.lock().unwrap();
                     s.evals_per_sec = evals_per_sec;
                     s.total_evals = evals;
-                    s.elapsed_secs = active_elapsed.as_secs();
+                    s.elapsed_secs = active_elapsed.as_secs_f64();
                     s.fitness = global_best.fitness;
                     s.polygons = global_best.polygons.len();
                     s.improvements = improvements;
@@ -2094,7 +2094,7 @@ fn gpu_main_loop_headless(legacy_image: Option<&str>, gpu_batch_iters_override: 
                     s.improvements = improvements;
                     s.evals_per_sec = evals_per_sec;
                     s.total_evals = evals;
-                    s.elapsed_secs = active_elapsed.as_secs();
+                    s.elapsed_secs = active_elapsed.as_secs_f64();
                     s.drawing_json = serde_json::to_string(&global_best).unwrap();
                     s.generation += 1;
                     s.image_generation += 1;
@@ -2125,7 +2125,7 @@ fn gpu_main_loop_headless(legacy_image: Option<&str>, gpu_batch_iters_override: 
                     let mut s = lock.lock().unwrap();
                     s.evals_per_sec = evals_per_sec;
                     s.total_evals = evals;
-                    s.elapsed_secs = active_elapsed.as_secs();
+                    s.elapsed_secs = active_elapsed.as_secs_f64();
                     s.fitness = global_best.fitness;
                     s.polygons = global_best.polygons.len();
                     s.improvements = improvements;
@@ -2143,17 +2143,34 @@ fn gpu_main_loop_headless(legacy_image: Option<&str>, gpu_batch_iters_override: 
     }
 }
 
+fn format_duration(d: Duration) -> String {
+    let total_secs = d.as_secs_f64();
+    if total_secs < 60.0 {
+        format!("{:.3}s", total_secs)
+    } else if total_secs < 3600.0 {
+        let mins = (total_secs / 60.0).floor() as u64;
+        let secs = total_secs - (mins as f64 * 60.0);
+        format!("{}m {:.3}s", mins, secs)
+    } else {
+        let hours = (total_secs / 3600.0).floor() as u64;
+        let remainder = total_secs - (hours as f64 * 3600.0);
+        let mins = (remainder / 60.0).floor() as u64;
+        let secs = remainder - (mins as f64 * 60.0);
+        format!("{}h {}m {:.3}s", hours, mins, secs)
+    }
+}
+
 fn print_gpu_stats(evolver: &GpuEvolver, best: &Drawing) {
     let evals = evolver.total_evaluations();
     let evals_per_sec = evolver.evals_per_sec();
-    let elapsed_secs = evolver.elapsed().as_secs();
+    let elapsed = evolver.elapsed();
     println!(
-        "[GPU] fitness: {:.4} | polygons: {} | evals: {} | evals/s: {:.0} | elapsed: {}s",
+        "[GPU] fitness: {:.4} | polygons: {} | evals: {} | evals/s: {:.0} | elapsed: {}",
         best.fitness,
         best.polygons.len(),
         evals,
         evals_per_sec,
-        elapsed_secs,
+        format_duration(elapsed),
     );
 }
 
@@ -2162,12 +2179,12 @@ fn print_gpu_stats_active(evolver: &GpuEvolver, best: &Drawing, active_elapsed: 
     let active_secs = active_elapsed.as_secs_f64();
     let evals_per_sec = if active_secs > 0.0 { evals as f64 / active_secs } else { 0.0 };
     println!(
-        "[GPU] fitness: {:.4} | polygons: {} | evals: {} | evals/s: {:.0} | elapsed: {}s",
+        "[GPU] fitness: {:.4} | polygons: {} | evals: {} | evals/s: {:.0} | elapsed: {}",
         best.fitness,
         best.polygons.len(),
         evals,
         evals_per_sec,
-        active_elapsed.as_secs(),
+        format_duration(active_elapsed),
     );
 }
 

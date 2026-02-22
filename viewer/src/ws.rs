@@ -47,7 +47,7 @@ pub struct ViewerState {
     pub improvements: u64,
     pub evals_per_sec: f64,
     pub total_evals: u64,
-    pub elapsed_secs: u64,
+    pub elapsed_secs: f64,
     pub paused: bool,
     pub connected: bool,
     pub connecting: bool,
@@ -88,7 +88,7 @@ impl Default for ViewerState {
             improvements: 0,
             evals_per_sec: 0.0,
             total_evals: 0,
-            elapsed_secs: 0,
+            elapsed_secs: 0.0,
             paused: false,
             connected: false,
             connecting: true,
@@ -316,7 +316,7 @@ fn handle_message(data: &serde_json::Value, state: RwSignal<ViewerState>) {
         if let Some(te) = data["totalEvals"].as_u64() {
             s.total_evals = te;
         }
-        if let Some(elapsed) = data["elapsed"].as_u64() {
+        if let Some(elapsed) = data["elapsed"].as_f64() {
             s.elapsed_secs = elapsed;
         }
         if let Some(w) = data["imageWidth"].as_u64() {
