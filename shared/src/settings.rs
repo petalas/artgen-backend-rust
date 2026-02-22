@@ -1,34 +1,33 @@
-// Mutation probability defaults (auto-tune cd-100 best)
-pub const ADD_POLYGON_PROB: f32 = 0.1;         // 1:10
-pub const REMOVE_POLYGON_PROB: f32 = 0.000306;  // 1:3263
-pub const REORDER_POLYGON_PROB: f32 = 0.003356;  // 1:298
-pub const OFFSET_POLYGON_PROBABILITY: f32 = 0.002; // 1:500
-pub const MOVE_POINT_PROBABILITY: f32 = 0.001056;  // 1:947
-pub const REMOVE_POINT_PROBABILITY: f32 = 0.002; // 1:500
-pub const MICRO_ADJUSTMENT_PROBABILITY: f32 = 0.002786; // 1:359
-pub const CHANGE_COLOR_PROB: f32 = 0.000473;    // 1:2114
-pub const ADJUST_BRIGHTNESS_PROB: f32 = 0.000473; // 1:2114
-pub const ADJUST_SATURATION_PROB: f32 = 0.001333; // 1:750
+// Mutation probability defaults
+pub const ADD_POLYGON_PROB: f32 = 0.5;
+pub const REMOVE_POLYGON_PROB: f32 = 0.000862;
+pub const REORDER_POLYGON_PROB: f32 = 0.002;
+pub const OFFSET_POLYGON_PROBABILITY: f32 = 0.005650;
+pub const MOVE_POINT_PROBABILITY: f32 = 0.000294;
+pub const REMOVE_POINT_PROBABILITY: f32 = 0.002;
+pub const MICRO_ADJUSTMENT_PROBABILITY: f32 = 0.002786;
+pub const CHANGE_COLOR_PROB: f32 = 0.000473;
+pub const ADJUST_BRIGHTNESS_PROB: f32 = 0.000473;
+pub const ADJUST_SATURATION_PROB: f32 = 0.001333;
 
-// New mutation probabilities
-pub const SCALE_POLYGON_PROB: f32 = 0.002;      // 1:500
-pub const ROTATE_POLYGON_PROB: f32 = 0.002;     // 1:500
-pub const ADJACENT_SWAP_PROB: f32 = 0.002;      // 1:500
-pub const MERGE_POLYGON_PROB: f32 = 0.000667;   // 1:1500
-pub const CLONE_POLYGON_PROB: f32 = 0.02;       // 1:50
-pub const MEDIUM_MOVE_PROBABILITY: f32 = 0.004;  // 1:250
-pub const SWAP_COLORS_PROB: f32 = 0.002;        // 1:500
+pub const SCALE_POLYGON_PROB: f32 = 0.005650;
+pub const ROTATE_POLYGON_PROB: f32 = 0.002;
+pub const ADJACENT_SWAP_PROB: f32 = 0.002;
+pub const MERGE_POLYGON_PROB: f32 = 0.000667;
+pub const CLONE_POLYGON_PROB: f32 = 0.071429;
+pub const MEDIUM_MOVE_PROBABILITY: f32 = 0.004;
+pub const SWAP_COLORS_PROB: f32 = 0.005650;
 
 // Merge mutation thresholds
 pub const MERGE_CENTROID_THRESHOLD: f32 = 0.15;
-pub const MERGE_COLOR_THRESHOLD: f32 = 0.196;
+pub const MERGE_COLOR_THRESHOLD: f32 = 0.20;
 
 // Mutation delta defaults
-pub const MOVE_POINT_MAX_DELTA: f32 = 0.15;
+pub const MOVE_POINT_MAX_DELTA: f32 = 0.113;
 pub const MEDIUM_MOVE_DELTA: f32 = 0.03;
-pub const MICRO_ADJUSTMENT_DELTA: f32 = 0.003;
-pub const NEW_POINT_MAX_DISTANCE: f32 = 0.03;
-pub const OFFSET_POLYGON_MAGNITUDE: f32 = 0.082;
+pub const MICRO_ADJUSTMENT_DELTA: f32 = 0.001;
+pub const NEW_POINT_MAX_DISTANCE: f32 = 0.005;
+pub const OFFSET_POLYGON_MAGNITUDE: f32 = 0.010;
 
 // Alpha range
 pub const MIN_ALPHA: u8 = 10;
@@ -48,7 +47,7 @@ pub const GPU_MAX_BATCH_ITERS: u32 = 4096;
 
 // Crossover defaults
 pub const CROSSOVER_PROB: f32 = 0.2;
-pub const SPATIAL_CROSSOVER_WEIGHT: f32 = 0.6625;
+pub const SPATIAL_CROSSOVER_WEIGHT: f32 = 0.66;
 pub const TOURNAMENT_SIZE: u32 = 3;
 
 // Mutation mode defaults

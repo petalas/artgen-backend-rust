@@ -4,24 +4,20 @@ use wasm_bindgen::JsCast;
 use crate::mutation_params::MutationParams;
 use crate::ws::{send_ws_json, send_ws_loading, ViewerState};
 
-/// Format a probability as "1 in N" string.
+/// Format a probability as a decimal string with adaptive precision.
 fn format_prob(p: f32) -> String {
     if p <= 0.0 {
         "OFF".to_string()
+    } else if p >= 0.01 {
+        format!("{:.4}", p)
     } else {
-        let n = (1.0 / p).round() as u32;
-        if n <= 1 {
-            "1 in 1".to_string()
-        } else {
-            format!("1 in {}", n)
-        }
+        format!("{:.6}", p)
     }
 }
 
 /// Convert a probability to a log-scale slider value.
-/// Maps prob range [1/50000, 1/2] to slider [0, 1000].
-/// Left (0) = rarest (1:50000), right (1000) = most frequent (1:2).
-/// Center (~500) ≈ 1:316, placing typical defaults (1:250 to 1:3000) in the middle zone.
+/// Maps prob range [0.00002, 0.5] to slider [0, 1000].
+/// Left (0) = rarest, right (1000) = most frequent.
 fn prob_to_slider(p: f32) -> f64 {
     if p <= 0.0 {
         return 0.0;
@@ -259,7 +255,7 @@ pub fn ParamsEditor(
             <DeltaSlider params={params} on_change={on_change} label="Move point delta" field="move_point_max_delta" min=0.03 max=0.3 step=0.005/>
             <DeltaSlider params={params} on_change={on_change} label="Micro adjust delta" field="micro_adjust_delta" min=0.0005 max=0.006 step=0.0005/>
             <DeltaSlider params={params} on_change={on_change} label="New point distance" field="new_point_max_distance" min=0.005 max=0.06 step=0.005/>
-            <DeltaSlider params={params} on_change={on_change} label="Offset magnitude" field="offset_polygon_magnitude" min=0.02 max=0.16 step=0.005/>
+            <DeltaSlider params={params} on_change={on_change} label="Offset magnitude" field="offset_polygon_magnitude" min=0.005 max=0.16 step=0.005/>
             <DeltaSlider params={params} on_change={on_change} label="Medium move delta" field="medium_move_delta" min=0.005 max=0.06 step=0.005/>
             <DeltaSlider params={params} on_change={on_change} label="Merge centroid dist" field="merge_centroid_threshold" min=0.03 max=0.3 step=0.01/>
             <DeltaSlider params={params} on_change={on_change} label="Merge color dist" field="merge_color_threshold" min=0.04 max=0.4 step=0.01/>
@@ -324,7 +320,7 @@ fn WgSelect(
     }
 }
 
-/// Probability slider with log scale and "1 in N" display.
+/// Probability slider with log scale and decimal display.
 #[component]
 fn ProbSlider(
     params: RwSignal<MutationParams>,

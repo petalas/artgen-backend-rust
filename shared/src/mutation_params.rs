@@ -27,7 +27,7 @@ fn default_merge_color_threshold() -> f32 { settings::MERGE_COLOR_THRESHOLD }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MutationParams {
-    // Probabilities (expressed as fraction, e.g. 0.02 = 1 in 50)
+    // Probabilities (0.0–1.0)
     pub add_polygon_prob: f32,
     pub remove_polygon_prob: f32,
     pub reorder_polygon_prob: f32,

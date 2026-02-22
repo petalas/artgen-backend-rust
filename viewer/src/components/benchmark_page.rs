@@ -1074,13 +1074,14 @@ fn import_results_from_file() {
     input.click();
 }
 
-/// Format a probability as compact "1:N" or "OFF".
+/// Format a probability as a compact decimal or "OFF".
 fn fmt_prob(p: f32) -> String {
     if p <= 0.0 {
         "off".to_string()
+    } else if p >= 0.01 {
+        format!("{:.4}", p)
     } else {
-        let n = (1.0 / p).round() as u32;
-        if n <= 1 { "1:1".to_string() } else { format!("1:{}", n) }
+        format!("{:.6}", p)
     }
 }
 
