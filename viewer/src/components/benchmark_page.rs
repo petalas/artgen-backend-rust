@@ -5,6 +5,7 @@ use wasm_bindgen::JsCast;
 use std::collections::HashSet;
 
 use crate::benchmark::{BenchmarkExport, BenchmarkRequest, BenchmarkResult, BenchmarkSnapshot};
+use crate::components::auto_tune_panel::AutoTuneSection;
 use crate::components::benchmark_chart::{color_for_index, BenchmarkChart};
 use crate::components::controls::download_blob;
 use crate::components::mutation_panel::ParamsEditor;
@@ -21,6 +22,7 @@ pub fn BenchmarkPage(state: RwSignal<ViewerState>) -> impl IntoView {
         <div class="benchmark-page">
             <SnapshotsSection state={state}/>
             <ConfigureSection state={state} bench_params={bench_params} bench_resolution={bench_resolution}/>
+            <AutoTuneSection state={state}/>
             <QueueSection state={state}/>
             <ResultsSection state={state} bench_params={bench_params} bench_resolution={bench_resolution}/>
         </div>
@@ -1077,8 +1079,8 @@ fn params_detail_view(p: &MutationParams, resolution: u32) -> impl IntoView {
             <div class="bench-params-row">
                 <span class="bench-params-group">"Color: "</span>
                 {pv("change", fmt_prob(p.change_color_prob), p.change_color_prob != d.change_color_prob)}
-                {pv("lighten", fmt_prob(p.lighten_color_prob), p.lighten_color_prob != d.lighten_color_prob)}
-                {pv("darken", fmt_prob(p.darken_color_prob), p.darken_color_prob != d.darken_color_prob)}
+                {pv("bright", fmt_prob(p.adjust_brightness_prob), p.adjust_brightness_prob != d.adjust_brightness_prob)}
+                {pv("satur", fmt_prob(p.adjust_saturation_prob), p.adjust_saturation_prob != d.adjust_saturation_prob)}
             </div>
             <div class="bench-params-row">
                 <span class="bench-params-group">"Deltas: "</span>

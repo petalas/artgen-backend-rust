@@ -240,8 +240,8 @@ pub fn ParamsEditor(
         <div class="mutation-section">
             <div class="mutation-section-title">"Color"</div>
             <ProbSlider params={params} on_change={on_change} label="Change color" field="change_color_prob"/>
-            <ProbSlider params={params} on_change={on_change} label="Lighten color" field="lighten_color_prob"/>
-            <ProbSlider params={params} on_change={on_change} label="Darken color" field="darken_color_prob"/>
+            <ProbSlider params={params} on_change={on_change} label="Adjust brightness" field="adjust_brightness_prob"/>
+            <ProbSlider params={params} on_change={on_change} label="Adjust saturation" field="adjust_saturation_prob"/>
         </div>
         <div class="mutation-section">
             <div class="mutation-section-title">"Deltas"</div>
@@ -501,8 +501,8 @@ fn get_prob_field(mp: &MutationParams, field: &str) -> f32 {
         "remove_point_prob" => mp.remove_point_prob,
         "micro_adjust_prob" => mp.micro_adjust_prob,
         "change_color_prob" => mp.change_color_prob,
-        "lighten_color_prob" => mp.lighten_color_prob,
-        "darken_color_prob" => mp.darken_color_prob,
+        "adjust_brightness_prob" => mp.adjust_brightness_prob,
+        "adjust_saturation_prob" => mp.adjust_saturation_prob,
         "crossover_prob" => mp.crossover_prob,
         _ => 0.0,
     }
@@ -518,8 +518,8 @@ fn set_prob_field(mp: &mut MutationParams, field: &str, val: f32) {
         "remove_point_prob" => mp.remove_point_prob = val,
         "micro_adjust_prob" => mp.micro_adjust_prob = val,
         "change_color_prob" => mp.change_color_prob = val,
-        "lighten_color_prob" => mp.lighten_color_prob = val,
-        "darken_color_prob" => mp.darken_color_prob = val,
+        "adjust_brightness_prob" => mp.adjust_brightness_prob = val,
+        "adjust_saturation_prob" => mp.adjust_saturation_prob = val,
         "crossover_prob" => mp.crossover_prob = val,
         _ => {}
     }

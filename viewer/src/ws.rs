@@ -4,6 +4,7 @@ use leptos::prelude::*;
 use wasm_bindgen::prelude::*;
 use web_sys::{MessageEvent, WebSocket};
 
+use crate::auto_tune::AutoTuneStatus;
 use crate::benchmark::{BenchmarkProgress, BenchmarkRequest, BenchmarkResult, BenchmarkSnapshot};
 use crate::mutation_params::MutationParams;
 
@@ -73,6 +74,8 @@ pub struct ViewerState {
     pub benchmark_initializing: bool,
     pub benchmark_progress: Option<BenchmarkProgress>,
     pub benchmark_queue: Vec<BenchmarkRequest>,
+    // Auto-tune
+    pub auto_tune_status: Option<AutoTuneStatus>,
 }
 
 impl Default for ViewerState {
@@ -106,6 +109,7 @@ impl Default for ViewerState {
             benchmark_initializing: false,
             benchmark_progress: None,
             benchmark_queue: vec![],
+            auto_tune_status: None,
         }
     }
 }
@@ -286,6 +290,10 @@ fn parse_results(data: &serde_json::Value) -> Vec<BenchmarkResult> {
         .unwrap_or_default()
 }
 
+fn parse_auto_tune_status(data: &serde_json::Value) -> Option<AutoTuneStatus> {
+    serde_json::from_value::<AutoTuneStatus>(data["autoTuneStatus"].clone()).ok()
+}
+
 fn handle_message(data: &serde_json::Value, state: RwSignal<ViewerState>) {
     let msg_type = data["type"].as_str().unwrap_or("");
 
@@ -347,6 +355,7 @@ fn handle_message(data: &serde_json::Value, state: RwSignal<ViewerState>) {
                 }
                 s.benchmark_snapshots = parse_snapshots(data);
                 s.benchmark_results = parse_results(data);
+                s.auto_tune_status = parse_auto_tune_status(data);
             }
             "update" => {
                 if let Some(img) = data["image"].as_str() {
@@ -397,6 +406,12 @@ fn handle_message(data: &serde_json::Value, state: RwSignal<ViewerState>) {
                 }
                 s.benchmark_snapshots = parse_snapshots(data);
                 s.benchmark_results = parse_results(data);
+                s.auto_tune_status = parse_auto_tune_status(data);
+            }
+            "auto_tune_status" => {
+                if let Ok(status) = serde_json::from_value::<AutoTuneStatus>(data["status"].clone()) {
+                    s.auto_tune_status = Some(status);
+                }
             }
             "project_error" => {
                 s.engine_loading = false;

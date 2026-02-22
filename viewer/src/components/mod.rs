@@ -1,3 +1,4 @@
+pub mod auto_tune_panel;
 pub mod benchmark_chart;
 pub mod benchmark_page;
 pub mod controls;

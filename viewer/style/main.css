@@ -1219,6 +1219,53 @@ body {
     margin-top: 12px;
 }
 
+/* Auto-Tune Importance Display */
+.auto-tune-importance {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    font-family: 'Ubuntu Mono', monospace;
+    font-size: 12px;
+}
+
+.auto-tune-importance-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.auto-tune-param-name {
+    width: 180px;
+    text-align: right;
+    color: #666;
+    flex-shrink: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.auto-tune-bar-bg {
+    flex: 1;
+    height: 12px;
+    background: #f0f0f0;
+    border-radius: 2px;
+    overflow: hidden;
+    min-width: 60px;
+}
+
+.auto-tune-bar-fill {
+    height: 100%;
+    border-radius: 2px;
+    transition: width 0.3s;
+}
+
+.auto-tune-corr-value {
+    width: 45px;
+    text-align: right;
+    color: #888;
+    flex-shrink: 0;
+}
+
 /* Responsive */
 @media (max-width: 600px) {
     .image-row {

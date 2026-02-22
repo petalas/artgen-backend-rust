@@ -89,9 +89,9 @@ struct Params {
     move_point_prob: f32,
     micro_adjust_prob: f32,
     change_color_prob: f32,
-    lighten_color_prob: f32,
+    adjust_brightness_prob: f32,
 
-    darken_color_prob: f32,
+    adjust_saturation_prob: f32,
     move_point_max_delta: f32,
     micro_adjust_delta: f32,
     new_point_max_distance: f32,
@@ -278,10 +278,10 @@ fn single_mutate_offspring(rng: ptr<function, vec4<u32>>, oid: u32, count: ptr<f
     let w_micro_adjust = params.micro_adjust_prob * fc * 3.0;
     let w_change_color = params.change_color_prob * fc * 4.0;
     let w_micro_color = params.micro_adjust_prob * fc * 4.0;
-    let w_lighten = params.lighten_color_prob * fc;
-    let w_darken = params.darken_color_prob * fc;
+    let w_brightness = params.adjust_brightness_prob * fc;
+    let w_saturation = params.adjust_saturation_prob * fc;
 
-    let total = w_add + w_remove + w_reorder + w_scale + w_rotate + w_adjacent_swap + w_offset + w_move_point + w_micro_adjust + w_change_color + w_micro_color + w_lighten + w_darken;
+    let total = w_add + w_remove + w_reorder + w_scale + w_rotate + w_adjacent_swap + w_offset + w_move_point + w_micro_adjust + w_change_color + w_micro_color + w_brightness + w_saturation;
 
     let r = rand_f32(rng) * total;
     var cumulative = 0.0;
@@ -431,21 +431,39 @@ fn single_mutate_offspring(rng: ptr<function, vec4<u32>>, oid: u32, count: ptr<f
                         else if ch == 2u { color.z = clamp(color.z + dir, 0.0, 1.0); }
                         else { color.w = clamp(color.w + dir, params.min_alpha_norm, params.max_alpha_norm); }
                     }
-                    // Lighten
+                    // Adjust brightness (50/50 lighten/darken)
                     else {
-                        cumulative += w_lighten;
+                        cumulative += w_brightness;
                         if r < cumulative {
                             let color_step = 1.0 / 255.0;
-                            color.x = min(color.x + color_step, 1.0);
-                            color.y = min(color.y + color_step, 1.0);
-                            color.z = min(color.z + color_step, 1.0);
+                            let brighten = rand_f32(rng) > 0.5;
+                            if brighten {
+                                color.x = min(color.x + color_step, 1.0);
+                                color.y = min(color.y + color_step, 1.0);
+                                color.z = min(color.z + color_step, 1.0);
+                            } else {
+                                color.x = max(color.x - color_step, 0.0);
+                                color.y = max(color.y - color_step, 0.0);
+                                color.z = max(color.z - color_step, 0.0);
+                            }
                         }
-                        // Darken (fallback)
+                        // Adjust saturation (fallback)
                         else {
+                            let avg = (color.x + color.y + color.z) / 3.0;
                             let color_step = 1.0 / 255.0;
-                            color.x = max(color.x - color_step, 0.0);
-                            color.y = max(color.y - color_step, 0.0);
-                            color.z = max(color.z - color_step, 0.0);
+                            let saturate = rand_f32(rng) > 0.5;
+                            let dx = sign(color.x - avg);
+                            let dy = sign(color.y - avg);
+                            let dz = sign(color.z - avg);
+                            if saturate {
+                                color.x = clamp(color.x + dx * color_step, 0.0, 1.0);
+                                color.y = clamp(color.y + dy * color_step, 0.0, 1.0);
+                                color.z = clamp(color.z + dz * color_step, 0.0, 1.0);
+                            } else {
+                                color.x = clamp(color.x - dx * color_step, 0.0, 1.0);
+                                color.y = clamp(color.y - dy * color_step, 0.0, 1.0);
+                                color.z = clamp(color.z - dz * color_step, 0.0, 1.0);
+                            }
                         }
                     }
                 }
@@ -712,11 +730,25 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
         if rand_f32(&rng) < params.micro_adjust_prob { let dir = select(-color_step, color_step, rand_f32(&rng) > 0.5); color.z = clamp(color.z + dir, 0.0, 1.0); is_dirty = true; }
         if rand_f32(&rng) < params.micro_adjust_prob { let dir = select(-color_step, color_step, rand_f32(&rng) > 0.5); color.w = clamp(color.w + dir, params.min_alpha_norm, params.max_alpha_norm); is_dirty = true; }
 
-        if rand_f32(&rng) < params.lighten_color_prob && color.x < 1.0 && color.y < 1.0 && color.z < 1.0 {
-            color.x += color_step; color.y += color_step; color.z += color_step; is_dirty = true;
+        if rand_f32(&rng) < params.adjust_brightness_prob {
+            let brighten = rand_f32(&rng) > 0.5;
+            if brighten {
+                color.x = min(color.x + color_step, 1.0); color.y = min(color.y + color_step, 1.0); color.z = min(color.z + color_step, 1.0);
+            } else {
+                color.x = max(color.x - color_step, 0.0); color.y = max(color.y - color_step, 0.0); color.z = max(color.z - color_step, 0.0);
+            }
+            is_dirty = true;
         }
-        if rand_f32(&rng) < params.darken_color_prob && color.x > 0.0 && color.y > 0.0 && color.z > 0.0 {
-            color.x -= color_step; color.y -= color_step; color.z -= color_step; is_dirty = true;
+        if rand_f32(&rng) < params.adjust_saturation_prob {
+            let avg = (color.x + color.y + color.z) / 3.0;
+            let sat = rand_f32(&rng) > 0.5;
+            let sdx = sign(color.x - avg); let sdy = sign(color.y - avg); let sdz = sign(color.z - avg);
+            if sat {
+                color.x = clamp(color.x + sdx * color_step, 0.0, 1.0); color.y = clamp(color.y + sdy * color_step, 0.0, 1.0); color.z = clamp(color.z + sdz * color_step, 0.0, 1.0);
+            } else {
+                color.x = clamp(color.x - sdx * color_step, 0.0, 1.0); color.y = clamp(color.y - sdy * color_step, 0.0, 1.0); color.z = clamp(color.z - sdz * color_step, 0.0, 1.0);
+            }
+            is_dirty = true;
         }
 
         // Move point (scaled by mutation_scale)

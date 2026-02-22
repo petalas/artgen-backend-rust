@@ -33,9 +33,9 @@ struct Params {
     move_point_prob: f32,
     micro_adjust_prob: f32,
     change_color_prob: f32,
-    lighten_color_prob: f32,
+    adjust_brightness_prob: f32,
 
-    darken_color_prob: f32,
+    adjust_saturation_prob: f32,
     move_point_max_delta: f32,
     micro_adjust_delta: f32,
     new_point_max_distance: f32,

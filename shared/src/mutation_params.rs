@@ -10,6 +10,7 @@ fn default_gpu_batch_iters() -> u32 {
     settings::GPU_DEFAULT_BATCH_ITERS
 }
 
+
 /// Runtime-configurable mutation parameters.
 /// Sent over WebSocket as JSON (camelCase) and used to build `GpuParams`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -24,8 +25,8 @@ pub struct MutationParams {
     pub remove_point_prob: f32,
     pub micro_adjust_prob: f32,
     pub change_color_prob: f32,
-    pub lighten_color_prob: f32,
-    pub darken_color_prob: f32,
+    pub adjust_brightness_prob: f32,
+    pub adjust_saturation_prob: f32,
 
     // Deltas / magnitudes
     pub move_point_max_delta: f32,
@@ -102,8 +103,8 @@ impl MutationParams {
         self.remove_point_prob = self.remove_point_prob.clamp(0.0, 1.0);
         self.micro_adjust_prob = self.micro_adjust_prob.clamp(0.0, 1.0);
         self.change_color_prob = self.change_color_prob.clamp(0.0, 1.0);
-        self.lighten_color_prob = self.lighten_color_prob.clamp(0.0, 1.0);
-        self.darken_color_prob = self.darken_color_prob.clamp(0.0, 1.0);
+        self.adjust_brightness_prob = self.adjust_brightness_prob.clamp(0.0, 1.0);
+        self.adjust_saturation_prob = self.adjust_saturation_prob.clamp(0.0, 1.0);
 
         // Deltas: non-negative
         self.move_point_max_delta = self.move_point_max_delta.max(0.0);
@@ -147,8 +148,8 @@ impl Default for MutationParams {
             remove_point_prob: settings::REMOVE_POINT_PROBABILITY,
             micro_adjust_prob: settings::MICRO_ADJUSTMENT_PROBABILITY,
             change_color_prob: settings::CHANGE_COLOR_PROB,
-            lighten_color_prob: settings::LIGHTEN_COLOR_PROB,
-            darken_color_prob: settings::DARKEN_COLOR_PROB,
+            adjust_brightness_prob: settings::ADJUST_BRIGHTNESS_PROB,
+            adjust_saturation_prob: settings::ADJUST_SATURATION_PROB,
             move_point_max_delta: settings::MOVE_POINT_MAX_DELTA,
             micro_adjust_delta: settings::MICRO_ADJUSTMENT_DELTA,
             new_point_max_distance: settings::NEW_POINT_MAX_DISTANCE,
@@ -166,7 +167,7 @@ impl Default for MutationParams {
             adaptive_mutation: settings::ADAPTIVE_MUTATION,
             rasterize_wg: [settings::RASTERIZE_WG_X_DEFAULT, settings::RASTERIZE_WG_Y_DEFAULT],
             gpu_batch_iters: settings::GPU_DEFAULT_BATCH_ITERS,
-            tile_culling: false,
+            tile_culling: true,
             incremental_eval: false,
         }
     }

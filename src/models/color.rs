@@ -1,5 +1,5 @@
 use crate::settings::{
-    CHANGE_COLOR_PROB, DARKEN_COLOR_PROB, LIGHTEN_COLOR_PROB, MAX_ALPHA,
+    ADJUST_BRIGHTNESS_PROB, ADJUST_SATURATION_PROB, CHANGE_COLOR_PROB, MAX_ALPHA,
     MICRO_ADJUSTMENT_PROBABILITY, MIN_ALPHA,
 };
 use crate::utils::{randomf32, randomu8};
@@ -87,20 +87,28 @@ impl Color {
             mutation_happened = true;
         }
         ////
-        if randomf32() < LIGHTEN_COLOR_PROB
-            && self.r < u8::MAX && self.g < u8::MAX && self.b < u8::MAX
-        {
-            self.r += 1;
-            self.g += 1;
-            self.b += 1;
+        if randomf32() < ADJUST_BRIGHTNESS_PROB {
+            if randomf32() > 0.5 {
+                if self.r < u8::MAX && self.g < u8::MAX && self.b < u8::MAX {
+                    self.r += 1; self.g += 1; self.b += 1;
+                }
+            } else if self.r > u8::MIN && self.g > u8::MIN && self.b > u8::MIN {
+                self.r -= 1; self.g -= 1; self.b -= 1;
+            }
             mutation_happened = true;
         }
-        if randomf32() < DARKEN_COLOR_PROB
-            && self.r > u8::MIN && self.g > u8::MIN && self.b > u8::MIN
-        {
-            self.r -= 1;
-            self.g -= 1;
-            self.b -= 1;
+        if randomf32() < ADJUST_SATURATION_PROB {
+            let avg = ((self.r as u16 + self.g as u16 + self.b as u16) / 3) as u8;
+            let saturate = randomf32() > 0.5;
+            if saturate {
+                if self.r > avg && self.r < u8::MAX { self.r += 1; } else if self.r < avg && self.r > u8::MIN { self.r -= 1; }
+                if self.g > avg && self.g < u8::MAX { self.g += 1; } else if self.g < avg && self.g > u8::MIN { self.g -= 1; }
+                if self.b > avg && self.b < u8::MAX { self.b += 1; } else if self.b < avg && self.b > u8::MIN { self.b -= 1; }
+            } else {
+                if self.r > avg && self.r > u8::MIN { self.r -= 1; } else if self.r < avg && self.r < u8::MAX { self.r += 1; }
+                if self.g > avg && self.g > u8::MIN { self.g -= 1; } else if self.g < avg && self.g < u8::MAX { self.g += 1; }
+                if self.b > avg && self.b > u8::MIN { self.b -= 1; } else if self.b < avg && self.b < u8::MAX { self.b += 1; }
+            }
             mutation_happened = true;
         }
 

@@ -1,4 +1,5 @@
 use artgen_backend_rust::{
+    auto_tune::{self, AutoTuner},
     benchmark::{BenchmarkExport, BenchmarkRequest, BenchmarkResult, BenchmarkSample, BenchmarkSnapshot, BenchmarkStore},
     engine::{Engine, Rasterizer},
     evaluator::{Evaluator, EvaluatorPayload},
@@ -384,6 +385,10 @@ struct WsState {
     benchmark_store: BenchmarkStore,
     benchmark_active: bool,
     benchmark_events: Vec<serde_json::Value>, // queued events for WS clients
+    // Auto-tune
+    auto_tuner: Option<AutoTuner>,
+    auto_tune_active: bool,
+    auto_tune_label: String, // label of the currently running auto-tune trial
 }
 
 type SharedWsState = Arc<(Mutex<WsState>, Condvar)>;
@@ -548,6 +553,7 @@ fn ws_handle_client(stream: std::net::TcpStream, state: SharedWsState) {
 
         // Send init message
         let gpu_stats_json = s.gpu_stats.as_ref().map(|g| g.to_json());
+        let auto_tune_status = s.auto_tuner.as_ref().map(|t| t.status(s.auto_tune_active));
         let msg = serde_json::json!({
             "type": "init",
             "referenceImage": BASE64.encode(&s.ref_png),
@@ -568,6 +574,7 @@ fn ws_handle_client(stream: std::net::TcpStream, state: SharedWsState) {
             "targetResolution": s.target_resolution,
             "snapshots": serde_json::to_value(&s.benchmark_store.snapshots).unwrap_or_default(),
             "results": serde_json::to_value(&s.benchmark_store.results).unwrap_or_default(),
+            "autoTuneStatus": auto_tune_status,
         });
         if ws
             .send(tungstenite::Message::Text(msg.to_string().into()))
@@ -679,6 +686,7 @@ fn ws_handle_client(stream: std::net::TcpStream, state: SharedWsState) {
                 last_gen = s.generation;
                 last_image_gen = s.image_generation;
                 last_image_send_time = Instant::now();
+                let auto_tune_status_val = s.auto_tuner.as_ref().map(|t| t.status(s.auto_tune_active));
                 let msg = serde_json::json!({
                     "type": "project_switched",
                     "referenceImage": BASE64.encode(&s.ref_png),
@@ -696,6 +704,7 @@ fn ws_handle_client(stream: std::net::TcpStream, state: SharedWsState) {
                     "imageHeight": s.image_height,
                     "mutationParams": s.mutation_params,
                     "targetResolution": s.target_resolution,
+                    "autoTuneStatus": auto_tune_status_val,
                     "snapshots": serde_json::to_value(&s.benchmark_store.snapshots).unwrap_or_default(),
                     "results": serde_json::to_value(&s.benchmark_store.results).unwrap_or_default(),
                 });
@@ -1141,6 +1150,127 @@ fn handle_ws_command(
             println!("[WS] Resolution set to {} by {:?}", resolution, peer);
             None
         }
+        Some("start_auto_tune") => {
+            let snapshot_id = cmd["snapshotId"].as_str().unwrap_or("").to_string();
+            let duration_secs = cmd["durationSecs"].as_u64().unwrap_or(30) as u32;
+            let resolution = cmd["resolution"].as_u64().unwrap_or(0) as u32;
+            let exploration_trials = cmd["explorationTrials"].as_u64().unwrap_or(20) as u32;
+            let elite_fraction = cmd["eliteFraction"].as_f64().unwrap_or(0.25) as f32;
+            let exploration_rate = cmd["explorationRate"].as_f64().unwrap_or(0.15) as f32;
+
+            let mut s = lock.lock().unwrap();
+
+            // Find the snapshot
+            let snap = s.benchmark_store.snapshots.iter().find(|snap| snap.id == snapshot_id);
+            let Some(snap) = snap else {
+                return Some(serde_json::json!({
+                    "type": "project_error",
+                    "error": "Snapshot not found",
+                }));
+            };
+            let drawing_json = snap.drawing_json.clone();
+
+            let base_params = s.mutation_params.clone();
+            let res = if resolution > 0 { resolution } else { s.target_resolution };
+
+            let config = artgen_shared::auto_tune::AutoTuneConfig {
+                snapshot_id: snapshot_id.clone(),
+                drawing_json,
+                duration_secs,
+                resolution: res,
+                exploration_trials,
+                elite_fraction,
+                exploration_rate,
+                param_specs: auto_tune::default_param_specs(),
+                base_params,
+            };
+
+            let mut tuner = AutoTuner::new(config);
+            let next = tuner.next_trial();
+            let label = next.label.clone();
+
+            // If benchmark resolution differs, trigger reload
+            if res > 0 && res != s.target_resolution {
+                s.target_resolution = res;
+                if let Some(name) = s.active_project.clone() {
+                    s.switch_request = Some(name);
+                }
+            }
+
+            s.benchmark_request = Some(next);
+            let status = tuner.status(true);
+            s.auto_tuner = Some(tuner);
+            s.auto_tune_active = true;
+            s.auto_tune_label = label;
+            s.benchmark_events.push(serde_json::json!({
+                "type": "auto_tune_status",
+                "status": serde_json::to_value(&status).unwrap(),
+            }));
+            s.generation += 1;
+            cvar.notify_all();
+            println!("[WS] Auto-tune started by {:?}", peer);
+            None
+        }
+        Some("stop_auto_tune") => {
+            let mut s = lock.lock().unwrap();
+            s.auto_tune_active = false;
+            let status = s.auto_tuner.as_ref().map(|t| t.status(false));
+            let project = s.active_project.clone();
+            if let Some(status) = status {
+                s.benchmark_events.push(serde_json::json!({
+                    "type": "auto_tune_status",
+                    "status": serde_json::to_value(&status).unwrap(),
+                }));
+            }
+            if let (Some(tuner), Some(ref proj)) = (&s.auto_tuner, &project) {
+                tuner.save(proj);
+            }
+            s.generation += 1;
+            cvar.notify_all();
+            println!("[WS] Auto-tune stopped by {:?}", peer);
+            None
+        }
+        Some("resume_auto_tune") => {
+            let mut s = lock.lock().unwrap();
+            let project = s.active_project.clone();
+            if let Some(ref proj) = project {
+                if let Some(tuner) = AutoTuner::load(proj) {
+                    let mut tuner = tuner;
+                    let next = tuner.next_trial();
+                    let label = next.label.clone();
+                    let res = tuner.config.resolution;
+                    if res > 0 && res != s.target_resolution {
+                        s.target_resolution = res;
+                        if let Some(name) = s.active_project.clone() {
+                            s.switch_request = Some(name);
+                        }
+                    }
+                    s.benchmark_request = Some(next);
+                    let status = tuner.status(true);
+                    s.auto_tuner = Some(tuner);
+                    s.auto_tune_active = true;
+                    s.auto_tune_label = label;
+                    s.benchmark_events.push(serde_json::json!({
+                        "type": "auto_tune_status",
+                        "status": serde_json::to_value(&status).unwrap(),
+                    }));
+                    s.generation += 1;
+                    cvar.notify_all();
+                    println!("[WS] Auto-tune resumed by {:?}", peer);
+                } else {
+                    return Some(serde_json::json!({
+                        "type": "project_error",
+                        "error": "No saved auto-tune state found for this project",
+                    }));
+                }
+            } else {
+                return Some(serde_json::json!({
+                    "type": "project_error",
+                    "error": "No active project",
+                }));
+            }
+            None
+        }
         Some("import_drawing") => {
             let name = cmd["name"].as_str().unwrap_or("");
             let drawing_json = cmd["drawingJson"].as_str().unwrap_or("");
@@ -1392,10 +1522,42 @@ fn run_benchmark(
             "type": "benchmark_complete",
             "result": serde_json::to_value(&result).unwrap(),
         }));
-        s.benchmark_store.results.push(result);
+        s.benchmark_store.results.push(result.clone());
+        s.benchmark_active = false;
+
+        // Auto-tune: record result and generate next trial
+        if s.auto_tune_active {
+            // Take tuner out temporarily to avoid borrow conflicts
+            if let Some(mut tuner) = s.auto_tuner.take() {
+                tuner.record_result(
+                    &result.id,
+                    result.final_fitness,
+                    result.improvements_per_sec,
+                    &result.label,
+                );
+                // Generate next trial
+                let next = tuner.next_trial();
+                let label = next.label.clone();
+                s.benchmark_request = Some(next);
+                s.auto_tune_label = label;
+                // Broadcast updated status
+                let status = tuner.status(true);
+                s.benchmark_events.push(serde_json::json!({
+                    "type": "auto_tune_status",
+                    "status": serde_json::to_value(&status).unwrap(),
+                }));
+                // Persist periodically (every 5 trials)
+                if tuner.trials.len() % 5 == 0 {
+                    if let Some(ref proj) = s.active_project {
+                        tuner.save(proj);
+                    }
+                }
+                s.auto_tuner = Some(tuner);
+            }
+        }
+
         let project = s.active_project.clone();
         let store = s.benchmark_store.clone();
-        s.benchmark_active = false;
         s.generation += 1;
         cvar.notify_all();
         drop(s);
@@ -1580,13 +1742,16 @@ fn gpu_main_loop_headless(legacy_image: Option<&str>, gpu_batch_iters_override: 
             switch_request: initial_project,
             reset_active: false,
             pending_delete: None,
-            target_resolution: 256,
+            target_resolution: 384,
             mutation_params: initial_params,
             gpu_stats: None,
             benchmark_request: None,
             benchmark_store: BenchmarkStore::default(),
             benchmark_active: false,
             benchmark_events: vec![],
+            auto_tuner: None,
+            auto_tune_active: false,
+            auto_tune_label: String::new(),
         }),
         Condvar::new(),
     ));
@@ -1730,6 +1895,12 @@ fn gpu_main_loop_headless(legacy_image: Option<&str>, gpu_batch_iters_override: 
             s.image_height = h as u32;
             s.active_project = Some(project_name.clone());
             s.benchmark_store = benchmark_store;
+            // Stop any running auto-tune on project switch
+            if s.auto_tune_active {
+                s.auto_tune_active = false;
+            }
+            s.auto_tuner = None;
+            s.auto_tune_label = String::new();
             s.paused = true;
             s.generation += 1;
             s.image_generation += 1;

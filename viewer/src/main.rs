@@ -1,4 +1,5 @@
 mod app;
+mod auto_tune;
 mod benchmark;
 mod canvas_renderer;
 mod components;
