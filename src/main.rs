@@ -384,7 +384,7 @@ struct WsState {
     benchmark_request: Option<BenchmarkRequest>,
     benchmark_store: BenchmarkStore,
     benchmark_active: bool,
-    benchmark_events: Vec<serde_json::Value>, // queued events for WS clients
+    benchmark_events: Vec<serde_json::Value>, // append-only event log; each WS client tracks its own cursor
     // Auto-tune
     auto_tuner: Option<AutoTuner>,
     auto_tune_active: bool,
@@ -539,6 +539,9 @@ fn ws_handle_client(stream: std::net::TcpStream, state: SharedWsState) {
     let mut last_send_time = Instant::now();
     let mut last_image_send_time = Instant::now();
 
+    // Per-connection cursor into the shared benchmark_events append-only log
+    let mut events_cursor: usize;
+
     // Send init message + project list (blocking mode)
     let mut last_gen;
     let mut last_image_gen;
@@ -546,6 +549,7 @@ fn ws_handle_client(stream: std::net::TcpStream, state: SharedWsState) {
     let mut last_project_list_gen;
     {
         let s = lock.lock().unwrap();
+        events_cursor = s.benchmark_events.len(); // start after existing events
         last_gen = s.generation;
         last_image_gen = s.image_generation;
         last_ref_image_gen = s.ref_image_generation;
@@ -645,7 +649,7 @@ fn ws_handle_client(stream: std::net::TcpStream, state: SharedWsState) {
 
         // 3. Read current state and send appropriate message
         let msg_string = {
-            let mut s = lock.lock().unwrap();
+            let s = lock.lock().unwrap();
 
             // Project list changed (small message, send immediately)
             if s.project_list_generation != last_project_list_gen {
@@ -661,13 +665,14 @@ fn ws_handle_client(stream: std::net::TcpStream, state: SharedWsState) {
                 continue;
             }
 
-            // Drain benchmark events (small messages, send immediately)
-            if !s.benchmark_events.is_empty() {
-                let events: Vec<serde_json::Value> = s.benchmark_events.drain(..).collect();
+            // Send new benchmark events (each connection has its own cursor)
+            if events_cursor < s.benchmark_events.len() {
+                let new_events: Vec<serde_json::Value> = s.benchmark_events[events_cursor..].to_vec();
+                events_cursor = s.benchmark_events.len();
                 drop(s);
                 ws.get_ref().set_nonblocking(false).ok();
                 let mut failed = false;
-                for evt in events {
+                for evt in new_events {
                     if ws.send(tungstenite::Message::Text(evt.to_string().into())).is_err() {
                         failed = true;
                         break;
@@ -1923,6 +1928,7 @@ fn gpu_main_loop_headless(legacy_image: Option<&str>, gpu_batch_iters_override: 
             }
             s.auto_tuner = None;
             s.auto_tune_label = String::new();
+            s.benchmark_events.clear(); // safe: project_switched sends full state
             s.paused = true;
             s.generation += 1;
             s.image_generation += 1;
