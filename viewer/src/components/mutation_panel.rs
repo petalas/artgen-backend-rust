@@ -19,23 +19,27 @@ fn format_prob(p: f32) -> String {
 }
 
 /// Convert a probability to a log-scale slider value.
-/// Maps prob range [1/10000, 1/1] to slider [0, 1000].
-/// Left (0) = rare, right (1000) = frequent.
+/// Maps prob range [1/50000, 1/2] to slider [0, 1000].
+/// Left (0) = rarest (1:50000), right (1000) = most frequent (1:2).
+/// Center (~500) ≈ 1:316, placing typical defaults (1:250 to 1:3000) in the middle zone.
 fn prob_to_slider(p: f32) -> f64 {
     if p <= 0.0 {
         return 0.0;
     }
-    let inv = 1.0 / p;
-    let log_val = inv.ln() as f64;
-    let max_log = 10000_f64.ln(); // ≈ 9.21
-    (1000.0 - (log_val / max_log) * 1000.0).clamp(0.0, 1000.0)
+    let inv = (1.0 / p) as f64;
+    let min_inv: f64 = 2.0;   // most frequent
+    let max_inv: f64 = 50000.0; // rarest
+    let log_range = max_inv.ln() - min_inv.ln();
+    (1000.0 * (max_inv.ln() - inv.ln()) / log_range).clamp(0.0, 1000.0)
 }
 
 /// Convert a log-scale slider value back to a probability.
 fn slider_to_prob(v: f64) -> f32 {
-    let max_log = 10000_f64.ln();
-    let log_val = ((1000.0 - v) / 1000.0) * max_log;
-    (1.0 / log_val.exp()) as f32
+    let min_inv: f64 = 2.0;
+    let max_inv: f64 = 50000.0;
+    let log_range = max_inv.ln() - min_inv.ln();
+    let log_inv = max_inv.ln() - (v / 1000.0) * log_range;
+    (1.0 / log_inv.exp()) as f32
 }
 
 fn send_params(params: &MutationParams) {
@@ -252,13 +256,13 @@ pub fn ParamsEditor(
         </div>
         <div class="mutation-section">
             <div class="mutation-section-title">"Deltas"</div>
-            <DeltaSlider params={params} on_change={on_change} label="Move point delta" field="move_point_max_delta" min=0.001 max=0.5 step=0.001/>
-            <DeltaSlider params={params} on_change={on_change} label="Micro adjust delta" field="micro_adjust_delta" min=0.001 max=0.1 step=0.001/>
-            <DeltaSlider params={params} on_change={on_change} label="New point distance" field="new_point_max_distance" min=0.001 max=0.2 step=0.001/>
-            <DeltaSlider params={params} on_change={on_change} label="Offset magnitude" field="offset_polygon_magnitude" min=0.001 max=0.5 step=0.001/>
-            <DeltaSlider params={params} on_change={on_change} label="Medium move delta" field="medium_move_delta" min=0.001 max=0.1 step=0.001/>
-            <DeltaSlider params={params} on_change={on_change} label="Merge centroid dist" field="merge_centroid_threshold" min=0.01 max=0.5 step=0.01/>
-            <DeltaSlider params={params} on_change={on_change} label="Merge color dist" field="merge_color_threshold" min=0.01 max=0.5 step=0.01/>
+            <DeltaSlider params={params} on_change={on_change} label="Move point delta" field="move_point_max_delta" min=0.03 max=0.3 step=0.005/>
+            <DeltaSlider params={params} on_change={on_change} label="Micro adjust delta" field="micro_adjust_delta" min=0.0005 max=0.006 step=0.0005/>
+            <DeltaSlider params={params} on_change={on_change} label="New point distance" field="new_point_max_distance" min=0.005 max=0.06 step=0.005/>
+            <DeltaSlider params={params} on_change={on_change} label="Offset magnitude" field="offset_polygon_magnitude" min=0.02 max=0.16 step=0.005/>
+            <DeltaSlider params={params} on_change={on_change} label="Medium move delta" field="medium_move_delta" min=0.005 max=0.06 step=0.005/>
+            <DeltaSlider params={params} on_change={on_change} label="Merge centroid dist" field="merge_centroid_threshold" min=0.03 max=0.3 step=0.01/>
+            <DeltaSlider params={params} on_change={on_change} label="Merge color dist" field="merge_color_threshold" min=0.04 max=0.4 step=0.01/>
         </div>
         <div class="mutation-section">
             <div class="mutation-section-title">"Crossover"</div>
@@ -355,7 +359,7 @@ fn ProbSlider(
                 class="mutation-slider"
                 min="0"
                 max="1000"
-                step="1"
+                step="5"
                 prop:value={move || prob_to_slider(get_prob_field(&params.get(), &f2)).to_string()}
                 on:input={on_input}
             />

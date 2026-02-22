@@ -1,27 +1,27 @@
 // Mutation probability defaults (auto-tune cd-100 best)
-pub const ADD_POLYGON_PROB: f32 = 1.0 / 10.0;
-pub const REMOVE_POLYGON_PROB: f32 = 1.0 / 3263.0;
-pub const REORDER_POLYGON_PROB: f32 = 1.0 / 298.0;
-pub const OFFSET_POLYGON_PROBABILITY: f32 = 1.0 / 500.0;
-pub const MOVE_POINT_PROBABILITY: f32 = 1.0 / 947.0;
-pub const REMOVE_POINT_PROBABILITY: f32 = 1.0 / 500.0;
-pub const MICRO_ADJUSTMENT_PROBABILITY: f32 = 1.0 / 359.0;
-pub const CHANGE_COLOR_PROB: f32 = 1.0 / 2114.0;
-pub const ADJUST_BRIGHTNESS_PROB: f32 = 1.0 / 2114.0;
-pub const ADJUST_SATURATION_PROB: f32 = 1.0 / 750.0;
+pub const ADD_POLYGON_PROB: f32 = 0.1;         // 1:10
+pub const REMOVE_POLYGON_PROB: f32 = 0.000306;  // 1:3263
+pub const REORDER_POLYGON_PROB: f32 = 0.003356;  // 1:298
+pub const OFFSET_POLYGON_PROBABILITY: f32 = 0.002; // 1:500
+pub const MOVE_POINT_PROBABILITY: f32 = 0.001056;  // 1:947
+pub const REMOVE_POINT_PROBABILITY: f32 = 0.002; // 1:500
+pub const MICRO_ADJUSTMENT_PROBABILITY: f32 = 0.002786; // 1:359
+pub const CHANGE_COLOR_PROB: f32 = 0.000473;    // 1:2114
+pub const ADJUST_BRIGHTNESS_PROB: f32 = 0.000473; // 1:2114
+pub const ADJUST_SATURATION_PROB: f32 = 0.001333; // 1:750
 
-// New mutation probabilities (GPU parity + new mutations)
-pub const SCALE_POLYGON_PROB: f32 = 1.0 / 500.0;
-pub const ROTATE_POLYGON_PROB: f32 = 1.0 / 500.0;
-pub const ADJACENT_SWAP_PROB: f32 = 1.0 / 500.0;
-pub const MERGE_POLYGON_PROB: f32 = 1.0 / 1500.0;
-pub const CLONE_POLYGON_PROB: f32 = 1.0 / 50.0;
-pub const MEDIUM_MOVE_PROBABILITY: f32 = 1.0 / 250.0;
-pub const SWAP_COLORS_PROB: f32 = 1.0 / 500.0;
+// New mutation probabilities
+pub const SCALE_POLYGON_PROB: f32 = 0.002;      // 1:500
+pub const ROTATE_POLYGON_PROB: f32 = 0.002;     // 1:500
+pub const ADJACENT_SWAP_PROB: f32 = 0.002;      // 1:500
+pub const MERGE_POLYGON_PROB: f32 = 0.000667;   // 1:1500
+pub const CLONE_POLYGON_PROB: f32 = 0.02;       // 1:50
+pub const MEDIUM_MOVE_PROBABILITY: f32 = 0.004;  // 1:250
+pub const SWAP_COLORS_PROB: f32 = 0.002;        // 1:500
 
 // Merge mutation thresholds
 pub const MERGE_CENTROID_THRESHOLD: f32 = 0.15;
-pub const MERGE_COLOR_THRESHOLD: f32 = 50.0 / 255.0; // ~0.196 in normalized space
+pub const MERGE_COLOR_THRESHOLD: f32 = 0.196;
 
 // Mutation delta defaults
 pub const MOVE_POINT_MAX_DELTA: f32 = 0.15;
