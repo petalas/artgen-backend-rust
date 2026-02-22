@@ -8,6 +8,15 @@ Genetic art generator in Rust. Evolves polygon-based drawings to approximate a r
 
 *(None currently.)*
 
+## Agent Delegation Hints
+
+This codebase has several distinct subsystems — use parallel agents to investigate them independently rather than reading everything into the main context:
+
+- **GPU pipeline** (`src/gpu_evolver/`, `src/shaders/`): complex, lots of files — always delegate exploration to an agent
+- **CPU rasterization** (`src/utils.rs`, `src/evaluator.rs`): SIMD-heavy, benefits from focused agent analysis
+- **Models & settings** (`src/models/`, `src/settings.rs`): small files, OK to read directly if you just need a quick lookup
+- **Cross-cutting changes** (e.g., adding a new mutation type): spawn parallel agents for GPU shader side and CPU/model side simultaneously
+
 ## Knowledge System
 
 This project uses a routing table (below) to map file patterns to docs you must read before editing. When you struggle with something, capture what you learned (see [When You Struggle](#when-you-struggle-mandatory)).
