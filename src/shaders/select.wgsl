@@ -48,8 +48,8 @@ struct Params {
     // Crossover params
     spatial_crossover_weight: f32,
     tournament_size: u32,
-    incremental_eval: u32,
-    tile_culling: u32,
+    _pad_ie: u32,
+    _pad_tc: u32,
 
     // Chain count + lambda + padding
     chain_count_param: u32,
@@ -152,25 +152,19 @@ fn select_main(@builtin(global_invocation_id) gid: vec3<u32>,
     // --- Parallel min-reduction to find best offspring among λ candidates ---
     let lambda = params.lambda;
 
-    let incremental = params.incremental_eval == 1u;
-
     // Phase 1: Each thread loads its error value (or sentinel if beyond lambda)
     // Threads 0..lambda-1 each read one error accumulator via atomicExchange (resets to 0)
     // Threads lambda..63 load MAX_U32 sentinel so they lose all comparisons
     // Error accumulators are stride-2: [new_error, old_error] per offspring
+    // Incremental: final_error = parent_total - old_dirty + new_dirty
     if local_id < lambda {
         let oid = chain_id * lambda + local_id;
         let new_err = atomicExchange(&error_accumulators[oid * 2u], 0u);
         let old_err = atomicExchange(&error_accumulators[oid * 2u + 1u], 0u);
-        if incremental {
-            // final_error = parent_total - old_dirty + new_dirty
-            let parent_total = atomicLoad(&chain_total_errors[chain_id]);
-            // Saturating subtraction to avoid underflow
-            let base = select(parent_total - old_err, 0u, old_err > parent_total);
-            reduction_err[local_id] = base + new_err;
-        } else {
-            reduction_err[local_id] = new_err;
-        }
+        let parent_total = atomicLoad(&chain_total_errors[chain_id]);
+        // Saturating subtraction to avoid underflow
+        let base = select(parent_total - old_err, 0u, old_err > parent_total);
+        reduction_err[local_id] = base + new_err;
         reduction_idx[local_id] = local_id;
     } else {
         reduction_err[local_id] = 0xFFFFFFFFu;
@@ -203,18 +197,12 @@ fn select_main(@builtin(global_invocation_id) gid: vec3<u32>,
         let fitness = compute_fitness(best_error, working_states[best_offspring_id].polygon_count);
         let fitness_bits = bitcast<u32>(fitness);
 
-        // Compare against chain's current best
-        // When incremental eval is on, recompute parent fitness from chain_total_errors
-        // (quantized precision) so it's consistent with offspring error computation.
-        // Otherwise the parent retains a stale fitness from float-precision error.
-        var current_fitness: f32;
-        if incremental {
-            let parent_error = atomicLoad(&chain_total_errors[chain_id]);
-            current_fitness = compute_fitness(parent_error, chain_states[chain_id].polygon_count);
-            chain_states[chain_id].fitness_bits = bitcast<u32>(current_fitness);
-        } else {
-            current_fitness = bitcast<f32>(chain_states[chain_id].fitness_bits);
-        }
+        // Compare against chain's current best.
+        // Recompute parent fitness from chain_total_errors (quantized precision)
+        // so it's consistent with offspring error computation.
+        let parent_error = atomicLoad(&chain_total_errors[chain_id]);
+        let current_fitness = compute_fitness(parent_error, chain_states[chain_id].polygon_count);
+        chain_states[chain_id].fitness_bits = bitcast<u32>(current_fitness);
 
         // Accept if strictly better, or with 50% probability if equal (plateau traversal)
         // Use the best offspring's RNG for neutral acceptance
@@ -230,15 +218,13 @@ fn select_main(@builtin(global_invocation_id) gid: vec3<u32>,
             shared_copy_count = working_states[best_offspring_id].polygon_count;
             shared_best_offspring_id = best_offspring_id;
 
-            // Incremental eval: store total error + write update flags for update_framebuffers
-            if incremental {
-                atomicStore(&chain_total_errors[chain_id], best_error);
-                let bbox_lo = working_states[best_offspring_id].fitness_bits;
-                let bbox_hi = working_states[best_offspring_id].stagnation_counter;
-                chain_update_flags[chain_id * 4u] = 1u;       // accepted
-                chain_update_flags[chain_id * 4u + 1u] = bbox_lo;
-                chain_update_flags[chain_id * 4u + 2u] = bbox_hi;
-            }
+            // Store total error + write update flags for update_framebuffers
+            atomicStore(&chain_total_errors[chain_id], best_error);
+            let bbox_lo = working_states[best_offspring_id].fitness_bits;
+            let bbox_hi = working_states[best_offspring_id].stagnation_counter;
+            chain_update_flags[chain_id * 4u] = 1u;       // accepted
+            chain_update_flags[chain_id * 4u + 1u] = bbox_lo;
+            chain_update_flags[chain_id * 4u + 2u] = bbox_hi;
 
             // Adaptive mutation scale: only update when enabled
             if params.adaptive_mutation == 1u {
@@ -265,9 +251,7 @@ fn select_main(@builtin(global_invocation_id) gid: vec3<u32>,
             }
 
             shared_accept = 0u;
-            if incremental {
-                chain_update_flags[chain_id * 4u] = 0u;  // not accepted
-            }
+            chain_update_flags[chain_id * 4u] = 0u;  // not accepted
         }
 
         // Export actual chain fitness (after acceptance) for CPU readback

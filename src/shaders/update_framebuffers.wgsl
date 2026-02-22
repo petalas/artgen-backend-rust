@@ -1,6 +1,5 @@
 // Update chain framebuffers after select acceptance: re-rasterize dirty bbox region.
 // Dispatch: (W/WG_X, H/WG_Y, active_chains) — same parallelism as init_framebuffers.
-// Only dispatched when incremental_eval is enabled.
 // Chains that didn't accept → all workgroups early-exit (reading 1 flag from global memory).
 // Workgroups outside dirty bbox → early-exit (tile-level skip).
 // Remaining workgroups: parallel rasterize into chain_framebuffers.
@@ -59,8 +58,8 @@ struct Params {
     // Crossover params
     spatial_crossover_weight: f32,
     tournament_size: u32,
-    incremental_eval: u32,
-    tile_culling: u32,
+    _pad_ie: u32,
+    _pad_tc: u32,
 
     // Chain count + lambda + padding
     chain_count_param: u32,

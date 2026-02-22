@@ -191,34 +191,6 @@ pub fn ParamsEditor(
                     "Adaptive mutation scale (\u{03BB}>1 offspring only)"
                 </label>
             </div>
-            <div class="mutation-row">
-                <label class="bench-checkbox-label">
-                    <input
-                        type="checkbox"
-                        disabled={move || is_disabled()}
-                        prop:checked={move || params.get().tile_culling}
-                        on:change={move |_| {
-                            params.update(|p| p.tile_culling = !p.tile_culling);
-                            notify();
-                        }}
-                    />
-                    "Tile culling (spatial polygon binning)"
-                </label>
-            </div>
-            <div class="mutation-row">
-                <label class="bench-checkbox-label">
-                    <input
-                        type="checkbox"
-                        disabled={move || is_disabled()}
-                        prop:checked={move || params.get().incremental_eval}
-                        on:change={move |_| {
-                            params.update(|p| p.incremental_eval = !p.incremental_eval);
-                            notify();
-                        }}
-                    />
-                    "Incremental eval (cached framebuffer)"
-                </label>
-            </div>
         </div>
         <div class="mutation-section">
             <div class="mutation-section-title">"Polygons"</div>

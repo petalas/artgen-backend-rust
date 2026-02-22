@@ -55,8 +55,8 @@ struct Params {
     // Crossover params
     spatial_crossover_weight: f32,
     tournament_size: u32,
-    incremental_eval: u32,
-    tile_culling: u32,
+    _pad_ie: u32,
+    _pad_tc: u32,
 
     // Chain count + lambda + padding
     chain_count_param: u32,

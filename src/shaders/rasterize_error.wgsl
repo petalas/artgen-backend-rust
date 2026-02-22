@@ -3,13 +3,10 @@
 // 1D workgroup layout required for subgroup intrinsics (naga constraint).
 // Pixel coordinates are derived from workgroup_id + local_invocation_index.
 //
-// Each thread rasterizes all polygons at its pixel, computes L1 error against reference,
+// Each thread rasterizes tile-culled polygons at its pixel, computes L1 error vs reference,
 // then subgroupAdd reduces within each warp/wave and thread 0 sums across subgroups.
-// Polygons are cooperatively loaded into shared memory in tiles (scaled to thread count).
-//
-// When tile culling is enabled (params.tile_culling == 1), only polygons that overlap
-// this workgroup's spatial tile are loaded from tile_data/tile_counts instead of iterating
-// all polygons. The binning pass must run before this shader.
+// Also computes old error from cached framebuffer for incremental evaluation.
+// Polygons are loaded from pre-binned tile_data (binning pass must run first).
 //
 // Workgroup size is configurable. pipeline.rs uses string replacement on the
 // WG_X/WG_Y constants below when creating non-default pipeline variants.
@@ -79,8 +76,8 @@ struct Params {
     // Crossover params
     spatial_crossover_weight: f32,
     tournament_size: u32,
-    incremental_eval: u32,
-    tile_culling: u32,
+    _pad_ie: u32,
+    _pad_tc: u32,
 
     // Chain count + lambda + padding
     chain_count_param: u32,
@@ -197,15 +194,12 @@ fn main(
     let w = params.image_width;
     let h = params.image_height;
     let lambda = params.lambda;
-    let incremental = params.incremental_eval == 1u;
-
-    // --- Incremental eval: dirty bbox tile skip ---
-    // Thread 0 reads the dirty bbox from offspring header and checks if this tile overlaps.
-    // Parent chain for this offspring: chain_id / lambda
     let parent_chain = chain_id / lambda;
 
-    if incremental && local_idx == 0u {
-        // Unpack dirty bbox from offspring header
+    // --- Dirty bbox tile skip ---
+    // Thread 0 reads the dirty bbox from offspring header and checks if this tile overlaps.
+    // Workgroups fully outside the dirty region early-exit (major perf win for single mutations).
+    if local_idx == 0u {
         let bbox_lo = working_states[chain_id].fitness_bits;
         let bbox_hi = working_states[chain_id].stagnation_counter;
         shared_dirty_min_x = bbox_lo & 0xFFFFu;
@@ -213,23 +207,19 @@ fn main(
         shared_dirty_max_x = bbox_hi & 0xFFFFu;
         shared_dirty_max_y = (bbox_hi >> 16u) & 0xFFFFu;
 
-        // This tile's pixel range
         let tile_min_x = wid.x * WG_X;
         let tile_min_y = wid.y * WG_Y;
         let tile_max_x = min(tile_min_x + WG_X, w);
         let tile_max_y = min(tile_min_y + WG_Y, h);
 
-        // Check overlap: skip if tile and dirty bbox don't intersect
         let no_overlap = tile_max_x <= shared_dirty_min_x || tile_min_x >= shared_dirty_max_x ||
                          tile_max_y <= shared_dirty_min_y || tile_min_y >= shared_dirty_max_y;
         shared_skip_tile = select(0u, 1u, no_overlap);
     }
 
-    if incremental {
-        workgroupBarrier();
-        if shared_skip_tile == 1u {
-            return;
-        }
+    workgroupBarrier();
+    if shared_skip_tile == 1u {
+        return;
     }
 
     var pixel_error = 0u;
@@ -238,132 +228,81 @@ fn main(
     if px < w && py < h {
         let chain_count = arrayLength(&working_states);
         if chain_id < chain_count {
-            // Pixel center in normalized coordinates
             let fx = (f32(px) + 0.5) / f32(w);
             let fy = (f32(py) + 0.5) / f32(h);
 
-            // Load reference pixel from texture (Rgba8Unorm: automatically [0,1] float)
             let ref_color = textureLoad(reference_image, vec2<i32>(i32(px), i32(py)), 0);
             let refr = ref_color.x * 255.0;
             let refg = ref_color.y * 255.0;
             let refb = ref_color.z * 255.0;
 
-            // --- Incremental: read cached parent pixel from chain_framebuffers ---
-            // The framebuffer stores quantized RGBA (R in bits 0-7, G in 8-15, B in 16-23).
-            // This is O(1) per pixel instead of O(polygon_count) re-rasterization.
-            // The framebuffer is kept in sync by init_framebuffers (on first enable)
+            // Read cached parent pixel from chain_framebuffers (O(1) per pixel).
+            // The framebuffer is kept in sync by init_framebuffers (on startup)
             // and update_framebuffers (after each select pass on acceptance).
-            if incremental {
-                let fb_idx = parent_chain * w * h + py * w + px;
-                let packed = chain_framebuffers[fb_idx];
-                let old_ri = f32(packed & 0xFFu);
-                let old_gi = f32((packed >> 8u) & 0xFFu);
-                let old_bi = f32((packed >> 16u) & 0xFFu);
-                pixel_error_old = u32(abs(old_ri - refr) + abs(old_gi - refg) + abs(old_bi - refb));
-            }
+            let fb_idx = parent_chain * w * h + py * w + px;
+            let packed = chain_framebuffers[fb_idx];
+            let old_ri = f32(packed & 0xFFu);
+            let old_gi = f32((packed >> 8u) & 0xFFu);
+            let old_bi = f32((packed >> 16u) & 0xFFu);
+            pixel_error_old = u32(abs(old_ri - refr) + abs(old_gi - refg) + abs(old_bi - refb));
 
             // Start with white background, accumulate in registers
             var r = 255.0;
             var g = 255.0;
             var b = 255.0;
 
-            if params.tile_culling == 1u {
-                // --- Tile-culled path ---
-                // This workgroup's tile coordinates
-                let tile_x = wid.x;
-                let tile_y = wid.y;
-                let num_tiles_x = (w + WG_X - 1u) / WG_X;
-                let num_tiles_y = (h + WG_Y - 1u) / WG_Y;
-                let num_tiles = num_tiles_x * num_tiles_y;
-                let tile_id = tile_y * num_tiles_x + tile_x;
+            // Tile-culled rasterization: only process polygons binned to this tile
+            let num_tiles_x = (w + WG_X - 1u) / WG_X;
+            let num_tiles_y = (h + WG_Y - 1u) / WG_Y;
+            let num_tiles = num_tiles_x * num_tiles_y;
+            let tile_id = wid.y * num_tiles_x + wid.x;
 
-                // Read tile polygon count (non-atomic read — binning pass is complete)
-                let tile_global = chain_id * num_tiles + tile_id;
-                let tile_poly_count = min(tile_counts_buf[tile_global], TILE_MAX_POLYS);
+            let tile_global = chain_id * num_tiles + tile_id;
+            let tile_poly_count = min(tile_counts_buf[tile_global], TILE_MAX_POLYS);
+            let tile_data_base = chain_id * num_tiles * TILE_MAX_POLYS + tile_id * TILE_MAX_POLYS;
 
-                // Tile data offset for this offspring's tile
-                let tile_data_base = chain_id * num_tiles * TILE_MAX_POLYS + tile_id * TILE_MAX_POLYS;
+            let sm_tile_count = (tile_poly_count + TILE_CAP - 1u) / TILE_CAP;
 
-                // Process tile polygons in shared-memory tiles (same tiling as brute force)
-                let sm_tile_count = (tile_poly_count + TILE_CAP - 1u) / TILE_CAP;
+            for (var sm_tile = 0u; sm_tile < sm_tile_count; sm_tile++) {
+                let sm_tile_base = sm_tile * TILE_CAP;
+                let sm_tile_end = min(TILE_CAP, tile_poly_count - sm_tile_base);
 
-                for (var sm_tile = 0u; sm_tile < sm_tile_count; sm_tile++) {
-                    let sm_tile_base = sm_tile * TILE_CAP;
-                    let sm_tile_end = min(TILE_CAP, tile_poly_count - sm_tile_base);
-
-                    // Cooperative load: each thread loads LOADS_PER_THREAD polygons via tile index
-                    for (var load_pass = 0u; load_pass < LOADS_PER_THREAD; load_pass++) {
-                        let slot = local_idx + load_pass * THREAD_COUNT;
-                        if slot < sm_tile_end {
-                            let poly_idx = tile_data[tile_data_base + sm_tile_base + slot];
-                            shared_polys[slot] = working_states[chain_id].polygons[poly_idx];
-                        }
+                for (var load_pass = 0u; load_pass < LOADS_PER_THREAD; load_pass++) {
+                    let slot = local_idx + load_pass * THREAD_COUNT;
+                    if slot < sm_tile_end {
+                        let poly_idx = tile_data[tile_data_base + sm_tile_base + slot];
+                        shared_polys[slot] = working_states[chain_id].polygons[poly_idx];
                     }
-                    workgroupBarrier();
-
-                    // Each thread tests its pixel against polygons in this shared memory tile
-                    for (var i = 0u; i < sm_tile_end; i++) {
-                        rasterize_blend(shared_polys[i], fx, fy, &r, &g, &b);
-                    }
-                    workgroupBarrier();
                 }
-            } else {
-                // --- Brute-force path (original) ---
-                let poly_count = working_states[chain_id].polygon_count;
-                let tile_count = (poly_count + TILE_CAP - 1u) / TILE_CAP;
+                workgroupBarrier();
 
-                for (var tile = 0u; tile < tile_count; tile++) {
-                    let tile_base = tile * TILE_CAP;
-                    let tile_end = min(TILE_CAP, poly_count - tile_base);
-
-                    // Cooperative load: each thread loads LOADS_PER_THREAD polygons into shared memory
-                    for (var load_pass = 0u; load_pass < LOADS_PER_THREAD; load_pass++) {
-                        let slot = local_idx + load_pass * THREAD_COUNT;
-                        if slot < tile_end {
-                            shared_polys[slot] = working_states[chain_id].polygons[tile_base + slot];
-                        }
-                    }
-                    workgroupBarrier();
-
-                    // Each thread tests its pixel against all polygons in this tile
-                    for (var i = 0u; i < tile_end; i++) {
-                        rasterize_blend(shared_polys[i], fx, fy, &r, &g, &b);
-                    }
-                    workgroupBarrier();
+                for (var i = 0u; i < sm_tile_end; i++) {
+                    rasterize_blend(shared_polys[i], fx, fy, &r, &g, &b);
                 }
+                workgroupBarrier();
             }
 
-            // Clamp rendered values
-            let ri = clamp(r, 0.0, 255.0);
-            let gi = clamp(g, 0.0, 255.0);
-            let bi = clamp(b, 0.0, 255.0);
-
             // L1 error: quantize to u8 integers (floor) so error matches
-            // framebuffer precision (pack_fb_pixel truncates to u8). Both
-            // incremental and non-incremental modes use quantized error
-            // to produce identical, comparable fitness values.
-            let qr = floor(ri);
-            let qg = floor(gi);
-            let qb = floor(bi);
+            // framebuffer precision (pack_fb_pixel truncates to u8).
+            let qr = floor(clamp(r, 0.0, 255.0));
+            let qg = floor(clamp(g, 0.0, 255.0));
+            let qb = floor(clamp(b, 0.0, 255.0));
             pixel_error = u32(abs(qr - refr) + abs(qg - refg) + abs(qb - refb));
         }
     }
 
     // Subgroup-accelerated reduction: subgroupAdd within each warp/wave,
     // then thread 0 sums across subgroups via shared memory.
-    let sg_sum = subgroupAdd(pixel_error);
     let sg_idx = local_idx / sg_size;
 
+    let sg_sum = subgroupAdd(pixel_error);
     if sg_inv_id == 0u {
         shared_errors[sg_idx] = sg_sum;
     }
 
-    // Also reduce old errors for incremental eval
-    if incremental {
-        let sg_sum_old = subgroupAdd(pixel_error_old);
-        if sg_inv_id == 0u {
-            shared_errors_old[sg_idx] = sg_sum_old;
-        }
+    let sg_sum_old = subgroupAdd(pixel_error_old);
+    if sg_inv_id == 0u {
+        shared_errors_old[sg_idx] = sg_sum_old;
     }
 
     workgroupBarrier();
@@ -372,17 +311,12 @@ fn main(
     if local_idx == 0u {
         let num_subgroups = (THREAD_COUNT + sg_size - 1u) / sg_size;
         var total = 0u;
+        var total_old = 0u;
         for (var i = 0u; i < num_subgroups; i++) {
             total += shared_errors[i];
+            total_old += shared_errors_old[i];
         }
         atomicAdd(&error_accumulators[chain_id * 2u], total);
-
-        if incremental {
-            var total_old = 0u;
-            for (var i = 0u; i < num_subgroups; i++) {
-                total_old += shared_errors_old[i];
-            }
-            atomicAdd(&error_accumulators[chain_id * 2u + 1u], total_old);
-        }
+        atomicAdd(&error_accumulators[chain_id * 2u + 1u], total_old);
     }
 }

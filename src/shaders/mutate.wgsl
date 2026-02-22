@@ -104,8 +104,8 @@ struct Params {
     // Crossover params
     spatial_crossover_weight: f32,
     tournament_size: u32,
-    incremental_eval: u32,
-    tile_culling: u32,
+    _pad_ie: u32,
+    _pad_tc: u32,
 
     // Chain count + lambda + padding
     chain_count_param: u32,
@@ -611,10 +611,8 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
             working_states[offspring_id].polygons[i] = poly;
         }
 
-        // Save RNG to offspring slot
-        if params.incremental_eval == 1u {
-            write_dirty_bbox(offspring_id, full_image_bbox());
-        }
+        // Crossover dirties the full image
+        write_dirty_bbox(offspring_id, full_image_bbox());
         working_states[offspring_id].rng_state.x = rng;
         return;
     }
@@ -637,9 +635,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
 
     if params.single_mutation_mode == 1u {
         let dirty_bbox = single_mutate_offspring(&rng, offspring_id, &count, mutation_scale);
-        if params.incremental_eval == 1u {
-            write_dirty_bbox(offspring_id, dirty_bbox);
-        }
+        write_dirty_bbox(offspring_id, dirty_bbox);
         working_states[offspring_id].rng_state.x = rng;
         return;
     }
@@ -967,9 +963,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
     }
 
     // Multi-mutation mode always dirties the full image
-    if params.incremental_eval == 1u {
-        write_dirty_bbox(offspring_id, full_image_bbox());
-    }
+    write_dirty_bbox(offspring_id, full_image_bbox());
 
     // Save per-offspring RNG state
     working_states[offspring_id].rng_state.x = rng;

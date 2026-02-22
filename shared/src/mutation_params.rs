@@ -101,18 +101,6 @@ pub struct MutationParams {
     #[serde(default = "default_gpu_batch_iters")]
     pub gpu_batch_iters: u32,
 
-    // Tile culling: spatial binning optimization for the rasterize pass.
-    // When enabled, a binning pass assigns each polygon to the tiles it overlaps,
-    // and the rasterize shader only processes polygons in its tile's list.
-    #[serde(default)]
-    pub tile_culling: bool,
-
-    // Incremental evaluation: cache the rasterized framebuffer per chain and only
-    // re-rasterize the dirty region (bounding box of the changed polygon).
-    // Only effective in single_mutation_mode.
-    #[serde(default)]
-    pub incremental_eval: bool,
-
 }
 
 impl MutationParams {
@@ -222,8 +210,6 @@ impl Default for MutationParams {
             adaptive_mutation: settings::ADAPTIVE_MUTATION,
             rasterize_wg: [settings::RASTERIZE_WG_X_DEFAULT, settings::RASTERIZE_WG_Y_DEFAULT],
             gpu_batch_iters: settings::GPU_DEFAULT_BATCH_ITERS,
-            tile_culling: true,
-            incremental_eval: false,
         }
     }
 }

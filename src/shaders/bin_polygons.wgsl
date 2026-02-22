@@ -2,7 +2,7 @@
 // Dispatch: (offspring_count, 1, 1) — one workgroup per offspring, one thread does the serial iteration.
 // Serial fill ensures polygon indices appear in original order (required for alpha blending).
 //
-// This shader runs between mutate and rasterize_error when tile culling is enabled.
+// This shader runs between mutate and rasterize_error.
 
 struct Polygon {
     data: vec4<u32>,   // [color_packed, v0_packed, v1_packed, v2_packed] — 16 bytes
@@ -51,8 +51,8 @@ struct Params {
     // Crossover params
     spatial_crossover_weight: f32,
     tournament_size: u32,
-    _pad1: u32,
-    tile_culling: u32,
+    _pad_ie: u32,
+    _pad_tc: u32,
 
     // Chain count + lambda + padding
     chain_count_param: u32,

@@ -65,7 +65,6 @@ impl PassTimings {
 struct PendingBatch {
     staging_idx: usize,
     collect_timestamps: bool,
-    tile_culling: bool,
     active_chain_count: u32,
     submission_index: SubmissionIndex,
 }
@@ -90,7 +89,7 @@ pub struct GpuEvolver {
     staging_idx: usize,      // alternates 0/1 for double-buffered staging
     pending_batch: Option<PendingBatch>,
     pending_map_receivers: Option<PendingMapReceivers>,
-    framebuffers_initialized: bool, // incremental eval: has init_framebuffers been dispatched?
+    framebuffers_initialized: bool, // has init_framebuffers been dispatched?
     /// Chain index whose state needs to be copied to readback_staging_buf
     /// in the next batch submission. Set when finish_pending_readback detects
     /// a new best but defers the actual GPU copy to avoid a synchronous round-trip.
@@ -223,20 +222,14 @@ impl GpuEvolver {
         // Check if rasterize workgroup size needs to change (between batches)
         self.pipeline.set_rasterize_wg(mutation_params.rasterize_wg);
 
-        // Incremental eval: initialize framebuffers if needed.
+        // Initialize framebuffers if needed (incremental eval is always on).
         // This must happen before submission and requires a synchronous GPU round-trip,
         // so flush any pending batch first to avoid conflicting submissions.
         let active_preview = mutation_params.chain_count.min(self.pipeline.chain_count);
-        if mutation_params.incremental_eval && !self.framebuffers_initialized {
-            // flush_pending internally checks for None, so safe to call unconditionally
+        if !self.framebuffers_initialized {
             let flush_result = self.flush_pending();
             self.dispatch_init_framebuffers(active_preview);
-            // If the flush produced a result, we need to return it. Since we've flushed
-            // the pending batch, there's nothing left to collect after submission below.
-            // We'll store it and return it at the end.
             return self.run_batch_inner(mutation_params, collect_timestamps, flush_result);
-        } else if !mutation_params.incremental_eval {
-            self.framebuffers_initialized = false;
         }
 
         // Save whether we have a previous batch to collect AFTER submitting
@@ -330,8 +323,6 @@ impl GpuEvolver {
         let wg_x = p.image_width.div_ceil(rwg[0]);
         let wg_y = p.image_height.div_ceil(rwg[1]);
         let lambda = mutation_params.lambda;
-        let tile_culling = mutation_params.tile_culling;
-        let incremental_eval = mutation_params.incremental_eval;
 
         // Runtime check: active * lambda must fit in offspring_capacity
         assert!(active * lambda <= p.offspring_capacity,
@@ -365,13 +356,10 @@ impl GpuEvolver {
                 pass.set_bind_group(1, &p.params_bind_group, &[]);
                 pass.dispatch_workgroups(active, 1, 1);
 
-                // Binning pass: only when tile culling is enabled
-                if tile_culling {
-                    pass.set_pipeline(&p.bin_polygons_pipeline);
-                    pass.set_bind_group(0, &p.bin_polygons_bind_group, &[]);
-                    pass.set_bind_group(1, &p.params_bind_group, &[]);
-                    pass.dispatch_workgroups(active * lambda, 1, 1);
-                }
+                pass.set_pipeline(&p.bin_polygons_pipeline);
+                pass.set_bind_group(0, &p.bin_polygons_bind_group, &[]);
+                pass.set_bind_group(1, &p.params_bind_group, &[]);
+                pass.dispatch_workgroups(active * lambda, 1, 1);
 
                 pass.set_pipeline(&p.rasterize_error_pipeline);
                 pass.set_bind_group(0, &p.rasterize_error_bind_group, &[]);
@@ -383,12 +371,10 @@ impl GpuEvolver {
                 pass.set_bind_group(1, &p.params_bind_group, &[]);
                 pass.dispatch_workgroups(active, 1, 1);
 
-                if incremental_eval {
-                    pass.set_pipeline(&p.update_framebuffers_pipeline);
-                    pass.set_bind_group(0, &p.update_framebuffers_bind_group, &[]);
-                    pass.set_bind_group(1, &p.params_bind_group, &[]);
-                    pass.dispatch_workgroups(wg_x, wg_y, active);
-                }
+                pass.set_pipeline(&p.update_framebuffers_pipeline);
+                pass.set_bind_group(0, &p.update_framebuffers_bind_group, &[]);
+                pass.set_bind_group(1, &p.params_bind_group, &[]);
+                pass.dispatch_workgroups(wg_x, wg_y, active);
             }
         }
 
@@ -411,7 +397,7 @@ impl GpuEvolver {
                 pass.dispatch_workgroups(active, 1, 1);
             }
 
-            if tile_culling {
+            {
                 let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
                     label: Some("bin_polygons"),
                     timestamp_writes: Some(ComputePassTimestampWrites {
@@ -456,12 +442,10 @@ impl GpuEvolver {
                 pass.dispatch_workgroups(active, 1, 1);
 
                 // Update framebuffers in same pass (timestamps cover both)
-                if incremental_eval {
-                    pass.set_pipeline(&p.update_framebuffers_pipeline);
-                    pass.set_bind_group(0, &p.update_framebuffers_bind_group, &[]);
-                    pass.set_bind_group(1, &p.params_bind_group, &[]);
-                    pass.dispatch_workgroups(wg_x, wg_y, active);
-                }
+                pass.set_pipeline(&p.update_framebuffers_pipeline);
+                pass.set_bind_group(0, &p.update_framebuffers_bind_group, &[]);
+                pass.set_bind_group(1, &p.params_bind_group, &[]);
+                pass.dispatch_workgroups(wg_x, wg_y, active);
             }
         }
 
@@ -539,7 +523,6 @@ impl GpuEvolver {
         self.pending_batch = Some(PendingBatch {
             staging_idx: write_idx,
             collect_timestamps,
-            tile_culling,
             active_chain_count: active,
             submission_index,
         });
@@ -650,16 +633,14 @@ impl GpuEvolver {
                 timestamps[end_idx].wrapping_sub(timestamps[begin_idx]) as f64 * period
             };
             self.pass_timings.mutate_ns += duration(0, 1);
-            if pending.tile_culling {
-                self.pass_timings.bin_polygons_ns += duration(2, 3);
-            }
+            self.pass_timings.bin_polygons_ns += duration(2, 3);
             self.pass_timings.rasterize_error_ns += duration(4, 5);
             self.pass_timings.select_ns += duration(6, 7);
             self.pass_timings.sample_count += 1;
             if self.pass_timings.sample_count <= 3 {
                 eprintln!("[timestamps] sample #{}: mutate={:.2}ns bin={:.2}ns rast={:.2}ns sel={:.2}ns period={:.4}",
                     self.pass_timings.sample_count,
-                    duration(0, 1), if pending.tile_culling { duration(2, 3) } else { 0.0 },
+                    duration(0, 1), duration(2, 3),
                     duration(4, 5), duration(6, 7), period);
             }
             drop(ts_data);
@@ -890,17 +871,22 @@ impl GpuEvolver {
         let wg_x = p.image_width.div_ceil(rwg[0]);
         let wg_y = p.image_height.div_ceil(rwg[1]);
 
-        let mut params = default_gpu_params(p.image_width, p.image_height, active);
-        // Force brute-force rasterization — tile data is stale (no bin_polygons dispatch here)
-        params.tile_culling = 0;
+        let params = default_gpu_params(p.image_width, p.image_height, active);
         let params_bytes: &[u8] = bytemuck::bytes_of(&params);
         p.queue.write_buffer(&p.params_buf, 0, params_bytes);
 
         {
             let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                label: Some("evaluate_rasterize_error"),
+                label: Some("evaluate_fitness"),
                 timestamp_writes: None,
             });
+
+            // Bin polygons first (tile culling is always on)
+            pass.set_pipeline(&p.bin_polygons_pipeline);
+            pass.set_bind_group(0, &p.bin_polygons_bind_group, &[]);
+            pass.set_bind_group(1, &p.params_bind_group, &[]);
+            pass.dispatch_workgroups(active, 1, 1);
+
             pass.set_pipeline(&p.rasterize_error_pipeline);
             pass.set_bind_group(0, &p.rasterize_error_bind_group, &[]);
             pass.set_bind_group(1, &p.params_bind_group, &[]);
@@ -1053,9 +1039,7 @@ impl GpuEvolver {
 
         // 4. Pre-initialize framebuffers so warmup exercises the full
         //    incremental pipeline (including update_framebuffers)
-        if params.incremental_eval {
-            self.dispatch_init_framebuffers(chain_count);
-        }
+        self.dispatch_init_framebuffers(chain_count);
 
         // 5. Run 2 warmup batches to warm GPU shader caches and memory pages,
         //    then flush results. This ensures the first real batch runs at
@@ -1068,11 +1052,8 @@ impl GpuEvolver {
         self.reinit_chains(drawing);
         let start_fitness = self.evaluate_chain_fitness(chain_count);
 
-        // 7. Pre-initialize framebuffers for incremental eval so this cost
-        //    is excluded from benchmark timing
-        if params.incremental_eval {
-            self.dispatch_init_framebuffers(chain_count);
-        }
+        // 7. Pre-initialize framebuffers so this cost is excluded from benchmark timing
+        self.dispatch_init_framebuffers(chain_count);
 
         // 8. Reset all counters so the benchmark starts clean
         self.iteration = 0;
