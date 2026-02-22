@@ -10,6 +10,17 @@ fn default_gpu_batch_iters() -> u32 {
     settings::GPU_DEFAULT_BATCH_ITERS
 }
 
+fn default_scale_polygon_prob() -> f32 { settings::SCALE_POLYGON_PROB }
+fn default_rotate_polygon_prob() -> f32 { settings::ROTATE_POLYGON_PROB }
+fn default_adjacent_swap_prob() -> f32 { settings::ADJACENT_SWAP_PROB }
+fn default_merge_polygon_prob() -> f32 { settings::MERGE_POLYGON_PROB }
+fn default_clone_polygon_prob() -> f32 { settings::CLONE_POLYGON_PROB }
+fn default_medium_move_prob() -> f32 { settings::MEDIUM_MOVE_PROBABILITY }
+fn default_swap_colors_prob() -> f32 { settings::SWAP_COLORS_PROB }
+fn default_medium_move_delta() -> f32 { settings::MEDIUM_MOVE_DELTA }
+fn default_merge_centroid_threshold() -> f32 { settings::MERGE_CENTROID_THRESHOLD }
+fn default_merge_color_threshold() -> f32 { settings::MERGE_COLOR_THRESHOLD }
+
 
 /// Runtime-configurable mutation parameters.
 /// Sent over WebSocket as JSON (camelCase) and used to build `GpuParams`.
@@ -27,12 +38,19 @@ pub struct MutationParams {
     pub change_color_prob: f32,
     pub adjust_brightness_prob: f32,
     pub adjust_saturation_prob: f32,
+    #[serde(default = "default_scale_polygon_prob")]
     pub scale_polygon_prob: f32,
+    #[serde(default = "default_rotate_polygon_prob")]
     pub rotate_polygon_prob: f32,
+    #[serde(default = "default_adjacent_swap_prob")]
     pub adjacent_swap_prob: f32,
+    #[serde(default = "default_merge_polygon_prob")]
     pub merge_polygon_prob: f32,
+    #[serde(default = "default_clone_polygon_prob")]
     pub clone_polygon_prob: f32,
+    #[serde(default = "default_medium_move_prob")]
     pub medium_move_prob: f32,
+    #[serde(default = "default_swap_colors_prob")]
     pub swap_colors_prob: f32,
 
     // Deltas / magnitudes
@@ -40,10 +58,13 @@ pub struct MutationParams {
     pub micro_adjust_delta: f32,
     pub new_point_max_distance: f32,
     pub offset_polygon_magnitude: f32,
+    #[serde(default = "default_medium_move_delta")]
     pub medium_move_delta: f32,
 
     // Merge thresholds
+    #[serde(default = "default_merge_centroid_threshold")]
     pub merge_centroid_threshold: f32,
+    #[serde(default = "default_merge_color_threshold")]
     pub merge_color_threshold: f32,
 
     // Alpha range
