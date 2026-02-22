@@ -117,7 +117,7 @@ fn pack_fb_pixel(r: f32, g: f32, b: f32) -> u32 {
 // Shared memory for polygon tiling (same approach as rasterize_error)
 const TILE_CAP: u32 = THREAD_COUNT * 3u;
 const LOADS_PER_THREAD: u32 = 3u;
-var<workgroup> shared_polys: array<Polygon, 1536>;   // max tile cap (512*3)
+var<workgroup> shared_polys: array<Polygon, TILE_CAP>;
 var<workgroup> shared_errors: array<u32, 128>;
 
 @compute @workgroup_size(THREAD_COUNT, 1, 1)

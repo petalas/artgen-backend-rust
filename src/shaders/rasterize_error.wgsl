@@ -124,7 +124,7 @@ struct Params {
 // Shared memory arrays sized to thread count.
 // shared_polys: TILE_CAP polygons (THREAD_COUNT * 3 * 16 bytes)
 // shared_errors: one u32 per subgroup for cross-subgroup reduction (max 256/4 = 64 subgroups)
-var<workgroup> shared_polys: array<Polygon, 1536>;   // max tile cap (512*3) — only TILE_CAP entries used
+var<workgroup> shared_polys: array<Polygon, TILE_CAP>;
 var<workgroup> shared_errors: array<u32, 128>;      // max subgroups — only ceil(THREAD_COUNT/sg_size) used
 var<workgroup> shared_errors_old: array<u32, 128>;  // old errors for incremental eval
 var<workgroup> shared_skip_tile: u32;               // set by thread 0 if tile is outside dirty bbox

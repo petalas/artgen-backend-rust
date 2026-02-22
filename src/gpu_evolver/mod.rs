@@ -61,6 +61,7 @@ struct PendingBatch {
     staging_idx: usize,
     collect_timestamps: bool,
     active_chain_count: u32,
+    submission_index: SubmissionIndex,
 }
 
 /// Receivers for the map_async callbacks on staging buffers.
@@ -186,8 +187,8 @@ impl GpuEvolver {
             pass.set_bind_group(1, &p.params_bind_group, &[]);
             pass.dispatch_workgroups(wg_x, wg_y, active_chains);
         }
-        p.queue.submit(std::iter::once(encoder.finish()));
-        p.device.poll(PollType::Wait { submission_index: None, timeout: None }).unwrap();
+        let si = p.queue.submit(std::iter::once(encoder.finish()));
+        p.device.poll(PollType::Wait { submission_index: Some(si), timeout: None }).unwrap();
 
         self.framebuffers_initialized = true;
         println!("Initialized chain framebuffers ({} chains)", active_chains);
@@ -399,7 +400,7 @@ impl GpuEvolver {
         );
 
         // 6. Submit — GPU starts working on this batch
-        p.queue.submit(std::iter::once(encoder.finish()));
+        let submission_index = p.queue.submit(std::iter::once(encoder.finish()));
 
         self.iteration += iterations;
         self.total_evaluations += iterations as u64 * active as u64 * lambda as u64;
@@ -413,6 +414,7 @@ impl GpuEvolver {
             staging_idx: write_idx,
             collect_timestamps,
             active_chain_count: active,
+            submission_index,
         });
 
         // 9. Return the PREVIOUS batch's result (one batch behind)
@@ -461,9 +463,9 @@ impl GpuEvolver {
         let idx = pending.staging_idx;
         let active = pending.active_chain_count as usize;
 
-        // Single poll waits for ALL pending GPU work — both the previous batch's
-        // map_async and any newly submitted command buffer
-        p.device.poll(PollType::Wait { submission_index: None, timeout: None }).unwrap();
+        // Poll only for the specific submission we need — the previous batch's command buffer.
+        // This avoids blocking on any unrelated GPU work.
+        p.device.poll(PollType::Wait { submission_index: Some(pending.submission_index.clone()), timeout: None }).unwrap();
 
         receivers.control_rx.recv().unwrap().expect("Failed to map control staging buffer");
         if let Some(ref ts_rx) = receivers.timestamp_rx {
@@ -543,7 +545,7 @@ impl GpuEvolver {
             GPU_DRAWING_STATE_SIZE as u64,
         );
 
-        p.queue.submit(std::iter::once(encoder.finish()));
+        let si = p.queue.submit(std::iter::once(encoder.finish()));
 
         // Map and read
         let slice = p.readback_staging_buf.slice(..);
@@ -551,7 +553,7 @@ impl GpuEvolver {
         slice.map_async(MapMode::Read, move |result| {
             tx.send(result).unwrap();
         });
-        p.device.poll(PollType::Wait { submission_index: None, timeout: None }).unwrap();
+        p.device.poll(PollType::Wait { submission_index: Some(si), timeout: None }).unwrap();
         rx.recv().unwrap().expect("Failed to map readback staging buffer");
 
         let data = slice.get_mapped_range();
@@ -565,7 +567,8 @@ impl GpuEvolver {
 
 
     /// Batch-readback multiple chains in a single GPU submission.
-    /// Avoids N separate round-trips.
+    /// Avoids N separate round-trips. Uses a persistent staging buffer
+    /// pre-allocated for chain_count chains.
     pub fn readback_chains(&self, chain_ids: &[u32]) -> Vec<Drawing> {
         if chain_ids.is_empty() {
             return Vec::new();
@@ -575,13 +578,11 @@ impl GpuEvolver {
         let count = chain_ids.len();
         let state_size = GPU_DRAWING_STATE_SIZE as u64;
 
-        // Temporary staging buffer sized for all requested chains
-        let staging = p.device.create_buffer(&BufferDescriptor {
-            label: Some("multi_readback_staging"),
-            size: count as u64 * state_size,
-            usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        assert!(
+            count as u32 <= p.chain_count,
+            "readback_chains: requested {} chains but staging buffer holds max {}",
+            count, p.chain_count,
+        );
 
         let mut encoder = p.device.create_command_encoder(&CommandEncoderDescriptor {
             label: Some("multi_readback"),
@@ -591,18 +592,19 @@ impl GpuEvolver {
             encoder.copy_buffer_to_buffer(
                 &p.chain_states_buf,
                 chain_id as u64 * state_size,
-                &staging,
+                &p.multi_readback_staging_buf,
                 i as u64 * state_size,
                 state_size,
             );
         }
 
-        p.queue.submit(std::iter::once(encoder.finish()));
+        let si = p.queue.submit(std::iter::once(encoder.finish()));
 
-        let slice = staging.slice(..);
+        let copy_size = count as u64 * state_size;
+        let slice = p.multi_readback_staging_buf.slice(..copy_size);
         let (tx, rx) = std::sync::mpsc::channel();
         slice.map_async(MapMode::Read, move |r| { tx.send(r).unwrap(); });
-        p.device.poll(PollType::Wait { submission_index: None, timeout: None }).unwrap();
+        p.device.poll(PollType::Wait { submission_index: Some(si), timeout: None }).unwrap();
         rx.recv().unwrap().expect("Failed to map multi-readback staging buffer");
 
         let data = slice.get_mapped_range();
@@ -614,7 +616,7 @@ impl GpuEvolver {
             })
             .collect();
         drop(data);
-        staging.unmap();
+        p.multi_readback_staging_buf.unmap();
 
         drawings
     }
@@ -716,19 +718,12 @@ impl GpuEvolver {
             pass.dispatch_workgroups(wg_x, wg_y, active);
         }
 
-        // Staging buffer: errors (active * 8 bytes, stride-2) + polygon_counts (active * 4 bytes)
+        // Use persistent staging buffer: errors (active * 8 bytes, stride-2) + polygon_counts (active * 4 bytes)
         let errors_size = active as u64 * 8; // stride-2: 2 u32s per offspring
-        let polygon_counts_size = active as u64 * 4;
-        let staging_size = errors_size + polygon_counts_size;
-        let staging = p.device.create_buffer(&BufferDescriptor {
-            label: Some("error_readback_staging"),
-            size: staging_size,
-            usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let staging_copy_size = errors_size + active as u64 * 4;
         encoder.copy_buffer_to_buffer(
             &p.error_accumulators_buf, 0,
-            &staging, 0,
+            &p.eval_fitness_staging_buf, 0,
             errors_size,
         );
         // Copy polygon_count (first u32) from each chain's working_states
@@ -736,20 +731,20 @@ impl GpuEvolver {
             encoder.copy_buffer_to_buffer(
                 &p.working_states_buf,
                 i as u64 * state_size,
-                &staging,
+                &p.eval_fitness_staging_buf,
                 errors_size + i as u64 * 4,
                 4,
             );
         }
 
-        p.queue.submit(std::iter::once(encoder.finish()));
+        let si = p.queue.submit(std::iter::once(encoder.finish()));
 
         // Map and read error values + polygon counts
-        let slice = staging.slice(..);
+        let slice = p.eval_fitness_staging_buf.slice(..staging_copy_size);
         let (tx, rx) = std::sync::mpsc::channel();
         slice.map_async(MapMode::Read, move |r| { tx.send(r).unwrap(); });
-        p.device.poll(PollType::Wait { submission_index: None, timeout: None }).unwrap();
-        rx.recv().unwrap().expect("Failed to map error readback staging buffer");
+        p.device.poll(PollType::Wait { submission_index: Some(si), timeout: None }).unwrap();
+        rx.recv().unwrap().expect("Failed to map eval fitness staging buffer");
 
         let data = slice.get_mapped_range();
         let all_u32s: &[u32] = bytemuck::cast_slice(&data);
@@ -777,7 +772,7 @@ impl GpuEvolver {
         }
 
         drop(data);
-        staging.unmap();
+        p.eval_fitness_staging_buf.unmap();
 
         // Write fitness_bits back into chain_states so the first run_batch
         // compares mutations against the correct baseline (not 0.0)
@@ -915,8 +910,10 @@ fn estimate_gpu_memory(chain_count: u32, offspring_capacity: u32, w: u32, h: u32
     let error_accumulators = oc * 8; // stride-2: 2 u32s per offspring
     let control = 16;
     let params = std::mem::size_of::<GpuParams>();
-    // Double-buffered staging: 2x control (16B each) + 2x fitness (k*4 each) + 2x timestamp (64B each) + readback
-    let staging = GPU_DRAWING_STATE_SIZE + 2 * 16 + 2 * (k * 4) + 2 * 64;
+    // Staging buffers: readback (1 state) + multi-readback (k states) + eval fitness (k*12)
+    //                + double-buffered: 2x control (16B) + 2x fitness (k*4) + 2x timestamp (64B)
+    let staging = GPU_DRAWING_STATE_SIZE + k * GPU_DRAWING_STATE_SIZE + k * 12
+        + 2 * 16 + 2 * (k * 4) + 2 * 64;
     // Tile culling buffers (worst-case: 8x8 WG)
     let max_num_tiles = ((w as usize + 7) / 8) * ((h as usize + 7) / 8);
     let tile_max_polys = crate::settings::TILE_MAX_POLYS as usize;

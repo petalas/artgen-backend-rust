@@ -263,11 +263,14 @@ fn gpu_main_loop(
     let mut last_draw_timestamp = Instant::now() - frametime;
     let mut last_save_timestamp = Instant::now();
     let mut last_stats_timestamp = Instant::now();
+    let mut batches = 0u64;
 
     let default_params = MutationParams::default();
     loop {
-        // Run a batch of GPU iterations
-        if let Some(new_best) = evolver.run_batch(&default_params, true) {
+        batches += 1;
+        // Run a batch of GPU iterations (collect timestamps every 20th batch, and always on the first)
+        let collect_timestamps = batches % 20 == 1;
+        if let Some(new_best) = evolver.run_batch(&default_params, collect_timestamps) {
             if new_best.fitness > global_best.fitness {
                 global_best = new_best;
 
@@ -2050,7 +2053,9 @@ fn gpu_main_loop_headless(legacy_image: Option<&str>, gpu_batch_iters_override: 
 
             batches += 1;
             let mp = ws_state.0.lock().unwrap().mutation_params.clone();
-            if let Some(new_best) = evolver.run_batch(&mp, true) {
+            // Collect timestamps every 20th batch (and always the first) to reduce pass transitions
+            let collect_timestamps = batches % 20 == 1;
+            if let Some(new_best) = evolver.run_batch(&mp, collect_timestamps) {
                 if new_best.fitness > global_best.fitness {
                     improvements += 1;
                     let delta = new_best.fitness - global_best.fitness;

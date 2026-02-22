@@ -20,6 +20,8 @@ pub struct GpuPipeline {
     pub error_accumulators_buf: Buffer,
     pub control_flags_buf: Buffer,
     pub readback_staging_buf: Buffer,
+    pub multi_readback_staging_buf: Buffer,  // persistent staging for batch chain readback
+    pub eval_fitness_staging_buf: Buffer,    // persistent staging for evaluate_chain_fitness readback
     pub control_staging_bufs: [Buffer; 2],
     pub fitness_packed_buf: Buffer,
     pub fitness_staging_bufs: [Buffer; 2],
@@ -289,6 +291,23 @@ impl GpuPipeline {
         let readback_staging_buf = device.create_buffer(&BufferDescriptor {
             label: Some("readback_staging"),
             size: GPU_DRAWING_STATE_SIZE as u64,
+            usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // Multi-chain readback staging (all chains — for readback_chains batch readback)
+        let multi_readback_staging_buf = device.create_buffer(&BufferDescriptor {
+            label: Some("multi_readback_staging"),
+            size: (chain_count as u64) * (GPU_DRAWING_STATE_SIZE as u64),
+            usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // Evaluate-fitness staging (errors + polygon_counts for all chains)
+        // Layout: [chain_count * 8 bytes (error accumulators, stride-2)] + [chain_count * 4 bytes (polygon counts)]
+        let eval_fitness_staging_buf = device.create_buffer(&BufferDescriptor {
+            label: Some("eval_fitness_staging"),
+            size: (chain_count as u64) * 12, // 8 bytes errors + 4 bytes polygon_count per chain
             usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -856,6 +875,8 @@ impl GpuPipeline {
             error_accumulators_buf,
             control_flags_buf,
             readback_staging_buf,
+            multi_readback_staging_buf,
+            eval_fitness_staging_buf,
             control_staging_bufs,
             fitness_packed_buf,
             fitness_staging_bufs,

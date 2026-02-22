@@ -826,6 +826,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
         var v0 = unpack_vertex(poly.data.y);
         var v1 = unpack_vertex(poly.data.z);
         var v2 = unpack_vertex(poly.data.w);
+        var modified = false;
 
         // Offset polygon (scaled by mutation_scale)
         if rand_f32(&rng) < params.offset_polygon_prob {
@@ -835,20 +836,20 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
             v0 = clamp(v0 + vec2<f32>(dx, dy), vec2<f32>(0.0), vec2<f32>(1.0));
             v1 = clamp(v1 + vec2<f32>(dx, dy), vec2<f32>(0.0), vec2<f32>(1.0));
             v2 = clamp(v2 + vec2<f32>(dx, dy), vec2<f32>(0.0), vec2<f32>(1.0));
-            is_dirty = true;
+            modified = true;
         }
 
         // Color mutations (not scaled)
-        if rand_f32(&rng) < params.change_color_prob { color.x = rand_f32(&rng); is_dirty = true; }
-        if rand_f32(&rng) < params.change_color_prob { color.y = rand_f32(&rng); is_dirty = true; }
-        if rand_f32(&rng) < params.change_color_prob { color.z = rand_f32(&rng); is_dirty = true; }
-        if rand_f32(&rng) < params.change_color_prob { color.w = clamp(rand_f32(&rng), params.min_alpha_norm, params.max_alpha_norm); is_dirty = true; }
+        if rand_f32(&rng) < params.change_color_prob { color.x = rand_f32(&rng); modified = true; }
+        if rand_f32(&rng) < params.change_color_prob { color.y = rand_f32(&rng); modified = true; }
+        if rand_f32(&rng) < params.change_color_prob { color.z = rand_f32(&rng); modified = true; }
+        if rand_f32(&rng) < params.change_color_prob { color.w = clamp(rand_f32(&rng), params.min_alpha_norm, params.max_alpha_norm); modified = true; }
 
         let color_step = 1.0 / 255.0;
-        if rand_f32(&rng) < params.micro_adjust_prob { let dir = select(-color_step, color_step, rand_f32(&rng) > 0.5); color.x = clamp(color.x + dir, 0.0, 1.0); is_dirty = true; }
-        if rand_f32(&rng) < params.micro_adjust_prob { let dir = select(-color_step, color_step, rand_f32(&rng) > 0.5); color.y = clamp(color.y + dir, 0.0, 1.0); is_dirty = true; }
-        if rand_f32(&rng) < params.micro_adjust_prob { let dir = select(-color_step, color_step, rand_f32(&rng) > 0.5); color.z = clamp(color.z + dir, 0.0, 1.0); is_dirty = true; }
-        if rand_f32(&rng) < params.micro_adjust_prob { let dir = select(-color_step, color_step, rand_f32(&rng) > 0.5); color.w = clamp(color.w + dir, params.min_alpha_norm, params.max_alpha_norm); is_dirty = true; }
+        if rand_f32(&rng) < params.micro_adjust_prob { let dir = select(-color_step, color_step, rand_f32(&rng) > 0.5); color.x = clamp(color.x + dir, 0.0, 1.0); modified = true; }
+        if rand_f32(&rng) < params.micro_adjust_prob { let dir = select(-color_step, color_step, rand_f32(&rng) > 0.5); color.y = clamp(color.y + dir, 0.0, 1.0); modified = true; }
+        if rand_f32(&rng) < params.micro_adjust_prob { let dir = select(-color_step, color_step, rand_f32(&rng) > 0.5); color.z = clamp(color.z + dir, 0.0, 1.0); modified = true; }
+        if rand_f32(&rng) < params.micro_adjust_prob { let dir = select(-color_step, color_step, rand_f32(&rng) > 0.5); color.w = clamp(color.w + dir, params.min_alpha_norm, params.max_alpha_norm); modified = true; }
 
         if rand_f32(&rng) < params.adjust_brightness_prob {
             let brighten = rand_f32(&rng) > 0.5;
@@ -857,7 +858,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
             } else {
                 color.x = max(color.x - color_step, 0.0); color.y = max(color.y - color_step, 0.0); color.z = max(color.z - color_step, 0.0);
             }
-            is_dirty = true;
+            modified = true;
         }
         if rand_f32(&rng) < params.adjust_saturation_prob {
             let avg = (color.x + color.y + color.z) / 3.0;
@@ -868,7 +869,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
             } else {
                 color.x = clamp(color.x - sdx * color_step, 0.0, 1.0); color.y = clamp(color.y - sdy * color_step, 0.0, 1.0); color.z = clamp(color.z - sdz * color_step, 0.0, 1.0);
             }
-            is_dirty = true;
+            modified = true;
         }
 
         // Move point (scaled by mutation_scale)
@@ -878,51 +879,54 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
         if rand_f32(&rng) < params.move_point_prob {
             v0.x = clamp(rand_f32_range(&rng, v0.x - move_d, v0.x + move_d), 0.0, 1.0);
             v0.y = clamp(rand_f32_range(&rng, v0.y - move_d, v0.y + move_d), 0.0, 1.0);
-            is_dirty = true;
+            modified = true;
         }
         if rand_f32(&rng) < params.medium_move_prob {
             v0.x = clamp(rand_f32_range(&rng, v0.x - medium_d, v0.x + medium_d), 0.0, 1.0);
             v0.y = clamp(rand_f32_range(&rng, v0.y - medium_d, v0.y + medium_d), 0.0, 1.0);
-            is_dirty = true;
+            modified = true;
         }
         if rand_f32(&rng) < params.micro_adjust_prob {
             v0.x = clamp(rand_f32_range(&rng, v0.x - micro_d, v0.x + micro_d), 0.0, 1.0);
             v0.y = clamp(rand_f32_range(&rng, v0.y - micro_d, v0.y + micro_d), 0.0, 1.0);
-            is_dirty = true;
+            modified = true;
         }
         if rand_f32(&rng) < params.move_point_prob {
             v1.x = clamp(rand_f32_range(&rng, v1.x - move_d, v1.x + move_d), 0.0, 1.0);
             v1.y = clamp(rand_f32_range(&rng, v1.y - move_d, v1.y + move_d), 0.0, 1.0);
-            is_dirty = true;
+            modified = true;
         }
         if rand_f32(&rng) < params.medium_move_prob {
             v1.x = clamp(rand_f32_range(&rng, v1.x - medium_d, v1.x + medium_d), 0.0, 1.0);
             v1.y = clamp(rand_f32_range(&rng, v1.y - medium_d, v1.y + medium_d), 0.0, 1.0);
-            is_dirty = true;
+            modified = true;
         }
         if rand_f32(&rng) < params.micro_adjust_prob {
             v1.x = clamp(rand_f32_range(&rng, v1.x - micro_d, v1.x + micro_d), 0.0, 1.0);
             v1.y = clamp(rand_f32_range(&rng, v1.y - micro_d, v1.y + micro_d), 0.0, 1.0);
-            is_dirty = true;
+            modified = true;
         }
         if rand_f32(&rng) < params.move_point_prob {
             v2.x = clamp(rand_f32_range(&rng, v2.x - move_d, v2.x + move_d), 0.0, 1.0);
             v2.y = clamp(rand_f32_range(&rng, v2.y - move_d, v2.y + move_d), 0.0, 1.0);
-            is_dirty = true;
+            modified = true;
         }
         if rand_f32(&rng) < params.medium_move_prob {
             v2.x = clamp(rand_f32_range(&rng, v2.x - medium_d, v2.x + medium_d), 0.0, 1.0);
             v2.y = clamp(rand_f32_range(&rng, v2.y - medium_d, v2.y + medium_d), 0.0, 1.0);
-            is_dirty = true;
+            modified = true;
         }
         if rand_f32(&rng) < params.micro_adjust_prob {
             v2.x = clamp(rand_f32_range(&rng, v2.x - micro_d, v2.x + micro_d), 0.0, 1.0);
             v2.y = clamp(rand_f32_range(&rng, v2.y - micro_d, v2.y + micro_d), 0.0, 1.0);
-            is_dirty = true;
+            modified = true;
         }
 
-        poly.data = vec4<u32>(pack_color(color), pack_vertex(v0), pack_vertex(v1), pack_vertex(v2));
-        working_states[offspring_id].polygons[pi] = poly;
+        if modified {
+            is_dirty = true;
+            poly.data = vec4<u32>(pack_color(color), pack_vertex(v0), pack_vertex(v1), pack_vertex(v2));
+            working_states[offspring_id].polygons[pi] = poly;
+        }
     }
 
     // Fallback micro-nudge if nothing fired
