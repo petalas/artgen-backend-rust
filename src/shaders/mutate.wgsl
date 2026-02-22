@@ -127,7 +127,7 @@ struct Params {
     // Merge thresholds + padding
     merge_centroid_threshold: f32,
     merge_color_threshold: f32,
-    integer_aabb: u32,
+    _pad2: u32,
     _pad3: u32,
 
     // Reserved padding (vec4[11-15])

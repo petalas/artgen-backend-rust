@@ -71,10 +71,10 @@ struct Params {
     medium_move_delta: f32,
     swap_colors_prob: f32,
 
-    // Merge thresholds + integer_aabb toggle
+    // Merge thresholds + padding
     merge_centroid_threshold: f32,
     merge_color_threshold: f32,
-    integer_aabb: u32,
+    _pad2: u32,
     _pad3: u32,
 
     // Reserved padding (vec4[11-15])

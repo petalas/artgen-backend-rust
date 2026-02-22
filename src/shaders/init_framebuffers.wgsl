@@ -75,10 +75,10 @@ struct Params {
     medium_move_delta: f32,
     swap_colors_prob: f32,
 
-    // Merge thresholds + integer_aabb toggle
+    // Merge thresholds + padding
     merge_centroid_threshold: f32,
     merge_color_threshold: f32,
-    integer_aabb: u32,
+    _pad2: u32,
     _pad3: u32,
 
     // Reserved padding (vec4[11-15])
@@ -167,22 +167,6 @@ fn main(
 
                 for (var i = 0u; i < tile_end; i++) {
                     let poly = shared_polys[i];
-
-                    // Integer AABB: early rejection using packed u32 vertex data before float unpack
-                    if params.integer_aabb != 0u {
-                        let v0w = poly.data.y;
-                        let v1w = poly.data.z;
-                        let v2w = poly.data.w;
-                        let ix0 = v0w & 0xFFFFu; let ix1 = v1w & 0xFFFFu; let ix2 = v2w & 0xFFFFu;
-                        let iy0 = v0w >> 16u;     let iy1 = v1w >> 16u;     let iy2 = v2w >> 16u;
-                        let pmin_x = min(ix0, min(ix1, ix2)) * w / 65535u;
-                        let pmax_x = (max(ix0, max(ix1, ix2)) * w + 65534u) / 65535u;
-                        let pmin_y = min(iy0, min(iy1, iy2)) * h / 65535u;
-                        let pmax_y = (max(iy0, max(iy1, iy2)) * h + 65534u) / 65535u;
-                        if px < pmin_x || px > pmax_x || py < pmin_y || py > pmax_y {
-                            continue;
-                        }
-                    }
 
                     let pv0 = unpack_vertex(poly.data.y);
                     let pv1 = unpack_vertex(poly.data.z);
