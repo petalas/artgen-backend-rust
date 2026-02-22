@@ -98,7 +98,7 @@ const TILE_MAX_POLYS: u32 = 256u;
 @group(0) @binding(0) var<storage, read>       working_states: array<DrawingState>;
 @group(0) @binding(1) var<storage, read_write> tile_data:      array<u32>;
 @group(0) @binding(2) var<storage, read_write> tile_counts:    array<atomic<u32>>;
-var<immediate>                                 params:         Params;
+@group(1) @binding(0) var<uniform>             params:         Params;
 
 @compute @workgroup_size(1, 1, 1)
 fn main(@builtin(workgroup_id) wid: vec3<u32>) {

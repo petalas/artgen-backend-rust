@@ -171,6 +171,7 @@ impl GpuEvolver {
 
         let params = default_gpu_params(p.image_width, p.image_height, active_chains);
         let params_bytes: &[u8] = bytemuck::bytes_of(&params);
+        p.queue.write_buffer(&p.params_buf, 0, params_bytes);
 
         let mut encoder = p.device.create_command_encoder(&CommandEncoderDescriptor {
             label: Some("init_framebuffers"),
@@ -182,7 +183,7 @@ impl GpuEvolver {
             });
             pass.set_pipeline(&p.init_framebuffers_pipeline);
             pass.set_bind_group(0, &p.init_framebuffers_bind_group, &[]);
-            pass.set_immediates(0, params_bytes);
+            pass.set_bind_group(1, &p.params_bind_group, &[]);
             pass.dispatch_workgroups(wg_x, wg_y, active_chains);
         }
         p.queue.submit(std::iter::once(encoder.finish()));
@@ -223,10 +224,11 @@ impl GpuEvolver {
         let write_idx = self.staging_idx;
         self.staging_idx = 1 - self.staging_idx;
 
-        // 3. Build params for push constants
+        // 3. Build params and upload to uniform buffer
         let mut params = gpu_params_from(mutation_params, p.image_width, p.image_height, active);
         params.iteration_number = self.iteration;
         let params_bytes: &[u8] = bytemuck::bytes_of(&params);
+        p.queue.write_buffer(&p.params_buf, 0, params_bytes);
 
         // Reset control flags before batch — preserve best_fitness_bits so atomicMax
         // only triggers new_best_found when fitness actually improves over last known best
@@ -282,25 +284,25 @@ impl GpuEvolver {
             for _ in 0..bulk_count {
                 pass.set_pipeline(&p.mutate_pipeline);
                 pass.set_bind_group(0, &p.mutate_bind_group, &[]);
-                pass.set_immediates(0, params_bytes);
+                pass.set_bind_group(1, &p.params_bind_group, &[]);
                 pass.dispatch_workgroups(active, 1, 1);
 
                 // Binning pass: only when tile culling is enabled
                 if tile_culling {
                     pass.set_pipeline(&p.bin_polygons_pipeline);
                     pass.set_bind_group(0, &p.bin_polygons_bind_group, &[]);
-                    pass.set_immediates(0, params_bytes);
+                    pass.set_bind_group(1, &p.params_bind_group, &[]);
                     pass.dispatch_workgroups(active * lambda, 1, 1);
                 }
 
                 pass.set_pipeline(&p.rasterize_error_pipeline);
                 pass.set_bind_group(0, &p.rasterize_error_bind_group, &[]);
-                pass.set_immediates(0, params_bytes);
+                pass.set_bind_group(1, &p.params_bind_group, &[]);
                 pass.dispatch_workgroups(wg_x, wg_y, active * lambda);
 
                 pass.set_pipeline(&p.select_pipeline);
                 pass.set_bind_group(0, &p.select_bind_group, &[]);
-                pass.set_immediates(0, params_bytes);
+                pass.set_bind_group(1, &p.params_bind_group, &[]);
                 pass.dispatch_workgroups(active, 1, 1);
             }
         }
@@ -321,7 +323,7 @@ impl GpuEvolver {
                 });
                 pass.set_pipeline(&p.mutate_pipeline);
                 pass.set_bind_group(0, &p.mutate_bind_group, &[]);
-                pass.set_immediates(0, params_bytes);
+                pass.set_bind_group(1, &p.params_bind_group, &[]);
                 pass.dispatch_workgroups(active, 1, 1);
             }
 
@@ -339,13 +341,13 @@ impl GpuEvolver {
                 if tile_culling {
                     pass.set_pipeline(&p.bin_polygons_pipeline);
                     pass.set_bind_group(0, &p.bin_polygons_bind_group, &[]);
-                    pass.set_immediates(0, params_bytes);
+                    pass.set_bind_group(1, &p.params_bind_group, &[]);
                     pass.dispatch_workgroups(active * lambda, 1, 1);
                 }
 
                 pass.set_pipeline(&p.rasterize_error_pipeline);
                 pass.set_bind_group(0, &p.rasterize_error_bind_group, &[]);
-                pass.set_immediates(0, params_bytes);
+                pass.set_bind_group(1, &p.params_bind_group, &[]);
                 pass.dispatch_workgroups(wg_x, wg_y, active * lambda);
             }
 
@@ -360,7 +362,7 @@ impl GpuEvolver {
                 });
                 pass.set_pipeline(&p.select_pipeline);
                 pass.set_bind_group(0, &p.select_bind_group, &[]);
-                pass.set_immediates(0, params_bytes);
+                pass.set_bind_group(1, &p.params_bind_group, &[]);
                 pass.dispatch_workgroups(active, 1, 1);
             }
         }
@@ -701,6 +703,7 @@ impl GpuEvolver {
         // Force brute-force rasterization — tile data is stale (no bin_polygons dispatch here)
         params.tile_culling = 0;
         let params_bytes: &[u8] = bytemuck::bytes_of(&params);
+        p.queue.write_buffer(&p.params_buf, 0, params_bytes);
 
         {
             let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
@@ -709,7 +712,7 @@ impl GpuEvolver {
             });
             pass.set_pipeline(&p.rasterize_error_pipeline);
             pass.set_bind_group(0, &p.rasterize_error_bind_group, &[]);
-            pass.set_immediates(0, params_bytes);
+            pass.set_bind_group(1, &p.params_bind_group, &[]);
             pass.dispatch_workgroups(wg_x, wg_y, active);
         }
 

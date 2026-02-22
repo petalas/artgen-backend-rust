@@ -97,7 +97,7 @@ struct ControlFlags {
 @group(0) @binding(1) var<storage, read>       working_states:     array<DrawingState>;
 @group(0) @binding(2) var<storage, read_write> error_accumulators: array<atomic<u32>>;
 @group(0) @binding(3) var<storage, read_write> control:            ControlFlags;
-var<immediate>                                 params:             Params;
+@group(1) @binding(0) var<uniform>             params:             Params;
 @group(0) @binding(4) var<storage, read_write> fitness_packed:     array<u32>;
 @group(0) @binding(5) var<storage, read_write> chain_framebuffers: array<u32>;
 @group(0) @binding(6) var<storage, read_write> chain_total_errors: array<atomic<u32>>;

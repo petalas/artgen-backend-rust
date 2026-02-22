@@ -112,7 +112,7 @@ fn pack_fb_pixel(r: f32, g: f32, b: f32) -> u32 {
 @group(0) @binding(1)                          var reference_image: texture_2d<f32>;
 @group(0) @binding(2) var<storage, read_write> chain_framebuffers: array<u32>;
 @group(0) @binding(3) var<storage, read_write> chain_total_errors: array<atomic<u32>>;
-var<immediate>                                 params:             Params;
+@group(1) @binding(0) var<uniform>             params:             Params;
 
 // Shared memory for polygon tiling (same approach as rasterize_error)
 const TILE_CAP: u32 = THREAD_COUNT * 3u;

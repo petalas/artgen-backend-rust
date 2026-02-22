@@ -119,7 +119,7 @@ struct Params {
 @group(0) @binding(3) var<storage, read>       tile_data:          array<u32>;
 @group(0) @binding(4) var<storage, read>       tile_counts_buf:    array<u32>;
 @group(0) @binding(5) var<storage, read>       chain_states:       array<DrawingState>;
-var<immediate>                                 params:             Params;
+@group(1) @binding(0) var<uniform>             params:             Params;
 
 // Shared memory arrays sized to thread count.
 // shared_polys: TILE_CAP polygons (THREAD_COUNT * 3 * 16 bytes)

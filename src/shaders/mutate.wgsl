@@ -140,7 +140,7 @@ struct Params {
 
 @group(0) @binding(0) var<storage, read>       chain_states:   array<DrawingState>;
 @group(0) @binding(1) var<storage, read_write>  working_states: array<DrawingState>;
-var<immediate>                                  params:         Params;
+@group(1) @binding(0) var<uniform>              params:         Params;
 
 // Shared memory for cooperative parent loading.
 // All threads in a workgroup collaboratively load the parent chain's polygon data

@@ -53,6 +53,10 @@ pub struct GpuPipeline {
     pipeline_cache: PipelineCache,
     pipeline_cache_path: Option<PathBuf>,
 
+    // Params uniform buffer + bind group (shared across all pipelines at group(1))
+    pub params_buf: Buffer,
+    pub params_bind_group: BindGroup,
+
     // Bind groups
     pub mutate_bind_group: BindGroup,
     pub rasterize_error_bind_group: BindGroup,
@@ -152,13 +156,12 @@ impl GpuPipeline {
             max_compute_invocations_per_workgroup: 512,
             max_compute_workgroup_size_x: 512, // 1D workgroup layout needs up to 512 in x (for 32x16 tile)
             max_storage_buffers_per_shader_stage: 7, // select uses 7 bindings (chain_states, working_states, error_accum, control, fitness, chain_framebuffers, chain_total_errors)
-            max_immediate_size: std::mem::size_of::<GpuParams>() as u32, // 256 bytes — RTX 5090 supports this
             ..Limits::downlevel_defaults()
         };
 
         let adapter_features = adapter.features();
         let subgroup_supported = adapter_features.contains(Features::SUBGROUP);
-        let mut required_features = Features::TIMESTAMP_QUERY | Features::IMMEDIATES | Features::PIPELINE_CACHE;
+        let mut required_features = Features::TIMESTAMP_QUERY | Features::PIPELINE_CACHE;
         if subgroup_supported {
             required_features |= Features::SUBGROUP;
             println!("Subgroup feature supported — enabling wave intrinsics for error reduction");
@@ -643,13 +646,42 @@ impl GpuPipeline {
             ],
         });
 
-        // --- Compute pipelines ---
-        let immediate_size = std::mem::size_of::<GpuParams>() as u32;
+        // --- Params uniform buffer + bind group (shared across all pipelines at group(1)) ---
+        let params_buf = device.create_buffer(&BufferDescriptor {
+            label: Some("params_uniform"),
+            size: std::mem::size_of::<GpuParams>() as u64,
+            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
 
+        let params_bgl = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("params_bgl"),
+            entries: &[BindGroupLayoutEntry {
+                binding: 0,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: NonZeroU64::new(std::mem::size_of::<GpuParams>() as u64),
+                },
+                count: None,
+            }],
+        });
+
+        let params_bind_group = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("params_bg"),
+            layout: &params_bgl,
+            entries: &[BindGroupEntry {
+                binding: 0,
+                resource: params_buf.as_entire_binding(),
+            }],
+        });
+
+        // --- Compute pipelines ---
         let mutate_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: Some("mutate_layout"),
-            bind_group_layouts: &[&mutate_bgl],
-            immediate_size,
+            bind_group_layouts: &[&mutate_bgl, &params_bgl],
+            immediate_size: 0,
         });
         let mutate_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
             label: Some("mutate_pipeline"),
@@ -662,8 +694,8 @@ impl GpuPipeline {
 
         let rasterize_error_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: Some("rasterize_error_layout"),
-            bind_group_layouts: &[&rasterize_error_bgl],
-            immediate_size,
+            bind_group_layouts: &[&rasterize_error_bgl, &params_bgl],
+            immediate_size: 0,
         });
         let (rasterize_error_pipeline, rasterize_error_shader) = create_rasterize_pipeline(
             &device,
@@ -674,8 +706,8 @@ impl GpuPipeline {
 
         let bin_polygons_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: Some("bin_polygons_layout"),
-            bind_group_layouts: &[&bin_polygons_bgl],
-            immediate_size,
+            bind_group_layouts: &[&bin_polygons_bgl, &params_bgl],
+            immediate_size: 0,
         });
         let bin_polygons_pipeline = create_bin_polygons_pipeline(
             &device,
@@ -686,8 +718,8 @@ impl GpuPipeline {
 
         let select_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: Some("select_layout"),
-            bind_group_layouts: &[&select_bgl],
-            immediate_size,
+            bind_group_layouts: &[&select_bgl, &params_bgl],
+            immediate_size: 0,
         });
         let select_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
             label: Some("select_pipeline"),
@@ -746,8 +778,8 @@ impl GpuPipeline {
         });
         let init_framebuffers_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: Some("init_framebuffers_layout"),
-            bind_group_layouts: &[&init_framebuffers_bgl],
-            immediate_size,
+            bind_group_layouts: &[&init_framebuffers_bgl, &params_bgl],
+            immediate_size: 0,
         });
         let init_framebuffers_pipeline = create_init_framebuffers_pipeline(
             &device,
@@ -846,6 +878,8 @@ impl GpuPipeline {
             timestamp_resolve_buf,
             timestamp_staging_bufs,
             timestamp_period,
+            params_buf,
+            params_bind_group,
             mutate_bind_group,
             rasterize_error_bind_group,
             select_bind_group,
