@@ -193,13 +193,13 @@ impl Engine {
                 let ge = self.working_data[g] as i32 - self.ref_image_data[g] as i32;
                 let be = self.working_data[b] as i32 - self.ref_image_data[b] as i32;
 
-                let sqrt = f32::sqrt(((re * re) + (ge * ge) + (be * be)) as f32);
-                error += sqrt;
+                let pixel_error = (re.abs() + ge.abs() + be.abs()) as f32;
+                error += pixel_error;
 
                 if draw_error {
                     // this is for the error heatmap
                     // scale it to 0 - 255, full red = max error
-                    let err_color = f32::floor(255.0 * (1.0 - sqrt / MAX_ERROR_PER_PIXEL)) as u8;
+                    let err_color = f32::floor(255.0 * (1.0 - pixel_error / MAX_ERROR_PER_PIXEL)) as u8;
                     self.error_data[r] = 255;
                     self.error_data[g] = err_color;
                     self.error_data[b] = err_color;

@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     settings::{
-        MICRO_ADJUSTMENT_DELTA, MICRO_ADJUSTMENT_PROBABILITY, MOVE_POINT_MAX_DELTA,
-        MOVE_POINT_PROBABILITY,
+        MEDIUM_MOVE_DELTA, MEDIUM_MOVE_PROBABILITY, MICRO_ADJUSTMENT_DELTA,
+        MICRO_ADJUSTMENT_PROBABILITY, MOVE_POINT_MAX_DELTA, MOVE_POINT_PROBABILITY,
     },
     utils::{randomf32, randomf32_clamped},
 };
@@ -38,6 +38,13 @@ impl Point {
         let mut mutated = false;
         if randomf32() < MOVE_POINT_PROBABILITY {
             let d = MOVE_POINT_MAX_DELTA;
+            self.x = randomf32_clamped(self.x - d, self.x + d).clamp(0.0, 1.0);
+            self.y = randomf32_clamped(self.y - d, self.y + d).clamp(0.0, 1.0);
+            mutated = true;
+        }
+
+        if randomf32() < MEDIUM_MOVE_PROBABILITY {
+            let d = MEDIUM_MOVE_DELTA;
             self.x = randomf32_clamped(self.x - d, self.x + d).clamp(0.0, 1.0);
             self.y = randomf32_clamped(self.y - d, self.y + d).clamp(0.0, 1.0);
             mutated = true;

@@ -56,6 +56,30 @@ struct Params {
     single_mutation_mode: u32,
     lambda: u32,
     adaptive_mutation: u32,
+
+    // New mutation probabilities
+    scale_polygon_prob: f32,
+    rotate_polygon_prob: f32,
+    adjacent_swap_prob: f32,
+    merge_polygon_prob: f32,
+
+    clone_polygon_prob: f32,
+    medium_move_prob: f32,
+    medium_move_delta: f32,
+    swap_colors_prob: f32,
+
+    // Merge thresholds + padding
+    merge_centroid_threshold: f32,
+    merge_color_threshold: f32,
+    _pad2: u32,
+    _pad3: u32,
+
+    // Reserved padding (vec4[11-15])
+    _reserved0: vec4<u32>,
+    _reserved1: vec4<u32>,
+    _reserved2: vec4<u32>,
+    _reserved3: vec4<u32>,
+    _reserved4: vec4<u32>,
 }
 
 fn unpack_vertex(word: u32) -> vec2<f32> {

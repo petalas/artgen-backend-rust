@@ -27,12 +27,24 @@ pub struct MutationParams {
     pub change_color_prob: f32,
     pub adjust_brightness_prob: f32,
     pub adjust_saturation_prob: f32,
+    pub scale_polygon_prob: f32,
+    pub rotate_polygon_prob: f32,
+    pub adjacent_swap_prob: f32,
+    pub merge_polygon_prob: f32,
+    pub clone_polygon_prob: f32,
+    pub medium_move_prob: f32,
+    pub swap_colors_prob: f32,
 
     // Deltas / magnitudes
     pub move_point_max_delta: f32,
     pub micro_adjust_delta: f32,
     pub new_point_max_distance: f32,
     pub offset_polygon_magnitude: f32,
+    pub medium_move_delta: f32,
+
+    // Merge thresholds
+    pub merge_centroid_threshold: f32,
+    pub merge_color_threshold: f32,
 
     // Alpha range
     pub min_alpha: u8,
@@ -105,12 +117,24 @@ impl MutationParams {
         self.change_color_prob = self.change_color_prob.clamp(0.0, 1.0);
         self.adjust_brightness_prob = self.adjust_brightness_prob.clamp(0.0, 1.0);
         self.adjust_saturation_prob = self.adjust_saturation_prob.clamp(0.0, 1.0);
+        self.scale_polygon_prob = self.scale_polygon_prob.clamp(0.0, 1.0);
+        self.rotate_polygon_prob = self.rotate_polygon_prob.clamp(0.0, 1.0);
+        self.adjacent_swap_prob = self.adjacent_swap_prob.clamp(0.0, 1.0);
+        self.merge_polygon_prob = self.merge_polygon_prob.clamp(0.0, 1.0);
+        self.clone_polygon_prob = self.clone_polygon_prob.clamp(0.0, 1.0);
+        self.medium_move_prob = self.medium_move_prob.clamp(0.0, 1.0);
+        self.swap_colors_prob = self.swap_colors_prob.clamp(0.0, 1.0);
 
         // Deltas: non-negative
         self.move_point_max_delta = self.move_point_max_delta.max(0.0);
         self.micro_adjust_delta = self.micro_adjust_delta.max(0.0);
         self.new_point_max_distance = self.new_point_max_distance.max(0.0);
         self.offset_polygon_magnitude = self.offset_polygon_magnitude.max(0.0);
+        self.medium_move_delta = self.medium_move_delta.max(0.0);
+
+        // Merge thresholds: non-negative
+        self.merge_centroid_threshold = self.merge_centroid_threshold.max(0.0);
+        self.merge_color_threshold = self.merge_color_threshold.max(0.0);
 
         // Chain count: clamp to [1, GPU_MAX_CHAIN_COUNT]
         self.chain_count = self.chain_count.clamp(1, settings::GPU_MAX_CHAIN_COUNT);
@@ -150,10 +174,20 @@ impl Default for MutationParams {
             change_color_prob: settings::CHANGE_COLOR_PROB,
             adjust_brightness_prob: settings::ADJUST_BRIGHTNESS_PROB,
             adjust_saturation_prob: settings::ADJUST_SATURATION_PROB,
+            scale_polygon_prob: settings::SCALE_POLYGON_PROB,
+            rotate_polygon_prob: settings::ROTATE_POLYGON_PROB,
+            adjacent_swap_prob: settings::ADJACENT_SWAP_PROB,
+            merge_polygon_prob: settings::MERGE_POLYGON_PROB,
+            clone_polygon_prob: settings::CLONE_POLYGON_PROB,
+            medium_move_prob: settings::MEDIUM_MOVE_PROBABILITY,
+            swap_colors_prob: settings::SWAP_COLORS_PROB,
             move_point_max_delta: settings::MOVE_POINT_MAX_DELTA,
             micro_adjust_delta: settings::MICRO_ADJUSTMENT_DELTA,
             new_point_max_distance: settings::NEW_POINT_MAX_DISTANCE,
             offset_polygon_magnitude: settings::OFFSET_POLYGON_MAGNITUDE,
+            medium_move_delta: settings::MEDIUM_MOVE_DELTA,
+            merge_centroid_threshold: settings::MERGE_CENTROID_THRESHOLD,
+            merge_color_threshold: settings::MERGE_COLOR_THRESHOLD,
             min_alpha: settings::MIN_ALPHA,
             max_alpha: settings::MAX_ALPHA,
             min_polygons: settings::MIN_POLYGONS_PER_IMAGE as u32,

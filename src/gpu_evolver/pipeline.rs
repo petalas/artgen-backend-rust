@@ -152,7 +152,7 @@ impl GpuPipeline {
             max_compute_invocations_per_workgroup: 512,
             max_compute_workgroup_size_x: 512, // 1D workgroup layout needs up to 512 in x (for 32x16 tile)
             max_storage_buffers_per_shader_stage: 7, // select uses 7 bindings (chain_states, working_states, error_accum, control, fitness, chain_framebuffers, chain_total_errors)
-            max_immediate_size: std::mem::size_of::<GpuParams>() as u32, // 128 bytes — Vulkan minimum guarantee
+            max_immediate_size: std::mem::size_of::<GpuParams>() as u32, // 256 bytes — RTX 5090 supports this
             ..Limits::downlevel_defaults()
         };
 

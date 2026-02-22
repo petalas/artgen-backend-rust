@@ -112,6 +112,30 @@ struct Params {
     single_mutation_mode: u32,
     lambda: u32,
     adaptive_mutation: u32,
+
+    // New mutation probabilities
+    scale_polygon_prob: f32,
+    rotate_polygon_prob: f32,
+    adjacent_swap_prob: f32,
+    merge_polygon_prob: f32,
+
+    clone_polygon_prob: f32,
+    medium_move_prob: f32,
+    medium_move_delta: f32,
+    swap_colors_prob: f32,
+
+    // Merge thresholds + padding
+    merge_centroid_threshold: f32,
+    merge_color_threshold: f32,
+    _pad2: u32,
+    _pad3: u32,
+
+    // Reserved padding (vec4[11-15])
+    _reserved0: vec4<u32>,
+    _reserved1: vec4<u32>,
+    _reserved2: vec4<u32>,
+    _reserved3: vec4<u32>,
+    _reserved4: vec4<u32>,
 }
 
 @group(0) @binding(0) var<storage, read>       chain_states:   array<DrawingState>;
@@ -211,19 +235,23 @@ fn single_mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<functio
     let w_add = params.add_polygon_prob;
     let w_remove = params.remove_polygon_prob;
     let w_reorder = params.reorder_polygon_prob;
-    let w_scale = params.offset_polygon_prob;
-    let w_rotate = params.offset_polygon_prob;
-    let w_adjacent_swap = params.reorder_polygon_prob;
+    let w_scale = params.scale_polygon_prob;
+    let w_rotate = params.rotate_polygon_prob;
+    let w_adjacent_swap = params.adjacent_swap_prob;
+    let w_merge = params.merge_polygon_prob;
+    let w_clone = params.clone_polygon_prob;
+    let w_swap_colors = params.swap_colors_prob;
     let fc = f32(c);
     let w_offset = params.offset_polygon_prob * fc;
     let w_move_point = params.move_point_prob * fc * 3.0;
+    let w_medium_move = params.medium_move_prob * fc * 3.0;
     let w_micro_adjust = params.micro_adjust_prob * fc * 3.0;
     let w_change_color = params.change_color_prob * fc * 4.0;
     let w_micro_color = params.micro_adjust_prob * fc * 4.0;
     let w_brightness = params.adjust_brightness_prob * fc;
     let w_saturation = params.adjust_saturation_prob * fc;
 
-    let total = w_add + w_remove + w_reorder + w_scale + w_rotate + w_adjacent_swap + w_offset + w_move_point + w_micro_adjust + w_change_color + w_micro_color + w_brightness + w_saturation;
+    let total = w_add + w_remove + w_reorder + w_scale + w_rotate + w_adjacent_swap + w_merge + w_clone + w_swap_colors + w_offset + w_move_point + w_medium_move + w_micro_adjust + w_change_color + w_micro_color + w_brightness + w_saturation;
 
     let r = rand_f32(rng) * total;
     var cumulative = 0.0;
@@ -314,6 +342,79 @@ fn single_mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<functio
         return full_image_bbox();
     }
 
+    // Merge polygons: pick two, check centroid proximity + color similarity, remove smaller
+    cumulative += w_merge;
+    if r < cumulative && c >= 2u && c > params.min_polygons {
+        let mi = rand_u32(rng, c);
+        var mj = rand_u32(rng, c);
+        while mi == mj { mj = rand_u32(rng, c); }
+        let pi_poly = working_states[oid].polygons[mi];
+        let pj_poly = working_states[oid].polygons[mj];
+        let ci_v0 = unpack_vertex(pi_poly.data.y); let ci_v1 = unpack_vertex(pi_poly.data.z); let ci_v2 = unpack_vertex(pi_poly.data.w);
+        let cj_v0 = unpack_vertex(pj_poly.data.y); let cj_v1 = unpack_vertex(pj_poly.data.z); let cj_v2 = unpack_vertex(pj_poly.data.w);
+        let centroid_i = (ci_v0 + ci_v1 + ci_v2) / 3.0;
+        let centroid_j = (cj_v0 + cj_v1 + cj_v2) / 3.0;
+        let cdist = abs(centroid_i.x - centroid_j.x) + abs(centroid_i.y - centroid_j.y);
+        let color_i = unpack_color(pi_poly);
+        let color_j = unpack_color(pj_poly);
+        let cdiff = abs(color_i.x - color_j.x) + abs(color_i.y - color_j.y) + abs(color_i.z - color_j.z);
+        if cdist < params.merge_centroid_threshold && cdiff < params.merge_color_threshold {
+            // Remove the polygon with smaller area (cross product)
+            let area_i = abs((ci_v1.x - ci_v0.x) * (ci_v2.y - ci_v0.y) - (ci_v2.x - ci_v0.x) * (ci_v1.y - ci_v0.y));
+            let area_j = abs((cj_v1.x - cj_v0.x) * (cj_v2.y - cj_v0.y) - (cj_v2.x - cj_v0.x) * (cj_v1.y - cj_v0.y));
+            let remove_idx = select(mi, mj, area_j < area_i);
+            let last = c - 1u;
+            if remove_idx != last { working_states[oid].polygons[remove_idx] = working_states[oid].polygons[last]; }
+            *count = c - 1u;
+            working_states[oid].polygon_count = c - 1u;
+            return full_image_bbox();
+        }
+        // Criteria not met — fall through to next mutation
+    }
+
+    // Clone + jitter: duplicate a polygon with small perturbation
+    cumulative += w_clone;
+    if r < cumulative && c < params.max_polygons && c >= 1u {
+        let src_idx = rand_u32(rng, c);
+        var new_poly = working_states[oid].polygons[src_idx];
+        // Jitter position
+        let jd = params.new_point_max_distance;
+        let jdx = rand_f32_range(rng, -jd, jd);
+        let jdy = rand_f32_range(rng, -jd, jd);
+        var jv0 = unpack_vertex(new_poly.data.y);
+        var jv1 = unpack_vertex(new_poly.data.z);
+        var jv2 = unpack_vertex(new_poly.data.w);
+        jv0 = clamp(jv0 + vec2<f32>(jdx, jdy), vec2<f32>(0.0), vec2<f32>(1.0));
+        jv1 = clamp(jv1 + vec2<f32>(jdx, jdy), vec2<f32>(0.0), vec2<f32>(1.0));
+        jv2 = clamp(jv2 + vec2<f32>(jdx, jdy), vec2<f32>(0.0), vec2<f32>(1.0));
+        new_poly.data.y = pack_vertex(jv0);
+        new_poly.data.z = pack_vertex(jv1);
+        new_poly.data.w = pack_vertex(jv2);
+        // Jitter color: ±5/255 per RGB channel
+        var jcolor = unpack_color(new_poly);
+        let cstep = 5.0 / 255.0;
+        jcolor.x = clamp(jcolor.x + rand_f32_range(rng, -cstep, cstep), 0.0, 1.0);
+        jcolor.y = clamp(jcolor.y + rand_f32_range(rng, -cstep, cstep), 0.0, 1.0);
+        jcolor.z = clamp(jcolor.z + rand_f32_range(rng, -cstep, cstep), 0.0, 1.0);
+        new_poly.data.x = pack_color(jcolor);
+        working_states[oid].polygons[c] = new_poly;
+        *count = c + 1u;
+        working_states[oid].polygon_count = c + 1u;
+        return full_image_bbox();
+    }
+
+    // Swap colors between two polygons
+    cumulative += w_swap_colors;
+    if r < cumulative && c >= 2u {
+        let sci = rand_u32(rng, c);
+        var scj = rand_u32(rng, c);
+        while sci == scj { scj = rand_u32(rng, c); }
+        let tmp_color = working_states[oid].polygons[sci].data.x;
+        working_states[oid].polygons[sci].data.x = working_states[oid].polygons[scj].data.x;
+        working_states[oid].polygons[scj].data.x = tmp_color;
+        return full_image_bbox();
+    }
+
     if c == 0u { return full_image_bbox(); }
     let pi = rand_u32(rng, c);
     var poly = working_states[oid].polygons[pi];
@@ -343,68 +444,79 @@ fn single_mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<functio
             else { v2.x = clamp(rand_f32_range(rng, v2.x - d, v2.x + d), 0.0, 1.0); v2.y = clamp(rand_f32_range(rng, v2.y - d, v2.y + d), 0.0, 1.0); }
         }
         else {
-            cumulative += w_micro_adjust;
+            // Medium-range point move
+            cumulative += w_medium_move;
             if r < cumulative {
-                let d = params.micro_adjust_delta * ms;
+                let d = params.medium_move_delta * ms;
                 let vi = rand_u32(rng, 3u);
                 if vi == 0u { v0.x = clamp(rand_f32_range(rng, v0.x - d, v0.x + d), 0.0, 1.0); v0.y = clamp(rand_f32_range(rng, v0.y - d, v0.y + d), 0.0, 1.0); }
                 else if vi == 1u { v1.x = clamp(rand_f32_range(rng, v1.x - d, v1.x + d), 0.0, 1.0); v1.y = clamp(rand_f32_range(rng, v1.y - d, v1.y + d), 0.0, 1.0); }
                 else { v2.x = clamp(rand_f32_range(rng, v2.x - d, v2.x + d), 0.0, 1.0); v2.y = clamp(rand_f32_range(rng, v2.y - d, v2.y + d), 0.0, 1.0); }
             }
-            // Change color channel
             else {
-                cumulative += w_change_color;
+                cumulative += w_micro_adjust;
                 if r < cumulative {
-                    let ch = rand_u32(rng, 4u);
-                    if ch == 0u { color.x = rand_f32(rng); }
-                    else if ch == 1u { color.y = rand_f32(rng); }
-                    else if ch == 2u { color.z = rand_f32(rng); }
-                    else { color.w = clamp(rand_f32(rng), params.min_alpha_norm, params.max_alpha_norm); }
+                    let d = params.micro_adjust_delta * ms;
+                    let vi = rand_u32(rng, 3u);
+                    if vi == 0u { v0.x = clamp(rand_f32_range(rng, v0.x - d, v0.x + d), 0.0, 1.0); v0.y = clamp(rand_f32_range(rng, v0.y - d, v0.y + d), 0.0, 1.0); }
+                    else if vi == 1u { v1.x = clamp(rand_f32_range(rng, v1.x - d, v1.x + d), 0.0, 1.0); v1.y = clamp(rand_f32_range(rng, v1.y - d, v1.y + d), 0.0, 1.0); }
+                    else { v2.x = clamp(rand_f32_range(rng, v2.x - d, v2.x + d), 0.0, 1.0); v2.y = clamp(rand_f32_range(rng, v2.y - d, v2.y + d), 0.0, 1.0); }
                 }
-                // Micro-adjust color
+                // Change color channel
                 else {
-                    cumulative += w_micro_color;
+                    cumulative += w_change_color;
                     if r < cumulative {
                         let ch = rand_u32(rng, 4u);
-                        let color_step = 1.0 / 255.0;
-                        let dir = select(-color_step, color_step, rand_f32(rng) > 0.5);
-                        if ch == 0u { color.x = clamp(color.x + dir, 0.0, 1.0); }
-                        else if ch == 1u { color.y = clamp(color.y + dir, 0.0, 1.0); }
-                        else if ch == 2u { color.z = clamp(color.z + dir, 0.0, 1.0); }
-                        else { color.w = clamp(color.w + dir, params.min_alpha_norm, params.max_alpha_norm); }
+                        if ch == 0u { color.x = rand_f32(rng); }
+                        else if ch == 1u { color.y = rand_f32(rng); }
+                        else if ch == 2u { color.z = rand_f32(rng); }
+                        else { color.w = clamp(rand_f32(rng), params.min_alpha_norm, params.max_alpha_norm); }
                     }
-                    // Adjust brightness (50/50 lighten/darken)
+                    // Micro-adjust color
                     else {
-                        cumulative += w_brightness;
+                        cumulative += w_micro_color;
                         if r < cumulative {
+                            let ch = rand_u32(rng, 4u);
                             let color_step = 1.0 / 255.0;
-                            let brighten = rand_f32(rng) > 0.5;
-                            if brighten {
-                                color.x = min(color.x + color_step, 1.0);
-                                color.y = min(color.y + color_step, 1.0);
-                                color.z = min(color.z + color_step, 1.0);
-                            } else {
-                                color.x = max(color.x - color_step, 0.0);
-                                color.y = max(color.y - color_step, 0.0);
-                                color.z = max(color.z - color_step, 0.0);
-                            }
+                            let dir = select(-color_step, color_step, rand_f32(rng) > 0.5);
+                            if ch == 0u { color.x = clamp(color.x + dir, 0.0, 1.0); }
+                            else if ch == 1u { color.y = clamp(color.y + dir, 0.0, 1.0); }
+                            else if ch == 2u { color.z = clamp(color.z + dir, 0.0, 1.0); }
+                            else { color.w = clamp(color.w + dir, params.min_alpha_norm, params.max_alpha_norm); }
                         }
-                        // Adjust saturation (fallback)
+                        // Adjust brightness (50/50 lighten/darken)
                         else {
-                            let avg = (color.x + color.y + color.z) / 3.0;
-                            let color_step = 1.0 / 255.0;
-                            let saturate = rand_f32(rng) > 0.5;
-                            let dx = sign(color.x - avg);
-                            let dy = sign(color.y - avg);
-                            let dz = sign(color.z - avg);
-                            if saturate {
-                                color.x = clamp(color.x + dx * color_step, 0.0, 1.0);
-                                color.y = clamp(color.y + dy * color_step, 0.0, 1.0);
-                                color.z = clamp(color.z + dz * color_step, 0.0, 1.0);
-                            } else {
-                                color.x = clamp(color.x - dx * color_step, 0.0, 1.0);
-                                color.y = clamp(color.y - dy * color_step, 0.0, 1.0);
-                                color.z = clamp(color.z - dz * color_step, 0.0, 1.0);
+                            cumulative += w_brightness;
+                            if r < cumulative {
+                                let color_step = 1.0 / 255.0;
+                                let brighten = rand_f32(rng) > 0.5;
+                                if brighten {
+                                    color.x = min(color.x + color_step, 1.0);
+                                    color.y = min(color.y + color_step, 1.0);
+                                    color.z = min(color.z + color_step, 1.0);
+                                } else {
+                                    color.x = max(color.x - color_step, 0.0);
+                                    color.y = max(color.y - color_step, 0.0);
+                                    color.z = max(color.z - color_step, 0.0);
+                                }
+                            }
+                            // Adjust saturation (fallback)
+                            else {
+                                let avg = (color.x + color.y + color.z) / 3.0;
+                                let color_step = 1.0 / 255.0;
+                                let saturate = rand_f32(rng) > 0.5;
+                                let dx = sign(color.x - avg);
+                                let dy = sign(color.y - avg);
+                                let dz = sign(color.z - avg);
+                                if saturate {
+                                    color.x = clamp(color.x + dx * color_step, 0.0, 1.0);
+                                    color.y = clamp(color.y + dy * color_step, 0.0, 1.0);
+                                    color.z = clamp(color.z + dz * color_step, 0.0, 1.0);
+                                } else {
+                                    color.x = clamp(color.x - dx * color_step, 0.0, 1.0);
+                                    color.y = clamp(color.y - dy * color_step, 0.0, 1.0);
+                                    color.z = clamp(color.z - dz * color_step, 0.0, 1.0);
+                                }
                             }
                         }
                     }
@@ -589,7 +701,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
     }
 
     // Scale polygon
-    if rand_f32(&rng) < params.offset_polygon_prob && count >= 1u {
+    if rand_f32(&rng) < params.scale_polygon_prob && count >= 1u {
         let si = rand_u32(&rng, count);
         var poly = working_states[offspring_id].polygons[si];
         var v0 = unpack_vertex(poly.data.y);
@@ -608,7 +720,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
     }
 
     // Rotate polygon
-    if rand_f32(&rng) < params.offset_polygon_prob && count >= 1u {
+    if rand_f32(&rng) < params.rotate_polygon_prob && count >= 1u {
         let ri = rand_u32(&rng, count);
         var poly = working_states[offspring_id].polygons[ri];
         var v0 = unpack_vertex(poly.data.y);
@@ -632,12 +744,78 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
     }
 
     // Adjacent swap
-    if rand_f32(&rng) < params.reorder_polygon_prob && count >= 2u {
+    if rand_f32(&rng) < params.adjacent_swap_prob && count >= 2u {
         let i1 = rand_u32(&rng, count);
         let i2 = select(i1 + 1u, i1 - 1u, i1 == count - 1u);
         let tmp = working_states[offspring_id].polygons[i1];
         working_states[offspring_id].polygons[i1] = working_states[offspring_id].polygons[i2];
         working_states[offspring_id].polygons[i2] = tmp;
+        is_dirty = true;
+    }
+
+    // Merge polygons
+    if rand_f32(&rng) < params.merge_polygon_prob && count >= 2u && count > params.min_polygons {
+        let mi = rand_u32(&rng, count);
+        var mj = rand_u32(&rng, count);
+        while mi == mj { mj = rand_u32(&rng, count); }
+        let pi_poly = working_states[offspring_id].polygons[mi];
+        let pj_poly = working_states[offspring_id].polygons[mj];
+        let ci_v0 = unpack_vertex(pi_poly.data.y); let ci_v1 = unpack_vertex(pi_poly.data.z); let ci_v2 = unpack_vertex(pi_poly.data.w);
+        let cj_v0 = unpack_vertex(pj_poly.data.y); let cj_v1 = unpack_vertex(pj_poly.data.z); let cj_v2 = unpack_vertex(pj_poly.data.w);
+        let centroid_i = (ci_v0 + ci_v1 + ci_v2) / 3.0;
+        let centroid_j = (cj_v0 + cj_v1 + cj_v2) / 3.0;
+        let cdist = abs(centroid_i.x - centroid_j.x) + abs(centroid_i.y - centroid_j.y);
+        let color_i = unpack_color(pi_poly);
+        let color_j = unpack_color(pj_poly);
+        let cdiff = abs(color_i.x - color_j.x) + abs(color_i.y - color_j.y) + abs(color_i.z - color_j.z);
+        if cdist < params.merge_centroid_threshold && cdiff < params.merge_color_threshold {
+            let area_i = abs((ci_v1.x - ci_v0.x) * (ci_v2.y - ci_v0.y) - (ci_v2.x - ci_v0.x) * (ci_v1.y - ci_v0.y));
+            let area_j = abs((cj_v1.x - cj_v0.x) * (cj_v2.y - cj_v0.y) - (cj_v2.x - cj_v0.x) * (cj_v1.y - cj_v0.y));
+            let remove_idx = select(mi, mj, area_j < area_i);
+            let last = count - 1u;
+            if remove_idx != last { working_states[offspring_id].polygons[remove_idx] = working_states[offspring_id].polygons[last]; }
+            count--;
+            working_states[offspring_id].polygon_count = count;
+            is_dirty = true;
+        }
+    }
+
+    // Clone + jitter
+    if rand_f32(&rng) < params.clone_polygon_prob && count < params.max_polygons && count >= 1u {
+        let src_idx = rand_u32(&rng, count);
+        var new_poly = working_states[offspring_id].polygons[src_idx];
+        let jd = params.new_point_max_distance;
+        let jdx = rand_f32_range(&rng, -jd, jd);
+        let jdy = rand_f32_range(&rng, -jd, jd);
+        var jv0 = unpack_vertex(new_poly.data.y);
+        var jv1 = unpack_vertex(new_poly.data.z);
+        var jv2 = unpack_vertex(new_poly.data.w);
+        jv0 = clamp(jv0 + vec2<f32>(jdx, jdy), vec2<f32>(0.0), vec2<f32>(1.0));
+        jv1 = clamp(jv1 + vec2<f32>(jdx, jdy), vec2<f32>(0.0), vec2<f32>(1.0));
+        jv2 = clamp(jv2 + vec2<f32>(jdx, jdy), vec2<f32>(0.0), vec2<f32>(1.0));
+        new_poly.data.y = pack_vertex(jv0);
+        new_poly.data.z = pack_vertex(jv1);
+        new_poly.data.w = pack_vertex(jv2);
+        var jcolor = unpack_color(new_poly);
+        let cstep = 5.0 / 255.0;
+        jcolor.x = clamp(jcolor.x + rand_f32_range(&rng, -cstep, cstep), 0.0, 1.0);
+        jcolor.y = clamp(jcolor.y + rand_f32_range(&rng, -cstep, cstep), 0.0, 1.0);
+        jcolor.z = clamp(jcolor.z + rand_f32_range(&rng, -cstep, cstep), 0.0, 1.0);
+        new_poly.data.x = pack_color(jcolor);
+        working_states[offspring_id].polygons[count] = new_poly;
+        count++;
+        working_states[offspring_id].polygon_count = count;
+        is_dirty = true;
+    }
+
+    // Swap colors
+    if rand_f32(&rng) < params.swap_colors_prob && count >= 2u {
+        let sci = rand_u32(&rng, count);
+        var scj = rand_u32(&rng, count);
+        while sci == scj { scj = rand_u32(&rng, count); }
+        let tmp_color = working_states[offspring_id].polygons[sci].data.x;
+        working_states[offspring_id].polygons[sci].data.x = working_states[offspring_id].polygons[scj].data.x;
+        working_states[offspring_id].polygons[scj].data.x = tmp_color;
         is_dirty = true;
     }
 
@@ -695,12 +873,18 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
 
         // Move point (scaled by mutation_scale)
         let move_d = params.move_point_max_delta * mutation_scale;
+        let medium_d = params.medium_move_delta * mutation_scale;
+        let micro_d = params.micro_adjust_delta * mutation_scale;
         if rand_f32(&rng) < params.move_point_prob {
             v0.x = clamp(rand_f32_range(&rng, v0.x - move_d, v0.x + move_d), 0.0, 1.0);
             v0.y = clamp(rand_f32_range(&rng, v0.y - move_d, v0.y + move_d), 0.0, 1.0);
             is_dirty = true;
         }
-        let micro_d = params.micro_adjust_delta * mutation_scale;
+        if rand_f32(&rng) < params.medium_move_prob {
+            v0.x = clamp(rand_f32_range(&rng, v0.x - medium_d, v0.x + medium_d), 0.0, 1.0);
+            v0.y = clamp(rand_f32_range(&rng, v0.y - medium_d, v0.y + medium_d), 0.0, 1.0);
+            is_dirty = true;
+        }
         if rand_f32(&rng) < params.micro_adjust_prob {
             v0.x = clamp(rand_f32_range(&rng, v0.x - micro_d, v0.x + micro_d), 0.0, 1.0);
             v0.y = clamp(rand_f32_range(&rng, v0.y - micro_d, v0.y + micro_d), 0.0, 1.0);
@@ -711,6 +895,11 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
             v1.y = clamp(rand_f32_range(&rng, v1.y - move_d, v1.y + move_d), 0.0, 1.0);
             is_dirty = true;
         }
+        if rand_f32(&rng) < params.medium_move_prob {
+            v1.x = clamp(rand_f32_range(&rng, v1.x - medium_d, v1.x + medium_d), 0.0, 1.0);
+            v1.y = clamp(rand_f32_range(&rng, v1.y - medium_d, v1.y + medium_d), 0.0, 1.0);
+            is_dirty = true;
+        }
         if rand_f32(&rng) < params.micro_adjust_prob {
             v1.x = clamp(rand_f32_range(&rng, v1.x - micro_d, v1.x + micro_d), 0.0, 1.0);
             v1.y = clamp(rand_f32_range(&rng, v1.y - micro_d, v1.y + micro_d), 0.0, 1.0);
@@ -719,6 +908,11 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
         if rand_f32(&rng) < params.move_point_prob {
             v2.x = clamp(rand_f32_range(&rng, v2.x - move_d, v2.x + move_d), 0.0, 1.0);
             v2.y = clamp(rand_f32_range(&rng, v2.y - move_d, v2.y + move_d), 0.0, 1.0);
+            is_dirty = true;
+        }
+        if rand_f32(&rng) < params.medium_move_prob {
+            v2.x = clamp(rand_f32_range(&rng, v2.x - medium_d, v2.x + medium_d), 0.0, 1.0);
+            v2.y = clamp(rand_f32_range(&rng, v2.y - medium_d, v2.y + medium_d), 0.0, 1.0);
             is_dirty = true;
         }
         if rand_f32(&rng) < params.micro_adjust_prob {

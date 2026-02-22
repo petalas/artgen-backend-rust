@@ -756,7 +756,7 @@ impl GpuEvolver {
         let polygon_counts = &all_u32s[active as usize * 2..];
 
         // Compute fitness from errors with point penalty (matching select.wgsl's compute_fitness)
-        let max_error = crate::settings::GPU_MAX_ERROR_PER_PIXEL
+        let max_error = crate::settings::MAX_ERROR_PER_PIXEL
             * (p.image_width * p.image_height) as f32;
         let per_point_mul = crate::settings::PER_POINT_MULTIPLIER;
 

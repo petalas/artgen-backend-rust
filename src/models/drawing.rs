@@ -6,10 +6,11 @@ use serde::{Deserialize, Serialize};
 use crate::{
     engine::{Rasterizer, Vertex},
     settings::{
-        ADD_POLYGON_PROB, MAX_POLYGONS_PER_IMAGE, MIN_POLYGONS_PER_IMAGE, REMOVE_POLYGON_PROB,
-        REORDER_POLYGON_PROB, START_WITH_POLYGONS_PER_IMAGE,
+        ADD_POLYGON_PROB, ADJACENT_SWAP_PROB, CLONE_POLYGON_PROB, MAX_POLYGONS_PER_IMAGE,
+        MERGE_POLYGON_PROB, MIN_POLYGONS_PER_IMAGE, NEW_POINT_MAX_DISTANCE, REMOVE_POLYGON_PROB,
+        REORDER_POLYGON_PROB, START_WITH_POLYGONS_PER_IMAGE, SWAP_COLORS_PROB,
     },
-    utils::{fill_shape, fill_triangle, randomf32, translate_color, translate_coord},
+    utils::{fill_shape, fill_triangle, randomf32, randomf32_clamped, translate_color, translate_coord},
 };
 
 use super::polygon::Polygon;
@@ -81,6 +82,22 @@ impl Drawing {
             self.is_dirty = true;
         }
 
+        if randomf32() < ADJACENT_SWAP_PROB && self.adjacent_swap() {
+            self.is_dirty = true;
+        }
+
+        if randomf32() < MERGE_POLYGON_PROB && self.merge_polygons() {
+            self.is_dirty = true;
+        }
+
+        if randomf32() < CLONE_POLYGON_PROB && self.clone_jitter() {
+            self.is_dirty = true;
+        }
+
+        if randomf32() < SWAP_COLORS_PROB && self.swap_colors() {
+            self.is_dirty = true;
+        }
+
         let mut internal_mutation_happened = false;
         self.polygons.iter_mut().for_each(|p| {
             internal_mutation_happened = p.mutate();
@@ -115,15 +132,105 @@ impl Drawing {
 
     pub fn reorder_polygons(&mut self) -> bool {
         let l = self.polygons.len();
-        if self.polygons.len() < 2 {
+        if l < 2 {
             return false;
         }
-        let i1 = rand::rng().random_range(0..l - 1);
-        let mut i2 = rand::rng().random_range(0..l - 1);
+        let i1 = rand::rng().random_range(0..l);
+        let mut i2 = rand::rng().random_range(0..l);
         while i1 == i2 {
-            i2 = rand::rng().random_range(0..l - 1);
+            i2 = rand::rng().random_range(0..l);
         }
         self.polygons.swap(i1, i2);
+        true
+    }
+
+    pub fn adjacent_swap(&mut self) -> bool {
+        let l = self.polygons.len();
+        if l < 2 {
+            return false;
+        }
+        let i = rand::rng().random_range(0..l);
+        let j = if i == l - 1 { i - 1 } else { i + 1 };
+        self.polygons.swap(i, j);
+        true
+    }
+
+    pub fn merge_polygons(&mut self) -> bool {
+        let l = self.polygons.len();
+        if l < 2 || l <= MIN_POLYGONS_PER_IMAGE {
+            return false;
+        }
+        let i = rand::rng().random_range(0..l);
+        let mut j = rand::rng().random_range(0..l);
+        while i == j {
+            j = rand::rng().random_range(0..l);
+        }
+
+        // Check if centroids are close and colors are similar
+        let centroid_a = polygon_centroid(&self.polygons[i]);
+        let centroid_b = polygon_centroid(&self.polygons[j]);
+        let dist = (centroid_a.0 - centroid_b.0).abs() + (centroid_a.1 - centroid_b.1).abs();
+        if dist > 0.15 {
+            return false;
+        }
+
+        let ca = &self.polygons[i].color;
+        let cb = &self.polygons[j].color;
+        let color_dist = (ca.r as i32 - cb.r as i32).abs()
+            + (ca.g as i32 - cb.g as i32).abs()
+            + (ca.b as i32 - cb.b as i32).abs();
+        if color_dist > 50 {
+            return false;
+        }
+
+        // Remove the polygon with smaller area
+        let area_i = polygon_area(&self.polygons[i]);
+        let area_j = polygon_area(&self.polygons[j]);
+        let remove = if area_i < area_j { i } else { j };
+        self.polygons.swap_remove(remove);
+        true
+    }
+
+    pub fn clone_jitter(&mut self) -> bool {
+        if self.polygons.is_empty() || self.polygons.len() >= MAX_POLYGONS_PER_IMAGE {
+            return false;
+        }
+        let src = rand::rng().random_range(0..self.polygons.len());
+        let mut clone = self.polygons[src].clone();
+
+        // Jitter position: small offset to all points
+        let d = NEW_POINT_MAX_DISTANCE;
+        let dx = randomf32_clamped(-d, d);
+        let dy = randomf32_clamped(-d, d);
+        for p in &mut clone.points {
+            p.x = (p.x + dx).clamp(0.0, 1.0);
+            p.y = (p.y + dy).clamp(0.0, 1.0);
+        }
+
+        // Jitter color: ±5 per channel
+        clone.color.r = (clone.color.r as i16 + rand::rng().random_range(-5..=5)).clamp(0, 255) as u8;
+        clone.color.g = (clone.color.g as i16 + rand::rng().random_range(-5..=5)).clamp(0, 255) as u8;
+        clone.color.b = (clone.color.b as i16 + rand::rng().random_range(-5..=5)).clamp(0, 255) as u8;
+
+        // Insert near the source in z-order
+        let insert_at = (src + 1).min(self.polygons.len());
+        self.polygons.insert(insert_at, clone);
+        true
+    }
+
+    pub fn swap_colors(&mut self) -> bool {
+        let l = self.polygons.len();
+        if l < 2 {
+            return false;
+        }
+        let i = rand::rng().random_range(0..l);
+        let mut j = rand::rng().random_range(0..l);
+        while i == j {
+            j = rand::rng().random_range(0..l);
+        }
+        let tmp = self.polygons[i].color;
+        self.polygons[i].color = self.polygons[j].color;
+        self.polygons[j].color = tmp;
         true
     }
 
@@ -235,6 +342,29 @@ impl Drawing {
         background.extend(vert);
         background
     }
+}
+
+fn polygon_centroid(p: &Polygon) -> (f32, f32) {
+    let n = p.points.len() as f32;
+    let cx = p.points.iter().map(|pt| pt.x).sum::<f32>() / n;
+    let cy = p.points.iter().map(|pt| pt.y).sum::<f32>() / n;
+    (cx, cy)
+}
+
+fn polygon_area(p: &Polygon) -> f32 {
+    // Shoelace formula for arbitrary polygon area
+    let pts = &p.points;
+    let n = pts.len();
+    if n < 3 {
+        return 0.0;
+    }
+    let mut area = 0.0;
+    for i in 0..n {
+        let j = (i + 1) % n;
+        area += pts[i].x * pts[j].y;
+        area -= pts[j].x * pts[i].y;
+    }
+    area.abs() / 2.0
 }
 
 impl From<String> for Drawing {

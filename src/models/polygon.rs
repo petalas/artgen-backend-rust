@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 use crate::{
     settings::{
         MIN_POINTS_PER_POLYGON, NEW_POINT_MAX_DISTANCE, OFFSET_POLYGON_MAGNITUDE,
-        OFFSET_POLYGON_PROBABILITY, REMOVE_POINT_PROBABILITY,
+        OFFSET_POLYGON_PROBABILITY, REMOVE_POINT_PROBABILITY, ROTATE_POLYGON_PROB,
+        SCALE_POLYGON_PROB,
     },
     utils::randomf32_clamped,
 };
@@ -52,6 +53,40 @@ impl Polygon {
         true
     }
 
+    fn scale_polygon(&mut self) -> bool {
+        if self.points.len() < 3 {
+            return false;
+        }
+        let n = self.points.len() as f32;
+        let cx = self.points.iter().map(|p| p.x).sum::<f32>() / n;
+        let cy = self.points.iter().map(|p| p.y).sum::<f32>() / n;
+        let scale = randomf32_clamped(0.8, 1.2);
+        for p in &mut self.points {
+            p.x = (cx + (p.x - cx) * scale).clamp(0.0, 1.0);
+            p.y = (cy + (p.y - cy) * scale).clamp(0.0, 1.0);
+        }
+        true
+    }
+
+    fn rotate_polygon(&mut self) -> bool {
+        if self.points.len() < 3 {
+            return false;
+        }
+        let n = self.points.len() as f32;
+        let cx = self.points.iter().map(|p| p.x).sum::<f32>() / n;
+        let cy = self.points.iter().map(|p| p.y).sum::<f32>() / n;
+        let angle = randomf32_clamped(-0.2618, 0.2618); // ±15°
+        let cos_a = angle.cos();
+        let sin_a = angle.sin();
+        for p in &mut self.points {
+            let dx = p.x - cx;
+            let dy = p.y - cy;
+            p.x = (cx + dx * cos_a - dy * sin_a).clamp(0.0, 1.0);
+            p.y = (cy + dx * sin_a + dy * cos_a).clamp(0.0, 1.0);
+        }
+        true
+    }
+
     fn remove_point(&mut self) -> bool {
         let n = self.points.len();
         if n <= MIN_POINTS_PER_POLYGON {
@@ -66,6 +101,16 @@ impl Polygon {
         let mut mutated = false;
         if rand::rng().random::<f32>() < OFFSET_POLYGON_PROBABILITY
             && self.offset_polygon()
+        {
+            mutated = true;
+        }
+        if rand::rng().random::<f32>() < SCALE_POLYGON_PROB
+            && self.scale_polygon()
+        {
+            mutated = true;
+        }
+        if rand::rng().random::<f32>() < ROTATE_POLYGON_PROB
+            && self.rotate_polygon()
         {
             mutated = true;
         }

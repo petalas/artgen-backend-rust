@@ -85,6 +85,27 @@ pub struct GpuParams {
     pub single_mutation_mode: u32,
     pub lambda: u32,
     pub adaptive_mutation: u32,
+
+    // vec4[8] — new mutation probabilities
+    pub scale_polygon_prob: f32,
+    pub rotate_polygon_prob: f32,
+    pub adjacent_swap_prob: f32,
+    pub merge_polygon_prob: f32,
+
+    // vec4[9] — more new mutation probabilities + deltas
+    pub clone_polygon_prob: f32,
+    pub medium_move_prob: f32,
+    pub medium_move_delta: f32,
+    pub swap_colors_prob: f32,
+
+    // vec4[10] — merge thresholds + padding
+    pub merge_centroid_threshold: f32,
+    pub merge_color_threshold: f32,
+    pub _pad2: u32,
+    pub _pad3: u32,
+
+    // vec4[11-15] — reserved padding to fill 256 bytes
+    pub _reserved: [u32; 20],
 }
 
 /// Control flags for CPU ↔ GPU communication (atomic u32s).
@@ -108,7 +129,7 @@ pub fn gpu_params_from(mp: &MutationParams, w: u32, h: u32, chain_count: u32) ->
         image_height: h,
         max_polygons: mp.max_polygons.min(MAX_POLYGONS_PER_IMAGE as u32),
         min_polygons: mp.min_polygons,
-        max_error_per_pixel: GPU_MAX_ERROR_PER_PIXEL,
+        max_error_per_pixel: MAX_ERROR_PER_PIXEL,
         per_point_multiplier: PER_POINT_MULTIPLIER,
         iteration_number: 0,
         _pad0: 0,
@@ -136,6 +157,19 @@ pub fn gpu_params_from(mp: &MutationParams, w: u32, h: u32, chain_count: u32) ->
         single_mutation_mode: if mp.single_mutation_mode { 1 } else { 0 },
         lambda: mp.lambda,
         adaptive_mutation: if mp.adaptive_mutation { 1 } else { 0 },
+        scale_polygon_prob: mp.scale_polygon_prob,
+        rotate_polygon_prob: mp.rotate_polygon_prob,
+        adjacent_swap_prob: mp.adjacent_swap_prob,
+        merge_polygon_prob: mp.merge_polygon_prob,
+        clone_polygon_prob: mp.clone_polygon_prob,
+        medium_move_prob: mp.medium_move_prob,
+        medium_move_delta: mp.medium_move_delta,
+        swap_colors_prob: mp.swap_colors_prob,
+        merge_centroid_threshold: mp.merge_centroid_threshold,
+        merge_color_threshold: mp.merge_color_threshold,
+        _pad2: 0,
+        _pad3: 0,
+        _reserved: [0u32; 20],
     }
 }
 
@@ -339,8 +373,8 @@ mod tests {
 
     #[test]
     fn test_params_size() {
-        // Must be 128 bytes (8 vec4 = 32 u32s * 4 = 128)
-        assert_eq!(std::mem::size_of::<GpuParams>(), 128);
+        // Must be 256 bytes (16 vec4 = 64 u32s * 4 = 256)
+        assert_eq!(std::mem::size_of::<GpuParams>(), 256);
     }
 
     #[test]
