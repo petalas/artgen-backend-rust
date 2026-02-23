@@ -856,17 +856,32 @@ impl GpuEvolver {
         let zeros = vec![0u8; active as usize * 8];
         p.queue.write_buffer(&p.error_accumulators_buf, 0, &zeros);
 
-        // Copy chain_states → working_states (rasterize_error reads working_states)
-        let mut encoder = p.device.create_command_encoder(&CommandEncoderDescriptor {
-            label: Some("evaluate_fitness"),
-        });
-        encoder.copy_buffer_to_buffer(
-            &p.chain_states_buf, 0,
-            &p.working_states_buf, 0,
-            copy_bytes,
-        );
+        // Submit 1: copy chain_states → working_states
+        // (must be a separate submit so the write_buffer calls below land AFTER the copy)
+        {
+            let mut copy_enc = p.device.create_command_encoder(&CommandEncoderDescriptor {
+                label: Some("evaluate_fitness_copy"),
+            });
+            copy_enc.copy_buffer_to_buffer(
+                &p.chain_states_buf, 0,
+                &p.working_states_buf, 0,
+                copy_bytes,
+            );
+            p.queue.submit(std::iter::once(copy_enc.finish()));
+        }
 
-        // Dispatch rasterize_error: treat each chain as a single offspring (lambda=1)
+        // Write full-image dirty bbox into each working state so the always-on
+        // tile skip in rasterize_error doesn't cull any tiles.
+        // Packing: fitness_bits = (min_x | min_y<<16), stagnation_counter = (max_x | max_y<<16)
+        let bbox_lo = 0u32; // min_x=0, min_y=0
+        let bbox_hi = p.image_width | (p.image_height << 16);
+        for i in 0..active as u64 {
+            let base = i * state_size;
+            p.queue.write_buffer(&p.working_states_buf, base + 4, &bbox_lo.to_le_bytes());
+            p.queue.write_buffer(&p.working_states_buf, base + 12, &bbox_hi.to_le_bytes());
+        }
+
+        // Submit 2: bin polygons + rasterize_error
         let rwg = p.rasterize_wg;
         let wg_x = p.image_width.div_ceil(rwg[0]);
         let wg_y = p.image_height.div_ceil(rwg[1]);
@@ -875,6 +890,9 @@ impl GpuEvolver {
         let params_bytes: &[u8] = bytemuck::bytes_of(&params);
         p.queue.write_buffer(&p.params_buf, 0, params_bytes);
 
+        let mut encoder = p.device.create_command_encoder(&CommandEncoderDescriptor {
+            label: Some("evaluate_fitness"),
+        });
         {
             let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
                 label: Some("evaluate_fitness"),
@@ -949,8 +967,8 @@ impl GpuEvolver {
         drop(data);
         p.eval_fitness_staging_buf.unmap();
 
-        // Write fitness_bits back into chain_states so the first run_batch
-        // compares mutations against the correct baseline (not 0.0)
+        // Write fitness_bits back into chain_states and initialize chain_total_errors
+        // so the first run_batch's select shader has correct baselines for incremental eval.
         for i in 0..active as usize {
             let fitness_bits = self.chain_fitness[i].to_bits();
             let offset = i as u64 * state_size + 4; // fitness_bits is at offset 4 in GpuDrawingState
@@ -958,6 +976,12 @@ impl GpuEvolver {
                 &p.chain_states_buf,
                 offset,
                 &fitness_bits.to_le_bytes(),
+            );
+            // chain_total_errors: select shader reads this for incremental error delta
+            p.queue.write_buffer(
+                &p.chain_total_errors_buf,
+                i as u64 * 4,
+                &errors[i].to_le_bytes(),
             );
         }
         self.best_fitness_bits = best_fitness.to_bits();
