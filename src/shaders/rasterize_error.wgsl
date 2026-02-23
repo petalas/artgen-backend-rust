@@ -225,70 +225,84 @@ fn main(
     var pixel_error = 0u;
     var pixel_error_old = 0u;
 
-    if px < w && py < h {
-        let chain_count = arrayLength(&working_states);
-        if chain_id < chain_count {
-            let fx = (f32(px) + 0.5) / f32(w);
-            let fy = (f32(py) + 0.5) / f32(h);
+    // Tile metadata — workgroup-uniform, computed by all threads.
+    // Must be outside the pixel bounds check so all threads (including those in
+    // partial tiles with px >= w) participate in shared memory loads and barriers.
+    let chain_count = arrayLength(&working_states);
+    let num_tiles_x = (w + WG_X - 1u) / WG_X;
+    let num_tiles_y = (h + WG_Y - 1u) / WG_Y;
+    let num_tiles = num_tiles_x * num_tiles_y;
+    let tile_id = wid.y * num_tiles_x + wid.x;
 
-            let ref_color = textureLoad(reference_image, vec2<i32>(i32(px), i32(py)), 0);
-            let refr = ref_color.x * 255.0;
-            let refg = ref_color.y * 255.0;
-            let refb = ref_color.z * 255.0;
+    var tile_poly_count = 0u;
+    var tile_data_base = 0u;
+    if chain_id < chain_count {
+        let tile_global = chain_id * num_tiles + tile_id;
+        tile_poly_count = min(tile_counts_buf[tile_global], TILE_MAX_POLYS);
+        tile_data_base = chain_id * num_tiles * TILE_MAX_POLYS + tile_id * TILE_MAX_POLYS;
+    }
+    let sm_tile_count = (tile_poly_count + TILE_CAP - 1u) / TILE_CAP;
 
-            // Read cached parent pixel from chain_framebuffers (O(1) per pixel).
-            // The framebuffer is kept in sync by init_framebuffers (on startup)
-            // and update_framebuffers (after each select pass on acceptance).
-            let fb_idx = parent_chain * w * h + py * w + px;
-            let packed = chain_framebuffers[fb_idx];
-            let old_ri = f32(packed & 0xFFu);
-            let old_gi = f32((packed >> 8u) & 0xFFu);
-            let old_bi = f32((packed >> 16u) & 0xFFu);
-            pixel_error_old = u32(abs(old_ri - refr) + abs(old_gi - refg) + abs(old_bi - refb));
+    // Per-pixel setup — only valid pixels read reference/framebuffer
+    let valid_pixel = px < w && py < h && chain_id < chain_count;
+    var fx = 0.0;
+    var fy = 0.0;
+    var r = 255.0;
+    var g = 255.0;
+    var b = 255.0;
+    var refr = 0.0;
+    var refg = 0.0;
+    var refb = 0.0;
 
-            // Start with white background, accumulate in registers
-            var r = 255.0;
-            var g = 255.0;
-            var b = 255.0;
+    if valid_pixel {
+        fx = (f32(px) + 0.5) / f32(w);
+        fy = (f32(py) + 0.5) / f32(h);
 
-            // Tile-culled rasterization: only process polygons binned to this tile
-            let num_tiles_x = (w + WG_X - 1u) / WG_X;
-            let num_tiles_y = (h + WG_Y - 1u) / WG_Y;
-            let num_tiles = num_tiles_x * num_tiles_y;
-            let tile_id = wid.y * num_tiles_x + wid.x;
+        let ref_color = textureLoad(reference_image, vec2<i32>(i32(px), i32(py)), 0);
+        refr = ref_color.x * 255.0;
+        refg = ref_color.y * 255.0;
+        refb = ref_color.z * 255.0;
 
-            let tile_global = chain_id * num_tiles + tile_id;
-            let tile_poly_count = min(tile_counts_buf[tile_global], TILE_MAX_POLYS);
-            let tile_data_base = chain_id * num_tiles * TILE_MAX_POLYS + tile_id * TILE_MAX_POLYS;
+        // Read cached parent pixel from chain_framebuffers (O(1) per pixel).
+        let fb_idx = parent_chain * w * h + py * w + px;
+        let packed = chain_framebuffers[fb_idx];
+        let old_ri = f32(packed & 0xFFu);
+        let old_gi = f32((packed >> 8u) & 0xFFu);
+        let old_bi = f32((packed >> 16u) & 0xFFu);
+        pixel_error_old = u32(abs(old_ri - refr) + abs(old_gi - refg) + abs(old_bi - refb));
+    }
 
-            let sm_tile_count = (tile_poly_count + TILE_CAP - 1u) / TILE_CAP;
+    // Tile-culled rasterization: ALL threads participate in shared memory loads
+    // (critical for partial tiles where out-of-bounds threads are responsible
+    // for loading polygon slots that in-bounds threads need for rasterization).
+    for (var sm_tile = 0u; sm_tile < sm_tile_count; sm_tile++) {
+        let sm_tile_base = sm_tile * TILE_CAP;
+        let sm_tile_end = min(TILE_CAP, tile_poly_count - sm_tile_base);
 
-            for (var sm_tile = 0u; sm_tile < sm_tile_count; sm_tile++) {
-                let sm_tile_base = sm_tile * TILE_CAP;
-                let sm_tile_end = min(TILE_CAP, tile_poly_count - sm_tile_base);
-
-                for (var load_pass = 0u; load_pass < LOADS_PER_THREAD; load_pass++) {
-                    let slot = local_idx + load_pass * THREAD_COUNT;
-                    if slot < sm_tile_end {
-                        let poly_idx = tile_data[tile_data_base + sm_tile_base + slot];
-                        shared_polys[slot] = working_states[chain_id].polygons[poly_idx];
-                    }
-                }
-                workgroupBarrier();
-
-                for (var i = 0u; i < sm_tile_end; i++) {
-                    rasterize_blend(shared_polys[i], fx, fy, &r, &g, &b);
-                }
-                workgroupBarrier();
+        for (var load_pass = 0u; load_pass < LOADS_PER_THREAD; load_pass++) {
+            let slot = local_idx + load_pass * THREAD_COUNT;
+            if slot < sm_tile_end {
+                let poly_idx = tile_data[tile_data_base + sm_tile_base + slot];
+                shared_polys[slot] = working_states[chain_id].polygons[poly_idx];
             }
-
-            // L1 error: quantize to u8 integers (floor) so error matches
-            // framebuffer precision (pack_fb_pixel truncates to u8).
-            let qr = floor(clamp(r, 0.0, 255.0));
-            let qg = floor(clamp(g, 0.0, 255.0));
-            let qb = floor(clamp(b, 0.0, 255.0));
-            pixel_error = u32(abs(qr - refr) + abs(qg - refg) + abs(qb - refb));
         }
+        workgroupBarrier();
+
+        if valid_pixel {
+            for (var i = 0u; i < sm_tile_end; i++) {
+                rasterize_blend(shared_polys[i], fx, fy, &r, &g, &b);
+            }
+        }
+        workgroupBarrier();
+    }
+
+    // L1 error: quantize to u8 integers (floor) so error matches
+    // framebuffer precision (pack_fb_pixel truncates to u8).
+    if valid_pixel {
+        let qr = floor(clamp(r, 0.0, 255.0));
+        let qg = floor(clamp(g, 0.0, 255.0));
+        let qb = floor(clamp(b, 0.0, 255.0));
+        pixel_error = u32(abs(qr - refr) + abs(qg - refg) + abs(qb - refb));
     }
 
     // Subgroup-accelerated reduction: subgroupAdd within each warp/wave,

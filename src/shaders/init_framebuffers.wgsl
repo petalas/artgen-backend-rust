@@ -139,84 +139,97 @@ fn main(
     var pixel_error = 0u;
     var packed_pixel = pack_fb_pixel(255.0, 255.0, 255.0);  // white background
 
-    if px < w && py < h {
-        let chain_count = arrayLength(&chain_states);
-        if chain_id < chain_count {
-            let fx = (f32(px) + 0.5) / f32(w);
-            let fy = (f32(py) + 0.5) / f32(h);
+    // Polygon count — workgroup-uniform, must be outside pixel bounds check so all
+    // threads (including partial-tile out-of-bounds threads) participate in shared
+    // memory loads and barriers.
+    let chain_count = arrayLength(&chain_states);
+    var poly_count = 0u;
+    if chain_id < chain_count {
+        poly_count = chain_states[chain_id].polygon_count;
+    }
+    let tile_count = (poly_count + TILE_CAP - 1u) / TILE_CAP;
 
-            var r = 255.0;
-            var g = 255.0;
-            var b = 255.0;
+    let valid_pixel = px < w && py < h && chain_id < chain_count;
+    var fx = 0.0;
+    var fy = 0.0;
+    var r = 255.0;
+    var g = 255.0;
+    var b = 255.0;
 
-            // Brute-force rasterize with shared memory tiling
-            let poly_count = chain_states[chain_id].polygon_count;
-            let tile_count = (poly_count + TILE_CAP - 1u) / TILE_CAP;
+    if valid_pixel {
+        fx = (f32(px) + 0.5) / f32(w);
+        fy = (f32(py) + 0.5) / f32(h);
+    }
 
-            for (var tile = 0u; tile < tile_count; tile++) {
-                let tile_base = tile * TILE_CAP;
-                let tile_end = min(TILE_CAP, poly_count - tile_base);
+    // Brute-force rasterize with shared memory tiling — ALL threads participate
+    // in loading (critical for partial tiles where out-of-bounds threads are
+    // responsible for loading polygon slots that in-bounds threads need).
+    for (var tile = 0u; tile < tile_count; tile++) {
+        let tile_base = tile * TILE_CAP;
+        let tile_end = min(TILE_CAP, poly_count - tile_base);
 
-                for (var load_pass = 0u; load_pass < LOADS_PER_THREAD; load_pass++) {
-                    let slot = local_idx + load_pass * THREAD_COUNT;
-                    if slot < tile_end {
-                        shared_polys[slot] = chain_states[chain_id].polygons[tile_base + slot];
-                    }
-                }
-                workgroupBarrier();
-
-                for (var i = 0u; i < tile_end; i++) {
-                    let poly = shared_polys[i];
-
-                    let pv0 = unpack_vertex(poly.data.y);
-                    let pv1 = unpack_vertex(poly.data.z);
-                    let pv2 = unpack_vertex(poly.data.w);
-
-                    // AABB culling
-                    let bb_min_x = min(pv0.x, min(pv1.x, pv2.x));
-                    let bb_max_x = max(pv0.x, max(pv1.x, pv2.x));
-                    let bb_min_y = min(pv0.y, min(pv1.y, pv2.y));
-                    let bb_max_y = max(pv0.y, max(pv1.y, pv2.y));
-
-                    if fx >= bb_min_x && fx <= bb_max_x && fy >= bb_min_y && fy <= bb_max_y {
-                        let e0 = edge_fn(pv0.x, pv0.y, pv1.x, pv1.y, fx, fy);
-                        let e1 = edge_fn(pv1.x, pv1.y, pv2.x, pv2.y, fx, fy);
-                        let e2 = edge_fn(pv2.x, pv2.y, pv0.x, pv0.y, fx, fy);
-                        let all_pos = e0 >= 0.0 && e1 >= 0.0 && e2 >= 0.0;
-                        let all_neg = e0 <= 0.0 && e1 <= 0.0 && e2 <= 0.0;
-                        if all_pos || all_neg {
-                            let pcolor = unpack_color(poly);
-                            let alpha = pcolor.w;
-                            let inv_alpha = 1.0 - alpha;
-                            r = r * inv_alpha + pcolor.x * 255.0 * alpha;
-                            g = g * inv_alpha + pcolor.y * 255.0 * alpha;
-                            b = b * inv_alpha + pcolor.z * 255.0 * alpha;
-                        }
-                    }
-                }
-                workgroupBarrier();
+        for (var load_pass = 0u; load_pass < LOADS_PER_THREAD; load_pass++) {
+            let slot = local_idx + load_pass * THREAD_COUNT;
+            if slot < tile_end {
+                shared_polys[slot] = chain_states[chain_id].polygons[tile_base + slot];
             }
-
-            let ri = clamp(r, 0.0, 255.0);
-            let gi = clamp(g, 0.0, 255.0);
-            let bi = clamp(b, 0.0, 255.0);
-
-            // Write framebuffer pixel
-            packed_pixel = pack_fb_pixel(ri, gi, bi);
-            let fb_idx = chain_id * w * h + py * w + px;
-            chain_framebuffers[fb_idx] = packed_pixel;
-
-            // Compute error from quantized pixel values (matching what rasterize_error
-            // reads from chain_framebuffers) to avoid drift in incremental total error.
-            let qi = f32(packed_pixel & 0xFFu);
-            let qg = f32((packed_pixel >> 8u) & 0xFFu);
-            let qb = f32((packed_pixel >> 16u) & 0xFFu);
-            let ref_color = textureLoad(reference_image, vec2<i32>(i32(px), i32(py)), 0);
-            let refr = ref_color.x * 255.0;
-            let refg = ref_color.y * 255.0;
-            let refb = ref_color.z * 255.0;
-            pixel_error = u32(abs(qi - refr) + abs(qg - refg) + abs(qb - refb));
         }
+        workgroupBarrier();
+
+        if valid_pixel {
+            for (var i = 0u; i < tile_end; i++) {
+                let poly = shared_polys[i];
+
+                let pv0 = unpack_vertex(poly.data.y);
+                let pv1 = unpack_vertex(poly.data.z);
+                let pv2 = unpack_vertex(poly.data.w);
+
+                // AABB culling
+                let bb_min_x = min(pv0.x, min(pv1.x, pv2.x));
+                let bb_max_x = max(pv0.x, max(pv1.x, pv2.x));
+                let bb_min_y = min(pv0.y, min(pv1.y, pv2.y));
+                let bb_max_y = max(pv0.y, max(pv1.y, pv2.y));
+
+                if fx >= bb_min_x && fx <= bb_max_x && fy >= bb_min_y && fy <= bb_max_y {
+                    let e0 = edge_fn(pv0.x, pv0.y, pv1.x, pv1.y, fx, fy);
+                    let e1 = edge_fn(pv1.x, pv1.y, pv2.x, pv2.y, fx, fy);
+                    let e2 = edge_fn(pv2.x, pv2.y, pv0.x, pv0.y, fx, fy);
+                    let all_pos = e0 >= 0.0 && e1 >= 0.0 && e2 >= 0.0;
+                    let all_neg = e0 <= 0.0 && e1 <= 0.0 && e2 <= 0.0;
+                    if all_pos || all_neg {
+                        let pcolor = unpack_color(poly);
+                        let alpha = pcolor.w;
+                        let inv_alpha = 1.0 - alpha;
+                        r = r * inv_alpha + pcolor.x * 255.0 * alpha;
+                        g = g * inv_alpha + pcolor.y * 255.0 * alpha;
+                        b = b * inv_alpha + pcolor.z * 255.0 * alpha;
+                    }
+                }
+            }
+        }
+        workgroupBarrier();
+    }
+
+    if valid_pixel {
+        let ri = clamp(r, 0.0, 255.0);
+        let gi = clamp(g, 0.0, 255.0);
+        let bi = clamp(b, 0.0, 255.0);
+
+        // Write framebuffer pixel
+        packed_pixel = pack_fb_pixel(ri, gi, bi);
+        let fb_idx = chain_id * w * h + py * w + px;
+        chain_framebuffers[fb_idx] = packed_pixel;
+
+        // Compute error from quantized pixel values (matching what rasterize_error
+        // reads from chain_framebuffers) to avoid drift in incremental total error.
+        let qi = f32(packed_pixel & 0xFFu);
+        let qg = f32((packed_pixel >> 8u) & 0xFFu);
+        let qb = f32((packed_pixel >> 16u) & 0xFFu);
+        let ref_color = textureLoad(reference_image, vec2<i32>(i32(px), i32(py)), 0);
+        let refr = ref_color.x * 255.0;
+        let refg = ref_color.y * 255.0;
+        let refb = ref_color.z * 255.0;
+        pixel_error = u32(abs(qi - refr) + abs(qg - refg) + abs(qb - refb));
     }
 
     // Subgroup-accelerated reduction for total error

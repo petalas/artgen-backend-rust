@@ -42,10 +42,11 @@ fn polygon_bbox_pixels(poly: Polygon, w: u32, h: u32) -> vec4<u32> {
     let v0 = unpack_vertex(poly.data.y);
     let v1 = unpack_vertex(poly.data.z);
     let v2 = unpack_vertex(poly.data.w);
+    // +1 padding on max to guard against float→int boundary rounding
     let min_x = u32(floor(min(v0.x, min(v1.x, v2.x)) * f32(w)));
     let min_y = u32(floor(min(v0.y, min(v1.y, v2.y)) * f32(h)));
-    let max_x = min(u32(ceil(max(v0.x, max(v1.x, v2.x)) * f32(w))), w);
-    let max_y = min(u32(ceil(max(v0.y, max(v1.y, v2.y)) * f32(h))), h);
+    let max_x = min(u32(ceil(max(v0.x, max(v1.x, v2.x)) * f32(w))) + 1u, w);
+    let max_y = min(u32(ceil(max(v0.y, max(v1.y, v2.y)) * f32(h))) + 1u, h);
     return vec4<u32>(min_x, min_y, max_x, max_y);
 }
 
@@ -274,16 +275,21 @@ fn single_mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<functio
         return polygon_bbox_pixels(new_poly, w, h);
     }
 
-    // Remove polygon — dirty region is the removed polygon's bbox
+    // Remove polygon — dirty region covers both the removed polygon and the polygon
+    // that swap-fills its slot (which changes z-order, affecting alpha blend results)
     cumulative += w_remove;
     if r < cumulative && c > params.min_polygons {
         let remove_idx = rand_u32(rng, c);
         let removed_bbox = polygon_bbox_pixels(working_states[oid].polygons[remove_idx], w, h);
         let last_idx = c - 1u;
-        if remove_idx != last_idx { working_states[oid].polygons[remove_idx] = working_states[oid].polygons[last_idx]; }
+        var dirty = removed_bbox;
+        if remove_idx != last_idx {
+            dirty = merge_bbox(dirty, polygon_bbox_pixels(working_states[oid].polygons[last_idx], w, h));
+            working_states[oid].polygons[remove_idx] = working_states[oid].polygons[last_idx];
+        }
         *count = c - 1u;
         working_states[oid].polygon_count = c - 1u;
-        return removed_bbox;
+        return dirty;
     }
 
     // Reorder (swap two) — dirty region is union of both polygons' bboxes
@@ -371,10 +377,14 @@ fn single_mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<functio
             let remove_idx = select(mi, mj, area_j < area_i);
             let removed_bbox = polygon_bbox_pixels(working_states[oid].polygons[remove_idx], w, h);
             let last = c - 1u;
-            if remove_idx != last { working_states[oid].polygons[remove_idx] = working_states[oid].polygons[last]; }
+            var dirty = removed_bbox;
+            if remove_idx != last {
+                dirty = merge_bbox(dirty, polygon_bbox_pixels(working_states[oid].polygons[last], w, h));
+                working_states[oid].polygons[remove_idx] = working_states[oid].polygons[last];
+            }
             *count = c - 1u;
             working_states[oid].polygon_count = c - 1u;
-            return removed_bbox;
+            return dirty;
         }
         // Criteria not met — fall through to next mutation
     }

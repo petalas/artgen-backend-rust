@@ -341,16 +341,23 @@ impl GpuEvolver {
         // -> STORAGE_READ). See flush_states() in wgpu-core/src/command/compute.rs which
         // calls drain_barriers() before every dispatch.
 
-        // Bulk iterations: all non-timestamped iterations go into ONE compute pass
-        // to minimize Vulkan command buffer objects. wgpu inserts pipeline barriers
-        // between dispatches within a pass based on storage buffer usage tracking.
+        // Bulk iterations: split into two passes per iteration.
+        // Pass A: mutate → bin → rasterize_error (internal barriers OK via usage changes)
+        // Pass B: select → update_framebuffers (internal barriers OK via usage changes)
+        //
+        // The pass boundary between A and B provides the critical memory barrier for
+        // error_accumulators: rasterize_error (atomicAdd, RW) → select (atomicExchange, RW).
+        // Without this barrier, select can read incomplete sums — wgpu's resource tracker
+        // only inserts barriers on usage *changes*, and RW→RW is not a change.
+        // The pass boundary between B(N) and A(N+1) similarly ensures select's
+        // atomicExchange (zeroing) is visible to the next rasterize_error's atomicAdd.
         let bulk_count = if collect_timestamps { iterations.saturating_sub(1) } else { iterations };
-        if bulk_count > 0 {
-            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                label: Some("bulk_iterations"),
-                timestamp_writes: None,
-            });
-            for _ in 0..bulk_count {
+        for _ in 0..bulk_count {
+            {
+                let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                    label: Some("mutate_bin_rasterize"),
+                    timestamp_writes: None,
+                });
                 pass.set_pipeline(&p.mutate_pipeline);
                 pass.set_bind_group(0, &p.mutate_bind_group, &[]);
                 pass.set_bind_group(1, &p.params_bind_group, &[]);
@@ -365,7 +372,12 @@ impl GpuEvolver {
                 pass.set_bind_group(0, &p.rasterize_error_bind_group, &[]);
                 pass.set_bind_group(1, &p.params_bind_group, &[]);
                 pass.dispatch_workgroups(wg_x, wg_y, active * lambda);
-
+            }
+            {
+                let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                    label: Some("select_update"),
+                    timestamp_writes: None,
+                });
                 pass.set_pipeline(&p.select_pipeline);
                 pass.set_bind_group(0, &p.select_bind_group, &[]);
                 pass.set_bind_group(1, &p.params_bind_group, &[]);
