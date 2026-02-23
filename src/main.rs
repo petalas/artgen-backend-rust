@@ -268,8 +268,7 @@ fn gpu_main_loop(
     let default_params = MutationParams::default();
     loop {
         batches += 1;
-        // Run a batch of GPU iterations (collect timestamps every 20th batch, and always on the first)
-        let collect_timestamps = batches % 20 == 1;
+        let collect_timestamps = true;
         if let Some(new_best) = evolver.run_batch(&default_params, collect_timestamps) {
             if new_best.fitness > global_best.fitness {
                 global_best = new_best;
@@ -314,6 +313,7 @@ fn gpu_main_loop(
     }
 }
 
+#[derive(Clone, Copy)]
 struct GpuPassTimingsWs {
     mutate_ms: f32,
     mutate_pct: f32,
@@ -1316,9 +1316,9 @@ fn handle_ws_command(
     }
 }
 
-fn build_gpu_stats(evolver: &GpuEvolver) -> GpuStatsWs {
+fn build_gpu_stats(evolver: &GpuEvolver, cached_timings: &mut Option<GpuPassTimingsWs>) -> GpuStatsWs {
     let timings = evolver.pass_timings();
-    let ws_timings = if timings.sample_count > 0 {
+    if timings.sample_count > 0 {
         let n = timings.sample_count as f64;
         let mutate = timings.mutate_ns / n / 1_000_000.0;
         let bin = timings.bin_polygons_ns / n / 1_000_000.0;
@@ -1326,7 +1326,7 @@ fn build_gpu_stats(evolver: &GpuEvolver) -> GpuStatsWs {
         let select = timings.select_ns / n / 1_000_000.0;
         let total = mutate + bin + rasterize_error + select;
         if total > 0.0 {
-            Some(GpuPassTimingsWs {
+            *cached_timings = Some(GpuPassTimingsWs {
                 mutate_ms: mutate as f32,
                 mutate_pct: (mutate / total * 100.0) as f32,
                 bin_polygons_ms: bin as f32,
@@ -1336,13 +1336,9 @@ fn build_gpu_stats(evolver: &GpuEvolver) -> GpuStatsWs {
                 select_ms: select as f32,
                 select_pct: (select / total * 100.0) as f32,
                 total_ms: total as f32,
-            })
-        } else {
-            None
+            });
         }
-    } else {
-        None
-    };
+    }
 
     let raw_fitness = evolver.chain_fitness();
     let chain_count = evolver.chain_count();
@@ -1353,7 +1349,7 @@ fn build_gpu_stats(evolver: &GpuEvolver) -> GpuStatsWs {
     GpuStatsWs {
         chain_count,
         memory_mb: evolver.estimated_memory_bytes() as f32 / (1024.0 * 1024.0),
-        timings: ws_timings,
+        timings: cached_timings.clone(),
         chain_fitness: fitness,
         rasterize_wg: evolver.rasterize_wg(),
     }
@@ -1982,6 +1978,7 @@ fn gpu_main_loop_headless(legacy_image: Option<&str>, gpu_batch_iters_override: 
         let mut global_best = initial_best;
         let mut last_save_timestamp = Instant::now();
         let mut last_stats_timestamp = Instant::now();
+        let mut cached_timings: Option<GpuPassTimingsWs> = None;
         let mut last_image_render = Instant::now();
         let image_render_interval = Duration::from_millis(200); // render at ~5fps
         let mut improvements = 0u64;
@@ -2090,8 +2087,7 @@ fn gpu_main_loop_headless(legacy_image: Option<&str>, gpu_batch_iters_override: 
 
             batches += 1;
             let mp = ws_state.0.lock().unwrap().mutation_params.clone();
-            // Collect timestamps every 20th batch (and always the first) to reduce pass transitions
-            let collect_timestamps = batches % 20 == 1;
+            let collect_timestamps = true;
             if let Some(new_best) = evolver.run_batch(&mp, collect_timestamps) {
                 if new_best.fitness > global_best.fitness {
                     improvements += 1;
@@ -2156,7 +2152,7 @@ fn gpu_main_loop_headless(legacy_image: Option<&str>, gpu_batch_iters_override: 
                 let active_secs = active_elapsed.as_secs_f64();
                 let evals = evolver.total_evaluations();
                 let evals_per_sec = if active_secs > 0.0 { evals as f64 / active_secs } else { 0.0 };
-                let gpu_stats = build_gpu_stats(&evolver);
+                let gpu_stats = build_gpu_stats(&evolver, &mut cached_timings);
                 {
                     let (lock, cvar) = &*ws_state;
                     let mut s = lock.lock().unwrap();
