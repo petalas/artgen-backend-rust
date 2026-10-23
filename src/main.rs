@@ -36,6 +36,9 @@ use tokio::sync::broadcast;
 const DEFAULT_REF_IMAGE_FILENAME: &str = "ff.jpg";
 const DEFAULT_SAVE_PATH: &str = "ff.best.json";
 
+#[path = "benchmark/live.rs"]
+mod live_acceptance;
+
 fn evaluate(work_sender: mpsc::Sender<EvaluatorPayload>, mut evaluator: Evaluator) {
     loop {
         let update = evaluator.produce_new_best();
@@ -81,6 +84,20 @@ fn main() {
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
     let args: Vec<String> = env::args().collect();
+
+    if args.get(1).is_some_and(|arg| arg == "--live-acceptance") {
+        let successful = match live_acceptance::run(&args[2..]) {
+            Ok(successful) => successful,
+            Err(error) => {
+                eprintln!("Live acceptance failed: {error:#}");
+                false
+            }
+        };
+        if !successful {
+            exit(1);
+        }
+        return;
+    }
 
     let use_gpu = args.iter().any(|a| a == "--gpu");
     let headless = args.iter().any(|a| a == "--headless");
@@ -359,6 +376,7 @@ impl GpuStatsWs {
     }
 }
 
+#[derive(Default)]
 struct WsState {
     ref_png: Vec<u8>,
     best_png: Vec<u8>,
@@ -521,6 +539,62 @@ fn build_project_list_msg(active_project: &Option<String>) -> serde_json::Value 
 }
 
 fn ws_handle_client(stream: std::net::TcpStream, state: SharedWsState) {
+    ws_handle_client_mode(stream, state, None);
+}
+
+fn drawing_update_message(s: &WsState) -> serde_json::Value {
+    let gpu_stats_json = s.gpu_stats.as_ref().map(GpuStatsWs::to_json);
+    serde_json::json!({
+        "type": "update",
+        "image": BASE64.encode(&s.best_png),
+        "fitness": s.fitness,
+        "polygons": s.polygons,
+        "improvements": s.improvements,
+        "evalsPerSec": s.evals_per_sec,
+        "totalEvals": s.total_evals,
+        "elapsed": s.elapsed_secs,
+        "paused": s.paused,
+        "drawingJson": s.drawing_json,
+        "gpuStats": gpu_stats_json,
+    })
+}
+
+fn stats_message(s: &WsState) -> serde_json::Value {
+    let gpu_stats_json = s.gpu_stats.as_ref().map(GpuStatsWs::to_json);
+    serde_json::json!({
+        "type": "stats",
+        "fitness": s.fitness,
+        "polygons": s.polygons,
+        "improvements": s.improvements,
+        "evalsPerSec": s.evals_per_sec,
+        "totalEvals": s.total_evals,
+        "elapsed": s.elapsed_secs,
+        "paused": s.paused,
+        "gpuStats": gpu_stats_json,
+    })
+}
+
+fn send_ws_update(
+    ws: &mut tungstenite::WebSocket<std::net::TcpStream>,
+    message: String,
+) -> tungstenite::Result<()> {
+    ws.get_ref().set_nonblocking(false)?;
+    let sent = ws.send(tungstenite::Message::Text(message.into()));
+    let restored = ws.get_ref().set_nonblocking(true);
+    sent?;
+    restored?;
+    Ok(())
+}
+
+// Power of Ten deviation: retain the existing long service handler and normal
+// command-drain loop to preserve its protocol. Acceptance owns a read-only local
+// client, bounds turns to 8192 and 120 seconds, and shuts down both socket ends.
+// Splitting the ordinary handler is a separate protocol refactor.
+fn ws_handle_client_mode(
+    stream: std::net::TcpStream,
+    state: SharedWsState,
+    acceptance: Option<Arc<live_acceptance::Session>>,
+) {
     let peer = stream.peer_addr().ok();
 
     // Configure WebSocket to accept large frames (up to 20MB for image uploads)
@@ -531,6 +605,9 @@ fn ws_handle_client(stream: std::net::TcpStream, state: SharedWsState) {
     let mut ws = match tungstenite::accept_with_config(stream, Some(config)) {
         Ok(ws) => ws,
         Err(e) => {
+            if let Some(session) = &acceptance {
+                session.fail(format!("WS handshake: {e}"));
+            }
             eprintln!("[WS] Handshake error: {}", e);
             return;
         }
@@ -587,31 +664,41 @@ fn ws_handle_client(stream: std::net::TcpStream, state: SharedWsState) {
             "results": serde_json::to_value(&s.benchmark_store.results).unwrap_or_default(),
             "autoTuneStatus": auto_tune_status,
         });
-        if ws
-            .send(tungstenite::Message::Text(msg.to_string().into()))
-            .is_err()
-        {
+        if let Err(error) = ws.send(tungstenite::Message::Text(msg.to_string().into())) {
+            if let Some(session) = &acceptance {
+                session.fail_connection(anyhow::Error::new(error).context("WS init"));
+            }
             println!("[WS] Client disconnected during init: {:?}", peer);
             return;
         }
 
         // Send project list
         let pl_msg = build_project_list_msg(&s.active_project);
-        if ws
-            .send(tungstenite::Message::Text(pl_msg.to_string().into()))
-            .is_err()
-        {
+        if let Err(error) = ws.send(tungstenite::Message::Text(pl_msg.to_string().into())) {
+            if let Some(session) = &acceptance {
+                session.fail_connection(anyhow::Error::new(error).context("WS project list"));
+            }
             println!("[WS] Client disconnected during project_list: {:?}", peer);
             return;
         }
     }
 
     // Switch to non-blocking so we can interleave reads (commands) and writes (updates)
-    if ws.get_ref().set_nonblocking(true).is_err() {
+    if let Err(error) = ws.get_ref().set_nonblocking(true) {
+        if let Some(session) = &acceptance {
+            session.fail_connection(error);
+        }
         return;
     }
 
+    let mut acceptance_turns = 0usize;
     loop {
+        if let Some(session) = &acceptance {
+            acceptance_turns += 1;
+            if session.expired() || acceptance_turns > 8192 {
+                break;
+            }
+        }
         // 1. Drain incoming commands from client
         loop {
             match ws.read() {
@@ -620,18 +707,44 @@ fn ws_handle_client(stream: std::net::TcpStream, state: SharedWsState) {
                         let reply = handle_ws_command(&cmd, &state, &peer);
                         if let Some(reply_msg) = reply {
                             // Send reply in blocking mode
-                            ws.get_ref().set_nonblocking(false).ok();
-                            let result = ws.send(tungstenite::Message::Text(reply_msg.to_string().into()));
-                            ws.get_ref().set_nonblocking(true).ok();
-                            if result.is_err() {
-                                println!("[WS] Client disconnected: {:?}", peer);
+                            let result = if acceptance.is_some() {
+                                send_ws_update(&mut ws, reply_msg.to_string())
+                            } else {
+                                ws.get_ref().set_nonblocking(false).ok();
+                                let result = ws
+                                    .send(tungstenite::Message::Text(reply_msg.to_string().into()));
+                                ws.get_ref().set_nonblocking(true).ok();
+                                result
+                            };
+                            if let Err(error) = result {
+                                if let Some(session) = &acceptance {
+                                    session.fail_connection(
+                                        anyhow::Error::new(error).context("WS command reply"),
+                                    );
+                                }
+                                println!("[WS] Client disconnected: {peer:?}");
                                 return;
                             }
                         }
+                    } else if let Some(session) = &acceptance {
+                        session.fail("malformed WS client JSON");
+                        return;
+                    }
+                }
+                Ok(tungstenite::Message::Binary(_) | tungstenite::Message::Frame(_)) => {
+                    if let Some(session) = &acceptance {
+                        session.fail("unexpected WS client data message");
+                        return;
                     }
                 }
                 Ok(tungstenite::Message::Close(_)) => {
-                    println!("[WS] Client disconnected: {:?}", peer);
+                    if let Some(session) = &acceptance {
+                        session.fail_connection(
+                            anyhow::Error::new(tungstenite::Error::ConnectionClosed)
+                                .context("WS client closed connection"),
+                        );
+                    }
+                    println!("[WS] Client disconnected: {peer:?}");
                     return;
                 }
                 Err(tungstenite::Error::Io(ref e))
@@ -639,8 +752,11 @@ fn ws_handle_client(stream: std::net::TcpStream, state: SharedWsState) {
                 {
                     break; // no more data
                 }
-                Err(_) => {
-                    println!("[WS] Client disconnected: {:?}", peer);
+                Err(error) => {
+                    if let Some(session) = &acceptance {
+                        session.fail_connection(anyhow::Error::new(error).context("WS receive"));
+                    }
+                    println!("[WS] Client disconnected: {peer:?}");
                     return;
                 }
                 _ => {}
@@ -655,89 +771,74 @@ fn ws_handle_client(stream: std::net::TcpStream, state: SharedWsState) {
         last_send_time = Instant::now();
 
         // 3. Read current state and send appropriate message
+        let mut live_ticket = None;
         let msg_string = {
-            let s = lock.lock().unwrap();
+            let mut s = lock.lock().unwrap();
 
-            // Project list changed (small message, send immediately)
-            if s.project_list_generation != last_project_list_gen {
-                last_project_list_gen = s.project_list_generation;
-                let pl_msg = build_project_list_msg(&s.active_project);
-                drop(s);
-                ws.get_ref().set_nonblocking(false).ok();
-                let result = ws.send(tungstenite::Message::Text(pl_msg.to_string().into()));
-                ws.get_ref().set_nonblocking(true).ok();
-                if result.is_err() {
-                    break;
-                }
-                continue;
-            }
-
-            // Send new benchmark events (each connection has its own cursor)
-            if events_cursor < s.benchmark_events.len() {
-                let new_events: Vec<serde_json::Value> = s.benchmark_events[events_cursor..].to_vec();
-                events_cursor = s.benchmark_events.len();
-                drop(s);
-                ws.get_ref().set_nonblocking(false).ok();
-                let mut failed = false;
-                for evt in new_events {
-                    if ws.send(tungstenite::Message::Text(evt.to_string().into())).is_err() {
-                        failed = true;
+            if let Some(session) = &acceptance {
+                match session.message(&mut s, &mut last_image_send_time) {
+                    Ok(Some((message, ticket))) => {
+                        live_ticket = Some(ticket);
+                        message
+                    }
+                    Ok(None) => stats_message(&s).to_string(),
+                    Err(error) => {
+                        session.fail(error.to_string());
                         break;
                     }
                 }
-                ws.get_ref().set_nonblocking(true).ok();
-                if failed {
-                    break;
-                }
-                continue;
-            }
-
-            // Reference image changed (project switch — always send immediately)
-            if s.ref_image_generation != last_ref_image_gen {
-                last_ref_image_gen = s.ref_image_generation;
-                last_gen = s.generation;
-                last_image_gen = s.image_generation;
-                last_image_send_time = Instant::now();
-                let auto_tune_status_val = s.auto_tuner.as_ref().map(|t| t.status(s.auto_tune_active));
-                let msg = serde_json::json!({
-                    "type": "project_switched",
-                    "referenceImage": BASE64.encode(&s.ref_png),
-                    "image": BASE64.encode(&s.best_png),
-                    "project": s.active_project,
-                    "fitness": s.fitness,
-                    "polygons": s.polygons,
-                    "improvements": s.improvements,
-                    "evalsPerSec": s.evals_per_sec,
-                    "totalEvals": s.total_evals,
-                    "elapsed": s.elapsed_secs,
-                    "paused": s.paused,
-                    "drawingJson": s.drawing_json,
-                    "imageWidth": s.image_width,
-                    "imageHeight": s.image_height,
-                    "mutationParams": s.mutation_params,
-                    "targetResolution": s.target_resolution,
-                    "autoTuneStatus": auto_tune_status_val,
-                    "snapshots": serde_json::to_value(&s.benchmark_store.snapshots).unwrap_or_default(),
-                    "results": serde_json::to_value(&s.benchmark_store.results).unwrap_or_default(),
-                });
-                msg.to_string()
-            } else if s.generation == last_gen {
-                // Nothing changed — skip send
-                continue;
             } else {
-                // Stats or image update
-                // Images are large (~100KB base64), throttle separately to ~5fps
-                let has_new_image = s.image_generation > last_image_gen
-                    && last_image_send_time.elapsed() >= image_interval;
-                last_gen = s.generation;
+                // Project list changed (small message, send immediately)
+                if s.project_list_generation != last_project_list_gen {
+                    last_project_list_gen = s.project_list_generation;
+                    let pl_msg = build_project_list_msg(&s.active_project);
+                    drop(s);
+                    ws.get_ref().set_nonblocking(false).ok();
+                    let result = ws.send(tungstenite::Message::Text(pl_msg.to_string().into()));
+                    ws.get_ref().set_nonblocking(true).ok();
+                    if result.is_err() {
+                        break;
+                    }
+                    continue;
+                }
 
-                let gpu_stats_json = s.gpu_stats.as_ref().map(|g| g.to_json());
-                let msg = if has_new_image {
+                // Send new benchmark events (each connection has its own cursor)
+                if events_cursor < s.benchmark_events.len() {
+                    let new_events: Vec<serde_json::Value> =
+                        s.benchmark_events[events_cursor..].to_vec();
+                    events_cursor = s.benchmark_events.len();
+                    drop(s);
+                    ws.get_ref().set_nonblocking(false).ok();
+                    let mut failed = false;
+                    for evt in new_events {
+                        if ws
+                            .send(tungstenite::Message::Text(evt.to_string().into()))
+                            .is_err()
+                        {
+                            failed = true;
+                            break;
+                        }
+                    }
+                    ws.get_ref().set_nonblocking(true).ok();
+                    if failed {
+                        break;
+                    }
+                    continue;
+                }
+
+                // Reference image changed (project switch — always send immediately)
+                if s.ref_image_generation != last_ref_image_gen {
+                    last_ref_image_gen = s.ref_image_generation;
+                    last_gen = s.generation;
                     last_image_gen = s.image_generation;
                     last_image_send_time = Instant::now();
-                    serde_json::json!({
-                        "type": "update",
+                    let auto_tune_status_val =
+                        s.auto_tuner.as_ref().map(|t| t.status(s.auto_tune_active));
+                    let msg = serde_json::json!({
+                        "type": "project_switched",
+                        "referenceImage": BASE64.encode(&s.ref_png),
                         "image": BASE64.encode(&s.best_png),
+                        "project": s.active_project,
                         "fitness": s.fitness,
                         "polygons": s.polygons,
                         "improvements": s.improvements,
@@ -746,31 +847,50 @@ fn ws_handle_client(stream: std::net::TcpStream, state: SharedWsState) {
                         "elapsed": s.elapsed_secs,
                         "paused": s.paused,
                         "drawingJson": s.drawing_json,
-                        "gpuStats": gpu_stats_json,
-                    })
+                        "imageWidth": s.image_width,
+                        "imageHeight": s.image_height,
+                        "mutationParams": s.mutation_params,
+                        "targetResolution": s.target_resolution,
+                        "autoTuneStatus": auto_tune_status_val,
+                        "snapshots": serde_json::to_value(&s.benchmark_store.snapshots).unwrap_or_default(),
+                        "results": serde_json::to_value(&s.benchmark_store.results).unwrap_or_default(),
+                    });
+                    msg.to_string()
+                } else if s.generation == last_gen {
+                    // Nothing changed — skip send
+                    continue;
                 } else {
-                    serde_json::json!({
-                        "type": "stats",
-                        "fitness": s.fitness,
-                        "polygons": s.polygons,
-                        "improvements": s.improvements,
-                        "evalsPerSec": s.evals_per_sec,
-                        "totalEvals": s.total_evals,
-                        "elapsed": s.elapsed_secs,
-                        "paused": s.paused,
-                        "gpuStats": gpu_stats_json,
-                    })
-                };
-                msg.to_string()
+                    // Stats or image update
+                    // Images are large (~100KB base64), throttle separately to ~5fps
+                    let has_new_image = s.image_generation > last_image_gen
+                        && last_image_send_time.elapsed() >= image_interval;
+                    last_gen = s.generation;
+
+                    let msg = if has_new_image {
+                        last_image_gen = s.image_generation;
+                        last_image_send_time = Instant::now();
+                        drawing_update_message(&s)
+                    } else {
+                        stats_message(&s)
+                    };
+                    msg.to_string()
+                }
             }
         };
 
         // Send in blocking mode to ensure delivery
-        ws.get_ref().set_nonblocking(false).ok();
-        let result = ws.send(tungstenite::Message::Text(msg_string.into()));
-        ws.get_ref().set_nonblocking(true).ok();
-        if result.is_err() {
+        let result = send_ws_update(&mut ws, msg_string);
+        if let Err(error) = result {
+            if let Some(session) = &acceptance {
+                session.fail_connection(error);
+            }
             break;
+        }
+        if let (Some(session), Some(ticket)) = (&acceptance, live_ticket) {
+            if let Err(error) = session.sent(ticket) {
+                session.fail(error.to_string());
+                break;
+            }
         }
     }
 

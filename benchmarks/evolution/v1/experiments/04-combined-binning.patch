@@ -1,0 +1,186 @@
+diff --git a/src/shaders/bin_polygons.wgsl b/src/shaders/bin_polygons.wgsl
+index 49df272..c3a9335 100644
+--- a/src/shaders/bin_polygons.wgsl
++++ b/src/shaders/bin_polygons.wgsl
+@@ -100,6 +100,72 @@ const TILE_MAX_POLYS: u32 = 256u;
+ @group(0) @binding(2) var<storage, read_write> tile_counts:    array<atomic<u32>>;
+ @group(1) @binding(0) var<uniform>             params:         Params;
+ 
++fn consumed_tiles(offspring_id: u32, image_size: vec2<u32>, tile_count: vec2<u32>) -> vec4<u32> {
++    let bbox_lo = working_states[offspring_id].fitness_bits;
++    let bbox_hi = working_states[offspring_id].stagnation_counter;
++    let dirty_min = vec2<u32>(bbox_lo & 0xFFFFu, bbox_lo >> 16u);
++    let dirty_max = vec2<u32>(bbox_hi & 0xFFFFu, bbox_hi >> 16u);
++    // The rasterizer clips the last tile's end to the image, not its padded size.
++    if any(dirty_min >= image_size) {
++        return vec4<u32>(0u);
++    }
++    let tile_size = vec2<u32>(TILE_W, TILE_H);
++    // Match tile_end > dirty_min && tile_start < dirty_max on each axis.
++    // Do not reject inverted/zero-width boxes: they can still consume a tile.
++    // Decoded u16 controls plus tile_size - 1 cannot overflow, even at 65535.
++    return vec4<u32>(dirty_min / tile_size,
++        min((dirty_max + tile_size - vec2<u32>(1u)) / tile_size, tile_count));
++}
++
++struct PackedLimits {
++    lower: vec2<u32>,
++    upper: vec2<u32>,
++    enabled: bool,
++}
++
++fn packed_axis_limits(consumed: vec2<u32>, dim: u32) -> vec2<u32> {
++    var lower = 0u;
++    var upper = 65536u;
++    // One pixel of slack exceeds the old f32 decode/multiply error for dim <= 512.
++    if consumed.x > 0u {
++        lower = ((consumed.x - 1u) * 65535u) / dim + 1u;
++    }
++    // At the image edge, q=65535 can enter the original partial final tile.
++    if consumed.y < dim {
++        upper = ((consumed.y + 1u) * 65535u + dim - 1u) / dim;
++    }
++    return vec2<u32>(lower, upper);
++}
++
++// The caller has already returned when the consumed tile rectangle is empty.
++fn packed_limits(consumed: vec4<u32>, w: u32, h: u32) -> PackedLimits {
++    var limits = PackedLimits(vec2<u32>(0u), vec2<u32>(65536u), false);
++    // Outside the proved range, retain dirty clipping and the original float bounds.
++    if w == 0u || h == 0u || w > 512u || h > 512u {
++        return limits;
++    }
++    let tile_size = vec2<u32>(TILE_W, TILE_H);
++    let pixel_min = consumed.xy * tile_size;
++    let pixel_max = min(consumed.zw * tile_size, vec2<u32>(w, h));
++    // Initial/full evaluation and crossover consume the whole image.
++    if all(pixel_min == vec2<u32>(0u)) && all(pixel_max == vec2<u32>(w, h)) {
++        return limits;
++    }
++    let x_limits = packed_axis_limits(vec2<u32>(pixel_min.x, pixel_max.x), w);
++    let y_limits = packed_axis_limits(vec2<u32>(pixel_min.y, pixel_max.y), h);
++    limits.lower = vec2<u32>(x_limits.x, y_limits.x);
++    limits.upper = vec2<u32>(x_limits.y, y_limits.y);
++    limits.enabled = true;
++    return limits;
++}
++
++fn packed_misses(poly: Polygon, limits: PackedLimits) -> bool {
++    let a = vec2<u32>(poly.data.y & 0xFFFFu, poly.data.y >> 16u);
++    let b = vec2<u32>(poly.data.z & 0xFFFFu, poly.data.z >> 16u);
++    let c = vec2<u32>(poly.data.w & 0xFFFFu, poly.data.w >> 16u);
++    return any(max(a, max(b, c)) < limits.lower) || any(min(a, min(b, c)) >= limits.upper);
++}
++
+ @compute @workgroup_size(1, 1, 1)
+ fn main(@builtin(workgroup_id) wid: vec3<u32>) {
+     let offspring_id = wid.x;
+@@ -113,51 +179,72 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>) {
+     let num_tiles_x = (w + TILE_W - 1u) / TILE_W;
+     let num_tiles_y = (h + TILE_H - 1u) / TILE_H;
+     let num_tiles = num_tiles_x * num_tiles_y;
++    let consumed = consumed_tiles(offspring_id, vec2<u32>(w, h), vec2<u32>(num_tiles_x, num_tiles_y));
++    if any(consumed.xy >= consumed.zw) {
++        return;
++    }
+ 
+-    // Reset tile counts for this offspring
+-    for (var t = 0u; t < num_tiles; t++) {
+-        atomicStore(&tile_counts[offspring_id * num_tiles + t], 0u);
++    // Reset every consumed bin, including bins with no overlapping polygons.
++    for (var ty = consumed.y; ty < consumed.w; ty++) {
++        for (var tx = consumed.x; tx < consumed.z; tx++) {
++            let tile_global = offspring_id * num_tiles + ty * num_tiles_x + tx;
++            atomicStore(&tile_counts[tile_global], 0u);
++        }
+     }
+ 
++    let limits = packed_limits(consumed, w, h);
+     let poly_count = working_states[offspring_id].polygon_count;
+ 
+     // Serial iteration: process polygons in order to preserve alpha blending order
+     for (var pi = 0u; pi < poly_count; pi++) {
+         let poly = working_states[offspring_id].polygons[pi];
++        if limits.enabled {
++            if packed_misses(poly, limits) {
++                continue;
++            }
++        }
++        bin_polygon(poly, pi, offspring_id, w, h, num_tiles_x, num_tiles_y, consumed);
++    }
++}
+ 
+-        // Unpack vertices
+-        let v0 = unpack_vertex(poly.data.y);
+-        let v1 = unpack_vertex(poly.data.z);
+-        let v2 = unpack_vertex(poly.data.w);
+-
+-        // AABB in normalized coords
+-        let bb_min_x = min(v0.x, min(v1.x, v2.x));
+-        let bb_max_x = max(v0.x, max(v1.x, v2.x));
+-        let bb_min_y = min(v0.y, min(v1.y, v2.y));
+-        let bb_max_y = max(v0.y, max(v1.y, v2.y));
+-
+-        // Convert to pixel coords
+-        let px_min_x = u32(bb_min_x * f32(w));
+-        let px_max_x = min(u32(ceil(bb_max_x * f32(w))), w);
+-        let px_min_y = u32(bb_min_y * f32(h));
+-        let px_max_y = min(u32(ceil(bb_max_y * f32(h))), h);
+-
+-        // Convert to tile coords
+-        let tile_min_x = px_min_x / TILE_W;
+-        let tile_max_x = min((px_max_x + TILE_W - 1u) / TILE_W, num_tiles_x);
+-        let tile_min_y = px_min_y / TILE_H;
+-        let tile_max_y = min((px_max_y + TILE_H - 1u) / TILE_H, num_tiles_y);
+-
+-        // Append polygon index to each overlapping tile
+-        for (var ty = tile_min_y; ty < tile_max_y; ty++) {
+-            for (var tx = tile_min_x; tx < tile_max_x; tx++) {
+-                let tile_id = ty * num_tiles_x + tx;
+-                let tile_global = offspring_id * num_tiles + tile_id;
+-                let slot = atomicAdd(&tile_counts[tile_global], 1u);
+-                if slot < TILE_MAX_POLYS {
+-                    let data_offset = offspring_id * num_tiles * TILE_MAX_POLYS + tile_id * TILE_MAX_POLYS + slot;
+-                    tile_data[data_offset] = pi;
+-                }
++// Survivors retain the original float bounds; only the scatter rectangle is clipped.
++fn bin_polygon(poly: Polygon, pi: u32, offspring_id: u32, w: u32, h: u32,
++               num_tiles_x: u32, num_tiles_y: u32, consumed: vec4<u32>) {
++    let num_tiles = num_tiles_x * num_tiles_y;
++    // Unpack vertices
++    let v0 = unpack_vertex(poly.data.y);
++    let v1 = unpack_vertex(poly.data.z);
++    let v2 = unpack_vertex(poly.data.w);
++
++    // AABB in normalized coords
++    let bb_min_x = min(v0.x, min(v1.x, v2.x));
++    let bb_max_x = max(v0.x, max(v1.x, v2.x));
++    let bb_min_y = min(v0.y, min(v1.y, v2.y));
++    let bb_max_y = max(v0.y, max(v1.y, v2.y));
++
++    // Convert to pixel coords
++    let px_min_x = u32(bb_min_x * f32(w));
++    let px_max_x = min(u32(ceil(bb_max_x * f32(w))), w);
++    let px_min_y = u32(bb_min_y * f32(h));
++    let px_max_y = min(u32(ceil(bb_max_y * f32(h))), h);
++
++    // Convert to tile coords
++    let tile_min_x = px_min_x / TILE_W;
++    let tile_max_x = min((px_max_x + TILE_W - 1u) / TILE_W, num_tiles_x);
++    let tile_min_y = px_min_y / TILE_H;
++    let tile_max_y = min((px_max_y + TILE_H - 1u) / TILE_H, num_tiles_y);
++    let tile_min = max(vec2<u32>(tile_min_x, tile_min_y), consumed.xy);
++    let tile_max = min(vec2<u32>(tile_max_x, tile_max_y), consumed.zw);
++
++    // Append polygon index to each overlapping consumed tile
++    for (var ty = tile_min.y; ty < tile_max.y; ty++) {
++        for (var tx = tile_min.x; tx < tile_max.x; tx++) {
++            let tile_id = ty * num_tiles_x + tx;
++            let tile_global = offspring_id * num_tiles + tile_id;
++            let slot = atomicAdd(&tile_counts[tile_global], 1u);
++            if slot < TILE_MAX_POLYS {
++                let data_offset = offspring_id * num_tiles * TILE_MAX_POLYS + tile_id * TILE_MAX_POLYS + slot;
++                tile_data[data_offset] = pi;
+             }
+         }
+     }

@@ -6,13 +6,49 @@ The user chose completed evaluations per second as the first optimization score,
 
 The scored workloads are mature states from **ff, mona, and darwin**, all strictly above **97% similarity**. Complexity and current similarity are part of each workload's identity. Blank starts, early evolution, and simple synthetic cases are measurement controls or correctness checks; they do not contribute to the optimization score.
 
-This plan began with source inspection at `543b766`. The first mature-drawing restart slice now includes local frozen inputs, seeded completed-work trials, an independent scalar renderer, overflow replay and supervised A/A reference capture. See the [implemented commands and current boundary](../benchmarks/evolution/v1/README.md). The user has captured the first reference; [baseline notes](../benchmarks/evolution/v1/baseline.md) record its checks, variation and identity. Machine isolation remains operator-declared rather than continuously verified. True continuation checkpoints, live-path acceptance and the broader campaign freeze remain later milestones. No throughput optimization attempt has run. The earlier startup comparison covers one fixture and short runs; retain it as evidence for that change, rather than using it as the campaign baseline.
+This plan began with source inspection at `543b766`. The first mature-drawing restart slice now includes local frozen inputs, seeded completed-work trials, an independent scalar renderer, overflow replay and supervised A/A reference capture. See the [implemented commands and current boundary](../benchmarks/evolution/v1/README.md). The user has captured the first reference; [baseline notes](../benchmarks/evolution/v1/baseline.md) record its checks, variation and identity.
+
+Machine isolation remains operator-declared rather than continuously verified. Six isolated experiments have run under the [provisional screening policy](../benchmarks/evolution/v1/comparison-policy.md) and the separate setup/non-regression objective for experiment 6. The first four failed promotion. The tile-parallel fifth candidate passed the full timing screen. The sixth reduced setup time but failed its throughput guard, so candidate 5 remains the best archived version. No runtime throughput change is installed.
+
+Candidate 5 also passed the [new-state and disjoint-seed engine confirmation](../benchmarks/evolution/v1/acceptance-result.md), with 2.30456 times throughput across 45 valid workers and exact replay. The first live package stopped invalid because its result formatter widened reported float values. Its remaining 19 workers were not run. [Live protocol 2](../benchmarks/evolution/v1/live-protocol-2.md) repairs serialization while retaining exact parameter checks and every performance threshold. Fresh live A/A qualification remains required, along with true continuation and broader campaign gates.
+
+The earlier startup comparison covers one fixture and short runs; retain it as evidence for that change, rather than using it as the campaign baseline.
 
 Qualification exposed two source correctness defects before reference capture: approximate reference-byte reconstruction undercounted integer L1, and post-selection cleanup removed visible triangles after their error was cached. The corrected engine recovers exact reference bytes and preserves the evaluated candidate's geometry. These repairs establish the reference behavior and do not count toward the proposed throughput target.
 
 Freeze the reference image, resolution, active population, offspring count, batch size, workgroup size, mutation parameters, adaptive settings, precision, fitness and selection rules, and seed schedule for every before/after comparison. Faster execution must preserve the same logical evaluations. Exact reuse of equivalent work is allowed; counting unfinished or skipped evolution steps is invalid.
 
 Proposed first-campaign target: a 20% improvement in the fixed suite's aggregate throughput after at least six valid, isolated experiments. This is a planning target, not a measured opportunity. Review the attempt and GPU-time budget after environment qualification, before starting a sustained run. Stop on the agreed predicate or an evidence-backed plateau; keep the original predicate in the report.
+
+## Exploratory attempts retained
+
+| Attempt | Declared budget | Aggregate paired result | Disposition |
+| --- | --- | --- | --- |
+| [1. Dirty-region bins](../benchmarks/evolution/v1/experiments/01-dirty-binning.md) | Five pairs/project, 64 batches | 1.625% gain | REJECT, below strict 3% |
+| [2. Packed rejection](../benchmarks/evolution/v1/experiments/02-packed-rejection.md) | Five pairs/project, 8 batches | 2.117% gain | REJECT preliminary, no full-budget inference |
+| [3. Parallel bounds](../benchmarks/evolution/v1/experiments/03-parallel-bounds.md) | Five pairs/project, 8 batches | No measurable gain | REJECT preliminary, broad interval |
+| [4. Combined work avoidance](../benchmarks/evolution/v1/experiments/04-combined-binning.md) | Five pairs/project, 8 batches | No measurable gain | REJECT preliminary |
+| [5. Tile-parallel filling](../benchmarks/evolution/v1/experiments/05-tile-parallel-binning.md) | Five pairs/project, 64 batches | 2.3145 times throughput | Timing screen passed; adoption pending |
+| [6. Remove bin-cache zeroing](../benchmarks/evolution/v1/experiments/06-bin-cache-initialization.md) | Five pairs/project, 64 batches versus candidate 5 | 39.83% less setup, throughput ratio 0.99803 | REJECT, mona throughput guard failed |
+
+All six preserve the mature inputs and pass exact endpoint replay and cached
+framebuffer byte-L1 checks. Background activity was uncontrolled. Short
+screens do not replace the full-budget reference. Patches and evidence remain
+available, and the production engine remains at the reference.
+
+The [amplification diagnostic](../benchmarks/evolution/v1/binning-sensitivity.md)
+then measured a 69% wall-time increase when the original bin body was repeated,
+with identical evolved states. Tile-parallel filling addresses that measured code
+path and passes the full timing screen with exact endpoint replay. Benchmark
+setup increased by roughly 6.6 seconds. Removing automatic bin-cache zeroing
+then reduced benchmark preparation by 39.83%, but mona missed the separately
+frozen throughput guard. That change was rejected without excluding its slow
+pair or adding samples. Compiler phases and direct UI readiness were not
+measured. Candidate 5 retains its original bin initialization. New mature states
+and disjoint seeds have passed engine confirmation. Live acceptance still needs
+fresh protocol-2 A/A qualification before the runtime default changes.
+The original 20%/six-attempt target remains a broader
+campaign proposal, rather than an achieved adoption result.
 
 ## What the current code tells us
 
@@ -121,7 +157,7 @@ Use a paired analysis that preserves the case/seed structure. Treat confidence p
 
 ### 6. Run the first measured experiment loop
 
-Only start engine attempts after milestones 1 through 5 pass. Each attempt states one mechanism, predicted limiting cost, affected cases, expected correctness invariants and rejection condition. Keep source changes isolated and preserve unrelated work. Archive the reference/candidate binary hashes, source patch and trial specifications before measurement.
+Only start scored campaign attempts after milestones 1 through 5 pass. Separate exploratory screens can test isolated mechanisms before broader qualification, but cannot return KEEP or relax the remaining gates. Each attempt states one mechanism, predicted limiting cost, affected cases, expected correctness invariants and rejection condition. Keep source changes isolated and preserve unrelated work. Archive the reference/candidate binary hashes, source patch and trial specifications before measurement.
 
 Use shorter fixed-work trials of the qualified mature projects for cheap performance screening. Label their findings provisional; they cannot accept a win. Simple or early-state controls remain useful for runner diagnostics and never substitute for the mature suite. Promising candidates receive the full alternating confirmation suite and quality gates. Check reserved mature checkpoints, disjoint seeds, and any qualified held-out image families before a campaign winner is adopted, without using confirmation results to tune implementation details.
 
@@ -323,6 +359,12 @@ Synthesized from 6 expert analyses (GPU compute, evolutionary algorithm, CPU-GPU
 **Fix:** Use 64-thread workgroup, parallelize tile count reset. Polygon scatter remains serial for ordering but reset phase is trivially parallelizable.
 **Effort:** Medium
 **Details:** [gpu-compute-optimization.md](gpu-compute-optimization.md)
+
+The later [parallel-bounds experiment](../benchmarks/evolution/v1/experiments/03-parallel-bounds.md)
+tested 32-lane bounds preprocessing with serial reset/scatter. It did not establish
+a throughput gain at its declared preliminary budget. That is a different
+mechanism from parallel count resets, and gives no evidence for the historical
+32 to 64 times utilization claim in this heading.
 
 ### 4.4 Polygon splitting mutation — [adds representational capacity]
 **Source:** Evolutionary Algorithm expert

@@ -1,0 +1,3 @@
+# Unified patches retain a single-space context marker on blank lines.
+# Preserve archived experiment bytes while checking other whitespace rules.
+benchmarks/evolution/v1/experiments/*.patch whitespace=-blank-at-eol

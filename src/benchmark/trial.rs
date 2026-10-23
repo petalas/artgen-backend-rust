@@ -231,7 +231,11 @@ fn execute(
     Ok(record)
 }
 
-fn prepare(
+/// Restore and qualify the seeded start shared by engine and live trials.
+///
+/// # Errors
+/// Returns errors from capacity, GPU preparation, state export or qualification.
+pub fn prepare(
     evolver: &mut GpuEvolver,
     input: &LoadedFixture,
     spec: &TrialSpec,
@@ -278,7 +282,11 @@ fn prepare(
     )
 }
 
-fn complete_record(
+/// Qualify a drained endpoint and populate its shared engine evidence.
+///
+/// # Errors
+/// Returns errors for malformed snapshots, rendering or complexity evaluation.
+pub fn complete_record(
     record: &mut TrialRecord,
     final_state: &BenchmarkSnapshot,
     input: &LoadedFixture,
@@ -533,7 +541,11 @@ fn state_hash(snapshot: &BenchmarkSnapshot) -> Result<String> {
     Ok(fixtures::sha256(&serde_json::to_vec(&canonical)?))
 }
 
-fn save_state(output: &Path, state: &BenchmarkSnapshot) -> Result<()> {
+/// Export the canonical endpoint and its inspection drawings.
+///
+/// # Errors
+/// Returns serialization and output-file errors.
+pub fn save_state(output: &Path, state: &BenchmarkSnapshot) -> Result<()> {
     fs::write(output.join("state.json"), serde_json::to_vec(state)?)?;
     let drawings: Vec<_> = state.parents.iter().map(to_drawing).collect();
     fs::write(
@@ -553,7 +565,8 @@ fn to_drawing(parent: &BenchmarkPackedState) -> Drawing {
     gpu_to_drawing(&state)
 }
 
-fn finish_record(record: &mut TrialRecord) {
+/// Derive final status and error count after all device and observer checks.
+pub fn finish_record(record: &mut TrialRecord) {
     record.error_count = record.errors.len();
     record.correctness = record.errors.is_empty();
     record.status = if record.correctness {

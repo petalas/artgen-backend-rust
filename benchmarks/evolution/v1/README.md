@@ -15,6 +15,18 @@ The first user-run reference capture is recorded in [baseline notes](baseline.md
 including repeatability, build/fixture identity and the remaining profiling gate.
 The [first diagnostic profiles](profile.md) separate host CPU/wait observations
 from full GPU batch spans and document the rerunnable profiling command.
+The [paired screening policy](comparison-policy.md) governs provisional candidate
+measurements. [Experiment 1](experiments/01-dirty-binning.md) records dirty-region
+binning, [experiment 2](experiments/02-packed-rejection.md) records packed polygon
+rejection, [experiment 3](experiments/03-parallel-bounds.md) records parallel bounds,
+[experiment 4](experiments/04-combined-binning.md) combines dirty tiles and packed
+rejection, and [experiment 5](experiments/05-tile-parallel-binning.md) tests
+tile-parallel filling with preserved polygon order. [Experiment 6](experiments/06-bin-cache-initialization.md)
+tests removal of redundant bin-cache initialization against that fast version,
+with separate setup and throughput non-regression gates. The separate
+[binning amplification diagnostic](binning-sensitivity.md) measures whole-run
+response to extra bin work. Candidate patches stay separate from the production
+shader until qualification.
 
 ## Import once
 
@@ -91,6 +103,65 @@ Detailed timestamp attribution covers only the final iteration of each batch;
 the selection interval includes framebuffer updates. Those sums are not total
 application time or a utilization measurement.
 
+## Bounded new-state and live qualification
+
+[Acceptance policy 1](acceptance-policy.md) defines the additional restart and
+real WebSocket workload for the archived tile-parallel candidate. It does not
+change the original scoring policy or automatically adopt a shader.
+[Live protocol 2](live-protocol-2.md) corrects result float serialization and
+requires a fresh live A/A baseline. The invalid protocol-1 live worker remains
+excluded. The separate engine confirmation is recorded in the
+[acceptance results](acceptance-result.md).
+
+Prepare a separate corpus with one preselected mature state per project.
+Generate each once with the original engine, construction seed 101, 64 batches
+and parent 0. Keep the source reference images and default settings unchanged.
+Require distinct packed geometry and starts above 97%; do not search for a
+replacement after a failure. Record construction and import provenance.
+
+The engine collector accepts that corpus separately from the original capture:
+
+```sh
+python3 scripts/qualify-evolution.py engine \
+  --manifest RESERVED/manifest.json --capture ORIGINAL/summary.json \
+  --reference REFERENCE/evolution-bench --candidate CANDIDATE/evolution-bench \
+  --output NEW_ENGINE_OUTPUT
+```
+
+It freezes seeds 11/13/17 for ff/mona/darwin, five alternating full-budget pairs
+per project, overflow replay, and extra 8/32-batch correctness prefixes.
+Diagnostic and prefix work remains outside the timing score.
+
+Build the actual backend with the same acceptance code on both sides. Its
+internal `--live-acceptance` entry uses the production PNG renderer, message
+serializers and WebSocket transport. The live collector runs A/A first:
+
+```sh
+python3 scripts/qualify-evolution.py live \
+  --manifest RESERVED/manifest.json --capture ORIGINAL/summary.json \
+  --reference REFERENCE/artgen-backend-rust --candidate CANDIDATE/artgen-backend-rust \
+  --output NEW_LIVE_OUTPUT
+```
+
+The fixed live workload completes 4,194,304 evaluations and receives 128
+identified image publications per worker. Raw receipt shards, payload hashes,
+origin counters and per-run p95 receipt latency support inspection. Additional
+payload renders and numerical audits run after the timed drain and receipts.
+The 300ms deadline preserves the existing 200ms image and 33ms send throttles.
+This measures local transport receipt, not browser JavaScript/rendering time.
+
+Each invocation has a hard 3,600-second budget and 120-second worker limit.
+Staged construction/engine/live commands can share one same-boot monotonic
+`--package-ledger` as specified in the policy. Failed or unqualified A/A stops
+before A/B. Read `summary.json` for the decision; a completed valid run
+does not imply that its timing gates passed. Existing output paths are refused.
+
+The corrected protocol-2 full-size integration check passed with exact
+parameters, all 128 receipts and endpoint checks. For the next quiet-machine
+measurement, the [result notes](acceptance-result.md#next-measurement) provide
+a frozen-input script that starts fresh A/A pairs and a new package clock.
+The failed protocol-1 live package remains closed.
+
 ## Numerical checks
 
 The scalar renderer consumes packed GPU triangles, rather than the different
@@ -133,10 +204,12 @@ Numerical GPU tests use a standalone main-thread executable because this Dozen
 driver can crash while tearing down a GPU created by Rust's threaded test runner.
 The existing renderer checks remain alongside the mixed-reference regression.
 
-This slice supplies reproducible engine reference trials and A/A evidence. The
-broader campaign still needs clean-machine noise qualification, sustained live
-preview acceptance, true continuation checkpoints, broader held-out states and
-seeds, and a frozen candidate comparison policy. No engine optimization attempt
+This slice supplies reproducible engine reference trials and A/A evidence.
+Candidate 5 also passed new-state engine confirmation with disjoint seeds.
+The broader campaign still needs fresh live A/A and preview acceptance, true
+continuation checkpoints, new image families and broader campaign qualification.
+The provisional comparison policy
+freezes exploratory screening only. No engine optimization attempt
 should be accepted from a short development run.
 
 The implementation's bounded resource and framework exceptions are recorded in
