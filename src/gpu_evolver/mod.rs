@@ -1,3 +1,4 @@
+pub mod benchmark;
 pub mod buffers;
 pub mod pipeline;
 
@@ -67,6 +68,8 @@ struct PendingBatch {
     collect_timestamps: bool,
     active_chain_count: u32,
     submission_index: SubmissionIndex,
+    iterations: u32,
+    evaluations: u64,
 }
 
 /// Receivers for the map_async callbacks on staging buffers.
@@ -81,6 +84,7 @@ pub struct GpuEvolver {
     pipeline: GpuPipeline,
     iteration: u32,
     total_evaluations: u64,
+    benchmark_counters: benchmark::BenchmarkCounters,
     start_time: Instant,
     best_fitness_bits: u32, // track best fitness across batches for control flag reset
     pass_timings: PassTimings,
@@ -160,6 +164,7 @@ impl GpuEvolver {
             pipeline,
             iteration: 0,
             total_evaluations: 0,
+            benchmark_counters: benchmark::BenchmarkCounters::default(),
             start_time: Instant::now(),
             best_fitness_bits: 0,
             pass_timings: PassTimings::default(),
@@ -513,7 +518,9 @@ impl GpuEvolver {
         let submission_index = p.queue.submit(std::iter::once(encoder.finish()));
 
         self.iteration += iterations;
-        self.total_evaluations += iterations as u64 * active as u64 * lambda as u64;
+        let evaluations = iterations as u64 * active as u64 * lambda as u64;
+        self.total_evaluations += evaluations;
+        self.benchmark_counters.record_submission(iterations, evaluations);
 
         // 6. NOW collect the previous batch's results while GPU works on the new batch.
         //    The previous batch uses a different staging set, so no conflicts.
@@ -537,6 +544,8 @@ impl GpuEvolver {
             collect_timestamps,
             active_chain_count: active,
             submission_index,
+            iterations,
+            evaluations,
         });
 
         // 9. Return the PREVIOUS batch's result (one batch behind)
@@ -611,6 +620,8 @@ impl GpuEvolver {
             ts_rx.recv().unwrap().expect("Failed to map timestamp staging buffer");
         }
         receivers.fitness_rx.recv().unwrap().expect("Failed to map fitness staging buffer");
+
+        self.benchmark_counters.record_completion(pending.iterations, pending.evaluations);
 
         // Read deferred best-chain drawing if this batch included a readback copy
         let deferred_drawing = if self.deferred_best_readback {
@@ -847,6 +858,7 @@ impl GpuEvolver {
 
         self.iteration = 0;
         self.total_evaluations = 0;
+        self.benchmark_counters = benchmark::BenchmarkCounters::default();
         self.best_fitness_bits = 0;
         self.start_time = Instant::now();
         self.pass_timings = PassTimings::default();

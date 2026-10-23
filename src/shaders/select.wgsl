@@ -86,10 +86,6 @@ fn unpack_color(p: Polygon) -> vec4<f32> {
     return unpack4x8unorm(p.data.x);
 }
 
-fn unpack_vertex(word: u32) -> vec2<f32> {
-    return vec2<f32>(f32(word & 0xFFFFu) / 65535.0, f32(word >> 16u) / 65535.0);
-}
-
 fn edge_fn(ax: f32, ay: f32, bx: f32, by: f32, px: f32, py: f32) -> f32 {
     return (bx - ax) * (py - ay) - (by - ay) * (px - ax);
 }
@@ -268,7 +264,9 @@ fn select_main(@builtin(global_invocation_id) gid: vec3<u32>,
 
     workgroupBarrier();
 
-    // ALL threads cooperate on the polygon copy if accepted
+    // Copy the evaluated candidate unchanged. Even a tiny triangle can cover a
+    // pixel; unscored cleanup would invalidate cached error and point penalty.
+    // ALL threads cooperate on the polygon copy if accepted.
     if shared_accept == 1u {
         let count = shared_copy_count;
         let src = shared_best_offspring_id;
@@ -277,28 +275,5 @@ fn select_main(@builtin(global_invocation_id) gid: vec3<u32>,
         }
     }
 
-    workgroupBarrier();
-
-    // Degenerate triangle culling: thread 0 compacts chain_states after copy
-    // Only runs on acceptance (rare), so minimal performance impact
-    if shared_accept == 1u && local_id == 0u {
-        let count = shared_copy_count;
-        var write_idx = 0u;
-        for (var r = 0u; r < count; r++) {
-            let p = chain_states[chain_id].polygons[r];
-            let pv0 = unpack_vertex(p.data.y);
-            let pv1 = unpack_vertex(p.data.z);
-            let pv2 = unpack_vertex(p.data.w);
-            // Cross product magnitude (2x area)
-            let cross = abs((pv1.x - pv0.x) * (pv2.y - pv0.y) - (pv2.x - pv0.x) * (pv1.y - pv0.y));
-            if cross > 0.00001 {
-                chain_states[chain_id].polygons[write_idx] = p;
-                write_idx++;
-            }
-        }
-        if write_idx < count && write_idx >= params.min_polygons {
-            chain_states[chain_id].polygon_count = write_idx;
-        }
-    }
 }
 

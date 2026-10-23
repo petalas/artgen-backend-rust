@@ -84,6 +84,7 @@ pub struct GpuPipeline {
     pub image_width: u32,
     pub image_height: u32,
     pub rasterize_wg: [u32; 2], // current workgroup size [wg_x, wg_y]
+    pub(super) benchmark_validation: bool,
     pub num_tiles: u32,          // num_tiles_x * num_tiles_y for current rasterize_wg
 }
 
@@ -333,7 +334,7 @@ impl GpuPipeline {
         let fitness_packed_buf = device.create_buffer(&BufferDescriptor {
             label: Some("fitness_packed"),
             size: fitness_packed_size as u64,
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
@@ -380,7 +381,7 @@ impl GpuPipeline {
         let tile_counts_buf = device.create_buffer(&BufferDescriptor {
             label: Some("tile_counts"),
             size: tile_counts_buf_size,
-            usage: BufferUsages::STORAGE,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
@@ -402,7 +403,7 @@ impl GpuPipeline {
         let chain_framebuffers_buf = device.create_buffer(&BufferDescriptor {
             label: Some("chain_framebuffers"),
             size: chain_framebuffers_size,
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
 
@@ -411,7 +412,7 @@ impl GpuPipeline {
         let chain_total_errors_buf = device.create_buffer(&BufferDescriptor {
             label: Some("chain_total_errors"),
             size: chain_total_errors_size,
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
 
@@ -421,7 +422,7 @@ impl GpuPipeline {
         let chain_update_flags_buf = device.create_buffer(&BufferDescriptor {
             label: Some("chain_update_flags"),
             size: chain_update_flags_size,
-            usage: BufferUsages::STORAGE,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
@@ -1001,6 +1002,7 @@ impl GpuPipeline {
             image_height,
             rasterize_wg,
             num_tiles,
+            benchmark_validation: false,
         }
     }
 
@@ -1047,6 +1049,32 @@ impl GpuPipeline {
 
         self.rasterize_wg = wg;
         self.num_tiles = self.image_width.div_ceil(wg[0]) * self.image_height.div_ceil(wg[1]);
+        if self.benchmark_validation {
+            self.set_benchmark_validation(true);
+        }
+    }
+
+    /// Only benchmark replays install this variant. The production source is unchanged.
+    pub(super) fn set_benchmark_validation(&mut self, enabled: bool) {
+        let source = bin_polygons_source(self.rasterize_wg);
+        let source = if enabled {
+            benchmark_bin_source(&source)
+        } else {
+            source
+        };
+        let shader = self.device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("benchmark_bin_shader"),
+            source: ShaderSource::Wgsl(source.into()),
+        });
+        self.bin_polygons_pipeline = self.device.create_compute_pipeline(&ComputePipelineDescriptor {
+            label: Some("benchmark_bin_pipeline"),
+            layout: Some(&self.bin_polygons_pipeline_layout),
+            module: &shader,
+            entry_point: Some("main"),
+            compilation_options: PipelineCompilationOptions::default(),
+            cache: Some(&self.pipeline_cache),
+        });
+        self.benchmark_validation = enabled;
     }
 
     /// Save pipeline cache data to disk for faster startup next time.
@@ -1123,9 +1151,7 @@ fn create_bin_polygons_pipeline(
     wg: [u32; 2],
     cache: &PipelineCache,
 ) -> ComputePipeline {
-    let source = include_str!("../shaders/bin_polygons.wgsl")
-        .replace("const TILE_W: u32 = 16;", &format!("const TILE_W: u32 = {};", wg[0]))
-        .replace("const TILE_H: u32 = 16;", &format!("const TILE_H: u32 = {};", wg[1]));
+    let source = bin_polygons_source(wg);
 
     let shader = device.create_shader_module(ShaderModuleDescriptor {
         label: Some("bin_polygons_shader"),
@@ -1140,6 +1166,20 @@ fn create_bin_polygons_pipeline(
         compilation_options: Default::default(),
         cache: Some(cache),
     })
+}
+
+fn bin_polygons_source(wg: [u32; 2]) -> String {
+    include_str!("../shaders/bin_polygons.wgsl")
+        .replace("const TILE_W: u32 = 16;", &format!("const TILE_W: u32 = {};", wg[0]))
+        .replace("const TILE_H: u32 = 16;", &format!("const TILE_H: u32 = {};", wg[1]))
+}
+
+fn benchmark_bin_source(source: &str) -> String {
+    let marker = "let slot = atomicAdd(&tile_counts[tile_global], 1u);";
+    assert_eq!(source.matches(marker).count(), 1, "benchmark bin instrumentation must match once");
+    // The benchmark capacity gate reserves the last word beyond every active tile.
+    // It is never reset by binning and retains the maximum across ALL iterations.
+    source.replace(marker, &format!("{marker}\n                atomicMax(&tile_counts[arrayLength(&tile_counts) - 1u], slot + 1u);"))
 }
 
 /// Create an init_framebuffers compute pipeline with the given workgroup size.
@@ -1199,4 +1239,23 @@ fn create_update_framebuffers_pipeline(
 fn pipeline_cache_path(adapter_info: &AdapterInfo) -> Option<PathBuf> {
     let key = wgpu::util::pipeline_cache_key(adapter_info)?;
     Some(PathBuf::from(format!("pipeline_cache_{}.bin", key)))
+}
+
+#[cfg(test)]
+mod benchmark_tests {
+    use super::{benchmark_bin_source, bin_polygons_source};
+
+    #[test]
+    fn benchmark_bin_variants_validate_without_a_gpu() {
+        for wg in [[32, 16], [16, 16], [32, 8], [16, 8], [8, 8]] {
+            let normal = bin_polygons_source(wg);
+            assert!(!normal.contains("atomicMax"));
+            let source = benchmark_bin_source(&normal);
+            let module = wgpu::naga::front::wgsl::parse_str(&source).unwrap();
+            wgpu::naga::valid::Validator::new(
+                wgpu::naga::valid::ValidationFlags::all(),
+                wgpu::naga::valid::Capabilities::all(),
+            ).validate(&module).unwrap();
+        }
+    }
 }

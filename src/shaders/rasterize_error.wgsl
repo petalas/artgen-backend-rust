@@ -260,9 +260,11 @@ fn main(
         fy = (f32(py) + 0.5) / f32(h);
 
         let ref_color = textureLoad(reference_image, vec2<i32>(i32(px), i32(py)), 0);
-        refr = ref_color.x * 255.0;
-        refg = ref_color.y * 255.0;
-        refb = ref_color.z * 255.0;
+        // Match init_framebuffers: L1 compares exact reference bytes, not the
+        // approximate UNORM reconstruction whose error would be truncated.
+        refr = round(ref_color.x * 255.0);
+        refg = round(ref_color.y * 255.0);
+        refb = round(ref_color.z * 255.0);
 
         // Read cached parent pixel from chain_framebuffers (O(1) per pixel).
         let fb_idx = parent_chain * w * h + py * w + px;

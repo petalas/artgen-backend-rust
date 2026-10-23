@@ -3,10 +3,10 @@
 //! Keep GPU checks on the main thread, as in the application.
 
 use artgen_backend_rust::{
-    gpu_evolver::GpuEvolver,
+    gpu_evolver::{benchmark::BenchmarkSnapshot, GpuEvolver},
     models::{color::Color, drawing::Drawing, point::Point, polygon::Polygon},
     mutation_params::MutationParams,
-    settings::PER_POINT_MULTIPLIER,
+    settings::{MAX_ERROR_PER_PIXEL, PER_POINT_MULTIPLIER},
 };
 
 fn layered_drawing() -> Drawing {
@@ -40,6 +40,7 @@ fn layered_drawing() -> Drawing {
 }
 
 fn main() {
+    verify_visible_layer_acceptance();
     // Odd dimensions exercise threads outside the image. At 8x8, the drawing
     // exceeds the shared polygon chunk size of 192 but stays below the tile-bin
     // limit of 256, so all polygons participate in multiple load/barriers.
@@ -60,7 +61,240 @@ fn main() {
         verify_workgroup(&mut evolver, &drawing, &empty, expected, workgroup);
     }
     assert!(evolver.readback_chain(0).polygons.is_empty());
+    drop(evolver);
+    verify_mixed_reference(&empty);
     println!("GPU rasterization checks passed");
+}
+
+fn no_op_params() -> MutationParams {
+    MutationParams {
+        add_polygon_prob: 0.0,
+        remove_polygon_prob: 0.0,
+        reorder_polygon_prob: 0.0,
+        offset_polygon_prob: 0.0,
+        move_point_prob: 0.0,
+        remove_point_prob: 0.0,
+        micro_adjust_prob: 0.0,
+        change_color_prob: 0.0,
+        adjust_brightness_prob: 0.0,
+        adjust_saturation_prob: 0.0,
+        scale_polygon_prob: 0.0,
+        rotate_polygon_prob: 0.0,
+        adjacent_swap_prob: 0.0,
+        merge_polygon_prob: 0.0,
+        clone_polygon_prob: 0.0,
+        medium_move_prob: 0.0,
+        swap_colors_prob: 0.0,
+        crossover_prob: 0.0,
+        micro_adjust_delta: 0.0,
+        min_alpha: 0,
+        max_alpha: 255,
+        min_polygons: 1,
+        max_polygons: 2,
+        chain_count: 2,
+        lambda: 1,
+        gpu_batch_iters: 1,
+        single_mutation_mode: false,
+        adaptive_mutation: false,
+        ..Default::default()
+    }
+}
+
+fn visible_small_layer() -> Drawing {
+    let mut drawing = colored_triangle(255);
+    drawing.polygons[0].color = Color {
+        r: 255,
+        g: 255,
+        b: 255,
+        a: 255,
+    };
+    drawing.polygons.push(Polygon {
+        points: vec![
+            Point { x: 0.499, y: 0.499 },
+            Point { x: 0.501, y: 0.499 },
+            Point { x: 0.5, y: 0.501 },
+        ],
+        color: Color {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 255,
+        },
+    });
+    drawing
+}
+
+fn verify_visible_layer_acceptance() {
+    // This layer has normalized twice-area 4e-6 but covers the center pixel.
+    // A neutral acceptance must preserve the evaluated geometry, cached error
+    // and point penalty. Darwin's first traced failure was iteration 2997.
+    let mut reference = [255, 255, 255, 255].repeat(17 * 19);
+    reference[(9 * 17 + 8) * 4..(9 * 17 + 8) * 4 + 3].fill(0);
+    let drawing = visible_small_layer();
+    let params = no_op_params();
+    let mut evolver = futures_lite::future::block_on(GpuEvolver::new(&reference, 17, 19, &drawing));
+    evolver
+        .prepare_seeded_benchmark(&drawing, &params, 7, 0, true)
+        .expect("visible-layer preparation failed");
+    let initial = assert_cached_byte_l1(&mut evolver, &reference, "visible layer, initial");
+    assert_eq!(initial.parent_total_errors, [0, 0]);
+    assert!(initial.parents.iter().all(|p| p.polygon_count == 2));
+    let mut accepted = false;
+    for step in 1..=16 {
+        let _best_drawing = evolver.run_batch(&params, true);
+        let state = evolver
+            .benchmark_snapshot(2, 1)
+            .expect("visible-layer snapshot failed");
+        accepted = state.chain_update_flags.iter().any(|flags| flags[0] == 1);
+        println!(
+            "visible-layer neutral step={step}, accepted={accepted}, counts={:?}",
+            state
+                .parents
+                .iter()
+                .map(|p| p.polygon_count)
+                .collect::<Vec<_>>()
+        );
+        let checked = assert_cached_byte_l1(&mut evolver, &reference, "visible layer, after no-op");
+        assert_eq!(checked.parent_total_errors, [0, 0]);
+        assert_no_op_state(&initial, &checked);
+        if accepted {
+            break;
+        }
+    }
+    assert!(
+        accepted,
+        "seeded check must exercise neutral acceptance within 16 steps"
+    );
+    let _best_fitness = evolver.evaluate_chain_fitness(2);
+    let full = assert_cached_byte_l1(&mut evolver, &reference, "visible layer, full recompute");
+    assert_eq!(full.parent_total_errors, [0, 0]);
+    assert_no_op_state(&initial, &full);
+}
+
+fn assert_no_op_state(initial: &BenchmarkSnapshot, actual: &BenchmarkSnapshot) {
+    assert_eq!(initial.parents.len(), actual.parents.len());
+    for (before, after) in initial.parents.iter().zip(&actual.parents) {
+        assert_eq!(
+            after.polygon_count, 2,
+            "visible layer must survive acceptance"
+        );
+        assert_eq!(after.polygons, before.polygons, "no-op geometry changed");
+        assert_eq!(
+            after.fitness_bits, before.fitness_bits,
+            "no-op score changed"
+        );
+    }
+}
+
+fn colored_triangle(alpha: u8) -> Drawing {
+    Drawing {
+        polygons: vec![Polygon {
+            points: vec![
+                Point { x: 0.0, y: 0.0 },
+                Point { x: 1.0, y: 0.0 },
+                Point { x: 0.0, y: 1.0 },
+            ],
+            color: Color {
+                r: 26,
+                g: 102,
+                b: 178,
+                a: alpha,
+            },
+        }],
+        is_dirty: false,
+        fitness: 0.0,
+    }
+}
+
+fn verify_mixed_reference(empty: &Drawing) {
+    // Every RGB channel visits all 256 reference bytes. Black references cannot
+    // expose subinteger error from reconstructing bytes through a UNORM sample.
+    let reference: Vec<u8> = (0..17 * 19)
+        .flat_map(|i| {
+            let byte = (i % 256) as u8;
+            [
+                byte,
+                byte.wrapping_add(85),
+                byte.wrapping_add(170),
+                byte.wrapping_add(1),
+            ]
+        })
+        .collect();
+    let opaque = colored_triangle(255);
+    let translucent = colored_triangle(128);
+    let mut evolver = futures_lite::future::block_on(GpuEvolver::new(&reference, 17, 19, empty));
+    for workgroup in [[8, 8], [16, 16], [32, 16]] {
+        let params = MutationParams {
+            chain_count: 2,
+            lambda: 1,
+            gpu_batch_iters: 1,
+            rasterize_wg: workgroup,
+            ..Default::default()
+        };
+        for (name, drawing) in [
+            ("empty", empty),
+            ("opaque", &opaque),
+            ("translucent", &translucent),
+        ] {
+            let context = format!("{workgroup:?}, {name}");
+            evolver
+                .prepare_seeded_benchmark(drawing, &params, 0x0123_4567_89ab_cdef, 0, false)
+                .expect("mixed-reference preparation failed");
+            let initialized = assert_cached_byte_l1(&mut evolver, &reference, &context);
+            evolver.evaluate_chain_fitness(2);
+            let evaluated = assert_cached_byte_l1(&mut evolver, &reference, &context);
+            assert_eq!(
+                initialized.parent_total_errors, evaluated.parent_total_errors,
+                "{context}"
+            );
+            for (errors, total) in evaluated
+                .offspring_errors
+                .iter()
+                .zip(&evaluated.parent_total_errors)
+            {
+                // Full evaluation visits every pixel: both new and cached old
+                // error accumulators must equal the framebuffer's byte L1.
+                assert_eq!(*errors, [*total, *total], "{context}: new/old errors");
+            }
+        }
+    }
+}
+
+fn assert_cached_byte_l1(
+    evolver: &mut GpuEvolver,
+    reference: &[u8],
+    context: &str,
+) -> BenchmarkSnapshot {
+    let snapshot = evolver.benchmark_snapshot(2, 1).expect("snapshot failed");
+    assert_eq!(reference.len(), 17 * 19 * 4);
+    assert_eq!(snapshot.parent_framebuffers.len(), 2);
+    for (chain, pixels) in snapshot.parent_framebuffers.iter().enumerate() {
+        assert_eq!(pixels.len(), 17 * 19);
+        let raw_error: u32 = pixels
+            .iter()
+            .zip(reference.chunks_exact(4))
+            .map(|(pixel, rgba)| {
+                let rgb = pixel.to_le_bytes();
+                (0..3)
+                    .map(|channel| u32::from(rgb[channel].abs_diff(rgba[channel])))
+                    .sum::<u32>()
+            })
+            .sum();
+        assert_eq!(
+            snapshot.parent_total_errors[chain], raw_error,
+            "{context}, chain {chain}: cached total"
+        );
+        let mut expected =
+            100.0 * (1.0 - raw_error as f32 / (MAX_ERROR_PER_PIXEL * pixels.len() as f32));
+        expected -=
+            expected * PER_POINT_MULTIPLIER * (snapshot.parents[chain].polygon_count * 3) as f32;
+        let fitness = f32::from_bits(snapshot.parents[chain].fitness_bits);
+        assert!(
+            (fitness - expected).abs() < 0.0001,
+            "{context}, chain {chain}: fitness={fitness}, expected={expected}"
+        );
+    }
+    snapshot
 }
 
 fn verify_workgroup(

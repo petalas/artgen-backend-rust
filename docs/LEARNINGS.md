@@ -12,6 +12,24 @@ Project-specific gotchas and hard-won knowledge. Search here when you hit unexpe
 
 -->
 
+### Reconstruct reference bytes before integer GPU error accumulation
+
+**Context**: Qualifying mature project benchmarks against framebuffer byte L1.
+**Gotcha**: A reference byte sampled from `Rgba8Unorm` and multiplied by 255 can be slightly noninteger. Casting the sum of absolute errors to `u32` can then undercount. On the mature ff fixture, initialization cached 2,923,600 while its framebuffer's exact byte L1 was 2,966,665. Black-only references did not expose this.
+**Fix**: Round reconstructed reference channels before subtraction in both error shaders. The standalone GPU check now visits every reference byte with empty, opaque and translucent drawings and compares cached, full and framebuffer errors.
+
+### Frozen floating-point metadata needs JSON roundtrip parsing
+
+**Context**: Comparing frozen geometry percentiles with benchmark trial metadata.
+**Gotcha**: Serde JSON's default fast parser changed an observed `f64` bbox percentile from `0.19420557263631666` to `0.19420557263631663`. Strict supervisor comparisons rejected all otherwise valid trials.
+**Fix**: Enable `serde_json`'s `float_roundtrip` feature and preserve exact metadata comparisons. The fixture tests include this value; the real supervisor validates imported metadata across Rust loading and Python comparison.
+
+### Do not change selected geometry after its error was evaluated
+
+**Context**: The 64-batch mature darwin benchmark failed exact cached/framebuffer L1 even though shorter trials passed.
+**Gotcha**: Selection used to remove triangles whose normalized cross magnitude was at most `1e-5` after caching error and exporting fitness. Such triangles can still cover pixels. At iteration 2997, candidate 97 improved one pixel by 118 error units, then cleanup removed that triangle while retaining the improved total. A tiny two-layer regression reproduced cached error 0 versus actual framebuffer error 765 after neutral acceptance.
+**Fix**: Preserve the evaluated candidate's geometry and polygon count through selection. The unscored post-selection cleanup is removed. Any future cleanup must form part of a proposal before evaluation, with its cost and quality measured separately.
+
 ### Automatic workgroup zeroing makes Dozen shader compilation slow
 
 **Context**: Project loading waits for `GpuEvolver::new`, initial fitness evaluation, and the first preview.

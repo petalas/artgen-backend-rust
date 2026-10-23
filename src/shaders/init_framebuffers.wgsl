@@ -227,9 +227,11 @@ fn main(
         let qg = f32((packed_pixel >> 8u) & 0xFFu);
         let qb = f32((packed_pixel >> 16u) & 0xFFu);
         let ref_color = textureLoad(reference_image, vec2<i32>(i32(px), i32(py)), 0);
-        let refr = ref_color.x * 255.0;
-        let refg = ref_color.y * 255.0;
-        let refb = ref_color.z * 255.0;
+        // Recover the Rgba8Unorm source bytes before L1 subtraction. A slightly
+        // noninteger reconstruction can otherwise lose one when cast to u32.
+        let refr = round(ref_color.x * 255.0);
+        let refg = round(ref_color.y * 255.0);
+        let refb = round(ref_color.z * 255.0);
         pixel_error = u32(abs(qi - refr) + abs(qg - refg) + abs(qb - refb));
     }
 

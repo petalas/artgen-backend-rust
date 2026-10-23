@@ -1,4 +1,156 @@
-# GPU Evolution Optimization TODO
+# GPU evolution performance plan
+
+## First campaign agreement
+
+The user chose completed evaluations per second as the first optimization score, with evolution behavior and quality preserved. Prepare and qualify the measurement environment before changing the engine for speed.
+
+The scored workloads are mature states from **ff, mona, and darwin**, all strictly above **97% similarity**. Complexity and current similarity are part of each workload's identity. Blank starts, early evolution, and simple synthetic cases are measurement controls or correctness checks; they do not contribute to the optimization score.
+
+This plan began with source inspection at `543b766`. The first mature-drawing restart slice now includes local frozen inputs, seeded completed-work trials, an independent scalar renderer, overflow replay and supervised A/A reference capture. See the [implemented commands and current boundary](../benchmarks/evolution/v1/README.md). The user has captured the first reference; [baseline notes](../benchmarks/evolution/v1/baseline.md) record its checks, variation and identity. Machine isolation remains operator-declared rather than continuously verified. True continuation checkpoints, live-path acceptance and the broader campaign freeze remain later milestones. No throughput optimization attempt has run. The earlier startup comparison covers one fixture and short runs; retain it as evidence for that change, rather than using it as the campaign baseline.
+
+Qualification exposed two source correctness defects before reference capture: approximate reference-byte reconstruction undercounted integer L1, and post-selection cleanup removed visible triangles after their error was cached. The corrected engine recovers exact reference bytes and preserves the evaluated candidate's geometry. These repairs establish the reference behavior and do not count toward the proposed throughput target.
+
+Freeze the reference image, resolution, active population, offspring count, batch size, workgroup size, mutation parameters, adaptive settings, precision, fitness and selection rules, and seed schedule for every before/after comparison. Faster execution must preserve the same logical evaluations. Exact reuse of equivalent work is allowed; counting unfinished or skipped evolution steps is invalid.
+
+Proposed first-campaign target: a 20% improvement in the fixed suite's aggregate throughput after at least six valid, isolated experiments. This is a planning target, not a measured opportunity. Review the attempt and GPU-time budget after environment qualification, before starting a sustained run. Stop on the agreed predicate or an evidence-backed plateau; keep the original predicate in the report.
+
+## What the current code tells us
+
+| Observed fact | Consequence for the environment | Evidence at the audited revision |
+|---|---|---|
+| The Divan GPU benchmark uses the older renderer. | Retain component benchmarks, and measure evolution through `GpuEvolver::run_batch`. | `benches/bench.rs:28` |
+| The CLI uses a blank start at 256px and enables adaptive mutation; production defaults differ. | Replace implicit defaults with a complete, versioned trial specification. | `src/main.rs:1639`; `shared/src/settings.rs` |
+| Evaluation totals advance after submission; the CLI does not drain its last batch before reporting. | Time completed work through a final checked drain, and distinguish submitted and completed work in records. | `src/gpu_evolver/mod.rs:512`; `src/main.rs:1736` |
+| Warmup performs two batches, then reseeds from the accumulated iteration count. | Add explicit trial seeds and state restoration independent of warmup history and batch partitioning. | `src/gpu_evolver/mod.rs:815`; `src/gpu_evolver/mod.rs:1068` |
+| CLI, warmup, viewer benchmark, and live evolution use different timestamp policies. | Warm and measure the same declared production path. Keep separate attribution runs. | `src/main.rs:1714`; `src/main.rs:2088`; `src/gpu_evolver/mod.rs:1087` |
+| Pass timers sample the last iteration; selection timing includes framebuffer updates. | Record coverage and actual stage names. Sampled pass sums are not full GPU or wall time. | `src/gpu_evolver/mod.rs:393`; `src/gpu_evolver/mod.rs:456` |
+| The viewer benchmark includes locks and conditional preview publication. | Use a controlled engine score plus a separate live integration acceptance case. | `src/main.rs:1359`; `src/main.rs:1483` |
+| Tile bins store at most 256 polygon indices, while framebuffer initialization and updates visit all polygons. | Detect overflow throughout a trial. An affected run cannot establish correctness or a performance win. | `src/shaders/bin_polygons.wgsl:151`; `src/shaders/init_framebuffers.wgsl:165` |
+| Existing GPU checks cover partial tiles and incremental/full agreement, but both paths can share renderer defects. | Add an independent packed-representation oracle and broader correctness cases. | `examples/check-gpu-rasterization.rs`; `src/gpu_evolver/mod.rs:902` |
+
+Additional items require investigation, not an assumed fix: independent atomic updates of best fitness and chain ID; selection by raw error before complexity penalty; score consistency after degenerate culling; capacity calculations for tile and framebuffer buffers. Reproduce each suspected defect at a narrow seam. Resolve any failure that invalidates the benchmark in a separately recorded correctness change, then establish the baseline on the corrected revision. Do not count a correctness repair as a throughput optimization.
+
+The CPU renderer is useful for diagnostics, but is not an exact GPU oracle. Its vertex rounding and per-layer integer blending differ from the packed GPU coordinates and floating-point blending. Document the current semantics from code; the older renderer and historical comments do not define the evolution contract.
+
+## Delivery milestones and exit gates
+
+### 1. Freeze contracts and workloads
+
+Create a versioned manifest under `benchmarks/evolution/v1/`. It identifies normalized RGBA bytes, initial state or continuation checkpoint, complete parameters, seed schedules, fixed completed-work budgets, case weights, splits, and content hashes. Record source-image hashes and preprocessing details as well as normalized hashes. A live project directory is an import source, not a mutable benchmark dependency.
+
+Start with at least one frozen mature checkpoint from each of `ff`, `mona`, and `darwin`, using the normal 384px longest-side resolution and preserving aspect ratio. Require every restored active parent chain to exceed 97.0% on the GPU fitness displayed as similarity in the viewer. Record raw L1 similarity and complexity-penalized fitness separately. Verify the threshold at the exact normalized reference bytes and resolution used by the trial; saved JSON fitness alone cannot qualify a checkpoint. Offspring may naturally score lower during mutation. Do not filter those proposals or change evolution to keep them above the threshold.
+
+Add distinct mature checkpoints per project to cover different polygon complexity and similarity levels above 97%, aiming for six scored cases when suitable states are available. Additional 256px or 512px cases must qualify independently at their own resolution. Freeze the chosen matrix before measuring candidates. A checkpoint that fails qualification must be replaced by a genuinely mature state generated with the unchanged baseline in an isolated copy, rather than a blank start, reduced polygon count, or relabeled score. Local project assets can remain in an untracked, hashed corpus when their redistribution status is unclear.
+
+For every checkpoint record packed triangle and vertex counts, normalized polygon area and bounding-box distributions, per-tile overlap counts and overflow status, and per-chain similarity. Also retain adaptive mutation scales and stagnation counters. During trials record acceptance rates and dirty-region coverage with a declared sampling policy. These describe why evaluations have different costs; do not divide throughput by polygon count or blend cases at different evolution stages. Compare each candidate against the exact same frozen starting population and completed-work budget.
+
+All three named projects are scored development workloads. Reserve separate mature checkpoints and disjoint seeds for confirmation. These test unseen states of known projects, not unseen image families. Add held-out image families when available, keeping every state and resolution of an unseen family out of development; any held-out performance workload must also exceed 97%. Simple synthetic targets remain outside the throughput score.
+
+Include true continuation checkpoints with diverse active chains, offspring RNG state, mutation scales, stagnation counters, and relevant control state. Single-drawing restarts remain useful as separately labeled cases. Define the checkpoint by a successful next-step replay, rather than guessing which fields are sufficient. Rebuild derivable caches outside the timed interval and verify them before use.
+
+Keep correctness fixtures separate from scored workloads. Cover odd dimensions such as 17x19, shared polygon chunk boundaries, 255/256/257 overlapping tile entries, empty and near-capacity drawings, alpha extremes, winding, shared edges, degenerate triangles, reset/reload, and long incremental sequences. Exercise supported workgroups and control combinations without multiplying every dimension into the scored matrix.
+
+**Exit gate:** every fixture is immutable, validated, available locally, and reproducible by hash. Every scored initial population has verified similarity above 97% at the measured resolution, recorded complexity, and a documented origin. All three projects are represented. Workload weights and validation splits are fixed.
+
+### 2. Implement one trial owner
+
+Add a thin standalone main-thread executable, proposed as `examples/evolution-bench.rs`, backed by a cohesive runner under `src/benchmark/`. The existing `src/benchmark.rs` can expose that runner alongside current shared UI types. Avoid putting the protocol in the viewer or duplicating it across the existing CLI, examples, and comparison script.
+
+The runner owns validation, GPU initialization, warmup, seeded reset or checkpoint restoration, timing, submission, completion, final state collection, and verification. A proposed internal interface is `run_trial(spec) -> Result<TrialRecord, TrialFailure>`. UI conversion stays outside it.
+
+A `TrialSpec` records protocol/case identity, project and checkpoint identity, fixture hashes, initial complexity and verified similarity, full requested parameters, explicit seed or checkpoint hash, fixed batch/work budget, instrumentation policy, cache policy, and time/memory limits. Validation rejects an unqualified scored checkpoint, silent parameter sanitization, population clamping, unsupported features, or incomplete buffer capacity. Check drawing, offspring, tile, framebuffer, and dispatch capacity together.
+
+A `TrialRecord` records status; requested and effective settings; submitted and completed batches, iterations, and logical evaluations; error and overflow counts; measured wall and drain times; GPU timing coverage; initial and final quality and complexity; state/checkpoint hashes; artifact paths; and build, GPU, driver, backend, toolchain, dependency-lock and protocol identity. Preserve integer RGB L1 totals and polygon counts alongside percentage fitness. Store the actual final drawing and independently checked score. Include quality and complexity checkpoints so a faster run cannot conceal a simpler or lower-similarity workload.
+
+Represent completed, invalid, failed, timed-out, and cancelled trials explicitly. A cancelled or partial run cannot produce a valid comparison score. The parent runner imposes a timeout and retains stderr/exit status, including abnormal GPU-process exits. Cap all run counts and artifacts before launching them.
+
+**Exit gate:** one-batch and multi-batch accounting matches completed GPU work; zero/invalid budgets fail clearly; cancellation, timeout, device error and last-batch handling produce correct statuses. Final records print error counts and completed work, not just elapsed time.
+
+### 3. Establish independent correctness and replay
+
+Define the authoritative representation and arithmetic before writing the oracle. Build a small scalar reference over packed GPU vertices/colors with the documented pixel-center, winding, coverage, floating-point blending, final quantization, L1 and complexity rules. Use analytical tiny cases to qualify it. Keep full unbinned GPU rendering as another differential check where useful.
+
+Compare per-pixel output and integer errors as well as fitness. Freeze numerical tolerances based on the unchanged engine's behavior and an understood reference, before evaluating candidates. A loose aggregate fitness tolerance is insufficient. The binned full evaluator alone cannot validate a defect shared with incremental evaluation.
+
+Add per-trial overflow detection or a proven complete fallback. Checking only the initial or final drawing misses overflow in intermediate offspring. Diagnostic instrumentation must have a separate mode if it changes timed work; it must exercise the same seeded trajectory. Dense cases cannot silently disappear from the suite or become smaller to pass this gate.
+
+Expose reproducible seeded reset/checkpoint restoration without altering the normal application's default seed behavior. Verify repeated same-seed runs, reset after unrelated trials, warmup independence, and execution partitioning where it is intended to be equivalent. Freeze batch partitioning when a proven behavioral dependency exists instead of assuming equivalence.
+
+At fixed completed-work checkpoints compare canonical active population state, relevant RNG/control state, pixel/error results, stored versus recomputed fitness, selection behavior, and the drawing returned as best. Omit irrelevant padding from logical hashes. Same-driver deterministic cases require exact canonical replay. If the unchanged engine is nondeterministic, explain and qualify that behavior before choosing its gate; do not loosen replay requirements to accept a candidate.
+
+Use the standalone main-thread GPU validation path on the current Dozen setup. Preserve `check-gpu-rasterization`'s visible late-chunk fixture, incremental comparisons before resets, and analytical checks. Extend it with the missing coverage and replay cases above.
+
+**Exit gate:** correctness and replay checks pass on the frozen baseline. Every observed discrepancy is resolved or explicitly blocks the affected campaign. There is a failing test for each known measurement/correctness defect being repaired.
+
+### 4. Qualify timing and machine isolation
+
+Use optimized, locked builds and archive executable hashes for the reference and candidate. Record the resolved nightly compiler and flags, dependency lock hash, adapter/backend/features, device limits, Vulkan/Dozen and GPU driver versions, and operating environment. A toolchain, dependency, driver, protocol, or corpus change requires a new baseline series.
+
+Run GPU jobs serially under a local benchmark lock. Use isolated working directories, copied cache seeds, and dedicated outputs. Check the live backend and other GPU activity before a campaign; do not silently stop the user's session. Unsupported telemetry is recorded as unavailable, not as zero utilization. Collect CPU load and supported GPU clock, temperature, power and utilization telemetry. Do not require clock locking or elevated privileges.
+
+Defer timed work while the user's backend is evolving or other unaccounted GPU work is active. Leave those processes untouched. Contention detected during a sample invalidates its entire reference/candidate pair; retain both records and repeat the pair after the GPU is quiet. Freeze the detection and invalidation rules with the protocol. Missing telemetry cannot establish that the GPU is idle, and a slow timing alone cannot justify excluding a sample.
+
+Declare cold/warm startup separately from steady evolution. Warm the exact production instrumentation path and verify stabilization experimentally. Restore the precise measured start after warmup, without shifting its RNG stream. Calibrate a fixed completed-work budget once per case so scored samples last roughly 15 to 30 seconds on the baseline. Store that budget; execute the identical logical work on the candidate. Setup, compilation and warmup are outside the score, final GPU completion is inside it.
+
+For the primary engine mode include CPU command encoding, submission, required result mapping/readback, and completion. Keep disk writes, report generation, and added correctness diagnostics outside the interval. Production-required operations remain inside it. Use a separate live integration case with fixed preview cadence, client count and publication workload to catch practical regressions.
+
+Freeze a live acceptance specification alongside the scored cases. Use one of the qualified above-97% mature project checkpoints with default settings, a fixed completed-evaluation budget, the actual backend PNG/serialization/WebSocket path, one local receiving client, and a fixed request trace and preview policy. Include the final GPU drain and due preview publications in its measured interval. Record completed evaluations per second, previews due/sent/received, missed publication deadlines, and each run's p95 latency from a scheduled preview to client receipt. Qualify the budget and sampling rules so the unchanged application can produce enough publications to estimate this latency.
+
+Run at least five alternating paired live trials. Apply the same throughput non-regression rule as for each scored case. For per-run p95 publication latency, require a non-increasing paired median and an upper paired confidence bound within a frozen equivalence margin no wider than 1%. These are proposed defaults to qualify during A/A testing. Require no missing due publications, device errors, or missed-deadline rate increase. Freeze the deadline, statistical procedures, margins and sample cap before testing candidates. Failure to establish either live throughput or latency non-regression is `INCONCLUSIVE` and prevents `KEEP`.
+
+Use existing production timestamps for the scored path. Collect detailed attribution in separate runs and report sampled-iteration coverage, selection-plus-update grouping, CPU encoding/wait/readback costs and unaccounted wall time. Add finer GPU boundaries only when needed for diagnosis, then quantify their overhead independently. Historical GPU percentages and CPU profiles do not establish the current limiter.
+
+**Exit gate:** demonstrate repeated A/A comparisons, cheap versus realistic workloads, a known slowdown inside the measured interval, a delay outside it, a no-work/unfinished-work failure, bad fixture/checkpoint rejection, and complete error accounting. Establish the variance and detectable effect before freezing the protocol.
+
+### 5. Record and freeze the baseline
+
+Run at least five alternating paired repetitions per scored case, using identical paired state/seed schedules. Separate same-seed timing repetitions from independent search-seed validation so they are not mistaken for independent evidence. Begin with a small paired schedule, then expand when uncertainty warrants it. Record order, all raw samples and every exclusion. Re-run both sides when conditions invalidate a pair.
+
+Choose fixed case weights before seeing candidate results. Give `ff`, `mona`, and `darwin` equal total weight, dividing each project's share across its scored checkpoints and resolutions. The primary score is the weighted geometric mean of matched per-case throughput ratios. Report each project's throughput and ratio separately, with checkpoint similarity, complexity and resolution. Additional snapshots from an easier project must not increase that project's influence. Keep per-case results and worst-case behavior visible so a broad regression cannot hide behind the mean.
+
+Proposed acceptance defaults, to freeze after the A/A audit:
+
+- The paired aggregate improvement must exceed both a 3% practical threshold and the calibrated noise band, with a positive paired confidence bound.
+- Every scored case must have a non-regressing paired median. Its lower confidence bound must meet a predeclared equivalence bound no wider than 1%. This is measurement tolerance, not permission to trade away a known slowdown.
+- Any result that cannot establish the required non-regression is `INCONCLUSIVE`, not `KEEP`. Add samples up to a fixed cap or reject the attempt; do not repeatedly retry until a favorable sample appears.
+- All correctness, replay, capacity, overflow and live integration gates pass. Verify quality again at fixed completed-work checkpoints and with disjoint validation seeds. End-of-run fitness alone is insufficient.
+
+Use a paired analysis that preserves the case/seed structure. Treat confidence procedures and sample caps as part of the versioned comparison code. Do not pool different images and seed repetitions as interchangeable observations.
+
+**Exit gate:** a baseline bundle exists with the exact revision/build, case manifest, raw runs, correctness report, traces, telemetry, noise analysis, thresholds and comparison-tool identity. A second invocation reproduces the decision within the declared noise. The independent review has no unresolved measurement-validity finding.
+
+### 6. Run the first measured experiment loop
+
+Only start engine attempts after milestones 1 through 5 pass. Each attempt states one mechanism, predicted limiting cost, affected cases, expected correctness invariants and rejection condition. Keep source changes isolated and preserve unrelated work. Archive the reference/candidate binary hashes, source patch and trial specifications before measurement.
+
+Use shorter fixed-work trials of the qualified mature projects for cheap performance screening. Label their findings provisional; they cannot accept a win. Simple or early-state controls remain useful for runner diagnostics and never substitute for the mature suite. Promising candidates receive the full alternating confirmation suite and quality gates. Check reserved mature checkpoints, disjoint seeds, and any qualified held-out image families before a campaign winner is adopted, without using confirmation results to tune implementation details.
+
+Order hypotheses by avoiding work, reusing work, reducing frequency, deferral, scheduling, concurrency, then making the operation cheaper. Select concrete attempts from fresh traces. Initial candidate families include submission/readback scheduling, host serialization/allocation, redundant bindings/transfers, exact binning improvements, and conservatively smaller dirty regions. Treat the February suggestions below as hypotheses needing source and trace checks. Mutation probabilities, population/resolution reductions, lower precision, approximate scoring, candidate screening and changed selection rules belong to a separately scored algorithm campaign.
+
+For every attempt append its hypothesis, patch/binary identities, before/after cases, error counts, work counts, correctness result, verdict and explanation. Use `KEEP`, `REJECT`, or `INCONCLUSIVE`. Keep a change only when all frozen gates pass. A harness defect increments the protocol version and requires rebaselining, rather than retrospectively changing the acceptance rule.
+
+If progress stalls, change hypothesis family or collect a new trace. Combine near-misses only after measuring each separately. Finish by replaying the held-out validation, longer mature-state runs and the live integration case. Report kept and rejected attempts, remaining limiting cost and any unresolved constraint.
+
+## Planned artifacts and controls
+
+| Artifact | Purpose |
+|---|---|
+| `benchmarks/evolution/v1/manifest.json` and fixture/checkpoint files | Frozen, hashed workloads, splits, seeds, weights and work budgets |
+| `src/benchmark/` modules | Trial contract, lifecycle, validation and result collection |
+| `examples/evolution-bench.rs` | Main-thread entry point for preflight, validation and one trial |
+| `scripts/compare-evolution.py`, or an equally small typed comparator | One versioned implementation of pairing, scoring and decisions |
+| `.cache/evolution-bench/<campaign>/<attempt>/` | Immutable executable copies, raw JSON, stderr, quality checkpoints, traces, telemetry and reports |
+| Local append-only decision trail | Hypotheses, changes, evidence, rejected attempts and verdicts |
+
+With five pairs and 15-second samples, confirmation contains 150 seconds of timed work per scored case. Three cases require 7.5 minutes; six require 15 minutes, plus startup, warmup, live integration and verification. That is planning arithmetic, not a runtime estimate. Freeze the mature case matrix and budget the campaign after measuring setup overhead. Do not launch a multi-hour unattended campaign as part of planning.
+
+The environment implementation is ready for review when one command can preflight, validate, run an A/A comparison and emit a complete decision bundle; corrupt inputs, unfinished work and known slowdowns are detected; the numerical/replay gates pass; and another invocation can reproduce the same verdict. Engine optimization starts after that checkpoint.
+
+Foundational Thinking shapes the contracts, continuation checkpoints and isolation before experimentation. Build the Lever shapes the single runner and comparator to be implemented. Explain the Number and Benchmark checklist shape completion accounting, profiling, pairing and noise qualification. Prove It Works shapes independent numerical and live integration gates.
+
+## Historical February 2026 idea backlog
+
+The material below is retained as a historical backlog. Its completion claims, numerical speedup estimates, hardware assumptions and bottleneck rankings need fresh source inspection and measurement before use. The first campaign is governed by the measurement plan above.
 
 Synthesized from 6 expert analyses (GPU compute, evolutionary algorithm, CPU-GPU hybrid, data structures, wgpu API, numerical methods). February 2026. Round 2 — focuses on NEW ideas beyond previous optimizations.
 
