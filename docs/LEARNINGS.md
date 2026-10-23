@@ -12,6 +12,12 @@ Project-specific gotchas and hard-won knowledge. Search here when you hit unexpe
 
 -->
 
+### Trunk 0.21 requires a boolean NO_COLOR value
+
+**Context**: Building the WASM viewer from a terminal that exports `NO_COLOR=1`.
+**Gotcha**: Trunk exits before building because its argument parser requires `true` or `false` for `NO_COLOR`. Passing `--no-color` does not bypass the environment parsing error.
+**Fix**: Run `NO_COLOR=true trunk build --locked`. The dependency verification script sets this value for Trunk.
+
 ### naga does not support `enable subgroups;` WGSL directive
 
 **Context**: Tried to use `enable subgroups;` + `subgroupAdd()` in rasterize_error.wgsl.

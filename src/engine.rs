@@ -426,7 +426,8 @@ impl Engine {
             .poll(wgpu::PollType::Wait { submission_index: Some(si), timeout: None }).unwrap();
 
         if receiver.recv().is_ok() {
-            let padded_buffer = buffer_slice.get_mapped_range();
+            let padded_buffer = buffer_slice.get_mapped_range()
+                .expect("Failed to access mapped image buffer");
             let vec = padded_buffer.to_vec();
             drop(padded_buffer); // avoid --> "You cannot unmap a buffer that still has accessible mapped views."
             output_buffer.unmap(); // avoid --> Buffer ObjectId { id: Some(1) } is already mapped' (breaks looping logic)
@@ -450,6 +451,7 @@ impl Engine {
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 force_fallback_adapter: false,
                 compatible_surface: None,
+                apply_limit_buckets: false,
             };
 
             let adapter = instance
@@ -691,7 +693,7 @@ impl Engine {
                 vertex: wgpu::VertexState {
                     module: &shader,
                     entry_point: Some("vs_main"),
-                    buffers: &[vertex_buffer_layout],
+                    buffers: &[Some(vertex_buffer_layout)],
                     compilation_options: Default::default(), // TODO: investigate if there's a better option
                 },
                 fragment: Some(wgpu::FragmentState {
@@ -717,7 +719,7 @@ impl Engine {
             .expect("no device?")
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("compute_pipeline_layout"),
-                bind_group_layouts: &[&compute_bind_group_layout],
+                bind_group_layouts: &[Some(&compute_bind_group_layout)],
                 immediate_size: 0,
             });
 

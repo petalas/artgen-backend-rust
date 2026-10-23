@@ -620,7 +620,8 @@ impl GpuEvolver {
             readback_rx.recv().unwrap().expect("Failed to map readback staging buffer");
 
             let slice = p.readback_staging_buf.slice(..);
-            let data = slice.get_mapped_range();
+            let data = slice.get_mapped_range()
+                .expect("Failed to access mapped best drawing buffer");
             let state: &GpuDrawingState = bytemuck::from_bytes(&data);
             let drawing = gpu_to_drawing(state);
             drop(data);
@@ -632,13 +633,15 @@ impl GpuEvolver {
 
         // Read control flags
         let control_slice = p.control_staging_bufs[idx].slice(..);
-        let control_data = control_slice.get_mapped_range();
+        let control_data = control_slice.get_mapped_range()
+            .expect("Failed to access mapped control flags buffer");
         let flags: ControlFlags = *bytemuck::from_bytes(&control_data);
         drop(control_data);
 
         // Read timestamps (only if collected)
         if pending.collect_timestamps {
-            let ts_data = p.timestamp_staging_bufs[idx].slice(..).get_mapped_range();
+            let ts_data = p.timestamp_staging_bufs[idx].slice(..).get_mapped_range()
+                .expect("Failed to access mapped timestamp buffer");
             let timestamps: &[u64] = bytemuck::cast_slice(&ts_data);
             let period = p.timestamp_period as f64;
             let duration = |begin_idx: usize, end_idx: usize| -> f64 {
@@ -661,7 +664,8 @@ impl GpuEvolver {
 
         // Read chain fitness
         let fitness_slice = p.fitness_staging_bufs[idx].slice(..((active as u64) * 4));
-        let fitness_data = fitness_slice.get_mapped_range();
+        let fitness_data = fitness_slice.get_mapped_range()
+            .expect("Failed to access mapped chain fitness buffer");
         let packed: &[u32] = bytemuck::cast_slice(&fitness_data);
         for (i, &bits) in packed.iter().enumerate() {
             self.chain_fitness[i] = f32::from_bits(bits);
@@ -738,7 +742,8 @@ impl GpuEvolver {
         p.device.poll(PollType::Wait { submission_index: Some(si), timeout: None }).unwrap();
         rx.recv().unwrap().expect("Failed to map readback staging buffer");
 
-        let data = slice.get_mapped_range();
+        let data = slice.get_mapped_range()
+            .expect("Failed to access mapped drawing readback buffer");
         let state: &GpuDrawingState = bytemuck::from_bytes(&data);
         let drawing = gpu_to_drawing(state);
         drop(data);
@@ -789,7 +794,8 @@ impl GpuEvolver {
         p.device.poll(PollType::Wait { submission_index: Some(si), timeout: None }).unwrap();
         rx.recv().unwrap().expect("Failed to map multi-readback staging buffer");
 
-        let data = slice.get_mapped_range();
+        let data = slice.get_mapped_range()
+            .expect("Failed to access mapped drawings readback buffer");
         let drawings: Vec<Drawing> = (0..count)
             .map(|i| {
                 let offset = i * GPU_DRAWING_STATE_SIZE;
@@ -951,7 +957,8 @@ impl GpuEvolver {
         p.device.poll(PollType::Wait { submission_index: Some(si), timeout: None }).unwrap();
         rx.recv().unwrap().expect("Failed to map eval fitness staging buffer");
 
-        let data = slice.get_mapped_range();
+        let data = slice.get_mapped_range()
+            .expect("Failed to access mapped evaluation buffer");
         let all_u32s: &[u32] = bytemuck::cast_slice(&data);
         // Errors are at stride-2 (slot 0 = new error, slot 1 = old error); pick slot 0 for each
         let error_u32s = &all_u32s[..active as usize * 2];

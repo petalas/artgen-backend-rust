@@ -101,11 +101,11 @@ impl GpuPipeline {
         // --- Device + Queue ---
         // Exclude GL/GLES — EGL conflicts with SDL2's display context.
         // Allow noncompliant adapters for WSL2 dozen (Vulkan-on-D3D12) driver.
-        let instance = Instance::new(&InstanceDescriptor {
+        let instance = Instance::new(InstanceDescriptor {
             backends: Backends::VULKAN | Backends::DX12,
             flags: wgpu::InstanceFlags::default()
                 | wgpu::InstanceFlags::ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER,
-            ..Default::default()
+            ..InstanceDescriptor::new_without_display_handle()
         });
 
         // Enumerate all adapters and prefer discrete GPU
@@ -133,7 +133,7 @@ impl GpuPipeline {
         // Cap chain_count to fit within the adapter's max storage buffer binding size.
         // Largest buffer is chain_states or working_states (chain_count * GPU_DRAWING_STATE_SIZE).
         let adapter_limits = adapter.limits();
-        let max_ssbo = adapter_limits.max_storage_buffer_binding_size as u64;
+        let max_ssbo = adapter_limits.max_storage_buffer_binding_size;
         let max_chains_by_buffer = max_ssbo / (GPU_DRAWING_STATE_SIZE as u64);
         let chain_count = chain_count.min(max_chains_by_buffer as u32);
 
@@ -141,12 +141,12 @@ impl GpuPipeline {
         let max_lambda = crate::settings::GPU_MAX_LAMBDA as u64;
         let max_buffer_needed = (chain_count as u64) * max_lambda * (GPU_DRAWING_STATE_SIZE as u64);
         // Clamp to adapter limit (don't request more than hardware supports)
-        let max_buffer_size = max_buffer_needed.min(max_ssbo as u64);
+        let max_buffer_size = max_buffer_needed.min(max_ssbo);
 
         // Tile culling buffers can be large: offspring_capacity * num_tiles * TILE_MAX_POLYS * 4
         // Compute the max tile buffer size we might need (for max resolution / min WG size)
         let tile_max_polys = crate::settings::TILE_MAX_POLYS as u64;
-        let max_offspring_capacity = ((max_ssbo as u64) / (GPU_DRAWING_STATE_SIZE as u64))
+        let max_offspring_capacity = (max_ssbo / (GPU_DRAWING_STATE_SIZE as u64))
             .min((chain_count as u64) * max_lambda);
         // Worst case tile count: max resolution with smallest WG (8x8)
         let max_tiles = ((image_width as u64 + 7) / 8) * ((image_height as u64 + 7) / 8);
@@ -158,7 +158,7 @@ impl GpuPipeline {
         let max_buffer_size = max_buffer_size.max(tile_data_size).max(tile_counts_size);
 
         let required_limits = Limits {
-            max_storage_buffer_binding_size: max_buffer_size as u32,
+            max_storage_buffer_binding_size: max_buffer_size,
             max_buffer_size,
             max_compute_workgroups_per_dimension: 65535,
             max_compute_invocations_per_workgroup: 512,
@@ -397,7 +397,7 @@ impl GpuPipeline {
         // Clamp to device limits — fewer chains may be usable for incremental eval
         let pixels_per_chain = (image_width as u64) * (image_height as u64);
         let chain_framebuffers_ideal = (chain_count as u64) * pixels_per_chain * 4;
-        let ssbo_limit = device.limits().max_storage_buffer_binding_size as u64;
+        let ssbo_limit = device.limits().max_storage_buffer_binding_size;
         let chain_framebuffers_size = chain_framebuffers_ideal.min(device_max).min(ssbo_limit);
         let chain_framebuffers_buf = device.create_buffer(&BufferDescriptor {
             label: Some("chain_framebuffers"),
@@ -725,7 +725,7 @@ impl GpuPipeline {
         // --- Compute pipelines ---
         let mutate_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: Some("mutate_layout"),
-            bind_group_layouts: &[&mutate_bgl, &params_bgl],
+            bind_group_layouts: &[Some(&mutate_bgl), Some(&params_bgl)],
             immediate_size: 0,
         });
         let mutate_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
@@ -739,7 +739,7 @@ impl GpuPipeline {
 
         let rasterize_error_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: Some("rasterize_error_layout"),
-            bind_group_layouts: &[&rasterize_error_bgl, &params_bgl],
+            bind_group_layouts: &[Some(&rasterize_error_bgl), Some(&params_bgl)],
             immediate_size: 0,
         });
         let (rasterize_error_pipeline, rasterize_error_shader) = create_rasterize_pipeline(
@@ -751,7 +751,7 @@ impl GpuPipeline {
 
         let bin_polygons_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: Some("bin_polygons_layout"),
-            bind_group_layouts: &[&bin_polygons_bgl, &params_bgl],
+            bind_group_layouts: &[Some(&bin_polygons_bgl), Some(&params_bgl)],
             immediate_size: 0,
         });
         let bin_polygons_pipeline = create_bin_polygons_pipeline(
@@ -763,7 +763,7 @@ impl GpuPipeline {
 
         let select_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: Some("select_layout"),
-            bind_group_layouts: &[&select_bgl, &params_bgl],
+            bind_group_layouts: &[Some(&select_bgl), Some(&params_bgl)],
             immediate_size: 0,
         });
         let select_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
@@ -823,7 +823,7 @@ impl GpuPipeline {
         });
         let init_framebuffers_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: Some("init_framebuffers_layout"),
-            bind_group_layouts: &[&init_framebuffers_bgl, &params_bgl],
+            bind_group_layouts: &[Some(&init_framebuffers_bgl), Some(&params_bgl)],
             immediate_size: 0,
         });
         let init_framebuffers_pipeline = create_init_framebuffers_pipeline(
@@ -871,7 +871,7 @@ impl GpuPipeline {
         });
         let update_framebuffers_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: Some("update_framebuffers_layout"),
-            bind_group_layouts: &[&update_framebuffers_bgl, &params_bgl],
+            bind_group_layouts: &[Some(&update_framebuffers_bgl), Some(&params_bgl)],
             immediate_size: 0,
         });
         let update_framebuffers_pipeline = create_update_framebuffers_pipeline(
