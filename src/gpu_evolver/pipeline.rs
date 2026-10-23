@@ -1095,11 +1095,25 @@ fn create_rasterize_pipeline(
         layout: Some(layout),
         module: &shader,
         entry_point: Some("main"),
-        compilation_options: Default::default(),
+        compilation_options: rasterize_compilation_options(device),
         cache: Some(cache),
     });
 
     (pipeline, shader)
+}
+
+// Only the rasterize/error, init-framebuffers, and update-framebuffers shaders
+// use these options. Every shared value they read is explicitly written before
+// a workgroup barrier; unused polygon/reduction slots are never read. Avoid the
+// redundant zeroing code, which is expensive to compile on the WSL Dozen driver.
+// Keep default initialization for mutation: empty-parent crossover reads slot 0.
+// Vulkan provides native subgroup IDs. Naga's DX12 translation infers them from
+// local indices, so retain default initialization on that backend.
+fn rasterize_compilation_options(device: &Device) -> PipelineCompilationOptions<'static> {
+    PipelineCompilationOptions {
+        zero_initialize_workgroup_memory: device.adapter_info().backend != Backend::Vulkan,
+        ..Default::default()
+    }
 }
 
 /// Create a bin_polygons compute pipeline with tile size matching the rasterize workgroup.
@@ -1149,7 +1163,7 @@ fn create_init_framebuffers_pipeline(
         layout: Some(layout),
         module: &shader,
         entry_point: Some("main"),
-        compilation_options: Default::default(),
+        compilation_options: rasterize_compilation_options(device),
         cache: Some(cache),
     })
 }
@@ -1175,7 +1189,7 @@ fn create_update_framebuffers_pipeline(
         layout: Some(layout),
         module: &shader,
         entry_point: Some("main"),
-        compilation_options: Default::default(),
+        compilation_options: rasterize_compilation_options(device),
         cache: Some(cache),
     })
 }

@@ -123,7 +123,7 @@ struct Params {
 // shared_polys: TILE_CAP polygons (THREAD_COUNT * 3 * 16 bytes)
 // shared_errors: one u32 per subgroup for cross-subgroup reduction (max 256/4 = 64 subgroups)
 var<workgroup> shared_polys: array<Polygon, TILE_CAP>;
-var<workgroup> shared_errors: array<u32, 128>;      // max subgroups — only ceil(THREAD_COUNT/sg_size) used
+var<workgroup> shared_errors: array<u32, 128>;      // only num_subgroups entries are used
 var<workgroup> shared_errors_old: array<u32, 128>;  // old errors for incremental eval
 var<workgroup> shared_skip_tile: u32;               // set by thread 0 if tile is outside dirty bbox
 // Dirty bbox unpacked from offspring header (set by thread 0, read after barrier)
@@ -182,7 +182,8 @@ fn main(
     @builtin(workgroup_id) wid: vec3<u32>,
     @builtin(local_invocation_index) local_idx: u32,
     @builtin(subgroup_invocation_id) sg_inv_id: u32,
-    @builtin(subgroup_size) sg_size: u32,
+    @builtin(subgroup_id) sg_idx: u32,
+    @builtin(num_subgroups) num_subgroups: u32,
 ) {
     // Derive 2D pixel coordinates from 1D thread index + workgroup ID
     let local_x = local_idx % WG_X;
@@ -305,10 +306,8 @@ fn main(
         pixel_error = u32(abs(qr - refr) + abs(qg - refg) + abs(qb - refb));
     }
 
-    // Subgroup-accelerated reduction: subgroupAdd within each warp/wave,
-    // then thread 0 sums across subgroups via shared memory.
-    let sg_idx = local_idx / sg_size;
-
+    // Subgroup leaders write distinct, dense slots before thread 0 sums them.
+    // Subgroup IDs cannot be inferred from local invocation indices.
     let sg_sum = subgroupAdd(pixel_error);
     if sg_inv_id == 0u {
         shared_errors[sg_idx] = sg_sum;
@@ -323,7 +322,6 @@ fn main(
 
     // Thread 0 sums across subgroups and atomicAdds to chain's accumulator (stride-2)
     if local_idx == 0u {
-        let num_subgroups = (THREAD_COUNT + sg_size - 1u) / sg_size;
         var total = 0u;
         var total_old = 0u;
         for (var i = 0u; i < num_subgroups; i++) {

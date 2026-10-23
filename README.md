@@ -13,6 +13,20 @@
 
 `cargo bench`
 
+To check GPU rasterization, framebuffer updates, and workgroup changes:
+
+```sh
+cargo run --release --example check-gpu-rasterization
+```
+
+To profile project initialization and warmed-up evolution at 384px:
+
+```sh
+cargo run --release --example profile-startup -- projects/ff/reference.original projects/ff/best.json
+```
+
+The startup profiler prints JSON timings and fails if initialization exceeds ten seconds. Both examples require the GPU features used by the engine.
+
 ## Last benchmark results (on M1 Max)
 
 ```text

@@ -125,7 +125,8 @@ fn main(
     @builtin(workgroup_id) wid: vec3<u32>,
     @builtin(local_invocation_index) local_idx: u32,
     @builtin(subgroup_invocation_id) sg_inv_id: u32,
-    @builtin(subgroup_size) sg_size: u32,
+    @builtin(subgroup_id) sg_idx: u32,
+    @builtin(num_subgroups) num_subgroups: u32,
 ) {
     let local_x = local_idx % WG_X;
     let local_y = local_idx / WG_X;
@@ -232,16 +233,14 @@ fn main(
         pixel_error = u32(abs(qi - refr) + abs(qg - refg) + abs(qb - refb));
     }
 
-    // Subgroup-accelerated reduction for total error
+    // Use the actual subgroup ID so every consumed slot has exactly one writer.
     let sg_sum = subgroupAdd(pixel_error);
-    let sg_idx = local_idx / sg_size;
     if sg_inv_id == 0u {
         shared_errors[sg_idx] = sg_sum;
     }
     workgroupBarrier();
 
     if local_idx == 0u {
-        let num_subgroups = (THREAD_COUNT + sg_size - 1u) / sg_size;
         var total = 0u;
         for (var i = 0u; i < num_subgroups; i++) {
             total += shared_errors[i];
