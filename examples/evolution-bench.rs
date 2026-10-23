@@ -2,7 +2,7 @@
 use anyhow::{bail, ensure, Context, Result};
 use artgen_backend_rust::benchmark::{
     fixtures,
-    trial::{self, TrialSpec},
+    trial::{self, TimestampMode, TrialSpec},
 };
 use std::{collections::BTreeMap, path::PathBuf};
 
@@ -12,7 +12,7 @@ fn main() -> Result<()> {
         .next()
         .context("expected freeze or trial; use scripts/evolution-bench.py --help")?;
     let flags: Vec<_> = args.collect();
-    let values = parse_flags(&flags)?;
+    let mut values = parse_flags(&flags)?;
     match command.as_str() {
         "freeze" => {
             ensure!(
@@ -27,6 +27,11 @@ fn main() -> Result<()> {
             println!("{}", serde_json::to_string(&manifest)?);
         }
         "trial" => {
+            let timestamp_mode = match values.remove("profile-mode").as_deref() {
+                None | Some("stages") => TimestampMode::Stages,
+                Some("batch-envelope") => TimestampMode::BatchEnvelope,
+                Some(mode) => bail!("unknown profiling mode {mode}"),
+            };
             ensure!(
                 values.len() == 7,
                 "trial expects manifest, case, seed, batches, warmup, diagnostic, output"
@@ -37,6 +42,7 @@ fn main() -> Result<()> {
                 batches: value(&values, "batches")?.parse()?,
                 warmup_batches: value(&values, "warmup")?.parse()?,
                 diagnostic: value(&values, "diagnostic")?.parse()?,
+                timestamp_mode,
             };
             let record = trial::run(
                 &path(&values, "manifest")?,

@@ -81,3 +81,7 @@ choosing an implementation change. Serial AABB scattering per offspring is a
 source-based hypothesis to investigate, not a demonstrated optimization win.
 Live-path acceptance, true continuation workloads and broader seed/held-out
 validation remain later campaign gates.
+
+The [first separate profiling pass](profile.md) now records host wait behavior
+and full GPU compute spans. Its diagnostic timings do not change this reference
+score or establish an optimization result.

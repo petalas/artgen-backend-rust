@@ -2,7 +2,8 @@
 //!
 //! Preparation and snapshot allocations are outside measurement. The normal batch
 //! path only accounts for work once per submitted/collected batch. Diagnostics
-//! replace the binning pipeline only for an untimed validation replay.
+//! replace binning for validation or reuse selection queries for a batch compute
+//! envelope. Diagnostic timings must not receive a production throughput score.
 use std::time::{Duration, Instant};
 
 use bytemuck::Zeroable;
@@ -19,6 +20,49 @@ use crate::settings::{
 
 const MAX_WARMUP_BATCHES: u32 = 1024;
 const READBACK_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Sum of full-batch GPU compute spans, excluding copies and host work.
+/// Available only in the opt-in diagnostic mode; selection timing is unavailable.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
+pub struct BenchmarkEnvelopeTimings {
+    pub compute_ns: f64,
+    pub sample_count: u64,
+}
+
+/// The meaning of queries 6/7 belongs to the submitted batch, not current mode.
+pub(super) fn decode_batch_timestamps(
+    timestamps: &[u64; 8],
+    period_ns: f64,
+    batch_envelope: bool,
+) -> (PassTimings, BenchmarkEnvelopeTimings) {
+    let duration = |begin: usize, end: usize| {
+        timestamps[end].wrapping_sub(timestamps[begin]) as f64 * period_ns
+    };
+    let final_pair_ns = duration(6, 7);
+    let pass = PassTimings {
+        mutate_ns: duration(0, 1),
+        bin_polygons_ns: duration(2, 3),
+        rasterize_error_ns: duration(4, 5),
+        select_ns: if batch_envelope { 0.0 } else { final_pair_ns },
+        sample_count: 1,
+    };
+    let envelope = if batch_envelope {
+        BenchmarkEnvelopeTimings {
+            compute_ns: final_pair_ns,
+            sample_count: 1,
+        }
+    } else {
+        BenchmarkEnvelopeTimings::default()
+    };
+    (pass, envelope)
+}
+
+fn validate_batch_envelope(params: &MutationParams, enabled: bool) -> Result<(), String> {
+    if enabled && params.gpu_batch_iters < 2 {
+        return Err("batch compute envelope requires at least two iterations".into());
+    }
+    Ok(())
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct BenchmarkCounters {
@@ -182,6 +226,7 @@ impl GpuEvolver {
     /// Rejects invalid shape, insufficient buffers, overflowing errors or device limits.
     pub fn benchmark_validate_capacity(&self, params: &MutationParams) -> Result<(), String> {
         validate_shape(params)?;
+        validate_batch_envelope(params, self.benchmark_batch_envelope)?;
         let p = &self.pipeline;
         let active = u64::from(params.chain_count);
         let offspring = active * u64::from(params.lambda);
@@ -204,6 +249,31 @@ impl GpuEvolver {
         p.queue
             .write_buffer(&p.tile_counts_buf, p.tile_counts_buf.size() - 4, &[0; 4]);
         Ok(())
+    }
+
+    /// Reuse queries 6/7 for the full-batch compute span when collecting timestamps.
+    /// The last iteration's mutate/bin/rasterize samples remain available, while
+    /// `PassTimings::select_ns` stays zero. This diagnostic changes timestamp
+    /// placement and must not be scored as production throughput.
+    ///
+    /// # Errors
+    /// Rejects a failed drain or fewer than two iterations when enabling. After
+    /// draining, failed validation retains the mode and collected timings.
+    pub fn benchmark_set_batch_envelope(
+        &mut self,
+        params: &MutationParams,
+        enabled: bool,
+    ) -> Result<(), String> {
+        self.benchmark_drain()?;
+        validate_batch_envelope(params, enabled)?;
+        self.benchmark_batch_envelope = enabled;
+        self.reset_pass_timings();
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn benchmark_envelope_timings(&self) -> BenchmarkEnvelopeTimings {
+        self.benchmark_envelope_timings
     }
 
     #[must_use]
@@ -330,7 +400,7 @@ impl GpuEvolver {
         self.deferred_best_readback = false;
         self.total_evaluations = 0;
         self.benchmark_counters = BenchmarkCounters::default();
-        self.pass_timings = PassTimings::default();
+        self.reset_pass_timings();
         self.start_time = Instant::now();
         Ok(fitness)
     }
@@ -685,6 +755,70 @@ impl SnapshotReader<'_> {
 mod tests {
     use super::*;
     use crate::models::{color::Color, point::Point, polygon::Polygon};
+
+    #[test]
+    fn normal_timestamp_pairs_retain_last_iteration_attribution() {
+        let (pass, envelope) =
+            decode_batch_timestamps(&[100, 110, 200, 230, 250, 290, 300, 375], 2.5, false);
+        assert_eq!(pass.mutate_ns, 25.0);
+        assert_eq!(pass.bin_polygons_ns, 75.0);
+        assert_eq!(pass.rasterize_error_ns, 100.0);
+        assert_eq!(pass.select_ns, 187.5);
+        assert_eq!(pass.total_ns(), 387.5);
+        assert_eq!(pass.sample_count, 1);
+        assert_eq!(envelope, BenchmarkEnvelopeTimings::default());
+    }
+
+    #[test]
+    fn envelope_timestamp_pair_is_never_attributed_to_selection() {
+        // Query 6 predates the last iteration, so 6/7 is the whole batch.
+        let (pass, envelope) =
+            decode_batch_timestamps(&[100, 110, 200, 230, 250, 290, 10, 375], 2.5, true);
+        assert_eq!(pass.mutate_ns, 25.0);
+        assert_eq!(pass.bin_polygons_ns, 75.0);
+        assert_eq!(pass.rasterize_error_ns, 100.0);
+        assert_eq!(pass.select_ns, 0.0);
+        assert_eq!(pass.total_ns(), 200.0);
+        assert_eq!(pass.sample_count, 1);
+        assert_eq!(envelope.compute_ns, 912.5);
+        assert_eq!(envelope.sample_count, 1);
+        assert_eq!(
+            serde_json::to_value(envelope).unwrap(),
+            serde_json::json!({ "compute_ns": 912.5, "sample_count": 1 }),
+        );
+    }
+
+    #[test]
+    fn timestamp_decoding_preserves_wraparound_and_zero_duration_samples() {
+        let timestamps = [u64::MAX - 2, 3, 10, 20, 30, 50, u64::MAX - 20, 19];
+        let (normal, _) = decode_batch_timestamps(&timestamps, 0.5, false);
+        let (diagnostic, envelope) = decode_batch_timestamps(&timestamps, 0.5, true);
+        assert_eq!(normal.mutate_ns, 3.0);
+        assert_eq!(normal.bin_polygons_ns, 5.0);
+        assert_eq!(normal.rasterize_error_ns, 10.0);
+        assert_eq!(normal.select_ns, 20.0);
+        assert_eq!(diagnostic.select_ns, 0.0);
+        assert_eq!(envelope.compute_ns, 20.0);
+        let (zero, zero_envelope) = decode_batch_timestamps(&[0; 8], 1.0, true);
+        assert_eq!(zero.total_ns(), 0.0);
+        assert_eq!(zero.sample_count, 1);
+        assert_eq!(zero_envelope.compute_ns, 0.0);
+        assert_eq!(zero_envelope.sample_count, 1);
+    }
+
+    #[test]
+    fn batch_envelope_requires_a_bulk_iteration_only_when_enabled() {
+        let mut params = MutationParams::default();
+        for iterations in [0, 1] {
+            params.gpu_batch_iters = iterations;
+            assert!(validate_batch_envelope(&params, true).is_err());
+            assert!(validate_batch_envelope(&params, false).is_ok());
+        }
+        for iterations in [2, 64, GPU_MAX_BATCH_ITERS] {
+            params.gpu_batch_iters = iterations;
+            assert!(validate_batch_envelope(&params, true).is_ok());
+        }
+    }
 
     #[test]
     fn seed_uses_high_bits_and_separates_parent_and_offspring() {

@@ -17,7 +17,8 @@ use super::{
 use crate::{
     gpu_evolver::{
         benchmark::{
-            BenchmarkCounters, BenchmarkPackedState, BenchmarkProvenance, BenchmarkSnapshot,
+            BenchmarkCounters, BenchmarkEnvelopeTimings, BenchmarkPackedState, BenchmarkProvenance,
+            BenchmarkSnapshot,
         },
         buffers::{gpu_to_drawing, GpuDrawingState, GpuPolygon},
         GpuEvolver,
@@ -34,6 +35,14 @@ pub struct TrialSpec {
     pub batches: u32,
     pub warmup_batches: u32,
     pub diagnostic: bool,
+    pub timestamp_mode: TimestampMode,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimestampMode {
+    Stages,
+    BatchEnvelope,
 }
 
 #[derive(Serialize)]
@@ -93,6 +102,8 @@ pub struct TrialRecord {
     pub params: MutationParams,
     pub timestamp_samples: u64,
     pub sampled_gpu_stage_totals_ns: [f64; 4],
+    pub timestamp_mode: TimestampMode,
+    pub batch_compute_envelope: Option<BenchmarkEnvelopeTimings>,
     pub start_mode: String,
 }
 
@@ -134,6 +145,8 @@ impl TrialRecord {
             params: input.manifest.params.clone(),
             timestamp_samples: 0,
             sampled_gpu_stage_totals_ns: [0.0; 4],
+            timestamp_mode: spec.timestamp_mode,
+            batch_compute_envelope: None,
             start_mode: input.manifest.start_mode.clone(),
         })
     }
@@ -153,6 +166,11 @@ pub fn run(manifest: &Path, spec: &TrialSpec, output: &Path) -> Result<TrialReco
     );
     fs::create_dir_all(output)?;
     let input = fixtures::load(manifest, &spec.case_id)?;
+    ensure!(
+        spec.timestamp_mode != TimestampMode::BatchEnvelope
+            || input.manifest.params.gpu_batch_iters >= 2,
+        "batch-envelope profiling requires at least two iterations per batch"
+    );
     ensure!(
         input.fixture.complexity.overflowed_tiles == 0,
         "initial tile-bin overflow"
@@ -207,6 +225,9 @@ fn execute(
         timings.rasterize_error_ns,
         timings.select_ns,
     ];
+    if spec.timestamp_mode == TimestampMode::BatchEnvelope {
+        record.batch_compute_envelope = Some(evolver.benchmark_envelope_timings());
+    }
     Ok(record)
 }
 
@@ -217,6 +238,9 @@ fn prepare(
     output: &Path,
 ) -> Result<TrialRecord> {
     let params = &input.manifest.params;
+    evolver
+        .benchmark_set_batch_envelope(params, spec.timestamp_mode == TimestampMode::BatchEnvelope)
+        .map_err(anyhow::Error::msg)?;
     evolver
         .benchmark_set_validation(spec.diagnostic)
         .map_err(anyhow::Error::msg)?;
@@ -538,7 +562,10 @@ fn finish_record(record: &mut TrialRecord) {
         "invalid"
     }
     .into();
-    if !record.correctness || record.diagnostic {
+    if !record.correctness
+        || record.diagnostic
+        || record.timestamp_mode == TimestampMode::BatchEnvelope
+    {
         record.evals_per_second = None;
     }
 }
@@ -623,6 +650,7 @@ mod tests {
             batches: 1,
             warmup_batches: 0,
             diagnostic: false,
+            timestamp_mode: TimestampMode::Stages,
         };
         let provenance = BenchmarkProvenance {
             name: "CPU-only numerical test".into(),
@@ -822,6 +850,23 @@ mod tests {
     }
 
     #[test]
+    fn compute_envelope_records_keep_diagnostics_without_a_throughput_score() {
+        let input = input();
+        let initial = snapshot();
+        let mut record = prepared_record(&input, &initial);
+        record.timestamp_mode = TimestampMode::BatchEnvelope;
+        record.batch_compute_envelope = Some(BenchmarkEnvelopeTimings {
+            compute_ns: 1234.0,
+            sample_count: 1,
+        });
+        record.evals_per_second = Some(100.0);
+        finish_record(&mut record);
+        assert!(record.correctness);
+        assert!(record.evals_per_second.is_none());
+        assert_eq!(record.batch_compute_envelope.unwrap().sample_count, 1);
+    }
+
+    #[test]
     fn diagnostic_records_retain_work_without_a_throughput_score() {
         let input = input();
         let state = snapshot();
@@ -843,6 +888,7 @@ mod tests {
             batches: 1,
             warmup_batches: 0,
             diagnostic: false,
+            timestamp_mode: TimestampMode::Stages,
         };
         for (batches, warmup, message) in
             [(0, 0, "batches"), (4097, 0, "batches"), (1, 17, "warmup")]

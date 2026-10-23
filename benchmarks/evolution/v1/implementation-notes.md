@@ -84,3 +84,33 @@ clamped to 0..255 before conversion. Large integer error totals deliberately
 round to f32 exactly where the shader does. The envelope's f64-to-f32 conversions
 round outward with adjacent representable values. These diagnostics stay visible;
 analytical tests and exact cached-error/replay gates cover the conversion rules.
+
+## Diagnostic profiling additions
+
+The opt-in batch-envelope mode reuses the existing eight timestamp queries.
+Queries 6/7 describe one submitted batch's compute span; their meaning travels
+with the pending batch. Normal mode retains all four existing stage intervals.
+No shader, population, precision or evolution decision changes for profiling.
+Warmup uses the selected mode and resets both timing accumulators afterward.
+The standalone runner emits no throughput score for an envelope record, and the
+reference supervisor rejects it. The diagnostic script also labels its entire
+bundle ineligible for primary scoring.
+
+The timestamp decoder retains the existing u64-to-f64 conversion for duration
+reporting. Clippy's precision warning remains visible. The conversion occurs
+after wrapping integer subtraction and does not affect error arithmetic, RNG or
+selection. Production and diagnostic query-pair tests preserve that behavior.
+These timings are attribution evidence, not a different evolutionary workload.
+
+`scripts/profile-evolution.py` shares the existing benchmark lock and immutable
+fixture/cache checks. It owns one process group at a time, kills and reaps that
+group on timeout/cancellation, and bounds samples, pipe reads, file sizes and
+process discovery. Linux `/proc`, perf, Python selectors, importlib and
+subprocess require the same allocation/callback deviations as the supervisor.
+Their precise bounds and ownership are documented in the script header. Only
+recognized perf startup failures may become unavailable evidence; worker
+failures remain invalid. The recurring warning-enabled Python tests exercise
+the subprocess boundaries, and the combined real ff command checks both modes.
+The diagnostic host window requires positive warmup and measured timing markers;
+zero-warmup reference captures are rejected. Extend that boundary only with an
+explicit window policy and corresponding real-process checks.

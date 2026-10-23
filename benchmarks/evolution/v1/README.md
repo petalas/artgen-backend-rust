@@ -13,6 +13,8 @@ an existing executable. GPU work stays on each subprocess's main thread.
 
 The first user-run reference capture is recorded in [baseline notes](baseline.md),
 including repeatability, build/fixture identity and the remaining profiling gate.
+The [first diagnostic profiles](profile.md) separate host CPU/wait observations
+from full GPU batch spans and document the rerunnable profiling command.
 
 ## Import once
 

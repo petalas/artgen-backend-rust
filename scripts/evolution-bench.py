@@ -553,6 +553,9 @@ def validate_quality_record(record, case):
 
 def validate_result(record, case, args, diagnostic, manifest_hash):
     object_value(record, "result")
+    require(record.get("timestamp_mode", "stages") == "stages"
+            and record.get("batch_compute_envelope") is None,
+            "profiling records cannot enter the reference timing score")
     require(type(record.get("protocol_version")) is int and record["protocol_version"] == 1,
             "unsupported result protocol")
     require(record.get("status") == "completed", "trial did not complete validly")

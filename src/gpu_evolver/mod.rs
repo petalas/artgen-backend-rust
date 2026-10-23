@@ -66,6 +66,7 @@ impl PassTimings {
 struct PendingBatch {
     staging_idx: usize,
     collect_timestamps: bool,
+    batch_envelope: bool,
     active_chain_count: u32,
     submission_index: SubmissionIndex,
     iterations: u32,
@@ -88,6 +89,8 @@ pub struct GpuEvolver {
     start_time: Instant,
     best_fitness_bits: u32, // track best fitness across batches for control flag reset
     pass_timings: PassTimings,
+    benchmark_batch_envelope: bool,
+    benchmark_envelope_timings: benchmark::BenchmarkEnvelopeTimings,
     chain_fitness: Vec<f32>,
     active_chain_count: u32, // runtime chain count (≤ pipeline.chain_count)
     staging_idx: usize,      // alternates 0/1 for double-buffered staging
@@ -168,6 +171,8 @@ impl GpuEvolver {
             start_time: Instant::now(),
             best_fitness_bits: 0,
             pass_timings: PassTimings::default(),
+            benchmark_batch_envelope: false,
+            benchmark_envelope_timings: benchmark::BenchmarkEnvelopeTimings::default(),
             chain_fitness: vec![0.0; actual_max as usize],
             active_chain_count: active_chains,
             staging_idx: 0,
@@ -224,6 +229,8 @@ impl GpuEvolver {
     ///
     /// Returns `Some(Drawing)` if the previous batch found a new global best.
     pub fn run_batch(&mut self, mutation_params: &MutationParams, collect_timestamps: bool) -> Option<Drawing> {
+        assert!(!self.benchmark_batch_envelope || mutation_params.gpu_batch_iters >= 2,
+            "batch compute envelope requires at least two iterations");
         // Check if rasterize workgroup size needs to change (between batches)
         self.pipeline.set_rasterize_wg(mutation_params.rasterize_wg);
 
@@ -286,6 +293,7 @@ impl GpuEvolver {
 
         let p = &self.pipeline;
         let iterations = mutation_params.gpu_batch_iters.max(1);
+        let batch_envelope = self.benchmark_batch_envelope && collect_timestamps;
         let active = mutation_params.chain_count.min(p.chain_count);
         self.active_chain_count = active;
 
@@ -357,11 +365,18 @@ impl GpuEvolver {
         // The pass boundary between B(N) and A(N+1) similarly ensures select's
         // atomicExchange (zeroing) is visible to the next rasterize_error's atomicAdd.
         let bulk_count = if collect_timestamps { iterations.saturating_sub(1) } else { iterations };
+        // Consume this marker at the first bulk pass without a per-iteration branch.
+        // Query 7 still marks the end of the final select/update pass.
+        let mut bulk_timestamp_writes = batch_envelope.then_some(ComputePassTimestampWrites {
+            query_set: &p.timestamp_query_set,
+            beginning_of_pass_write_index: Some(6),
+            end_of_pass_write_index: None,
+        });
         for _ in 0..bulk_count {
             {
                 let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
                     label: Some("mutate_bin_rasterize"),
-                    timestamp_writes: None,
+                    timestamp_writes: bulk_timestamp_writes.take(),
                 });
                 pass.set_pipeline(&p.mutate_pipeline);
                 pass.set_bind_group(0, &p.mutate_bind_group, &[]);
@@ -449,7 +464,7 @@ impl GpuEvolver {
                     label: Some("select"),
                     timestamp_writes: Some(ComputePassTimestampWrites {
                         query_set: qs,
-                        beginning_of_pass_write_index: Some(6),
+                        beginning_of_pass_write_index: if batch_envelope { None } else { Some(6) },
                         end_of_pass_write_index: Some(7),
                     }),
                 });
@@ -542,6 +557,7 @@ impl GpuEvolver {
         self.pending_batch = Some(PendingBatch {
             staging_idx: write_idx,
             collect_timestamps,
+            batch_envelope,
             active_chain_count: active,
             submission_index,
             iterations,
@@ -653,21 +669,27 @@ impl GpuEvolver {
         if pending.collect_timestamps {
             let ts_data = p.timestamp_staging_bufs[idx].slice(..).get_mapped_range()
                 .expect("Failed to access mapped timestamp buffer");
-            let timestamps: &[u64] = bytemuck::cast_slice(&ts_data);
+            let timestamps: &[u64; 8] = bytemuck::cast_slice(&ts_data).try_into()
+                .expect("timestamp staging buffer must contain eight queries");
             let period = p.timestamp_period as f64;
-            let duration = |begin_idx: usize, end_idx: usize| -> f64 {
-                timestamps[end_idx].wrapping_sub(timestamps[begin_idx]) as f64 * period
-            };
-            self.pass_timings.mutate_ns += duration(0, 1);
-            self.pass_timings.bin_polygons_ns += duration(2, 3);
-            self.pass_timings.rasterize_error_ns += duration(4, 5);
-            self.pass_timings.select_ns += duration(6, 7);
+            let (sample, envelope) = benchmark::decode_batch_timestamps(
+                timestamps, period, pending.batch_envelope,
+            );
+            self.pass_timings.mutate_ns += sample.mutate_ns;
+            self.pass_timings.bin_polygons_ns += sample.bin_polygons_ns;
+            self.pass_timings.rasterize_error_ns += sample.rasterize_error_ns;
+            self.pass_timings.select_ns += sample.select_ns;
             self.pass_timings.sample_count += 1;
+            self.benchmark_envelope_timings.compute_ns += envelope.compute_ns;
+            self.benchmark_envelope_timings.sample_count += envelope.sample_count;
             if self.pass_timings.sample_count <= 3 {
                 eprintln!("[timestamps] sample #{}: mutate={:.2}ns bin={:.2}ns rast={:.2}ns sel={:.2}ns period={:.4}",
                     self.pass_timings.sample_count,
-                    duration(0, 1), duration(2, 3),
-                    duration(4, 5), duration(6, 7), period);
+                    sample.mutate_ns, sample.bin_polygons_ns,
+                    sample.rasterize_error_ns, sample.select_ns, period);
+                if pending.batch_envelope {
+                    eprintln!("[timestamps] diagnostic batch compute={:.2}ns; select unavailable", envelope.compute_ns);
+                }
             }
             drop(ts_data);
             p.timestamp_staging_bufs[idx].unmap();
@@ -861,7 +883,7 @@ impl GpuEvolver {
         self.benchmark_counters = benchmark::BenchmarkCounters::default();
         self.best_fitness_bits = 0;
         self.start_time = Instant::now();
-        self.pass_timings = PassTimings::default();
+        self.reset_pass_timings();
         self.chain_fitness.fill(0.0);
     }
 
@@ -1042,6 +1064,7 @@ impl GpuEvolver {
 
     pub fn reset_pass_timings(&mut self) {
         self.pass_timings.reset();
+        self.benchmark_envelope_timings = benchmark::BenchmarkEnvelopeTimings::default();
     }
 
     pub fn total_evaluations(&self) -> u64 {
@@ -1114,7 +1137,7 @@ impl GpuEvolver {
         self.iteration = 0;
         self.total_evaluations = 0;
         self.start_time = Instant::now();
-        self.pass_timings = PassTimings::default();
+        self.reset_pass_timings();
 
         start_fitness
     }

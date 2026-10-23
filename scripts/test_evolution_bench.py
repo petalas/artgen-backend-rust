@@ -178,6 +178,9 @@ canonical = [state[field] for field in ("parents", "offspring", "parent_total_er
 record["final_state_sha256"] = hashlib.sha256(json.dumps(canonical, separators=(",", ":")).encode()).hexdigest()
 if MODE == "no_evolution":
     record["initial_state_sha256"] = record["final_state_sha256"]
+if MODE == "profiling_score":
+    record["timestamp_mode"] = "batch_envelope"
+    record["batch_compute_envelope"] = {"compute_ns": 1000, "sample_count": batches}
 if MODE == "state_hash_mismatch":
     record["final_state_sha256"] = hashed("wrong canonical state hash")
 (output / "state.json").write_text(json.dumps(state))
@@ -432,6 +435,9 @@ class SupervisorBehaviorTests(unittest.TestCase):
 
     def test_unchanged_state_cannot_claim_completed_evolution_work(self):
         self.assert_failure("no_evolution", "no evolution state changed")
+
+    def test_profiled_records_cannot_be_used_as_reference_timing_samples(self):
+        self.assert_failure("profiling_score", "profiling records cannot enter")
 
     def test_missing_independent_quality_metrics_are_rejected(self):
         self.assert_failure("missing_quality", "final_quality needs one numerical check")
