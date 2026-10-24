@@ -37,7 +37,10 @@ binning operations, packed bounds and alternate G1 lane widths failed their shor
 filters. Matched compilation options did not rescue indirect raster compaction.
 Direct adjacent-tile grouping also failed and was removed in `fe5e829`; its fresh
 coverage, fault and host-edge proofs remain archived in
-[report 20](20-direct-raster-coarsening.md). Two independent triangle-edge
-microexperiments are now in their short screen; no new adoption is implied.
+[report 20](20-direct-raster-coarsening.md). Two triangle-edge microexperiments passed their short filter. The sole selected
+candidate passed numerical fixtures, but its full confirmation was interrupted
+before completion. It remains unadopted; see [report 21](21-raster-edge-micros.md).
+After recovery, the accepted defaults are being compared directly against the
+original archived engine. No partial candidate timings are promoted.
 Earlier live-preview results retain their original dispositions and are outside
 this engine-only score. Work continues until the morning cutoff.

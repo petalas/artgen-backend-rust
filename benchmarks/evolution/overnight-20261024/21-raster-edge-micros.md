@@ -56,3 +56,25 @@ Per-case paired ratios below are medians with observed minimum and maximum.
 | lazyEdge | ff | 1.004047547 [0.990711085, 1.017384010] |
 | lazyEdge | mona | 1.047788068 [1.017085526, 1.078490610] |
 | lazyEdge | darwin | 1.019815909 [1.018124206, 1.021507613] |
+
+## Interrupted confirmation
+
+The candidate-specific release numerical checker completed successfully across
+all five supported workgroup shapes. Its binary SHA256 is
+`9658a41df134b50111a40690140e023a1a68431bb03e9419da4e3b715c578dd7`.
+The temporary build restored the accepted AE1 production source before runtime
+confirmation. Source snapshots and restoration hashes are retained in the package.
+
+The subsequent full confirmation was interrupted. The user reported a possible
+computer restart; recovery found no worker or session. The incremental summary contains
+ten of thirty expected timing trials and two diagnostics, plus two completed
+reference qualifications. These records retain 14,680,064 completed evaluations
+excluding warmup and numerical-checker work. The aggregate package never
+completed, reserved confirmation never started, and no full-budget timing score
+is claimed. The candidate remains unadopted. The short result and completed
+numerical proof remain historical evidence, not permission to extend or promote
+the partial series. `raster-lazy-confirmation/interrupted.json` records recovery.
+
+The proposed host readback observer also stopped during cache-only preparation.
+It was not compiled or run and changed no root engine code. Its unfinished cache
+files remain available; they support no timing conclusion.
