@@ -1,0 +1,61 @@
+--- a/src/shaders/rasterize_error.wgsl
++++ b/src/shaders/rasterize_error.wgsl
+@@ -30,7 +30,10 @@
+     bb_max_x: f32,   // offset 28
+     bb_min_y: f32,   // offset 32
+     bb_max_y: f32,   // offset 36
+-    color_packed: u32, // offset 40; trailing padding 44..47; stride 48
++    color_packed: u32, // offset 40; padding 44..47
++    edge01: vec2<f32>, // offset 48
++    edge12: vec2<f32>, // offset 56
++    edge20: vec2<f32>, // offset 64; struct alignment 8; stride 72
+ }
+ 
+ struct DrawingState {
+@@ -130,7 +133,7 @@
+ @group(1) @binding(0) var<uniform>             params:             Params;
+ 
+ // Shared polygon capacity follows the tile polygon clamp.
+-// shared_polys: 256 decoded polygons, stride 48, 12288 bytes
++// shared_polys: 256 decoded polygons plus edge deltas, stride 72, 18432 bytes
+ // shared_errors: one u32 per subgroup for cross-subgroup reduction (max 256/4 = 64 subgroups)
+ var<workgroup> shared_polys: array<DecodedPolygon, TILE_MAX_POLYS>;
+ var<workgroup> shared_errors: array<u32, 128>;      // only num_subgroups entries are used
+@@ -143,8 +146,8 @@
+ var<workgroup> shared_dirty_max_y: u32;
+ 
+ // Half-space edge function: positive if point (px,py) is on the left side of edge (ax,ay)->(bx,by)
+-fn edge_fn(ax: f32, ay: f32, bx: f32, by: f32, px: f32, py: f32) -> f32 {
+-    return (bx - ax) * (py - ay) - (by - ay) * (px - ax);
++fn edge_fn(ax: f32, ay: f32, edge_delta: vec2<f32>, px: f32, py: f32) -> f32 {
++    return edge_delta.x * (py - ay) - edge_delta.y * (px - ax);
+ }
+ 
+ /// Rasterize a polygon and alpha-blend if pixel is inside.
+@@ -165,9 +168,9 @@
+     }
+ 
+     // Half-space triangle test (3 edge evaluations)
+-    let e0 = edge_fn(pv0.x, pv0.y, pv1.x, pv1.y, fx, fy);
+-    let e1 = edge_fn(pv1.x, pv1.y, pv2.x, pv2.y, fx, fy);
+-    let e2 = edge_fn(pv2.x, pv2.y, pv0.x, pv0.y, fx, fy);
++    let e0 = edge_fn(pv0.x, pv0.y, poly.edge01, fx, fy);
++    let e1 = edge_fn(pv1.x, pv1.y, poly.edge12, fx, fy);
++    let e2 = edge_fn(pv2.x, pv2.y, poly.edge20, fx, fy);
+ 
+     // Inside if all same sign (handle both CW and CCW winding)
+     let all_pos = e0 >= 0.0 && e1 >= 0.0 && e2 >= 0.0;
+@@ -298,8 +301,12 @@
+         let bb_max_x = max(pv0.x, max(pv1.x, pv2.x));
+         let bb_min_y = min(pv0.y, min(pv1.y, pv2.y));
+         let bb_max_y = max(pv0.y, max(pv1.y, pv2.y));
++        let edge01 = vec2<f32>(pv1.x - pv0.x, pv1.y - pv0.y);
++        let edge12 = vec2<f32>(pv2.x - pv1.x, pv2.y - pv1.y);
++        let edge20 = vec2<f32>(pv0.x - pv2.x, pv0.y - pv2.y);
+         shared_polys[slot] = DecodedPolygon(
+-            pv0, pv1, pv2, bb_min_x, bb_max_x, bb_min_y, bb_max_y, poly.data.x);
++            pv0, pv1, pv2, bb_min_x, bb_max_x, bb_min_y, bb_max_y, poly.data.x,
++            edge01, edge12, edge20);
+     }
+     workgroupBarrier();
+ 

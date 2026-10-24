@@ -42,8 +42,8 @@ fn layered_drawing() -> Drawing {
 fn main() {
     verify_visible_layer_acceptance();
     // Odd dimensions exercise threads outside the image. At 8x8, the drawing
-    // exceeds the shared polygon chunk size of 192 but stays below the tile-bin
-    // limit of 256, so all polygons participate in multiple load/barriers.
+    // crosses the old 192-entry chunk boundary but stays below the tile-bin
+    // limit of 256, so late layers exercise the complete loaded prefix.
     let reference = [0, 0, 0, 255].repeat(17 * 19);
     let empty = Drawing {
         polygons: vec![],
@@ -54,10 +54,10 @@ fn main() {
     let mut evolver = futures_lite::future::block_on(GpuEvolver::new(&reference, 17, 19, &empty));
     assert_eq!(evolver.evaluate_chain_fitness(2), 0.0);
     // The final two red triangles must affect the result even at 8x8, where
-    // they occupy the second shared polygon chunk after the black base.
+    // they follow the old chunk boundary after the black base.
     let expected =
         (100.0 * (1.0 - 1.0 / 3.0)) * (1.0 - PER_POINT_MULTIPLIER * drawing.num_points() as f32);
-    for workgroup in [[8, 8], [16, 16], [32, 16]] {
+    for workgroup in [[8, 8], [16, 8], [16, 16], [32, 8], [32, 16]] {
         verify_workgroup(&mut evolver, &drawing, &empty, expected, workgroup);
     }
     assert!(evolver.readback_chain(0).polygons.is_empty());
@@ -223,7 +223,7 @@ fn verify_mixed_reference(empty: &Drawing) {
     let opaque = colored_triangle(255);
     let translucent = colored_triangle(128);
     let mut evolver = futures_lite::future::block_on(GpuEvolver::new(&reference, 17, 19, empty));
-    for workgroup in [[8, 8], [16, 16], [32, 16]] {
+    for workgroup in [[8, 8], [16, 8], [16, 16], [32, 8], [32, 16]] {
         let params = MutationParams {
             chain_count: 2,
             lambda: 1,

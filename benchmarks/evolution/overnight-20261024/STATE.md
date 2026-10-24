@@ -23,6 +23,13 @@ The decoded tile geometry cache also passed full training and reserved confirmat
 measuring 1.23597 and 1.23817 times its preceding engine throughput. See
 [05-decoded-raster-cache.md](05-decoded-raster-cache.md).
 
-The next families are mutation parent copying and isolated raster reductions.
+The fixed-tile 256-lane raster also passed training and reserved confirmation,
+measuring 1.06371 and 1.06264 times decoded C throughput. It preserves the logical
+32×16 tile and every pixel calculation; see
+[11-fixed-tile-physical-lanes.md](11-fixed-tile-physical-lanes.md).
+
+Both compact-raster prefix experiments failed their short filters and their
+runtime path was removed. Source-coupled mutation workgroup splitting is the next
+measured family. Every evolution setting remains pinned.
 Earlier live-preview results retain their original dispositions and are outside
 this engine-only score. Work continues until the morning cutoff.

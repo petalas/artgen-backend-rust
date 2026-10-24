@@ -1,0 +1,200 @@
+--- a/src/shaders/rasterize_error.wgsl
++++ b/src/shaders/rasterize_error.wgsl
+@@ -1,20 +1,18 @@
+-// Fused rasterize + error compute shader — one thread per pixel per offspring
+-// Dispatch: (W/WG_X, H/WG_Y, K*lambda) workgroups of size (THREAD_COUNT, 1, 1)
+-// 1D workgroup layout required for subgroup intrinsics (naga constraint).
+-// Pixel coordinates are derived from workgroup_id + local_invocation_index.
++// SOURCE-ONLY PROTOTYPE: serial pixels per physical lane, same logical raster tile.
++// Dispatch and binning remain (ceil(W/WG_X), ceil(H/WG_Y), K*lambda).
++// 1D workgroup layout is retained for subgroup intrinsics.
++// Each lane owns ordinal local_idx + k*PHYSICAL_LANES, within WG_X*WG_Y.
++// Each pixel retains C's f32 rasterization followed by integer byte-L1.
++// Integer lane totals feed C's unchanged dense actual-subgroup-ID reduction.
++// Cooperative decoded-cache loading uses every physical lane, even at image edges.
+ //
+-// Each thread rasterizes tile-culled polygons at its pixel, computes L1 error vs reference,
+-// then subgroupAdd reduces within each warp/wave and thread 0 sums across subgroups.
+-// Also computes old error from cached framebuffer for incremental evaluation.
+-// Polygons are loaded from pre-binned tile_data (binning pass must run first).
+-//
+-// Workgroup size is configurable. pipeline.rs uses string replacement on the
+-// WG_X/WG_Y constants below when creating non-default pipeline variants.
+-// Supported configurations: 16x16 (256 threads), 16x8 (128 threads), 8x8 (64 threads).
+-// Shared polygon capacity is fixed at the clamped tile polygon limit.
++// pipeline.rs specializes the exact WG_X/WG_Y markers below.
++// Supported logical tiles: 32x16, 16x16, 32x8, 16x8, 8x8.
++// Shared polygon capacity remains the clamped 256-polygon limit.
+ const WG_X: u32 = 16;
+ const WG_Y: u32 = 16;
+ const THREAD_COUNT: u32 = WG_X * WG_Y;
++const PHYSICAL_LANES: u32 = min(256u, THREAD_COUNT);
+ const TILE_MAX_POLYS: u32 = 256u;
+ 
+ struct Polygon {
+@@ -131,7 +129,7 @@
+ 
+ // Shared polygon capacity follows the tile polygon clamp.
+ // shared_polys: 256 decoded polygons, stride 48, 12288 bytes
+-// shared_errors: one u32 per subgroup for cross-subgroup reduction (max 256/4 = 64 subgroups)
++// shared_errors: C's 128 slots retained; indexed by actual dense subgroup ID
+ var<workgroup> shared_polys: array<DecodedPolygon, TILE_MAX_POLYS>;
+ var<workgroup> shared_errors: array<u32, 128>;      // only num_subgroups entries are used
+ var<workgroup> shared_errors_old: array<u32, 128>;  // old errors for incremental eval
+@@ -187,7 +185,59 @@
+     }
+ }
+ 
+-@compute @workgroup_size(THREAD_COUNT, 1, 1)
++// No barriers or cross-pixel floating-point state are permitted in this helper.
++fn pixel_errors(
++    px: u32, py: u32, w: u32, h: u32,
++    parent_chain: u32, tile_poly_count: u32, valid_pixel: bool,
++) -> vec2<u32> {
++    if !valid_pixel {
++        return vec2<u32>(0u, 0u);
++    }
++    var pixel_error = 0u;
++    var pixel_error_old = 0u;
++
++    var fx = 0.0;
++    var fy = 0.0;
++    var r = 255.0;
++    var g = 255.0;
++    var b = 255.0;
++    var refr = 0.0;
++    var refg = 0.0;
++    var refb = 0.0;
++
++    fx = (f32(px) + 0.5) / f32(w);
++    fy = (f32(py) + 0.5) / f32(h);
++
++    let ref_color = textureLoad(reference_image, vec2<i32>(i32(px), i32(py)), 0);
++    // Match init_framebuffers: L1 compares exact reference bytes, not the
++    // approximate UNORM reconstruction whose error would be truncated.
++    refr = round(ref_color.x * 255.0);
++    refg = round(ref_color.y * 255.0);
++    refb = round(ref_color.z * 255.0);
++
++    // Read cached parent pixel from chain_framebuffers (O(1) per pixel).
++    let fb_idx = parent_chain * w * h + py * w + px;
++    let packed = chain_framebuffers[fb_idx];
++    let old_ri = f32(packed & 0xFFu);
++    let old_gi = f32((packed >> 8u) & 0xFFu);
++    let old_bi = f32((packed >> 16u) & 0xFFu);
++    pixel_error_old = u32(abs(old_ri - refr) + abs(old_gi - refg) + abs(old_bi - refb));
++
++    for (var i = 0u; i < tile_poly_count; i++) {
++        rasterize_blend(shared_polys[i], fx, fy, &r, &g, &b);
++    }
++
++    // L1 error: quantize to u8 integers (floor) so error matches
++    // framebuffer precision (pack_fb_pixel truncates to u8).
++    let qr = floor(clamp(r, 0.0, 255.0));
++    let qg = floor(clamp(g, 0.0, 255.0));
++    let qb = floor(clamp(b, 0.0, 255.0));
++    pixel_error = u32(abs(qr - refr) + abs(qg - refg) + abs(qb - refb));
++
++    return vec2<u32>(pixel_error, pixel_error_old);
++}
++
++@compute @workgroup_size(PHYSICAL_LANES, 1, 1)
+ fn main(
+     @builtin(workgroup_id) wid: vec3<u32>,
+     @builtin(local_invocation_index) local_idx: u32,
+@@ -195,11 +245,6 @@
+     @builtin(subgroup_id) sg_idx: u32,
+     @builtin(num_subgroups) num_subgroups: u32,
+ ) {
+-    // Derive 2D pixel coordinates from 1D thread index + workgroup ID
+-    let local_x = local_idx % WG_X;
+-    let local_y = local_idx / WG_X;
+-    let px = wid.x * WG_X + local_x;
+-    let py = wid.y * WG_Y + local_y;
+     let chain_id = wid.z;
+ 
+     let w = params.image_width;
+@@ -233,9 +278,6 @@
+         return;
+     }
+ 
+-    var pixel_error = 0u;
+-    var pixel_error_old = 0u;
+-
+     // Tile metadata — workgroup-uniform, computed by all threads.
+     // Must be outside the pixel bounds check so all threads (including those in
+     // partial tiles with px >= w) participate in shared memory loads and barriers.
+@@ -253,41 +295,10 @@
+         tile_data_base = chain_id * num_tiles * TILE_MAX_POLYS + tile_id * TILE_MAX_POLYS;
+     }
+ 
+-    // Per-pixel setup — only valid pixels read reference/framebuffer
+-    let valid_pixel = px < w && py < h && chain_id < chain_count;
+-    var fx = 0.0;
+-    var fy = 0.0;
+-    var r = 255.0;
+-    var g = 255.0;
+-    var b = 255.0;
+-    var refr = 0.0;
+-    var refg = 0.0;
+-    var refb = 0.0;
+-
+-    if valid_pixel {
+-        fx = (f32(px) + 0.5) / f32(w);
+-        fy = (f32(py) + 0.5) / f32(h);
+-
+-        let ref_color = textureLoad(reference_image, vec2<i32>(i32(px), i32(py)), 0);
+-        // Match init_framebuffers: L1 compares exact reference bytes, not the
+-        // approximate UNORM reconstruction whose error would be truncated.
+-        refr = round(ref_color.x * 255.0);
+-        refg = round(ref_color.y * 255.0);
+-        refb = round(ref_color.z * 255.0);
+-
+-        // Read cached parent pixel from chain_framebuffers (O(1) per pixel).
+-        let fb_idx = parent_chain * w * h + py * w + px;
+-        let packed = chain_framebuffers[fb_idx];
+-        let old_ri = f32(packed & 0xFFu);
+-        let old_gi = f32((packed >> 8u) & 0xFFu);
+-        let old_bi = f32((packed >> 16u) & 0xFFu);
+-        pixel_error_old = u32(abs(old_ri - refr) + abs(old_gi - refg) + abs(old_bi - refb));
+-    }
+-
+     // Tile-culled rasterization: ALL threads participate in shared memory loads
+     // (critical for partial tiles where out-of-bounds threads are responsible
+     // for loading polygon slots that in-bounds threads need for rasterization).
+-    for (var slot = local_idx; slot < tile_poly_count; slot += THREAD_COUNT) {
++    for (var slot = local_idx; slot < tile_poly_count; slot += PHYSICAL_LANES) {
+         let poly_idx = tile_data[tile_data_base + slot];
+         let poly = working_states[chain_id].polygons[poly_idx];
+         let pv0 = unpack_vertex(poly.data.y);
+@@ -303,20 +314,16 @@
+     }
+     workgroupBarrier();
+ 
+-    if valid_pixel {
+-        for (var i = 0u; i < tile_poly_count; i++) {
+-            rasterize_blend(shared_polys[i], fx, fy, &r, &g, &b);
+-        }
+-    }
+-    // The polygon cache is never overwritten; no post-blend barrier is needed.
+-
+-    // L1 error: quantize to u8 integers (floor) so error matches
+-    // framebuffer precision (pack_fb_pixel truncates to u8).
+-    if valid_pixel {
+-        let qr = floor(clamp(r, 0.0, 255.0));
+-        let qg = floor(clamp(g, 0.0, 255.0));
+-        let qb = floor(clamp(b, 0.0, 255.0));
+-        pixel_error = u32(abs(qr - refr) + abs(qg - refg) + abs(qb - refb));
++    // Each ordinal belongs to one physical lane; only integer L1 crosses pixels.
++    var pixel_error = 0u;
++    var pixel_error_old = 0u;
++    for (var ordinal = local_idx; ordinal < THREAD_COUNT; ordinal += PHYSICAL_LANES) {
++        let px = wid.x * WG_X + ordinal % WG_X;
++        let py = wid.y * WG_Y + ordinal / WG_X;
++        let valid_pixel = px < w && py < h && chain_id < chain_count;
++        let errors = pixel_errors(px, py, w, h, parent_chain, tile_poly_count, valid_pixel);
++        pixel_error += errors.x;
++        pixel_error_old += errors.y;
+     }
+ 
+     // Subgroup leaders write distinct, dense slots before thread 0 sums them.
