@@ -15,7 +15,8 @@ the ordinary a292/e133/598 shader bytes, all parameters and RNG, and the ordinar
 two-pass bulk/four-pass sampled schedule with its original RW-to-RW boundaries and
 eight timestamp meanings. The current lab rejects `--compact-raster` as unknown.
 
-This default-off benchmark mode changed scheduling only. It built a prefix of
+This default-off benchmark mode changed scheduling and, unintentionally, the
+raster compilation zeroing policy on Vulkan. It built a prefix of
 consumed tile counts from the current offspring headers, then indirectly dispatched
 those workgroups. Binning, raster arithmetic, selection, mutation, RNG streams and
 complete MutationParams remained unchanged. The ordinary full-image fitness/reset
@@ -151,3 +152,14 @@ seven mutation-checker CPU tests passed. All/pedantic Clippy completed successfu
 with no errors; legacy diagnostics remain. Independent source review confirmed
 the ordinary pass/timestamp schedule and source-coupled mutation dispatch were
 preserved. Fresh release and runtime evidence use the separate v8 archive.
+
+A later initialization audit found a compilation-option confound. The archived
+ordinary raster uses `rasterize_compilation_options(device)`, which disables
+workgroup zero initialization on Vulkan. The compact raster factory used
+`PipelineCompilationOptions::default()`, enabling it. Both WG1 and WG64 filters
+therefore include that difference. Their work, correctness and rejection records
+remain valid for the tested prototypes, but the ratios do not isolate compact
+scheduling. The failed runtime remains removed. No zeroing-related speed claim
+follows from source inspection, and no ordinary-raster change is needed because
+zeroing is already disabled on the recorded backend. The audit is retained as
+`.cache/evolution-overnight-20261024/raster-initialization-audit.json`.
