@@ -30,6 +30,12 @@ Project-specific gotchas and hard-won knowledge. Search here when you hit unexpe
 **Gotcha**: On Vulkan/Dozen, its first 64-batch ff diagnostic produced cached-minus-framebuffer RGB L1 deltas of `19,9,22,0`. Six final canonical fields differed from the reference. The error pipeline used the new cache while initialization and accepted-framebuffer rendering retained their original color paths. The retained endpoints do not establish the compiled rounding or instruction cause.
 **Fix**: Keep the accepted packed-color path. Any future cache optimization must compare cached totals with exact byte L1 from its actual committed framebuffers before timing. Fitness derived from the cached total alone is insufficient; the independent raw-L1 fitness also exceeded the existing tolerance on one chain. Preserve both exact integer consistency and reference-state replay. See the [numerical rejection record](../benchmarks/evolution/continuation-20261024/17-normalized-rgba-cache.md).
 
+### A smaller decoded raster cache can lose throughput
+
+**Context**: Replacing AE1's three shared `vec2<f32>` vertex fields with six scalar fields reduced the inferred polygon stride from 48 to 44 bytes while retaining packed color and arithmetic.
+**Gotcha**: All fifteen paired throughput ratios were below one on Vulkan/Dozen. The aggregate was 0.910216, with interval [0.907813, 0.912492], despite passing the training numerical gates. Sampled raster intervals increased; the compiled lowering, bank conflicts and occupancy were not measured.
+**Fix**: Retain AE1's 48-byte record. Treat source allocation savings as a hypothesis, then verify completed-engine throughput and exact state/error associations. Do not infer performance from struct size or retime this rejected candidate. See the [scalar-layout record](../benchmarks/evolution/continuation-20261024/18-scalar-geometry-cache.md).
+
 ### Frozen floating-point metadata needs JSON roundtrip parsing
 
 **Context**: Comparing frozen geometry percentiles with benchmark trial metadata.

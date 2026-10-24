@@ -1,0 +1,400 @@
+{
+  "schema": "scalar-geometry-cache-closed-v1",
+  "status": "REJECT",
+  "data_validity": "PASS",
+  "adoption": false,
+  "production_runtime_changed": false,
+  "evolution_parameters_changed": false,
+  "candidate_sha256": "7f551b7f5455430b6d2cb38f879fefb05096f33689a71d37528e87122efdb2d2",
+  "reference_sha256": "ae1fd75fdc118debf2a50cbad699e513b5af0dcbfa3754b45966f7a8ee925af3",
+  "spec_sha256": "9bff03466d2060886677aa90a9796e664d28496bac5aba779de9a45dcb620481",
+  "binary_sha256": "97d176f3b5f97c818d19a5e25b2f75e9e587bf1925a948c330b78e2022512ab1",
+  "validator_sha256": "4f73cbbe74204fa128239cbffd9f80bf967284260ab3a1a820e4deea3794839b",
+  "aggregate": {
+    "interval95": [
+      0.9078128282721665,
+      0.9124921299583041
+    ],
+    "ratio": 0.9102155860636119
+  },
+  "cases": {
+    "ff": {
+      "arms": {
+        "reference": {
+          "evals_per_second": {
+            "median": 320167.93799101684,
+            "min": 312322.757953304,
+            "max": 331182.8142336704
+          },
+          "elapsed_seconds": {
+            "median": 3.275081217,
+            "min": 3.166154628,
+            "max": 3.357347402
+          },
+          "drain_seconds": {
+            "median": 0.043611308,
+            "min": 0.043382975,
+            "max": 0.044048495
+          },
+          "sampled_stage_median_trial_average_ns": [
+            90471.5,
+            50713.5,
+            433389.5,
+            82482.0
+          ]
+        },
+        "scalar": {
+          "evals_per_second": {
+            "median": 291210.0059493211,
+            "min": 283759.9646678663,
+            "max": 298202.7569112998
+          },
+          "elapsed_seconds": {
+            "median": 3.600755395,
+            "min": 3.516318933,
+            "max": 3.695292256
+          },
+          "drain_seconds": {
+            "median": 0.047971246,
+            "min": 0.047746651,
+            "max": 0.04854006
+          },
+          "sampled_stage_median_trial_average_ns": [
+            90606.5,
+            50297.0,
+            510594.0,
+            82686.5
+          ]
+        }
+      },
+      "statistics": {
+        "geomean_ratio": 0.910361981014589,
+        "interval95": [
+          0.9051763667244036,
+          0.9152631823122649
+        ],
+        "interval_statistic": "exp(mean(log(paired ratio)))",
+        "paired_ratios": {
+          "cv": 0.006656065803894159,
+          "max": 0.9171994774789084,
+          "mean": 0.9103821869622294,
+          "median": 0.9095539290304945,
+          "min": 0.9004173649569234,
+          "n": 5,
+          "range": 0.016782112521985026,
+          "raw": [
+            0.9004173649569234,
+            0.9161929715635165,
+            0.9095539290304945,
+            0.9171994774789084,
+            0.9085471917813042
+          ]
+        }
+      }
+    },
+    "mona": {
+      "arms": {
+        "reference": {
+          "evals_per_second": {
+            "median": 258000.57894332334,
+            "min": 256236.22677986752,
+            "max": 258533.70032480598
+          },
+          "elapsed_seconds": {
+            "median": 4.064238942,
+            "min": 4.05585809,
+            "max": 4.092223856
+          },
+          "drain_seconds": {
+            "median": 0.053138351,
+            "min": 0.052813308,
+            "max": 0.053363726
+          },
+          "sampled_stage_median_trial_average_ns": [
+            108691.5,
+            61670.5,
+            561447.5,
+            83313.5
+          ]
+        },
+        "scalar": {
+          "evals_per_second": {
+            "median": 235321.6985273768,
+            "min": 233475.97492938518,
+            "max": 236983.0433160483
+          },
+          "elapsed_seconds": {
+            "median": 4.455925682,
+            "min": 4.424687882,
+            "max": 4.491151607
+          },
+          "drain_seconds": {
+            "median": 0.059622025,
+            "min": 0.059371885,
+            "max": 0.059965313
+          },
+          "sampled_stage_median_trial_average_ns": [
+            108913.0,
+            61842.5,
+            655837.0,
+            83625.0
+          ]
+        }
+      },
+      "statistics": {
+        "geomean_ratio": 0.9138212763125485,
+        "interval95": [
+          0.9115496579637206,
+          0.9166226264068666
+        ],
+        "interval_statistic": "exp(mean(log(paired ratio)))",
+        "paired_ratios": {
+          "cv": 0.003133223436635216,
+          "max": 0.9185612909633928,
+          "mean": 0.9138257556301865,
+          "median": 0.9119437952960006,
+          "min": 0.9111747306908493,
+          "n": 5,
+          "range": 0.007386560272543474,
+          "raw": [
+            0.9185612909633928,
+            0.9157213075356229,
+            0.9119437952960006,
+            0.9111747306908493,
+            0.9117276536650669
+          ]
+        }
+      }
+    },
+    "darwin": {
+      "arms": {
+        "reference": {
+          "evals_per_second": {
+            "median": 256611.24661114468,
+            "min": 256006.19583745106,
+            "max": 259542.43314269348
+          },
+          "elapsed_seconds": {
+            "median": 4.08624335,
+            "min": 4.040094667,
+            "max": 4.095900869
+          },
+          "drain_seconds": {
+            "median": 0.052960479,
+            "min": 0.05291698,
+            "max": 0.053259181
+          },
+          "sampled_stage_median_trial_average_ns": [
+            99485.5,
+            55651.0,
+            555190.0,
+            92549.0
+          ]
+        },
+        "scalar": {
+          "evals_per_second": {
+            "median": 233289.34066669954,
+            "min": 231095.65574283572,
+            "max": 234162.9456730807
+          },
+          "elapsed_seconds": {
+            "median": 4.494744582,
+            "min": 4.477975783,
+            "max": 4.5374111280000005
+          },
+          "drain_seconds": {
+            "median": 0.059601794,
+            "min": 0.059327293,
+            "max": 0.060904544
+          },
+          "sampled_stage_median_trial_average_ns": [
+            99555.5,
+            55333.5,
+            650218.0,
+            92810.5
+          ]
+        }
+      },
+      "statistics": {
+        "geomean_ratio": 0.9064783290203682,
+        "interval95": [
+          0.9026381292463198,
+          0.9103348666089037
+        ],
+        "interval_statistic": "exp(mean(log(paired ratio)))",
+        "paired_ratios": {
+          "cv": 0.004879235633128548,
+          "max": 0.9125201984148381,
+          "mean": 0.9064891199642164,
+          "median": 0.9072378660470012,
+          "min": 0.9009422598937534,
+          "n": 5,
+          "range": 0.011577938521084685,
+          "raw": [
+            0.9009422598937534,
+            0.9125201984148381,
+            0.9072378660470012,
+            0.9097035129849352,
+            0.9020417624805543
+          ]
+        }
+      }
+    }
+  },
+  "normal_trials": 30,
+  "diagnostics": 6,
+  "qualifications": 3,
+  "native_errors": 0,
+  "process": {
+    "artifact_file_byte_limit": 67108864,
+    "command": [
+      "/home/nick/git/artgen-backend-rust/.cache/evolution-qualification-prepared-20261024/build-100/build/engine-qualification-lab",
+      "--manifest",
+      "/home/nick/git/artgen-backend-rust/.cache/evolution-bench/baseline-20261023T172054.919294Z-95742/fixtures/manifest.json",
+      "--reference-shader",
+      "/home/nick/git/artgen-backend-rust/.cache/evolution-profiling-20261024/build-finalize-v1/source/src/shaders/rasterize_error.wgsl",
+      "--variant",
+      "scalar=/home/nick/git/artgen-backend-rust/.cache/evolution-layout-20261024/source-113/candidate.wgsl",
+      "--output",
+      "/home/nick/git/artgen-backend-rust/.cache/evolution-layout-20261024/train/output",
+      "--pairs",
+      "5",
+      "--batches",
+      "64",
+      "--seed",
+      "7",
+      "--case",
+      "all",
+      "--shader-stage",
+      "raster",
+      "--diagnostics",
+      "true",
+      "--finalize-overlap",
+      "false"
+    ],
+    "cwd": "/home/nick/git/artgen-backend-rust/.cache/evolution-layout-20261024/train/cwd",
+    "process_wall_seconds": 271.2346827900001,
+    "returncode": 0,
+    "started_utc": "2026-10-24T15:49:25.754310+00:00",
+    "status": "completed"
+  },
+  "controller_wall_seconds": 273.66608047800037,
+  "work": {
+    "category_counters": {
+      "diagnostic": {
+        "completed_batches": 384,
+        "completed_evaluations": 6291456,
+        "completed_iterations": 24576,
+        "submitted_batches": 384,
+        "submitted_evaluations": 6291456,
+        "submitted_iterations": 24576
+      },
+      "normal": {
+        "completed_batches": 1920,
+        "completed_evaluations": 31457280,
+        "completed_iterations": 122880,
+        "submitted_batches": 1920,
+        "submitted_evaluations": 31457280,
+        "submitted_iterations": 122880
+      },
+      "qualification": {
+        "completed_batches": 192,
+        "completed_evaluations": 3145728,
+        "completed_iterations": 12288,
+        "submitted_batches": 192,
+        "submitted_evaluations": 3145728,
+        "submitted_iterations": 12288
+      }
+    },
+    "interpretation": "partial counters and source-accounted warmups are lower bounds; resets excluded",
+    "logical_evaluations_lower_bound": 46006272,
+    "read_errors": [],
+    "successful_preparations_lower_bound": 39,
+    "warmup_evaluations_source_accounted_lower_bound": 5111808
+  },
+  "all_pairs_retained": true,
+  "reserved_started": false,
+  "candidate_all_workgroup_checker_started": false,
+  "extra_samples": 0,
+  "retries": 0,
+  "rust_builds": 0,
+  "audit": {
+    "audit": "114",
+    "status": "COMPLETE",
+    "data_validity": "PASS",
+    "performance_gate": "REJECT",
+    "adoption": false,
+    "authoritative_run": "run-20261024T160011.004008Z",
+    "checks_passed": 446,
+    "findings": [],
+    "aggregate_ratio": 0.9102155860636119,
+    "interval95": [
+      0.9078128282721665,
+      0.9124921299583041
+    ],
+    "normal_rows": 30,
+    "diagnostics": 6,
+    "qualifications": 3,
+    "snapshots": 18,
+    "parents_checked": 72,
+    "native_errors": 0,
+    "cached_integer_mismatches": 0,
+    "max_f32_fitness_abs_difference": 0.0,
+    "logical_evaluations_lower_bound": 46006272,
+    "warmup_evaluations_source_accounted": 5111808,
+    "preservation": {
+      "root_source_files": 78,
+      "ordinary_binaries": 3,
+      "helpers": 2,
+      "source113_protected_production_files": 10,
+      "private_build100_source_files": 86,
+      "include_records": 41,
+      "embedded_shader_ranges": 6,
+      "named_cohort_raw_files": 64,
+      "distinct_bounded_inputs": 261,
+      "changed_raw_or_protected_paths": []
+    },
+    "statistics": "run-20261024T160011.004008Z/statistics.json",
+    "endpoints": "run-20261024T160011.004008Z/endpoints.json",
+    "inventory_before": "run-20261024T160011.004008Z/inventory-before.json",
+    "inventory_after": "run-20261024T160011.004008Z/inventory-after.json",
+    "retained_earlier_runs": [
+      {
+        "path": "run-20261024T155822.712172Z",
+        "outcome": "Audit bookkeeping exception retained unchanged. Parent-derived analysis.json was outside the named raw inventory. Historical documentation and initial clock status were overconstrained."
+      },
+      {
+        "path": "run-20261024T155935.969472Z",
+        "outcome": "Retained failed audit assertion. Floating-point deadline subtraction differed from 1800 by rounding; final check uses the exact producer expression deadline == monotonic_start + 1800."
+      }
+    ],
+    "documentation_observation": "Parent-authorized post-timing docs/LEARNINGS.md differs from source113 historical named-input hash. Historical bytes match frozen d365ce9. Documentation is outside ten protected production files and raw evidence.",
+    "limitations": [
+      "No scalar rerender, build, compiler, Naga, GPU, profiler, test suite, native launch, or source edit.",
+      "Normal rows save canonical hashes, not state dumps. Eighteen qualification/diagnostic snapshots independently audited.",
+      "Same seed 7 repeats support this conditional screen, not independent search-seed or reserved-drawing claims.",
+      "Compiler FP equality, actual device allocation and lowering cause unknown. Host/GPU background isolation unverified.",
+      "Only frozen protocol d365ce9 and named hashes checked. Concurrent parent report/profile edits allowed; no whole-worktree-clean claim."
+    ],
+    "rerun": "python3 -B .cache/evolution-layout-20261024/result-audit-114/audit.py",
+    "rerun_policy": "Creates a distinct run directory. Existing findings and exceptions remain unchanged."
+  },
+  "artifact_sha256": {
+    ".cache/evolution-layout-20261024/train-result.json": "db64829eadadb1a4d518f63de53b1fcbeb31c3ebd31bcd02b87692929a7e47ad",
+    ".cache/evolution-layout-20261024/analysis.json": "17100a947710eab97f6e9dd859af544a20a042350cb3e9206c2c8e4d718e3535",
+    ".cache/evolution-layout-20261024/spec.json": "9bff03466d2060886677aa90a9796e664d28496bac5aba779de9a45dcb620481",
+    ".cache/evolution-layout-20261024/run-training.py": "aecc062f8dd056c586b3fab654241aac06cd43c709cac01acaffbeb5d457eb63",
+    ".cache/evolution-layout-20261024/train/output/trials.jsonl": "af57102849d6c67278224c3adbd763693d173640efda03e8043101d29efc2e65",
+    ".cache/evolution-layout-20261024/train/output/summary.json": "9008ffbbab9e856d585607fc63e9c461adf53aac9a99aceb4a58ad39a0459ceb",
+    ".cache/evolution-layout-20261024/result-audit-114/audit.json": "589a1e1062a3c6a0c9e7d34d98e7ab1c53050c579049186332c7a8d1edc32223",
+    ".cache/evolution-layout-20261024/result-audit-114/artifacts.json": "6aa7b8775ff8dcc716280a835106db68d2f81b1a21855fb5537a76195b7850ec",
+    ".cache/evolution-layout-20261024/result-audit-114/report.md": "598fb92ec17a1e6a4c3d2c62272d9cb55eb7b25d24eb94169ecf0fcd70d83190"
+  },
+  "limits": [
+    "Training workload uses 32x16 logical raster tiles; no all-five-workgroup or reserved qualification follows rejection.",
+    "Statistics are conditional on repeated same-seed timing; no other hardware or independent search-seed claim.",
+    "Actual compiled allocation, memory transactions, occupancy and lowering cause unknown.",
+    "Stages sample only final iterations; sampled averages are not whole-run shares.",
+    "Prior A/A64 calibration contributes no A/B timing samples; background isolation unverified."
+  ]
+}
