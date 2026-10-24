@@ -1,0 +1,28 @@
+diff --git a/src/shaders/bin_polygons.wgsl b/src/shaders/bin_polygons.wgsl
+index c0f9149..263cf4f 100644
+--- a/src/shaders/bin_polygons.wgsl
++++ b/src/shaders/bin_polygons.wgsl
+@@ -156,19 +156,21 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index)
+     // One lane owns each tile, including its count reset for an empty drawing.
+     for (var tile_id = local_idx; tile_id < num_tiles; tile_id += 32u) {
+         let tile_global = offspring_id * num_tiles + tile_id;
+-        atomicStore(&tile_counts[tile_global], 0u);
++        var raw_count = 0u;
+         let tx = tile_id % num_tiles_x;
+         let ty = tile_id / num_tiles_x;
+ 
+         for (var pi = 0u; pi < poly_count; pi++) {
+             let bounds = polygon_bounds[pi];
+             if tx >= bounds.x && tx < bounds.y && ty >= bounds.z && ty < bounds.w {
+-                let slot = atomicAdd(&tile_counts[tile_global], 1u);
++                let slot = raw_count;
++                raw_count += 1u;
+                 if slot < TILE_MAX_POLYS {
+                     let data_offset = offspring_id * num_tiles * TILE_MAX_POLYS + tile_id * TILE_MAX_POLYS + slot;
+                     tile_data[data_offset] = pi;
+                 }
+             }
+         }
++        atomicStore(&tile_counts[tile_global], raw_count);
+     }
+ }

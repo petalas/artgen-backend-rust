@@ -1,0 +1,30 @@
+diff --git a/src/shaders/bin_polygons.wgsl b/src/shaders/bin_polygons.wgsl
+index c0f9149..e89fc83 100644
+--- a/src/shaders/bin_polygons.wgsl
++++ b/src/shaders/bin_polygons.wgsl
+@@ -130,7 +130,7 @@ fn polygon_tile_bounds(poly: Polygon, w: u32, h: u32, num_tiles_x: u32, num_tile
+     return vec4<u32>(tile_min_x, tile_max_x, tile_min_y, tile_max_y);
+ }
+ 
+-@compute @workgroup_size(32, 1, 1)
++@compute @workgroup_size(256, 1, 1)
+ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) local_idx: u32) {
+     let offspring_id = wid.x;
+     let offspring_count = arrayLength(&working_states);
+@@ -147,14 +147,14 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index)
+     let poly_count = working_states[offspring_id].polygon_count;
+ 
+     // Each consumed slot has exactly one writer, including partial lane batches.
+-    for (var pi = local_idx; pi < poly_count; pi += 32u) {
++    for (var pi = local_idx; pi < poly_count; pi += 256u) {
+         let poly = working_states[offspring_id].polygons[pi];
+         polygon_bounds[pi] = polygon_tile_bounds(poly, w, h, num_tiles_x, num_tiles_y);
+     }
+     workgroupBarrier();
+ 
+     // One lane owns each tile, including its count reset for an empty drawing.
+-    for (var tile_id = local_idx; tile_id < num_tiles; tile_id += 32u) {
++    for (var tile_id = local_idx; tile_id < num_tiles; tile_id += 256u) {
+         let tile_global = offspring_id * num_tiles + tile_id;
+         atomicStore(&tile_counts[tile_global], 0u);
+         let tx = tile_id % num_tiles_x;
