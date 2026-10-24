@@ -1,0 +1,145 @@
+--- a/contract/run-campaign.py
++++ b/contract/run-campaign.py
+@@ -1,6 +1,6 @@
+ #!/usr/bin/env python3
+-"""Import-only validation for prepared raster kernel evidence.
++"""Import-only validation for prepared kernel evidence with an explicit shader stage.
+ 
+ No scheduling, clock creation, evidence writes, or executable launch is provided.
+ The parent freezes each phase specification and owns all execution.
+ """
+@@ -177,9 +177,10 @@
+     for key in ("allocated_chains", "offspring_capacity", "max_storage_buffer_binding_size", "max_buffer_size"):
+         require(type(gpu[key]) is int and 0 < gpu[key] <= 2**64 - 1, f"invalid GPU {key}")
+ 
+ 
+-def validate_row(row, phase, reference, diagnostic=False, *, source_sha256=AE1, manifest_hash=MANIFEST):
++def validate_row(row, phase, reference, diagnostic=False, *, source_sha256=AE1,
++                 manifest_hash=MANIFEST, shader_stage="raster"):
+     _, cases, seed, batches, enabled, candidate = phase
+     require(row.get("schema") == "engine-lab-prepared-v2", "wrong row schema")
+     require(row.get("case_id") in cases, "wrong row case")
+     for key, expected in (("seed", seed), ("batches", batches), ("warmup_batches", 8),
+@@ -187,9 +188,10 @@
+                           ("error_count", 0), ("mutate_group_size", 1),
+                           ("mutate_zero_initialize_workgroup_memory", True)):
+         require(type(row.get(key)) is type(expected) and row[key] == expected, f"wrong row {key}")
+     require(row.get("errors") == [] and row.get("timestamp_mode") == "stages", "row errors/mode")
+-    require(row.get("shader_stage") == "raster", "wrong shader stage")
++    require(shader_stage in ("bin", "raster", "mutate")
++            and row.get("shader_stage") == shader_stage, "wrong shader stage")
+     require(row.get("variant") in ("reference", candidate), "wrong arm")
+     actual = enabled and row["variant"] == candidate
+     require(type(row.get("finalize_overlap")) is bool and row["finalize_overlap"] == actual,
+             "wrong actual installed overlap mode")
+@@ -216,14 +218,34 @@
+         rate = finite(row.get("evals_per_second"), True)
+         require(math.isclose(rate, batches * 16384 / row["elapsed_seconds"], rel_tol=1e-6), "wrong rate")
+ 
+ 
++def phase_stage(spec):
++    stage = spec.get("shader_stage", "raster")
++    require(type(stage) is str and stage in ("bin", "raster", "mutate"), "unsupported shader stage")
++    return stage
++
++
++def validate_source_options(source, stage):
++    if stage == "mutate":
++        options = source.get("mutate_options")
++        require(type(source.get("mutate_group_size")) is int and source["mutate_group_size"] == 1,
++                "mutation source must retain G1")
++        require(type(options) is dict and set(options) == {"zero_initialize_workgroup_memory"}
++                and options["zero_initialize_workgroup_memory"] is True,
++                "mutation source must retain initialization TRUE")
++    else:
++        require(source.get("mutate_group_size") is None and source.get("mutate_options") is None,
++                "unexpected mutation source override")
++
++
+ def phase_identities(spec, phase):
+     """Resolve one frozen phase's manifest and arm identities at the boundary.
+ 
+     The legacy shader-only shape supports read-only 106 regression fixtures.
+     Explicit source identities require the kernel experiment's false modes.
+     """
++    phase_stage(spec)
+     identity = spec["identities"]
+     fields = ("reference_shader", "reference_sha256", "candidate_shader", "candidate_sha256")
+     explicit = any(field in identity for field in fields)
+     if explicit:
+@@ -247,8 +269,9 @@
+ 
+ def validate_summary(summary, phase, spec):
+     _, cases, seed, batches, enabled, candidate = phase
+     manifest, manifest_hash, sources_expected = phase_identities(spec, phase)
++    stage = phase_stage(spec)
+     require(summary.get("schema") == spec["schema"] and summary.get("status") == "completed",
+             "native summary incomplete/schema mismatch")
+     require(type(summary.get("error_count")) is int and summary["error_count"] == 0
+             and summary.get("errors") == [], "native summary errors")
+@@ -258,9 +281,9 @@
+     for key, expected in (("completed_trials", 10 * len(cases)), ("expected_trials", 10 * len(cases)),
+                           ("completed_diagnostics", 2 * len(cases)), ("expected_diagnostics", 2 * len(cases))):
+         require(type(summary.get(key)) is int and summary[key] == expected, f"wrong summary {key}")
+     config = summary["config"]
+-    for key, value in (("pairs", 5), ("batches", batches), ("seed", seed), ("shader_stage", "raster"),
++    for key, value in (("pairs", 5), ("batches", batches), ("seed", seed), ("shader_stage", stage),
+                        ("diagnostics", True), ("finalize_overlap", enabled),
+                        ("case", "all" if len(cases) == 3 else cases[0]), ("mutate_zero_initialize", None)):
+         require(type(config.get(key)) is type(value) and config[key] == value, f"wrong config {key}")
+     require(config.get("manifest") == manifest, "config manifest differs")
+@@ -271,13 +294,12 @@
+     require(len(sources) == 2, "wrong source count")
+     for source, name, mode in zip(sources, ("reference", candidate), (False, enabled), strict=True):
+         path, digest = sources_expected[name]
+         require(source.get("name") == name and source.get("sha256") == digest
+-                and source.get("path") == path and source.get("shader_stage") == "raster"
++                and source.get("path") == path and source.get("shader_stage") == stage
+                 and type(source.get("finalize_overlap")) is bool and source["finalize_overlap"] == mode,
+                 "source identity/expected mode mismatch")
+-        require(source.get("mutate_group_size") is None and source.get("mutate_options") is None,
+-                "unexpected mutation source override")
++        validate_source_options(source, stage)
+     require([c.get("case_id") for c in summary["cases"]] == list(cases), "summary case coverage")
+     check_work(summary["diagnostic_counters"], batches * 2 * len(cases))
+ 
+ 
+@@ -328,8 +350,9 @@
+ 
+ 
+ def validate_phase(compare, b, folder, phase, spec, fixtures, gpu_identities):
+     _, manifest_hash, sources_expected = phase_identities(spec, phase)
++    stage = phase_stage(spec)
+     output = folder / "output"
+     summary = b.object_value(b.read_json(output / "summary.json", 2 * 1024 * 1024), "native summary")
+     validate_summary(summary, phase, spec)
+     require(summary["config"].get("output") == str(output), "output path mismatch")
+@@ -374,9 +397,10 @@
+     for rows, diagnostic in ((normal, False), (diagnostics, True)):
+         for row in rows:
+             require(row.get("candidate") == (row["variant"] if diagnostic else candidate), "candidate mismatch")
+             validate_row(row, phase, references[row["case_id"]], diagnostic,
+-                         source_sha256=sources_expected[row["variant"]][1], manifest_hash=manifest_hash)
++                         source_sha256=sources_expected[row["variant"]][1],
++                         manifest_hash=manifest_hash, shader_stage=stage)
+             require(row.get("setup_timing_boundaries") == summary.get("setup_timing_boundaries")
+                     == references[row["case_id"]].get("setup_timing_boundaries")
+                     and bool(row.get("setup_timing_boundaries")), "startup clock labels mismatch")
+             if diagnostic:
+@@ -451,13 +475,14 @@
+         c["completed_evaluations"] for c in result["category_counters"].values())
+     return result
+ 
+ 
+-def command_for(binary, manifest, shader, folder, phase, *, candidate_shader):
++def command_for(binary, manifest, shader, folder, phase, *, candidate_shader, shader_stage="raster"):
+     """Build a command only; the caller owns admission and execution."""
+     _, cases, seed, batches, enabled, candidate = phase
++    require(shader_stage in ("bin", "raster", "mutate"), "unsupported shader stage")
+     require(enabled is False, "kernel experiment requires both overlap modes false")
+     return [str(binary), "--manifest", str(manifest), "--reference-shader", str(shader),
+             "--variant", f"{candidate}={candidate_shader}", "--output", str(folder / "output"),
+             "--pairs", "5", "--batches", str(batches), "--seed", str(seed),
+-            "--case", "all" if len(cases) == 3 else cases[0], "--shader-stage", "raster",
++            "--case", "all" if len(cases) == 3 else cases[0], "--shader-stage", shader_stage,
+             "--diagnostics", "true", "--finalize-overlap", "false"]

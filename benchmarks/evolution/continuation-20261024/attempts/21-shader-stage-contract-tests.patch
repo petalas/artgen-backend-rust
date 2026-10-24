@@ -1,0 +1,102 @@
+--- /dev/null
++++ b/contract/test-stage.py
+@@ -0,0 +1,99 @@
++"""Synthetic stage-wire contracts plus read-only propagation over retained A/A data."""
++import copy
++import importlib.util
++from pathlib import Path
++import unittest
++from unittest.mock import patch
++
++HERE = Path(__file__).resolve().parent
++LOADER = importlib.util.spec_from_file_location("base_kernel_tests", HERE / "test-kernel.py")
++K = importlib.util.module_from_spec(LOADER)
++LOADER.loader.exec_module(K)
++C = K.C
++
++
++class StageContract(unittest.TestCase):
++    @classmethod
++    def setUpClass(cls):
++        K.KernelContract.setUpClass()
++        cls.base = K.KernelContract
++
++    def summary_for(self, stage):
++        summary = copy.deepcopy(self.base.summary)
++        summary["config"]["shader_stage"] = stage
++        for source in summary["sources"]:
++            source["shader_stage"] = stage
++            source["mutate_group_size"] = 1 if stage == "mutate" else None
++            source["mutate_options"] = ({"zero_initialize_workgroup_memory": True}
++                                        if stage == "mutate" else None)
++        return summary
++
++    def test_explicit_stage_summary_and_command(self):
++        for stage in ("bin", "raster", "mutate"):
++            spec = dict(self.base.spec, shader_stage=stage)
++            C.validate_summary(self.summary_for(stage), self.base.phase, spec)
++            ident = spec["identities"]
++            command = C.command_for(Path("/unused/binary"), Path(ident["manifest"]),
++                                    Path(ident["reference_shader"]), HERE / "unused", self.base.phase,
++                                    candidate_shader=Path(ident["candidate_shader"]), shader_stage=stage)
++            self.assertEqual(command[command.index("--shader-stage") + 1], stage)
++            self.assertEqual(command[command.index("--finalize-overlap") + 1], "false")
++            with self.assertRaises(C.Invalid):
++                C.validate_summary(self.base.summary, self.base.phase,
++                                   dict(self.base.spec, shader_stage="mutate"))
++
++    def test_mutation_metadata_cannot_select_other_group_or_policy(self):
++        spec = dict(self.base.spec, shader_stage="mutate")
++        valid = self.summary_for("mutate")
++        C.validate_summary(valid, self.base.phase, spec)
++        for field, value in (("mutate_group_size", None), ("mutate_group_size", True),
++                             ("mutate_group_size", 64), ("mutate_options", None),
++                             ("mutate_options", {"zero_initialize_workgroup_memory": False}),
++                             ("mutate_options", {"zero_initialize_workgroup_memory": 1}),
++                             ("mutate_options", {"zero_initialize_workgroup_memory": True, "extra": 0})):
++            for arm in range(2):
++                bad = copy.deepcopy(valid)
++                bad["sources"][arm][field] = value
++                with self.subTest(field=field, value=value, arm=arm), self.assertRaises(C.Invalid):
++                    C.validate_summary(bad, self.base.phase, spec)
++
++    def test_unknown_stage_and_wrong_row_stage_are_rejected(self):
++        row = dict(self.base.rows[0], shader_stage="mutate")
++        C.validate_row(row, self.base.phase, self.base.records["ff"], shader_stage="mutate")
++        for stage in (None, True, "select", "Mutate", ""):
++            with self.subTest(stage=stage), self.assertRaises(C.Invalid):
++                C.validate_summary(self.summary_for("mutate"), self.base.phase,
++                                   dict(self.base.spec, shader_stage=stage))
++        for stage in ("bin", "raster"):
++            with self.assertRaises(C.Invalid):
++                C.validate_row(row, self.base.phase, self.base.records["ff"], shader_stage=stage)
++
++    def test_stage_propagates_through_full_phase_without_relaxing_other_evidence(self):
++        # Only JSON stage fields are converted in memory. This is no native mutation proof.
++        original_read = self.base.b.read_json
++        original_lines = C.read_lines
++        for stage in ("bin", "mutate"):
++            summary = self.summary_for(stage)
++
++            def read_json(path, *args, _summary=summary, _stage=stage, **kwargs):
++                if path == self.base.output / "summary.json":
++                    return copy.deepcopy(_summary)
++                data = original_read(path, *args, **kwargs)
++                if path.name == "result.json" and path.parent.name.startswith("diagnostic-"):
++                    data = dict(data, shader_stage=_stage)
++                return data
++
++            def read_lines(b, path, maximum, _stage=stage):
++                return [dict(row, shader_stage=_stage) for row in original_lines(b, path, maximum)]
++
++            with patch.object(self.base.b, "read_json", side_effect=read_json), \
++                 patch.object(C, "read_lines", side_effect=read_lines):
++                result = C.validate_phase(self.base.compare, self.base.b, self.base.output.parent,
++                                          self.base.phase, dict(self.base.spec, shader_stage=stage),
++                                          self.base.fixtures, {})
++                self.assertTrue(result["valid"])
++                self.assertEqual(result["work"]["logical_evaluations_lower_bound"], 46006272)
++
++
++if __name__ == "__main__":
++    unittest.main(verbosity=2)

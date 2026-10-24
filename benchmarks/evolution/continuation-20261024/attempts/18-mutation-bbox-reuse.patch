@@ -1,0 +1,21 @@
+--- a/src/shaders/mutate.wgsl
++++ b/src/shaders/mutate.wgsl
+@@ -437,6 +437,7 @@
+     if c == 0u { return full_image_bbox(); }
+     let pi = rand_u32(rng, c);
+     var poly = working_states[oid].polygons[pi];
++    let old_vertices = poly.data.yzw;
+     let old_bbox = polygon_bbox_pixels(poly, w, h);
+     var color = unpack_color(poly);
+     var v0 = unpack_vertex(poly.data.y);
+@@ -547,6 +548,10 @@
+     // Repack and write back
+     poly.data = vec4<u32>(pack_color(color), pack_vertex(v0), pack_vertex(v1), pack_vertex(v2));
+     working_states[oid].polygons[pi] = poly;
++    // Identical packed geometry has the same bbox, regardless of color.
++    if all(poly.data.yzw == old_vertices) {
++        return old_bbox;
++    }
+     // For per-polygon mutations (vertex/color changes), dirty region is union of old and new bbox
+     return merge_bbox(old_bbox, polygon_bbox_pixels(poly, w, h));
+ }
