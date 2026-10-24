@@ -1,0 +1,240 @@
+--- a/src/shaders/rasterize_error.wgsl
++++ b/src/shaders/rasterize_error.wgsl
+@@ -1,4 +1,5 @@
+-// SOURCE-ONLY PROTOTYPE: serial pixels per physical lane, same logical raster tile.
+-// Dispatch and binning remain (ceil(W/WG_X), ceil(H/WG_Y), K*lambda).
++// CACHE-ONLY PROTOTYPE: serial adjacent original raster tiles per workgroup.
++// Raster dispatch: (ceil(ceil(W/WG_X)/T), ceil(H/WG_Y), K*lambda).
++// Binning, tile buffers, original strides, and framebuffer update grids stay unchanged.
+ // 1D workgroup layout is retained for subgroup intrinsics.
+ // Each lane owns ordinal local_idx + k*PHYSICAL_LANES, within WG_X*WG_Y.
+@@ -15,4 +16,5 @@
+ const PHYSICAL_LANES: u32 = min(256u, THREAD_COUNT);
+ const TILE_MAX_POLYS: u32 = 256u;
++const RASTER_TILES_PER_GROUP: u32 = 4u;
+ 
+ struct Polygon {
+@@ -134,10 +136,5 @@
+ var<workgroup> shared_errors: array<u32, 128>;      // only num_subgroups entries are used
+ var<workgroup> shared_errors_old: array<u32, 128>;  // old errors for incremental eval
+-var<workgroup> shared_skip_tile: u32;               // set by thread 0 if tile is outside dirty bbox
+-// Dirty bbox unpacked from offspring header (set by thread 0, read after barrier)
+-var<workgroup> shared_dirty_min_x: u32;
+-var<workgroup> shared_dirty_min_y: u32;
+-var<workgroup> shared_dirty_max_x: u32;
+-var<workgroup> shared_dirty_max_y: u32;
++var<workgroup> shared_skip_mask: u32; // lane 0 writes once, then immutable
+ 
+ // Half-space edge function: positive if point (px,py) is on the left side of edge (ax,ay)->(bx,by)
+@@ -253,102 +250,116 @@
+     let parent_chain = chain_id / lambda;
+ 
+-    // --- Dirty bbox tile skip ---
+-    // Thread 0 reads the dirty bbox from offspring header and checks if this tile overlaps.
+-    // Workgroups fully outside the dirty region early-exit (major perf win for single mutations).
+-    if local_idx == 0u {
+-        let bbox_lo = working_states[chain_id].fitness_bits;
+-        let bbox_hi = working_states[chain_id].stagnation_counter;
+-        shared_dirty_min_x = bbox_lo & 0xFFFFu;
+-        shared_dirty_min_y = (bbox_lo >> 16u) & 0xFFFFu;
+-        shared_dirty_max_x = bbox_hi & 0xFFFFu;
+-        shared_dirty_max_y = (bbox_hi >> 16u) & 0xFFFFu;
+-
+-        let tile_min_x = wid.x * WG_X;
+-        let tile_min_y = wid.y * WG_Y;
+-        let tile_max_x = min(tile_min_x + WG_X, w);
+-        let tile_max_y = min(tile_min_y + WG_Y, h);
+-
+-        let no_overlap = tile_max_x <= shared_dirty_min_x || tile_min_x >= shared_dirty_max_x ||
+-                         tile_max_y <= shared_dirty_min_y || tile_min_y >= shared_dirty_max_y;
+-        shared_skip_tile = select(0u, 1u, no_overlap);
+-    }
+-
+-    workgroupBarrier();
+-    if shared_skip_tile == 1u {
+-        return;
+-    }
+-
+-    // Tile metadata — workgroup-uniform, computed by all threads.
+-    // Must be outside the pixel bounds check so all threads (including those in
+-    // partial tiles with px >= w) participate in shared memory loads and barriers.
+     let chain_count = arrayLength(&working_states);
+     let num_tiles_x = (w + WG_X - 1u) / WG_X;
+     let num_tiles_y = (h + WG_Y - 1u) / WG_Y;
+     let num_tiles = num_tiles_x * num_tiles_y;
+-    let tile_id = wid.y * num_tiles_x + wid.x;
+-
+-    var tile_poly_count = 0u;
+-    var tile_data_base = 0u;
+-    if chain_id < chain_count {
+-        let tile_global = chain_id * num_tiles + tile_id;
+-        tile_poly_count = min(tile_counts_buf[tile_global], TILE_MAX_POLYS);
+-        tile_data_base = chain_id * num_tiles * TILE_MAX_POLYS + tile_id * TILE_MAX_POLYS;
+-    }
+-
+-    // Tile-culled rasterization: ALL threads participate in shared memory loads
+-    // (critical for partial tiles where out-of-bounds threads are responsible
+-    // for loading polygon slots that in-bounds threads need for rasterization).
+-    for (var slot = local_idx; slot < tile_poly_count; slot += PHYSICAL_LANES) {
+-        let poly_idx = tile_data[tile_data_base + slot];
+-        let poly = working_states[chain_id].polygons[poly_idx];
+-        let pv0 = unpack_vertex(poly.data.y);
+-        let pv1 = unpack_vertex(poly.data.z);
+-        let pv2 = unpack_vertex(poly.data.w);
+-
+-        let bb_min_x = min(pv0.x, min(pv1.x, pv2.x));
+-        let bb_max_x = max(pv0.x, max(pv1.x, pv2.x));
+-        let bb_min_y = min(pv0.y, min(pv1.y, pv2.y));
+-        let bb_max_y = max(pv0.y, max(pv1.y, pv2.y));
+-        shared_polys[slot] = DecodedPolygon(
+-            pv0, pv1, pv2, bb_min_x, bb_max_x, bb_min_y, bb_max_y, poly.data.x);
+-    }
+-    workgroupBarrier();
+-
+-    // Each ordinal belongs to one physical lane; only integer L1 crosses pixels.
+-    var pixel_error = 0u;
+-    var pixel_error_old = 0u;
+-    for (var ordinal = local_idx; ordinal < THREAD_COUNT; ordinal += PHYSICAL_LANES) {
+-        let px = wid.x * WG_X + ordinal % WG_X;
+-        let py = wid.y * WG_Y + ordinal / WG_X;
+-        let valid_pixel = px < w && py < h && chain_id < chain_count;
+-        let errors = pixel_errors(px, py, w, h, parent_chain, tile_poly_count, valid_pixel);
+-        pixel_error += errors.x;
+-        pixel_error_old += errors.y;
+-    }
+-
+-    // Subgroup leaders write distinct, dense slots before thread 0 sums them.
+-    // Subgroup IDs cannot be inferred from local invocation indices.
+-    let sg_sum = subgroupAdd(pixel_error);
+-    if sg_inv_id == 0u {
+-        shared_errors[sg_idx] = sg_sum;
+-    }
+-
+-    let sg_sum_old = subgroupAdd(pixel_error_old);
+-    if sg_inv_id == 0u {
+-        shared_errors_old[sg_idx] = sg_sum_old;
+-    }
+-
+-    workgroupBarrier();
+-
+-    // Thread 0 sums across subgroups and atomicAdds to chain's accumulator (stride-2)
++
++    // Padding is rejected before tile metadata. Preserve the strict AE1 predicate,
++    // including zero-width and inverted dirty boxes, without endpoint normalization.
+     if local_idx == 0u {
+-        var total = 0u;
+-        var total_old = 0u;
+-        for (var i = 0u; i < num_subgroups; i++) {
+-            total += shared_errors[i];
+-            total_old += shared_errors_old[i];
+-        }
+-        atomicAdd(&error_accumulators[chain_id * 2u], total);
+-        atomicAdd(&error_accumulators[chain_id * 2u + 1u], total_old);
+-    }
+-}
++        let bbox_lo = working_states[chain_id].fitness_bits;
++        let bbox_hi = working_states[chain_id].stagnation_counter;
++        let dirty_min_x = bbox_lo & 0xFFFFu;
++        let dirty_min_y = (bbox_lo >> 16u) & 0xFFFFu;
++        let dirty_max_x = bbox_hi & 0xFFFFu;
++        let dirty_max_y = (bbox_hi >> 16u) & 0xFFFFu;
++        var mask = 0u;
++        for (var s = 0u; s < RASTER_TILES_PER_GROUP; s++) {
++            let mask_tile_x = wid.x * RASTER_TILES_PER_GROUP + s;
++            if mask_tile_x >= num_tiles_x {
++                mask |= 1u << s;
++                continue;
++            }
++            let tile_min_x = mask_tile_x * WG_X;
++            let tile_min_y = wid.y * WG_Y;
++            let tile_max_x = min(tile_min_x + WG_X, w);
++            let tile_max_y = min(tile_min_y + WG_Y, h);
++            let no_overlap = tile_max_x <= dirty_min_x || tile_min_x >= dirty_max_x ||
++                             tile_max_y <= dirty_min_y || tile_min_y >= dirty_max_y;
++            if no_overlap {
++                mask |= 1u << s;
++            }
++        }
++        shared_skip_mask = mask;
++    }
++    let skip_mask = workgroupUniformLoad(&shared_skip_mask);
++    if skip_mask == (1u << RASTER_TILES_PER_GROUP) - 1u {
++        return;
++    }
++
++    for (var tile_offset = 0u; tile_offset < RASTER_TILES_PER_GROUP; tile_offset++) {
++        if (skip_mask & (1u << tile_offset)) != 0u {
++            continue;
++        }
++        let tile_x = wid.x * RASTER_TILES_PER_GROUP + tile_offset;
++        let tile_id = wid.y * num_tiles_x + tile_x;
++        var tile_poly_count = 0u;
++        var tile_data_base = 0u;
++        if chain_id < chain_count {
++            let tile_global = chain_id * num_tiles + tile_id;
++            tile_poly_count = min(tile_counts_buf[tile_global], TILE_MAX_POLYS);
++            tile_data_base = chain_id * num_tiles * TILE_MAX_POLYS + tile_id * TILE_MAX_POLYS;
++        }
++
++        // Tile-culled rasterization: ALL threads participate in shared memory loads
++        // (critical for partial tiles where out-of-bounds threads are responsible
++        // for loading polygon slots that in-bounds threads need for rasterization).
++        for (var slot = local_idx; slot < tile_poly_count; slot += PHYSICAL_LANES) {
++            let poly_idx = tile_data[tile_data_base + slot];
++            let poly = working_states[chain_id].polygons[poly_idx];
++            let pv0 = unpack_vertex(poly.data.y);
++            let pv1 = unpack_vertex(poly.data.z);
++            let pv2 = unpack_vertex(poly.data.w);
++
++            let bb_min_x = min(pv0.x, min(pv1.x, pv2.x));
++            let bb_max_x = max(pv0.x, max(pv1.x, pv2.x));
++            let bb_min_y = min(pv0.y, min(pv1.y, pv2.y));
++            let bb_max_y = max(pv0.y, max(pv1.y, pv2.y));
++            shared_polys[slot] = DecodedPolygon(
++                pv0, pv1, pv2, bb_min_x, bb_max_x, bb_min_y, bb_max_y, poly.data.x);
++        }
++        workgroupBarrier();
++
++        // Each ordinal belongs to one physical lane; only integer L1 crosses pixels.
++        var pixel_error = 0u;
++        var pixel_error_old = 0u;
++        for (var ordinal = local_idx; ordinal < THREAD_COUNT; ordinal += PHYSICAL_LANES) {
++            let px = tile_x * WG_X + ordinal % WG_X;
++            let py = wid.y * WG_Y + ordinal / WG_X;
++            let valid_pixel = px < w && py < h && chain_id < chain_count;
++            let errors = pixel_errors(px, py, w, h, parent_chain, tile_poly_count, valid_pixel);
++            pixel_error += errors.x;
++            pixel_error_old += errors.y;
++        }
++
++        // Subgroup leaders write distinct, dense slots before thread 0 sums them.
++        // Subgroup IDs cannot be inferred from local invocation indices.
++        let sg_sum = subgroupAdd(pixel_error);
++        if sg_inv_id == 0u {
++            shared_errors[sg_idx] = sg_sum;
++        }
++
++        let sg_sum_old = subgroupAdd(pixel_error_old);
++        if sg_inv_id == 0u {
++            shared_errors_old[sg_idx] = sg_sum_old;
++        }
++
++        workgroupBarrier();
++
++        // Thread 0 sums across subgroups and atomicAdds to chain's accumulator (stride-2)
++        if local_idx == 0u {
++            var total = 0u;
++            var total_old = 0u;
++            for (var i = 0u; i < num_subgroups; i++) {
++                total += shared_errors[i];
++                total_old += shared_errors_old[i];
++            }
++            atomicAdd(&error_accumulators[chain_id * 2u], total);
++            atomicAdd(&error_accumulators[chain_id * 2u + 1u], total_old);
++        }
++        // The final reduction barrier completes every previous polygon read before
++        // the next cache write. The next cache-load barrier waits for lane 0's
++        // previous error reads before any next-tile error-array write. Skipped
++        // iterations write nothing, and skip_mask never changes. No end barrier.
++    }
++}

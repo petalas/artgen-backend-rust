@@ -18,7 +18,9 @@ use crate::settings::{
     GPU_MAX_BATCH_ITERS, GPU_MAX_LAMBDA, MAX_POLYGONS_PER_IMAGE, TILE_MAX_POLYS,
 };
 
-pub use super::pipeline::benchmark_mutate_group_size_from_source;
+pub use super::pipeline::{
+    benchmark_mutate_group_size_from_source, benchmark_raster_tiles_per_group_from_source,
+};
 
 const MAX_WARMUP_BATCHES: u32 = 1024;
 const READBACK_TIMEOUT: Duration = Duration::from_secs(120);
@@ -255,6 +257,12 @@ impl GpuEvolver {
     #[must_use]
     pub fn benchmark_mutate_group_size(&self) -> u32 {
         self.pipeline.mutate_group_size
+    }
+
+    /// Actual logical tile grouping retained with the selected raster pipeline.
+    #[must_use]
+    pub fn benchmark_raster_tiles_per_group(&self) -> u32 {
+        self.pipeline.raster_tiles_per_group()
     }
 
     /// Install a lab bin shader while drained, retaining device, layouts and buffers.

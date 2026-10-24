@@ -40,6 +40,29 @@ struct BenchmarkMutatePipeline {
 struct BenchmarkRasterKey {
     source: Arc<str>,
     wg: [u32; 2],
+    tiles_per_group: u32,
+}
+
+impl BenchmarkRasterKey {
+    fn new(source: Arc<str>, wg: [u32; 2]) -> Result<Self, String> {
+        validate_benchmark_raster_source(&source)?;
+        let tiles_per_group = benchmark_raster_tiles_per_group_from_source(&source)?;
+        Ok(Self {
+            source,
+            wg,
+            tiles_per_group,
+        })
+    }
+}
+
+/// Read-only snapshot of the installed raster factory specialization.
+/// Compilation options come from the same policy used for the active pipeline.
+pub struct BenchmarkRasterResources {
+    pub pipeline: ComputePipeline,
+    pub source: String,
+    pub wg: [u32; 2],
+    pub tiles_per_group: u32,
+    pub compilation_options: PipelineCompilationOptions<'static>,
 }
 
 struct BenchmarkRasterPipeline {
@@ -99,6 +122,7 @@ pub struct GpuPipeline {
     rasterize_error_shader: ShaderModule,
     rasterize_error_pipeline_layout: PipelineLayout,
     benchmark_raster_source: Option<Arc<str>>,
+    raster_tiles_per_group: u32,
     benchmark_raster_pipelines: Vec<BenchmarkRasterPipeline>,
 
     // Bin polygons pipeline recreation support (tile size must match rasterize WG)
@@ -159,6 +183,11 @@ impl GpuPipeline {
         let mutate_source = include_str!("../shaders/mutate.wgsl");
         let mutate_group_size = benchmark_mutate_group_size_from_source(mutate_source)
             .expect("bundled mutation source must have valid group metadata");
+
+        let raster_tiles_per_group = benchmark_raster_tiles_per_group_from_source(
+            include_str!("../shaders/rasterize_error.wgsl"),
+        )
+        .expect("bundled raster source must have valid tile metadata");
 
         // --- Device + Queue ---
         // Exclude GL/GLES — EGL conflicts with SDL2's display context.
@@ -1037,6 +1066,7 @@ impl GpuPipeline {
             rasterize_error_shader,
             rasterize_error_pipeline_layout,
             benchmark_raster_source: None,
+            raster_tiles_per_group,
             benchmark_raster_pipelines: Vec::new(),
             bin_polygons_pipeline_layout,
             benchmark_bin_source: None,
@@ -1104,18 +1134,21 @@ impl GpuPipeline {
             "Recreating rasterize_error + bin_polygons pipelines: {}x{} -> {}x{}",
             self.rasterize_wg[0], self.rasterize_wg[1], wg[0], wg[1]
         );
-        let (pipeline, shader) = if let Some(source) = self.benchmark_raster_source.clone() {
-            self.cached_benchmark_raster(source, wg)?
-        } else {
-            create_rasterize_pipeline(
-                &self.device,
-                &self.rasterize_error_pipeline_layout,
-                wg,
-                &self.pipeline_cache,
-            )
-        };
+        let (pipeline, shader, tiles_per_group) =
+            if let Some(source) = self.benchmark_raster_source.clone() {
+                self.cached_benchmark_raster(source, wg)?
+            } else {
+                let (pipeline, shader) = create_rasterize_pipeline(
+                    &self.device,
+                    &self.rasterize_error_pipeline_layout,
+                    wg,
+                    &self.pipeline_cache,
+                );
+                (pipeline, shader, self.raster_tiles_per_group)
+            };
         self.rasterize_error_pipeline = pipeline;
         self.rasterize_error_shader = shader;
+        self.raster_tiles_per_group = tiles_per_group;
 
         self.bin_polygons_pipeline = bin;
 
@@ -1195,33 +1228,75 @@ impl GpuPipeline {
         Ok(pipeline)
     }
 
-    pub(super) fn set_benchmark_raster_shader(&mut self, source: &str) -> Result<(), String> {
+    /// Install a raster source through the engine's specialization and pipeline cache.
+    ///
+    /// The caller must own this pipeline exclusively and drain submitted GPU work
+    /// before calling. Source-derived tile grouping survives prepares, workgroup
+    /// changes and diagnostics. Production compilation options remain in force.
+    ///
+    /// # Errors
+    /// Rejects invalid metadata or specialization markers, exhausted cache and GPU
+    /// compilation errors. Active source, pipeline and tile grouping stay unchanged.
+    pub fn set_benchmark_raster_shader(&mut self, source: &str) -> Result<(), String> {
         validate_benchmark_raster_source(source)?;
         let source = self
             .benchmark_raster_pipelines
             .iter()
             .find(|entry| entry.key.source.as_ref() == source)
             .map_or_else(|| Arc::from(source), |entry| Arc::clone(&entry.key.source));
-        let (pipeline, shader) =
+        let (pipeline, shader, tiles_per_group) =
             self.cached_benchmark_raster(Arc::clone(&source), self.rasterize_wg)?;
         self.rasterize_error_pipeline = pipeline;
         self.rasterize_error_shader = shader;
         self.benchmark_raster_source = Some(source);
+        self.raster_tiles_per_group = tiles_per_group;
         Ok(())
+    }
+
+    /// Actual logical tile grouping retained with the active raster pipeline.
+    #[must_use]
+    pub fn raster_tiles_per_group(&self) -> u32 {
+        self.raster_tiles_per_group
+    }
+
+    /// Direct raster X groups for a width, using the active logical tile and source.
+    /// Framebuffer updates and binning must retain the full original tile grid.
+    #[must_use]
+    pub fn raster_dispatch_x_for_width(&self, width: u32) -> u32 {
+        raster_dispatch_x(width, self.rasterize_wg[0], self.raster_tiles_per_group)
+    }
+
+    /// Snapshot the actual installed handle, specialized source, shape and options.
+    /// Uses the factory specializer and option helper without an independent policy.
+    #[must_use]
+    pub fn benchmark_raster_resources(&self) -> BenchmarkRasterResources {
+        let source = self.benchmark_raster_source.as_deref()
+            .unwrap_or(include_str!("../shaders/rasterize_error.wgsl"));
+        BenchmarkRasterResources {
+            pipeline: self.rasterize_error_pipeline.clone(),
+            source: specialize_raster_source(source, self.rasterize_wg),
+            wg: self.rasterize_wg,
+            tiles_per_group: self.raster_tiles_per_group,
+            compilation_options: rasterize_compilation_options(&self.device),
+        }
     }
 
     fn cached_benchmark_raster(
         &mut self,
         source: Arc<str>,
         wg: [u32; 2],
-    ) -> Result<(ComputePipeline, ShaderModule), String> {
-        let key = BenchmarkRasterKey { source, wg };
+    ) -> Result<(ComputePipeline, ShaderModule, u32), String> {
+        let key = BenchmarkRasterKey::new(source, wg)?;
         if let Some(entry) = self
             .benchmark_raster_pipelines
             .iter()
             .find(|entry| entry.key == key)
         {
-            return Ok((entry.pipeline.clone(), entry.shader.clone()));
+            return Ok((
+                entry.pipeline.clone(),
+                entry.shader.clone(),
+                entry.key.tiles_per_group,
+            ));
         }
         if self.benchmark_raster_pipelines.len() == MAX_BENCHMARK_RASTER_PIPELINES {
             return Err("benchmark raster pipeline cache is full".into());
@@ -1238,13 +1313,14 @@ impl GpuPipeline {
         } else {
             self.compile_benchmark_raster(&key.source, wg)?
         };
+        let tiles_per_group = key.tiles_per_group;
         self.benchmark_raster_pipelines
             .push(BenchmarkRasterPipeline {
                 key,
                 pipeline: pipeline.clone(),
                 shader: shader.clone(),
             });
-        Ok((pipeline, shader))
+        Ok((pipeline, shader, tiles_per_group))
     }
 
     fn compile_benchmark_raster(
@@ -1529,6 +1605,59 @@ fn next_mutate_source_token<'a>(
     Ok(None)
 }
 
+/// Parse exact raster tile grouping without compiling or rewriting WGSL.
+/// Sources with no code marker use one tile; comments cannot supply metadata.
+///
+/// # Errors
+/// Rejects empty/oversized sources, malformed or duplicate declarations, unsupported
+/// literals, code references without a declaration, and unterminated block comments.
+pub fn benchmark_raster_tiles_per_group_from_source(source: &str) -> Result<u32, String> {
+    const NAME: &str = "RASTER_TILES_PER_GROUP";
+    const PREFIX: &str = "const RASTER_TILES_PER_GROUP: u32 = ";
+    if source.is_empty() || source.len() > MAX_BENCHMARK_SOURCE_BYTES {
+        return Err("raster shader must contain 1..262144 bytes".into());
+    }
+    let mut tiles = None;
+    let mut seen_code_marker = false;
+    let mut offset = 0;
+    let mut previous = (0, "");
+    while let Some((start, token)) = next_mutate_source_token(source, &mut offset)? {
+        if token == NAME {
+            seen_code_marker = true;
+            if previous.1 == "const" {
+                if tiles.is_some() {
+                    return Err("duplicate RASTER_TILES_PER_GROUP declaration".into());
+                }
+                let declaration = source[previous.0..]
+                    .split_once(';')
+                    .map(|(declaration, _)| declaration)
+                    .ok_or("missing RASTER_TILES_PER_GROUP terminator")?;
+                tiles = Some(match declaration.strip_prefix(PREFIX) {
+                    Some("1u") => 1,
+                    Some("2u") => 2,
+                    Some("4u") => 4,
+                    _ => return Err(
+                        "RASTER_TILES_PER_GROUP must be an exact literal 1u, 2u or 4u".into(),
+                    ),
+                });
+            } else if ["override", "let", "var", "fn", "struct", "alias"].contains(&previous.1) {
+                return Err("RASTER_TILES_PER_GROUP requires its exact const declaration".into());
+            }
+        }
+        previous = (start, token);
+    }
+    match tiles {
+        Some(tiles) => Ok(tiles),
+        None if !seen_code_marker => Ok(1),
+        None => Err("RASTER_TILES_PER_GROUP is referenced without its const declaration".into()),
+    }
+}
+
+fn raster_dispatch_x(width: u32, wg_x: u32, tiles_per_group: u32) -> u32 {
+    debug_assert!(wg_x > 0 && [1, 2, 4].contains(&tiles_per_group));
+    width.div_ceil(wg_x).div_ceil(tiles_per_group)
+}
+
 /// Create a rasterize_error compute pipeline with the given workgroup size.
 /// Uses string replacement on the shader source since naga does not support
 /// override constants in @workgroup_size or const expressions.
@@ -1772,7 +1901,8 @@ mod benchmark_tests {
     use sha2::{Digest, Sha256};
 
     use super::{
-        benchmark_bin_source, benchmark_mutate_group_size_from_source, bin_polygons_source,
+        benchmark_bin_source, benchmark_mutate_group_size_from_source,
+        benchmark_raster_tiles_per_group_from_source, bin_polygons_source, raster_dispatch_x,
         specialize_benchmark_bin_source, specialize_bin_source, specialize_raster_source,
         validate_benchmark_bin_source, validate_benchmark_mutate_source,
         validate_benchmark_raster_source, BenchmarkMutateKey, BenchmarkRasterKey,
@@ -1785,6 +1915,39 @@ mod benchmark_tests {
     const GROUPED_MUTATE_G1: &str = include_str!(
         "../../benchmarks/evolution/overnight-20261024/fixtures/mutate-g1-wg64-copy64.wgsl"
     );
+    const RASTER_AE1_REFERENCE: &str = include_str!(
+        "../../benchmarks/evolution/overnight-20261024/fixtures/raster-ae1-reference.wgsl"
+    );
+    const RASTER_DIRECT_T2: &str = include_str!(
+        "../../benchmarks/evolution/overnight-20261024/fixtures/raster-direct-t2.wgsl"
+    );
+    const RASTER_DIRECT_T4: &str = include_str!(
+        "../../benchmarks/evolution/overnight-20261024/fixtures/raster-direct-t4.wgsl"
+    );
+
+    #[test]
+    fn raster_fixtures_pin_exact_historical_inputs() {
+        for (source, expected_sha256) in [
+            (
+                RASTER_AE1_REFERENCE,
+                "ae1fd75fdc118debf2a50cbad699e513b5af0dcbfa3754b45966f7a8ee925af3",
+            ),
+            (
+                RASTER_DIRECT_T2,
+                "c3b2d775f76fcd9f8ebadf77d957cad40663fb766641e662174e245f6de80da3",
+            ),
+            (
+                RASTER_DIRECT_T4,
+                "64d4584f32865fed0d15f1d422d4afcbd482b175755bbc606eb9b1879b36feb4",
+            ),
+        ] {
+            assert_eq!(
+                format!("{:x}", Sha256::digest(source.as_bytes())),
+                expected_sha256
+            );
+        }
+    }
+
     // Metadata/cache fixture only; this empty kernel does not test mutation equivalence.
     const GROUPED_MUTATE_G64: &str = "const OFFSPRING_GROUP_SIZE: u32 = 64u;\n\
         @compute @workgroup_size(64) fn main() {}";
@@ -1930,8 +2093,8 @@ mod benchmark_tests {
     #[test]
     fn raster_source_specialization_preserves_candidate_and_cache_identity() {
         let original = include_str!("../shaders/rasterize_error.wgsl");
+        let actual_tiles = benchmark_raster_tiles_per_group_from_source(original).unwrap();
         let candidate = format!("{original}\n// actual candidate");
-        validate_benchmark_raster_source(&candidate).unwrap();
         for wg in [[32, 16], [16, 16], [32, 8], [16, 8], [8, 8]] {
             let source = specialize_raster_source(&candidate, wg);
             assert!(source.ends_with("// actual candidate"));
@@ -1941,34 +2104,130 @@ mod benchmark_tests {
             wgpu::naga::valid::Validator::new(
                 wgpu::naga::valid::ValidationFlags::all(),
                 wgpu::naga::valid::Capabilities::all(),
-            )
-            .validate(&module)
-            .unwrap();
-            let key = BenchmarkRasterKey {
-                source: candidate.as_str().into(),
-                wg,
-            };
-            assert_eq!(
-                key,
-                BenchmarkRasterKey {
-                    source: candidate.as_str().into(),
-                    wg
+            ).validate(&module).unwrap();
+            let key = BenchmarkRasterKey::new(candidate.as_str().into(), wg).unwrap();
+            assert_eq!(key.tiles_per_group, actual_tiles);
+            assert_eq!(key.source.as_ref(), candidate);
+            assert_eq!(key, BenchmarkRasterKey::new(candidate.as_str().into(), wg).unwrap());
+            assert_ne!(key, BenchmarkRasterKey::new(original.into(), wg).unwrap());
+            assert_ne!(key, BenchmarkRasterKey::new(candidate.as_str().into(), [1, 1]).unwrap());
+        }
+        // A future bundled T2 source must initialize the host from its own bytes.
+        let future = "const WG_X: u32 = 16;\nconst WG_Y: u32 = 16;\n\
+            const RASTER_TILES_PER_GROUP: u32 = 2u;";
+        let future_key = BenchmarkRasterKey::new(future.into(), [32, 16]).unwrap();
+        assert_eq!(future_key.tiles_per_group, 2);
+        let other = future.replace("= 2u;", "= 4u;");
+        let other_key = BenchmarkRasterKey::new(other.as_str().into(), [32, 16]).unwrap();
+        assert_eq!(other_key.tiles_per_group, 4);
+        assert_ne!(future_key, other_key);
+        assert_eq!(future_key, BenchmarkRasterKey::new(future_key.source.clone(), [32, 16]).unwrap());
+        for invalid in [
+            future.replace("= 2u;", "= 3u;"),
+            format!("{future}\nconst RASTER_TILES_PER_GROUP: u32 = 2u;"),
+            future.replace("const RASTER_TILES_PER_GROUP", "override RASTER_TILES_PER_GROUP"),
+        ] {
+            assert!(BenchmarkRasterKey::new(invalid.as_str().into(), [32, 16]).is_err());
+        }
+    }
+
+    #[test]
+    fn raster_tile_metadata_ignores_comments_and_accepts_only_exact_bounded_literals() {
+        let parse = benchmark_raster_tiles_per_group_from_source;
+        for source in [
+            "// historical raster",
+            "// const RASTER_TILES_PER_GROUP: u32 = 4u;",
+            "/* outer /* nested */ const RASTER_TILES_PER_GROUP: u32 = 2u; */",
+            "// λ\nconst UNRELATED_RASTER_TILES_PER_GROUP: u32 = 4u;",
+        ] {
+            assert_eq!(parse(source).unwrap(), 1);
+        }
+        for tiles in [1, 2, 4] {
+            let source = format!("/* λ */ const RASTER_TILES_PER_GROUP: u32 = {tiles}u;\n\
+                let tiles = RASTER_TILES_PER_GROUP; // const RASTER_TILES_PER_GROUP: u32 = 8u;");
+            assert_eq!(parse(&source).unwrap(), tiles);
+        }
+        for literal in ["0u", "3u", "8u", "04u", "0x4u", "4", "4U", "4 u", "4u + 0u", "u32(4)", "OTHER"] {
+            assert!(parse(&format!("const RASTER_TILES_PER_GROUP: u32 = {literal};")).is_err());
+        }
+        for source in [
+            "RASTER_TILES_PER_GROUP",
+            "// const RASTER_TILES_PER_GROUP: u32 = 2u;\nlet x = RASTER_TILES_PER_GROUP;",
+            "const RASTER_TILES_PER_GROUP: u32 = 2u",
+            "const\nRASTER_TILES_PER_GROUP: u32 = 2u;",
+            "const /* comment */ RASTER_TILES_PER_GROUP: u32 = 2u;",
+            "const RASTER_TILES_PER_GROUP:u32 = 2u;",
+            "const RASTER_TILES_PER_GROUP: u32 =  2u;",
+            "override RASTER_TILES_PER_GROUP: u32 = 2u;",
+            "const RASTER_TILES_PER_GROUP: u32 = 2u; const RASTER_TILES_PER_GROUP: u32 = 2u;",
+            "const RASTER_TILES_PER_GROUP: u32 = 2u; override RASTER_TILES_PER_GROUP: u32 = 2u;",
+            "const RASTER_TILES_PER_GROUP: u32 = 2u; /* unterminated",
+            "/* unterminated without marker",
+            "",
+        ] {
+            assert!(parse(source).is_err(), "{source}");
+        }
+        let maximum = format!("//{}", " ".repeat(MAX_BENCHMARK_SOURCE_BYTES - 2));
+        assert_eq!(parse(&maximum).unwrap(), 1);
+        assert!(parse(&format!("{maximum} ")).is_err());
+        assert!(parse(&"λ".repeat(MAX_BENCHMARK_SOURCE_BYTES / 2 + 1)).is_err());
+    }
+
+    #[test]
+    fn raster_direct_dispatch_covers_each_original_x_once_with_partial_groups() {
+        for (wg_x, max_groups) in [(8, 536_870_912), (16, 268_435_456), (32, 134_217_728)] {
+            for tiles in [1, 2, 4] {
+                assert_eq!(raster_dispatch_x(0, wg_x, tiles), 0);
+                assert_eq!(raster_dispatch_x(u32::MAX, wg_x, tiles), max_groups / tiles);
+                for nx in 1..=257 {
+                    for width in [nx * wg_x - 1, nx * wg_x] {
+                        let groups = raster_dispatch_x(width, wg_x, tiles);
+                        assert!((groups - 1) * tiles < nx);
+                        let mut visits = vec![0; nx as usize];
+                        for group in 0..groups {
+                            for offset in 0..tiles {
+                                let x = group * tiles + offset;
+                                if x < nx {
+                                    visits[x as usize] += 1;
+                                }
+                            }
+                        }
+                        assert_eq!(visits, vec![1; nx as usize]);
+                    }
                 }
-            );
-            assert_ne!(
-                key,
-                BenchmarkRasterKey {
-                    source: original.into(),
-                    wg
+            }
+        }
+    }
+
+    // Historical helper math stays pinned when a future bundled raster is adopted.
+    #[test]
+    fn raster_cache_candidates_validate_thirty_source_specializations() {
+        let baseline = RASTER_AE1_REFERENCE;
+        for (file, candidate, declared) in [
+            ("raster-direct-t2.wgsl", RASTER_DIRECT_T2, 2),
+            ("raster-direct-t4.wgsl", RASTER_DIRECT_T4, 4),
+        ] {
+            for (start, end) in [("fn unpack_color", "struct Params"), ("// Half-space edge function:", "@compute")] {
+                let expected = baseline.split_once(start).unwrap().1.split_once(end).unwrap().0;
+                let actual = candidate.split_once(start).unwrap().1.split_once(end).unwrap().0;
+                assert_eq!(actual, expected, "float helper bytes changed in {file}");
+            }
+            for tiles in [1, 2, 4] {
+                let source = candidate.replace(
+                    &format!("const RASTER_TILES_PER_GROUP: u32 = {declared}u;"),
+                    &format!("const RASTER_TILES_PER_GROUP: u32 = {tiles}u;"),
+                );
+                assert_eq!(benchmark_raster_tiles_per_group_from_source(&source).unwrap(), tiles);
+                for wg in [[32, 16], [16, 16], [32, 8], [16, 8], [8, 8]] {
+                    let specialized = specialize_raster_source(&source, wg);
+                    let module = wgpu::naga::front::wgsl::parse_str(&specialized)
+                        .unwrap_or_else(|error| panic!("{file} T={tiles} WG={wg:?}: {}", error.emit_to_string(&specialized)));
+                    wgpu::naga::valid::Validator::new(
+                        wgpu::naga::valid::ValidationFlags::all(),
+                        wgpu::naga::valid::Capabilities::all(),
+                    ).validate(&module).unwrap_or_else(|error| panic!("{file} T={tiles} WG={wg:?}: {error:?}"));
                 }
-            );
-            assert_ne!(
-                key,
-                BenchmarkRasterKey {
-                    source: candidate.as_str().into(),
-                    wg: [1, 1]
-                }
-            );
+            }
         }
     }
 

@@ -146,7 +146,7 @@ impl GpuEvolver {
         init_offspring_rng(&pipeline, 0);
 
         let rwg = pipeline.rasterize_wg;
-        let wg_x = image_width.div_ceil(rwg[0]);
+        let wg_x = pipeline.raster_dispatch_x_for_width(image_width);
         let wg_y = image_height.div_ceil(rwg[1]);
         println!(
             "GPU evolver initialized: {} active chains (max {}), offspring capacity {}, {}x{} image, {:.1} MB GPU memory, rasterize dispatch {}x{}x{} (wg {}x{})",
@@ -334,6 +334,7 @@ impl GpuEvolver {
 
         let rwg = p.rasterize_wg;
         let wg_x = p.image_width.div_ceil(rwg[0]);
+        let raster_dispatch_x = p.raster_dispatch_x_for_width(p.image_width);
         let wg_y = p.image_height.div_ceil(rwg[1]);
         let lambda = mutation_params.lambda;
         let mutate_dispatch_y = lambda.div_ceil(p.mutate_group_size);
@@ -388,7 +389,7 @@ impl GpuEvolver {
                 pass.set_pipeline(&p.rasterize_error_pipeline);
                 pass.set_bind_group(0, &p.rasterize_error_bind_group, &[]);
                 pass.set_bind_group(1, &p.params_bind_group, &[]);
-                pass.dispatch_workgroups(wg_x, wg_y, active * lambda);
+                pass.dispatch_workgroups(raster_dispatch_x, wg_y, active * lambda);
             }
             {
                 let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
@@ -453,7 +454,7 @@ impl GpuEvolver {
                 pass.set_pipeline(&p.rasterize_error_pipeline);
                 pass.set_bind_group(0, &p.rasterize_error_bind_group, &[]);
                 pass.set_bind_group(1, &p.params_bind_group, &[]);
-                pass.dispatch_workgroups(wg_x, wg_y, active * lambda);
+                pass.dispatch_workgroups(raster_dispatch_x, wg_y, active * lambda);
             }
 
             {
@@ -932,7 +933,7 @@ impl GpuEvolver {
 
         // Submit 2: bin polygons + rasterize_error
         let rwg = p.rasterize_wg;
-        let wg_x = p.image_width.div_ceil(rwg[0]);
+        let raster_dispatch_x = p.raster_dispatch_x_for_width(p.image_width);
         let wg_y = p.image_height.div_ceil(rwg[1]);
 
         let params = default_gpu_params(p.image_width, p.image_height, active);
@@ -957,7 +958,7 @@ impl GpuEvolver {
             pass.set_pipeline(&p.rasterize_error_pipeline);
             pass.set_bind_group(0, &p.rasterize_error_bind_group, &[]);
             pass.set_bind_group(1, &p.params_bind_group, &[]);
-            pass.dispatch_workgroups(wg_x, wg_y, active);
+            pass.dispatch_workgroups(raster_dispatch_x, wg_y, active);
         }
 
         // Use persistent staging buffer: errors (active * 8 bytes, stride-2) + polygon_counts (active * 4 bytes)
