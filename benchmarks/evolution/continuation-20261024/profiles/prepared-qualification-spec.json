@@ -1,0 +1,197 @@
+{
+  "protocol": "prepared-throughput-20261024-v1",
+  "scope": "conditional campaign; never policy1 KEEP or adoption",
+  "schema": "engine-lab-prepared-v2",
+  "prerequisite": "separate implementation100/source/binary review; source85 preservation and archived ordinary-API8 proof",
+  "fresh": {
+    "namespace": ".cache/evolution-qualification-prepared-20261024",
+    "clock": "new monotonic deadline before lock",
+    "reuse_samples_or_ledger": false
+  },
+  "fixed": {
+    "pairs_per_case": 5,
+    "order": [
+      "AB",
+      "BA",
+      "AB",
+      "BA",
+      "AB"
+    ],
+    "warmups": 8,
+    "diagnostics": true,
+    "timestamp_mode": "stages",
+    "batch_compute_envelope": false,
+    "mutate_zero_initialize": true,
+    "mutate_group": 1,
+    "same_AE1_bytes": true,
+    "manifest_sha256": "82dfe207ecd20ae964edf4528f1a90fe4176b21f4ac0911b305da1e1edf1c5aa",
+    "typed_params_sha256": "755575d7c391eaa45ba8358724d0c66ae499c445a388badb5d465fb07a824f60",
+    "fitness_tolerance": 2e-05,
+    "scalar_uncertainty_policy": "unchanged",
+    "canonical_fields": 7
+  },
+  "invocations": [
+    {
+      "phase": "AA",
+      "cases": [
+        "ff",
+        "mona",
+        "darwin"
+      ],
+      "seed": 7,
+      "batches": 8,
+      "flags": [
+        false,
+        false
+      ]
+    },
+    {
+      "phase": "train",
+      "requires": "AA pass",
+      "cases": [
+        "ff",
+        "mona",
+        "darwin"
+      ],
+      "seed": 7,
+      "batches": 64,
+      "flags": [
+        false,
+        true
+      ]
+    },
+    {
+      "phase": "reserved",
+      "requires": "train pass",
+      "case": "ff",
+      "seed": 11,
+      "batches": 64,
+      "flags": [
+        false,
+        true
+      ]
+    },
+    {
+      "phase": "reserved",
+      "case": "mona",
+      "seed": 13,
+      "batches": 64,
+      "flags": [
+        false,
+        true
+      ]
+    },
+    {
+      "phase": "reserved",
+      "case": "darwin",
+      "seed": 17,
+      "batches": 64,
+      "flags": [
+        false,
+        true
+      ]
+    }
+  ],
+  "statistics": {
+    "helper_math": "compare.statistics",
+    "bootstrap_seed": 20261024,
+    "resamples": 10000,
+    "interval95": [
+      0.025,
+      0.975
+    ],
+    "resampling_unit": "paired run log ratio within case",
+    "weighting": "equal case log means",
+    "evaluate": "complete AA, complete train, complete reconstructed reserved matrix separately"
+  },
+  "validity": [
+    "one frozen release executable; default constructor flag false",
+    "zero process/summary/row/qualification/diagnostic errors",
+    "exact planned matrix and submitted/completed work",
+    "finite positive elapsed/rates; rates recomputed from completed work",
+    "typed parameters and pinned fixture/source/GPU identities",
+    "exact seven-field initial/final replay and unchanged scalar policy",
+    "diagnostics, qualification and warmups excluded from scored rates"
+  ],
+  "AA": {
+    "aggregate_CI_contained": [
+      0.99,
+      1.01
+    ],
+    "each_case_CI_contained": [
+      0.98,
+      1.02
+    ],
+    "each_case_paired_median_contained": [
+      0.99,
+      1.01
+    ],
+    "require_CI_contains_one": false
+  },
+  "AB_train_and_reserved": {
+    "aggregate_ratio_gt": 1.03,
+    "aggregate_CI_lower_gt": 1.0,
+    "each_case_paired_median_gte": 0.995,
+    "each_case_CI_lower_gte": 0.99
+  },
+  "bounds": {
+    "max_invocations": 5,
+    "execution_seconds": 1800,
+    "child_seconds_max": 600,
+    "cleanup_reserve_seconds": 30,
+    "child_timeout": "min(600, remaining-30)",
+    "lock": ".cache/evolution-bench/benchmark.lock",
+    "serial": true,
+    "retries": 0,
+    "extra_samples": 0,
+    "exclusions": 0,
+    "warmup_variants": 0
+  },
+  "stopping": {
+    "invalid_or_AA_fail_or_timeout_or_lock_busy": "INCONCLUSIVE",
+    "valid_complete_AB_gate_fail": "REJECT for this campaign",
+    "all_pass": "PASS_PREPARED_CONDITIONAL; startup/adoption unresolved",
+    "preserve_partials": true
+  },
+  "startup": {
+    "shared_per_case": [
+      "device_initialization_seconds",
+      "source_precompile_seconds"
+    ],
+    "per_arm_case_phase": [
+      "source_install_seconds first/median/min/max",
+      "preparation_seconds first/median/min/max"
+    ],
+    "separate": "qualification, diagnostic and normal pipeline history; cold/first unobserved costs remain unresolved",
+    "whole_app_startup_claim": false,
+    "not_measured_as_application_startup": true
+  },
+  "expected_full_evaluations": {
+    "scored": 66846720,
+    "diagnostic": 13369344,
+    "qualification": 6684672,
+    "warmup": 15335424,
+    "logical_total": 102236160
+  },
+  "adoption": {
+    "default_flip": false,
+    "fresh_API64": "before production adoption, outside this campaign",
+    "isolation": "unverified",
+    "driver_cause": "unproved",
+    "live_UI_claim": false,
+    "old_warmup2": "REJECT unchanged"
+  },
+  "frozen_utc": "2026-10-24T14:22:19.792687+00:00",
+  "identities": {
+    "binary_json": "/home/nick/git/artgen-backend-rust/.cache/evolution-qualification-prepared-20261024/build-100/binary.json",
+    "binary_sha256": "97d176f3b5f97c818d19a5e25b2f75e9e587bf1925a948c330b78e2022512ab1",
+    "source_freeze_sha256": "9cc71d312fe5c2358c4b32eef4b00681f5e2884242169b6c26777ea3baae6fc5",
+    "manifest": "/home/nick/git/artgen-backend-rust/.cache/evolution-bench/baseline-20261023T172054.919294Z-95742/fixtures/manifest.json",
+    "shader": "/home/nick/git/artgen-backend-rust/.cache/evolution-profiling-20261024/build-finalize-v1/source/src/shaders/rasterize_error.wgsl",
+    "helpers": {
+      "scripts/compare-evolution.py": "33b5b3c655e8a5378291f4916dc1ca0aa6d5d4b25229a032398f8c30491c4486",
+      "scripts/evolution-bench.py": "6de8a7450e89e9734019cc279c8c9a2f9e0bb5b36bbffe617d65cc9243ae0c73"
+    }
+  },
+  "reuse_historical_hashes": "correctness associations only; no historical timing samples"
+}
