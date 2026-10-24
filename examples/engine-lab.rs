@@ -22,8 +22,8 @@ use artgen_backend_rust::{
     },
     gpu_evolver::{
         benchmark::{
-            benchmark_mutate_group_size_from_source, BenchmarkCounters, BenchmarkProvenance,
-            BenchmarkSnapshot,
+            benchmark_mutate_group_size_from_source, BenchmarkCounters, BenchmarkMutateOptions,
+            BenchmarkProvenance, BenchmarkSnapshot,
         },
         GpuEvolver,
     },
@@ -36,7 +36,7 @@ const SCHEMA: &str = "engine-lab-v1";
 const MAX_SOURCE_BYTES: u64 = 256 * 1024;
 const MAX_ROW_BYTES: usize = 64 * 1024;
 const MAX_TRIALS: usize = 3 * 16 * 10 * 2;
-const FLAGS: [&str; 9] = [
+const FLAGS: [&str; 10] = [
     "manifest",
     "reference-shader",
     "pairs",
@@ -46,8 +46,10 @@ const FLAGS: [&str; 9] = [
     "output",
     "shader-stage",
     "diagnostics",
+    "mutate-zero-initialize",
 ];
-const USAGE: &str = "engine-lab --reference-shader PATH --variant NAME=PATH [--variant NAME=PATH ...]\n  --output NEWDIR [--manifest PATH] [--pairs 1..10] [--batches 1..64] [--seed U64] [--case ff|mona|darwin|all]\n  [--shader-stage bin|raster|mutate] [--diagnostics true|false]\nDefaults: fixtures .cache/evolution-bench/fixtures/v1/manifest.json, pairs 2, batches 8, shader-stage bin, diagnostics false.\nFixed manifest parameters: 4 chains, lambda 64, 64 iterations, raster WG 32x16, resolution 384.\nTwo Stages warmups, default seed 7 and all cases; use a parent process timeout. No GPU work for --help.";
+const MAX_ARGS: usize = 2 * (16 + FLAGS.len());
+const USAGE: &str = "engine-lab --reference-shader PATH --variant NAME=PATH [--variant NAME=PATH ...]\n  --output NEWDIR [--manifest PATH] [--pairs 1..10] [--batches 1..64] [--seed U64] [--case ff|mona|darwin|all]\n  [--shader-stage bin|raster|mutate] [--diagnostics true|false] [--mutate-zero-initialize true|false]\nMutation zeroing defaults to true; the flag requires stage mutate and applies only to candidates. Reference always uses true.\nDefaults: fixtures .cache/evolution-bench/fixtures/v1/manifest.json, pairs 2, batches 8, shader-stage bin, diagnostics false.\nFixed manifest parameters: 4 chains, lambda 64, 64 iterations, raster WG 32x16, resolution 384.\nTwo Stages warmups, default seed 7 and all cases; use a parent process timeout. No GPU work for --help.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -67,11 +69,14 @@ impl ShaderStage {
         }
     }
 
-    fn install(self, evolver: &mut GpuEvolver, source: &str) -> Result<()> {
+    fn install(self, evolver: &mut GpuEvolver, source: &Source) -> Result<()> {
         match self {
-            Self::Bin => evolver.benchmark_set_bin_shader(source),
-            Self::Raster => evolver.benchmark_set_raster_shader(source),
-            Self::Mutate => evolver.benchmark_set_mutate_shader(source),
+            Self::Bin => evolver.benchmark_set_bin_shader(&source.wgsl),
+            Self::Raster => evolver.benchmark_set_raster_shader(&source.wgsl),
+            Self::Mutate => evolver.benchmark_set_mutate_shader_with_options(
+                &source.wgsl,
+                source.mutate_options.unwrap_or_default(),
+            ),
         }
         .map_err(anyhow::Error::msg)
     }
@@ -89,13 +94,15 @@ struct Config {
     output: PathBuf,
     shader_stage: ShaderStage,
     diagnostics: bool,
+    mutate_zero_initialize: Option<bool>,
 }
 
 impl Config {
     fn parse(args: &[String]) -> Result<Self> {
         ensure!(
-            args.len() <= 50 && args.len() % 2 == 0,
-            "expected at most 25 --flag value pairs"
+            args.len() <= MAX_ARGS && args.len() % 2 == 0,
+            "expected at most {} --flag value pairs",
+            MAX_ARGS / 2
         );
         let mut values = BTreeMap::new();
         let mut variants = Vec::with_capacity(16);
@@ -128,6 +135,15 @@ impl Config {
             case == "all" || PROJECTS.contains(&case),
             "case must be ff, mona, darwin or all"
         );
+        let shader_stage = ShaderStage::parse(values.get("shader-stage").unwrap_or(&"bin"))?;
+        let mutate_zero_initialize = values
+            .get("mutate-zero-initialize")
+            .map(|value| value.parse::<bool>())
+            .transpose()?;
+        ensure!(
+            mutate_zero_initialize.is_none() || shader_stage == ShaderStage::Mutate,
+            "mutate-zero-initialize requires shader-stage mutate"
+        );
         Ok(Self {
             manifest: PathBuf::from(
                 values
@@ -145,7 +161,8 @@ impl Config {
             batches,
             seed,
             case: case.into(),
-            shader_stage: ShaderStage::parse(values.get("shader-stage").unwrap_or(&"bin"))?,
+            shader_stage,
+            mutate_zero_initialize,
             diagnostics: values.get("diagnostics").unwrap_or(&"false").parse()?,
         })
     }
@@ -184,6 +201,7 @@ fn valid_name(name: &str) -> bool {
 struct Source {
     shader_stage: ShaderStage,
     mutate_group_size: Option<u32>,
+    mutate_options: Option<BenchmarkMutateOptions>,
     name: String,
     path: PathBuf,
     sha256: String,
@@ -218,6 +236,12 @@ fn read_sources(config: &Config) -> Result<Vec<Source>> {
         sources.push(Source {
             shader_stage: config.shader_stage,
             mutate_group_size,
+            mutate_options: (config.shader_stage == ShaderStage::Mutate).then_some(
+                BenchmarkMutateOptions {
+                    zero_initialize_workgroup_memory: name == "reference"
+                        || config.mutate_zero_initialize.unwrap_or(true),
+                },
+            ),
             name: name.into(),
             path: path.clone(),
             sha256,
@@ -227,6 +251,36 @@ fn read_sources(config: &Config) -> Result<Vec<Source>> {
     Ok(sources)
 }
 
+#[derive(Clone, Copy)]
+struct MutationExecution {
+    group_size: u32,
+    zero_initialize_workgroup_memory: bool,
+}
+
+impl MutationExecution {
+    fn installed(evolver: &GpuEvolver) -> Self {
+        Self {
+            group_size: evolver.benchmark_mutate_group_size(),
+            zero_initialize_workgroup_memory: evolver
+                .benchmark_mutate_zero_initialize_workgroup_memory(),
+        }
+    }
+}
+
+fn check_mutation_execution(evolver: &GpuEvolver, source: &Source) -> Result<()> {
+    if let Some(options) = source.mutate_options {
+        ensure!(
+            evolver.benchmark_mutate_shader_matches(&source.wgsl, options),
+            "actual mutation source/options differ from selected source metadata"
+        );
+        ensure!(
+            source.mutate_group_size == Some(evolver.benchmark_mutate_group_size()),
+            "actual mutation group size differs from selected source metadata"
+        );
+    }
+    Ok(())
+}
+
 #[derive(Serialize)]
 struct TrialRow {
     schema: &'static str,
@@ -234,6 +288,7 @@ struct TrialRow {
     variant: String,
     shader_stage: ShaderStage,
     mutate_group_size: u32,
+    mutate_zero_initialize_workgroup_memory: bool,
     timing_eligible: bool,
     initial_max_tile_occupancy: Option<u32>,
     validation_max_tile_occupancy: Option<u32>,
@@ -269,7 +324,7 @@ impl TrialRow {
         case: &str,
         manifest: &str,
         gpu: BenchmarkProvenance,
-        mutate_group_size: u32,
+        mutation: MutationExecution,
         timing_eligible: bool,
     ) -> Self {
         Self {
@@ -277,7 +332,8 @@ impl TrialRow {
             case_id: case.into(),
             variant: source.name.clone(),
             shader_stage: config.shader_stage,
-            mutate_group_size,
+            mutate_group_size: mutation.group_size,
+            mutate_zero_initialize_workgroup_memory: mutation.zero_initialize_workgroup_memory,
             timing_eligible,
             initial_max_tile_occupancy: None,
             validation_max_tile_occupancy: None,
@@ -316,6 +372,7 @@ impl TrialRow {
 struct QualifiedCase {
     case_id: String,
     mutate_group_size: u32,
+    mutate_zero_initialize_workgroup_memory: bool,
     params: MutationParams,
     params_sha256: String,
     initial_state_sha256: String,
@@ -351,8 +408,12 @@ struct Summary<'a> {
     rates: Vec<Rates>,
 }
 
+fn collect_cli_args(args: impl Iterator<Item = String>) -> Vec<String> {
+    args.take(MAX_ARGS + 1).collect()
+}
+
 fn main() -> Result<()> {
-    let args: Vec<_> = std::env::args().skip(1).take(51).collect();
+    let args = collect_cli_args(std::env::args().skip(1));
     if args == ["--help"] {
         println!("{USAGE}");
         return Ok(());
@@ -467,6 +528,8 @@ fn run_cases(summary: &mut Summary<'_>, rows: &mut File) -> Result<()> {
         summary.cases.push(QualifiedCase {
             case_id: case.into(),
             mutate_group_size: evolver.benchmark_mutate_group_size(),
+            mutate_zero_initialize_workgroup_memory: evolver
+                .benchmark_mutate_zero_initialize_workgroup_memory(),
             params: input.manifest.params.clone(),
             params_sha256,
             initial_state_sha256: state_hash(&initial)?,
@@ -509,7 +572,8 @@ fn precompile_sources(
             )
             .map_err(anyhow::Error::msg)?;
         for source in summary.sources {
-            summary.config.shader_stage.install(evolver, &source.wgsl)?;
+            summary.config.shader_stage.install(evolver, source)?;
+            check_mutation_execution(evolver, source)?;
         }
         Ok(())
     })();
@@ -574,9 +638,11 @@ fn qualify_inner(
     summary
         .config
         .shader_stage
-        .install(evolver, &summary.sources[0].wgsl)?;
+        .install(evolver, &summary.sources[0])?;
+    check_mutation_execution(evolver, &summary.sources[0])?;
     let spec = spec(summary.config, &input.fixture.id);
     let mut record = trial::prepare(evolver, input, &spec, output)?;
+    check_mutation_execution(evolver, &summary.sources[0])?;
     let params = &input.manifest.params;
     let initial = evolver
         .benchmark_snapshot(params.chain_count, params.lambda)
@@ -782,7 +848,7 @@ fn run_trial(
         &input.fixture.id,
         &input.manifest_sha256,
         evolver.benchmark_provenance(),
-        evolver.benchmark_mutate_group_size(),
+        MutationExecution::installed(evolver),
         timing_eligible,
     );
     if let Err(error) = execute_trial(
@@ -798,8 +864,10 @@ fn run_trial(
         row.errors.push(format!("{error:#}"));
     }
     row.mutate_group_size = evolver.benchmark_mutate_group_size();
-    if source.mutate_group_size.is_some_and(|group| group != row.mutate_group_size) {
-        row.errors.push("actual mutation group size differs from selected source metadata".into());
+    row.mutate_zero_initialize_workgroup_memory =
+        evolver.benchmark_mutate_zero_initialize_workgroup_memory();
+    if let Err(error) = check_mutation_execution(evolver, source) {
+        row.errors.push(error.to_string());
     }
     row
 }
@@ -814,11 +882,15 @@ fn execute_trial(
 ) -> Result<()> {
     let params = &input.manifest.params;
     row.params_sha256 = fixtures::sha256(&serde_json::to_vec(params)?);
-    config.shader_stage.install(evolver, &source.wgsl)?;
+    config.shader_stage.install(evolver, source)?;
+    check_mutation_execution(evolver, source)?;
     row.mutate_group_size = evolver.benchmark_mutate_group_size();
+    row.mutate_zero_initialize_workgroup_memory =
+        evolver.benchmark_mutate_zero_initialize_workgroup_memory();
     evolver
         .prepare_seeded_benchmark(&input.drawing, params, config.seed, 2, true)
         .map_err(anyhow::Error::msg)?;
+    check_mutation_execution(evolver, source)?;
     let initial = evolver
         .benchmark_snapshot(params.chain_count, params.lambda)
         .map_err(anyhow::Error::msg)?;
@@ -1184,6 +1256,51 @@ mod tests {
     }
 
     #[test]
+    fn mutate_zeroing_flag_is_optional_strict_and_mutation_only() -> Result<()> {
+        assert_eq!(Config::parse(&args())?.mutate_zero_initialize, None);
+        for value in ["true", "false"] {
+            let mut input = args();
+            input.extend([
+                "--shader-stage".into(),
+                "mutate".into(),
+                "--mutate-zero-initialize".into(),
+                value.into(),
+            ]);
+            let config = Config::parse(&input)?;
+            assert_eq!(config.mutate_zero_initialize, Some(value == "true"));
+            assert_eq!(
+                serde_json::to_value(config)?["mutate_zero_initialize"],
+                value == "true"
+            );
+            input.extend(["--mutate-zero-initialize".into(), value.into()]);
+            assert!(Config::parse(&input).is_err());
+        }
+        for stage in ["bin", "raster", "mutate"] {
+            for value in ["TRUE", "0", "invalid", ""] {
+                let mut input = args();
+                input.extend([
+                    "--shader-stage".into(),
+                    stage.into(),
+                    "--mutate-zero-initialize".into(),
+                    value.into(),
+                ]);
+                assert!(Config::parse(&input).is_err());
+            }
+        }
+        for stage in ["bin", "raster"] {
+            let mut input = args();
+            input.extend([
+                "--shader-stage".into(),
+                stage.into(),
+                "--mutate-zero-initialize".into(),
+                "true".into(),
+            ]);
+            assert!(Config::parse(&input).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
     fn diagnostic_evidence_requires_occupancy_and_excludes_rates() -> Result<()> {
         let mut config = Config::parse(&args())?;
         config.output =
@@ -1193,6 +1310,7 @@ mod tests {
         let source = Source {
             shader_stage: ShaderStage::Bin,
             mutate_group_size: None,
+            mutate_options: None,
             name: "candidate".into(),
             path: "candidate.wgsl".into(),
             sha256: "abc".into(),
@@ -1200,8 +1318,18 @@ mod tests {
         };
         let result = (|| -> Result<()> {
             for maximum in [None, Some(257), Some(256)] {
-                let mut row =
-                    TrialRow::new(&config, &source, "ff", "manifest", provenance(), 64, false);
+                let mut row = TrialRow::new(
+                    &config,
+                    &source,
+                    "ff",
+                    "manifest",
+                    provenance(),
+                    MutationExecution {
+                        group_size: 64,
+                        zero_initialize_workgroup_memory: true,
+                    },
+                    false,
+                );
                 let mut state = white();
                 state.validation_max_tile_occupancy = maximum;
                 record_diagnostic_state(&config, &mut row, &state, "initial")?;
@@ -1252,33 +1380,61 @@ mod tests {
             invalid.extend([flag.to_owned(), value.to_owned()]);
             assert!(Config::parse(&invalid).is_err());
         }
-        let mut maximal = args();
-        for index in 1..16 {
-            maximal.extend(["--variant".into(), format!("v{index}=path")]);
-        }
-        maximal.extend([
-            "--pairs".into(),
-            "10".into(),
-            "--batches".into(),
-            "64".into(),
-            "--seed".into(),
-            "7".into(),
-            "--manifest".into(),
-            "manifest.json".into(),
-            "--case".into(),
-            "all".into(),
-            "--shader-stage".into(),
-            "raster".into(),
-            "--diagnostics".into(),
-            "true".into(),
-        ]);
-        assert_eq!(Config::parse(&maximal)?.variants.len(), 16);
-        maximal.extend(["--variant".into(), "overflow=path".into()]);
-        assert!(Config::parse(&maximal).is_err());
         for variant in ["reference=x", "candidate=x", "../escape=x", "empty="] {
             let mut invalid = args();
             invalid.extend(["--variant".into(), variant.into()]);
             assert!(Config::parse(&invalid).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn cli_collects_maximum_mutation_arguments_and_rejects_overflow() -> Result<()> {
+        let mut maximal = args();
+        for index in 1..16 {
+            maximal.extend(["--variant".into(), format!("v{index}=path")]);
+        }
+        maximal.extend(
+            [
+                "--pairs",
+                "10",
+                "--batches",
+                "64",
+                "--seed",
+                "11",
+                "--manifest",
+                "manifest.json",
+                "--case",
+                "all",
+                "--shader-stage",
+                "mutate",
+                "--diagnostics",
+                "true",
+                "--mutate-zero-initialize",
+                "false",
+            ]
+            .map(str::to_owned),
+        );
+        assert_eq!(maximal.len(), 52);
+        let config = Config::parse(&collect_cli_args(maximal.iter().cloned()))?;
+        assert_eq!(config.variants.len(), 16);
+        assert_eq!(config.variants[15], ("v15".into(), PathBuf::from("path")));
+        assert_eq!((config.pairs, config.batches, config.seed), (10, 64, 11));
+        assert_eq!(config.shader_stage, ShaderStage::Mutate);
+        assert!(config.diagnostics);
+        assert_eq!(config.mutate_zero_initialize, Some(false));
+        assert_eq!(config.manifest, PathBuf::from("manifest.json"));
+        assert_eq!(config.reference_shader, PathBuf::from("reference.wgsl"));
+        assert_eq!(config.output, PathBuf::from("new-output"));
+        assert_eq!(config.cases().collect::<Vec<_>>(), PROJECTS);
+        for overflow in [vec!["--variant"], vec!["--variant", "overflow=path"]] {
+            let input = maximal
+                .iter()
+                .cloned()
+                .chain(overflow.into_iter().map(str::to_owned));
+            let collected = collect_cli_args(input);
+            assert_eq!(collected.len(), 53);
+            assert!(Config::parse(&collected).is_err());
         }
         Ok(())
     }
@@ -1453,15 +1609,31 @@ mod tests {
             ] {
                 fs::write(&config.reference_shader, original)?;
                 fs::write(&config.variants[0].1, GROUPED_MUTATE_G4)?;
-                let sources = read_sources(&config)?;
-                assert_eq!(sources.len(), 2);
-                for (source, (expected, group)) in sources
-                    .iter()
-                    .zip([(original, group), (GROUPED_MUTATE_G4, 4)])
-                {
-                    assert_mutate_source_rows(&config, source, expected, group)?;
+                for requested in [None, Some(true), Some(false)] {
+                    config.mutate_zero_initialize = requested;
+                    let sources = read_sources(&config)?;
+                    assert_eq!(sources.len(), 2);
+                    assert!(
+                        sources[0]
+                            .mutate_options
+                            .unwrap()
+                            .zero_initialize_workgroup_memory
+                    );
+                    assert_eq!(
+                        sources[1]
+                            .mutate_options
+                            .unwrap()
+                            .zero_initialize_workgroup_memory,
+                        requested.unwrap_or(true)
+                    );
+                    for (source, (expected, group)) in sources
+                        .iter()
+                        .zip([(original, group), (GROUPED_MUTATE_G4, 4)])
+                    {
+                        assert_mutate_source_rows(&config, source, expected, group)?;
+                    }
+                    assert_ne!(sources[0].sha256, sources[1].sha256);
                 }
-                assert_ne!(sources[0].sha256, sources[1].sha256);
             }
             Ok(())
         })();
@@ -1482,6 +1654,13 @@ mod tests {
         assert_eq!(serialized["shader_stage"], "mutate");
         assert_eq!(source.mutate_group_size, Some(group));
         assert_eq!(serialized["mutate_group_size"], group);
+        assert_eq!(
+            serialized["mutate_options"]["zero_initialize_workgroup_memory"],
+            source
+                .mutate_options
+                .unwrap()
+                .zero_initialize_workgroup_memory
+        );
         assert!(serialized.get("wgsl").is_none());
         for timing_eligible in [true, false] {
             let row = TrialRow::new(
@@ -1490,7 +1669,13 @@ mod tests {
                 "ff",
                 "manifest",
                 provenance(),
-                group,
+                MutationExecution {
+                    group_size: group,
+                    zero_initialize_workgroup_memory: source
+                        .mutate_options
+                        .unwrap_or_default()
+                        .zero_initialize_workgroup_memory,
+                },
                 timing_eligible,
             );
             let value = serde_json::to_value(row)?;
@@ -1498,6 +1683,13 @@ mod tests {
             assert_eq!(value["source_sha256"], source.sha256);
             assert_eq!(value["timing_eligible"], timing_eligible);
             assert_eq!(value["mutate_group_size"], group);
+            assert_eq!(
+                value["mutate_zero_initialize_workgroup_memory"],
+                source
+                    .mutate_options
+                    .unwrap()
+                    .zero_initialize_workgroup_memory
+            );
         }
         Ok(())
     }
@@ -1508,6 +1700,7 @@ mod tests {
         let mut source = Source {
             shader_stage: ShaderStage::Mutate,
             mutate_group_size: Some(4),
+            mutate_options: Some(BenchmarkMutateOptions::default()),
             name: "candidate".into(),
             path: "candidate.wgsl".into(),
             sha256: "abc".into(),
@@ -1519,10 +1712,23 @@ mod tests {
             for actual in [1, 4, 16, 32, 64] {
                 for timing_eligible in [true, false] {
                     let row = TrialRow::new(
-                        &config, &source, "ff", "manifest", provenance(), actual, timing_eligible,
+                        &config,
+                        &source,
+                        "ff",
+                        "manifest",
+                        provenance(),
+                        MutationExecution {
+                            group_size: actual,
+                            zero_initialize_workgroup_memory: false,
+                        },
+                        timing_eligible,
                     );
                     let value = serde_json::to_value(row)?;
                     assert_eq!(value["mutate_group_size"], actual);
+                    assert_eq!(value["mutate_zero_initialize_workgroup_memory"], false);
+                    assert!(value["gpu"]
+                        .get("mutate_zero_initialize_workgroup_memory")
+                        .is_none());
                     assert_eq!(value["gpu"], gpu);
                     assert!(value["gpu"].get("mutate_group_size").is_none());
                     assert_eq!(value["timing_eligible"], timing_eligible);
@@ -1532,6 +1738,7 @@ mod tests {
         let case = QualifiedCase {
             case_id: "ff".into(),
             mutate_group_size: 16,
+            mutate_zero_initialize_workgroup_memory: false,
             params: MutationParams::default(),
             params_sha256: "params".into(),
             initial_state_sha256: "initial".into(),
@@ -1540,6 +1747,10 @@ mod tests {
         };
         let value = serde_json::to_value(case)?;
         assert_eq!(value["mutate_group_size"], 16);
+        assert_eq!(value["mutate_zero_initialize_workgroup_memory"], false);
+        assert!(value["params"]
+            .get("mutate_zero_initialize_workgroup_memory")
+            .is_none());
         assert_eq!(value["gpu"], gpu);
         assert!(value["params"].get("mutate_group_size").is_none());
         Ok(())
@@ -1552,6 +1763,7 @@ mod tests {
             Source {
                 shader_stage: config.shader_stage,
                 mutate_group_size: None,
+                mutate_options: None,
                 name: "reference".into(),
                 path: "reference.wgsl".into(),
                 sha256: "abc".into(),
@@ -1560,6 +1772,7 @@ mod tests {
             Source {
                 shader_stage: config.shader_stage,
                 mutate_group_size: None,
+                mutate_options: None,
                 name: "candidate".into(),
                 path: "candidate.wgsl".into(),
                 sha256: "def".into(),

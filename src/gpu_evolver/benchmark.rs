@@ -18,7 +18,10 @@ use crate::settings::{
     GPU_MAX_BATCH_ITERS, GPU_MAX_LAMBDA, MAX_POLYGONS_PER_IMAGE, TILE_MAX_POLYS,
 };
 
-pub use super::pipeline::benchmark_mutate_group_size_from_source;
+pub use super::pipeline::{
+    benchmark_mutate_compilation_options, benchmark_mutate_group_size_from_source,
+    BenchmarkMutateOptions,
+};
 
 const MAX_WARMUP_BATCHES: u32 = 1024;
 const READBACK_TIMEOUT: Duration = Duration::from_secs(120);
@@ -247,8 +250,38 @@ impl GpuEvolver {
     /// # Errors
     /// Rejects a failed drain, invalid source, exhausted cache or GPU errors.
     pub fn benchmark_set_mutate_shader(&mut self, source: &str) -> Result<(), String> {
+        self.benchmark_set_mutate_shader_with_options(source, BenchmarkMutateOptions::default())
+    }
+
+    /// Install a mutation source and its explicit compiler policy while drained.
+    ///
+    /// # Errors
+    /// Rejects a failed drain, invalid source, exhausted cache or GPU errors.
+    pub fn benchmark_set_mutate_shader_with_options(
+        &mut self,
+        source: &str,
+        options: BenchmarkMutateOptions,
+    ) -> Result<(), String> {
         self.benchmark_drain()?;
-        self.pipeline.set_benchmark_mutate_shader(source)
+        self.pipeline.set_benchmark_mutate_shader(source, options)
+    }
+
+    /// Actual zero-initialization policy retained with the mutation pipeline.
+    #[must_use]
+    pub fn benchmark_mutate_zero_initialize_workgroup_memory(&self) -> bool {
+        self.pipeline
+            .mutate_options
+            .zero_initialize_workgroup_memory
+    }
+
+    /// Whether the installed mutation pipeline has the exact requested source and policy.
+    #[must_use]
+    pub fn benchmark_mutate_shader_matches(
+        &self,
+        source: &str,
+        options: BenchmarkMutateOptions,
+    ) -> bool {
+        self.pipeline.mutate_source.as_ref() == source && self.pipeline.mutate_options == options
     }
 
     /// Actual logical offspring width retained with the selected mutation pipeline.

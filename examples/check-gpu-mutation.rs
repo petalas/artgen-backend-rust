@@ -8,7 +8,8 @@
 //! `--help` parses no sources, creates no files, and initializes no GPU.
 //!
 //! Sources are compiled once, verbatim, through the public mutation pipeline's
-//! actual bind-group layouts, with default compilation options. No engine API,
+//! actual bind-group layouts, with mutation-only compilation options. Reference zeroing stays true; candidate
+//! zeroing defaults to true and can be disabled explicitly. No engine API,
 //! solver, source rewriting, or scored campaign is involved. In particular,
 //! marker-free physical workgroups of 128/256/512 lanes retain dispatch(4, 1, 1).
 //! An exact `OFFSPRING_GROUP_SIZE` declaration changes only dispatch Y to
@@ -73,7 +74,10 @@ use std::{
 use anyhow::{bail, ensure, Context, Result};
 use artgen_backend_rust::{
     gpu_evolver::{
-        benchmark::benchmark_mutate_group_size_from_source,
+        benchmark::{
+            benchmark_mutate_compilation_options, benchmark_mutate_group_size_from_source,
+            BenchmarkMutateOptions,
+        },
         buffers::{default_gpu_params, GpuDrawingState, GpuParams, GPU_DRAWING_STATE_SIZE},
         pipeline::GpuPipeline,
     },
@@ -101,7 +105,7 @@ const ERROR_BYTES: u64 = (ERROR_WORDS * 4) as u64;
 const SNAPSHOT_BYTES: u64 = (SNAPSHOT_WORDS * 4) as u64;
 const MAX_CANDIDATES: usize = 4;
 const MAX_VARIANTS: usize = MAX_CANDIDATES + 1;
-const MAX_ARGS: usize = 2 * (MAX_CANDIDATES + 2);
+const MAX_ARGS: usize = 2 * (MAX_CANDIDATES + 3);
 const MAX_PATH_BYTES: usize = 4096;
 const MAX_SOURCE_BYTES: usize = 256 * 1024;
 const MAX_ERROR_CHARS: usize = 16 * 1024;
@@ -125,6 +129,7 @@ struct SourceArg {
 struct Options {
     sources: Vec<SourceArg>,
     output: PathBuf,
+    candidate_mutation: BenchmarkMutateOptions,
 }
 
 struct Source {
@@ -132,6 +137,7 @@ struct Source {
     text: String,
     sha256: String,
     mutate_group_size: u32,
+    options: BenchmarkMutateOptions,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -221,6 +227,7 @@ fn parse_args(args: impl Iterator<Item = OsString>) -> Result<Option<Options>> {
     let mut reference = None;
     let mut candidates = Vec::with_capacity(MAX_CANDIDATES);
     let mut output = None;
+    let mut mutate_zero_initialize = None;
     ensure!(args.len() % 2 == 0, "options require values; use --help");
     for pair in args.as_chunks::<2>().0 {
         let flag = bounded_arg(&pair[0])?;
@@ -238,6 +245,13 @@ fn parse_args(args: impl Iterator<Item = OsString>) -> Result<Option<Options>> {
                 ensure!(output.is_none(), "duplicate --output");
                 output = Some(PathBuf::from(value));
             }
+            "--mutate-zero-initialize" => {
+                ensure!(
+                    mutate_zero_initialize.is_none(),
+                    "duplicate --mutate-zero-initialize"
+                );
+                mutate_zero_initialize = Some(value.parse::<bool>()?);
+            }
             _ => bail!("unknown option {flag:?}; use --help"),
         }
     }
@@ -251,6 +265,9 @@ fn parse_args(args: impl Iterator<Item = OsString>) -> Result<Option<Options>> {
     Ok(Some(Options {
         sources,
         output: output.context("missing --output")?,
+        candidate_mutation: BenchmarkMutateOptions {
+            zero_initialize_workgroup_memory: mutate_zero_initialize.unwrap_or(true),
+        },
     }))
 }
 
@@ -297,6 +314,7 @@ fn add_candidate(candidates: &mut Vec<SourceArg>, value: &str) -> Result<()> {
 
 fn print_help() {
     println!("check-gpu-mutation --reference PATH --candidate NAME=PATH [--candidate NAME=PATH ...] --output NEWDIR\n\
+        [--mutate-zero-initialize true|false] applies only to candidates, default true. Reference uses true.\n\
         Compare one reference with 1..4 mutation sources on the main thread.\n\
         NEWDIR must not exist; its parent must exist. UTF-8 sources: 1..256 KiB.\n\
         Run the built executable under `timeout 600s`. Poll/map limit: 120s.\n\
@@ -375,7 +393,12 @@ fn bounded_path(path: &Path) -> Result<&str> {
 
 fn load_sources(options: &Options, evidence: &mut Evidence) -> Result<Vec<Source>> {
     let mut sources = Vec::with_capacity(MAX_VARIANTS);
-    for arg in &options.sources {
+    for (index, arg) in options.sources.iter().enumerate() {
+        let compilation_options = if index == 0 {
+            BenchmarkMutateOptions::default()
+        } else {
+            options.candidate_mutation
+        };
         let (path, text) =
             read_source(&arg.path).with_context(|| format!("load source {}", arg.name))?;
         let path_text = bounded_path(&path)?;
@@ -392,12 +415,14 @@ fn load_sources(options: &Options, evidence: &mut Evidence) -> Result<Vec<Source
         destination.flush()?;
         evidence.event(&json!({"event":"source", "name":arg.name, "path":path_text,
             "copy":copy, "sha256":sha256, "bytes":text.len(),
-            "mutate_group_size":mutate_group_size}))?;
+            "mutate_group_size":mutate_group_size, "constants":benchmark_mutate_compilation_options(compilation_options).constants,
+            "zero_initialize_workgroup_memory":compilation_options.zero_initialize_workgroup_memory}))?;
         sources.push(Source {
             name: arg.name.clone(),
             text,
             sha256,
             mutate_group_size,
+            options: compilation_options,
         });
     }
     Ok(sources)
@@ -451,7 +476,9 @@ fn run(options: &Options, evidence: &mut Evidence, deadline: Instant) -> Result<
         "seed":SEED, "outer_process_timeout_seconds":600, "poll_map_timeout_seconds":120,
         "semantics":"all header bits and active polygon prefix; padding differences logged",
         "unproduced_slots":"compare every word against variant's own prior full snapshot",
-        "compilation_options":"wgpu::PipelineCompilationOptions::default()",
+        "compilation_options":"per-source mutation policy; see source and compilation events",
+        "reference_zero_initialize_workgroup_memory":true,
+        "candidate_zero_initialize_workgroup_memory":options.candidate_mutation.zero_initialize_workgroup_memory,
         "scored_campaign":false}),
     )?;
     let sources = load_sources(options, evidence)?;
@@ -669,7 +696,9 @@ fn compile_variants(
         remaining(deadline)?;
         evidence.event(
             &json!({"event":"compilation_started", "variant":source.name,
-            "sha256":source.sha256, "mutate_group_size":source.mutate_group_size}),
+            "sha256":source.sha256, "mutate_group_size":source.mutate_group_size,
+            "zero_initialize_workgroup_memory":source.options.zero_initialize_workgroup_memory,
+            "constants":benchmark_mutate_compilation_options(source.options).constants}),
         )?;
         let scopes = error_scopes(device);
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -686,13 +715,15 @@ fn compile_variants(
             layout: Some(&layout),
             module: &module,
             entry_point: Some("main"),
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            compilation_options: benchmark_mutate_compilation_options(source.options),
             cache: None,
         });
         finish_scopes(device, scopes, evidence, &source.name, deadline)?;
         evidence.event(
             &json!({"event":"compilation_completed", "variant":source.name,
-            "sha256":source.sha256, "mutate_group_size":source.mutate_group_size}),
+            "sha256":source.sha256, "mutate_group_size":source.mutate_group_size,
+            "zero_initialize_workgroup_memory":source.options.zero_initialize_workgroup_memory,
+            "constants":benchmark_mutate_compilation_options(source.options).constants}),
         )?;
         variants.push(Variant {
             source,
@@ -839,6 +870,8 @@ fn run_fixtures(
             evidence.comparisons += usize::from(variant_index > 0);
             evidence.event(&json!({"event":"comparison", "fixture":index,
                 "variant":variant.source.name, "sha256":variant.source.sha256,
+                "mutate_group_size":variant.source.mutate_group_size,
+                "zero_initialize_workgroup_memory":variant.source.options.zero_initialize_workgroup_memory,
                 "reference":variant_index == 0, "passed":passed, "produced_slots":produced,
                 "state_sha256":hash(bytemuck::cast_slice(&actual[..OUTPUT_WORDS])),
                 "error_sha256":hash(bytemuck::cast_slice(&actual[OUTPUT_WORDS..])),
@@ -976,7 +1009,8 @@ fn dispatch(
     let dimensions = mutation_dispatch(case, variant.source.mutate_group_size);
     evidence.event(&json!({"event":"dispatch_started", "fixture":fixture,
         "variant":variant.source.name, "dispatch":dimensions,
-        "mutate_group_size":variant.source.mutate_group_size}))?;
+        "mutate_group_size":variant.source.mutate_group_size,
+        "zero_initialize_workgroup_memory":variant.source.options.zero_initialize_workgroup_memory}))?;
     let scopes = error_scopes(&p.device);
     p.queue.write_buffer(
         &buffers.output,
@@ -999,6 +1033,8 @@ fn dispatch(
     evidence.completed += 1;
     evidence.event(&json!({"event":"dispatch_completed", "fixture":fixture,
         "variant":variant.source.name, "completed_dispatches":evidence.completed,
+        "mutate_group_size":variant.source.mutate_group_size,
+        "zero_initialize_workgroup_memory":variant.source.options.zero_initialize_workgroup_memory,
         "readback_bytes":SNAPSHOT_BYTES, "gpu_scopes_clear":true}))
 }
 
@@ -1308,6 +1344,9 @@ mod tests {
             let mut options = Options {
                 sources: Vec::new(),
                 output: directory.join("evidence"),
+                candidate_mutation: BenchmarkMutateOptions {
+                    zero_initialize_workgroup_memory: false,
+                },
             };
             for (index, (text, _)) in inputs.iter().enumerate() {
                 let path = directory.join(format!("source-{index}.wgsl"));
@@ -1354,11 +1393,20 @@ mod tests {
         assert_eq!(source.text, text);
         assert_eq!(source.sha256, hash(text.as_bytes()));
         assert_eq!(source.mutate_group_size, group);
+        assert_eq!(
+            source.options.zero_initialize_workgroup_memory,
+            source.name == "source-0"
+        );
         let event: Value = serde_json::from_str(line)?;
         assert_eq!(event["event"], "source");
         assert_eq!(event["name"], source.name);
         assert_eq!(event["sha256"], source.sha256);
         assert_eq!(event["mutate_group_size"], group);
+        assert_eq!(
+            event["zero_initialize_workgroup_memory"],
+            source.options.zero_initialize_workgroup_memory
+        );
+        assert_eq!(event["constants"], json!([]));
         assert_eq!(event["bytes"], text.len());
         assert_eq!(
             fs::read_to_string(output.join(format!("{}.wgsl", source.name)))?,
@@ -1463,6 +1511,52 @@ mod tests {
         let mut invalid = args.map(OsString::from);
         invalid[5] = OsString::from("x".repeat(MAX_PATH_BYTES + 1));
         assert!(parse_args(invalid.into_iter()).is_err());
+    }
+
+    #[test]
+    fn candidate_zeroing_cli_defaults_true_and_rejects_invalid_or_duplicate() {
+        let base = [
+            "--reference",
+            "reference.wgsl",
+            "--candidate",
+            "candidate=candidate.wgsl",
+            "--output",
+            "new-results",
+        ]
+        .map(OsString::from)
+        .to_vec();
+        assert!(
+            parse_args(base.clone().into_iter())
+                .unwrap()
+                .unwrap()
+                .candidate_mutation
+                .zero_initialize_workgroup_memory
+        );
+        for value in ["true", "false"] {
+            let mut input = base.clone();
+            input.extend([
+                OsString::from("--mutate-zero-initialize"),
+                OsString::from(value),
+            ]);
+            let options = parse_args(input.clone().into_iter()).unwrap().unwrap();
+            assert_eq!(
+                options.candidate_mutation.zero_initialize_workgroup_memory,
+                value == "true"
+            );
+            input.extend([
+                OsString::from("--mutate-zero-initialize"),
+                OsString::from(value),
+            ]);
+            assert!(parse_args(input.into_iter()).is_err());
+        }
+        for value in ["TRUE", "0", "invalid", ""] {
+            let mut input = base.clone();
+            input.extend([
+                OsString::from("--mutate-zero-initialize"),
+                OsString::from(value),
+            ]);
+            assert!(parse_args(input.into_iter()).is_err());
+        }
     }
 
     #[test]

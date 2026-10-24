@@ -15,19 +15,60 @@ const MAX_BENCHMARK_SOURCE_BYTES: usize = 256 * 1024;
 const MAX_BENCHMARK_RASTER_PIPELINES: usize = 17 * 5;
 const MAX_BENCHMARK_MUTATE_PIPELINES: usize = 17;
 
+/// Mutation-only compiler policy. Historical benchmark sources require zeroing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct BenchmarkMutateOptions {
+    pub zero_initialize_workgroup_memory: bool,
+}
+
+impl Default for BenchmarkMutateOptions {
+    fn default() -> Self {
+        Self {
+            zero_initialize_workgroup_memory: true,
+        }
+    }
+}
+
+// Bundled policy is separate from the historical-source default.
+const BUNDLED_MUTATE_OPTIONS: BenchmarkMutateOptions = BenchmarkMutateOptions {
+    zero_initialize_workgroup_memory: true,
+};
+
+/// Shared by the mutation factory and the direct numerical checker.
+#[must_use]
+pub fn benchmark_mutate_compilation_options(
+    options: BenchmarkMutateOptions,
+) -> PipelineCompilationOptions<'static> {
+    PipelineCompilationOptions {
+        zero_initialize_workgroup_memory: options.zero_initialize_workgroup_memory,
+        ..PipelineCompilationOptions::default()
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct BenchmarkMutateKey {
     source: Arc<str>,
     group_size: u32,
+    options: BenchmarkMutateOptions,
 }
 
 impl BenchmarkMutateKey {
-    fn new(source: &str) -> Result<Self, String> {
+    fn new(source: &str, options: BenchmarkMutateOptions) -> Result<Self, String> {
         let group_size = benchmark_mutate_group_size_from_source(source)?;
         Ok(Self {
             source: Arc::from(source),
             group_size,
+            options,
         })
+    }
+
+    fn matches_installed(
+        &self,
+        source: &str,
+        group_size: u32,
+        options: BenchmarkMutateOptions,
+    ) -> bool {
+        self.source.as_ref() == source && self.group_size == group_size && self.options == options
     }
 }
 
@@ -85,6 +126,8 @@ pub struct GpuPipeline {
     // Compute pipelines
     pub mutate_pipeline: ComputePipeline,
     pub(super) mutate_group_size: u32,
+    pub(super) mutate_source: Arc<str>,
+    pub(super) mutate_options: BenchmarkMutateOptions,
     pub rasterize_error_pipeline: ComputePipeline,
     pub select_pipeline: ComputePipeline,
     pub bin_polygons_pipeline: ComputePipeline,
@@ -159,6 +202,8 @@ impl GpuPipeline {
         let mutate_source = include_str!("../shaders/mutate.wgsl");
         let mutate_group_size = benchmark_mutate_group_size_from_source(mutate_source)
             .expect("bundled mutation source must have valid group metadata");
+
+        let mutate_options = BUNDLED_MUTATE_OPTIONS;
 
         // --- Device + Queue ---
         // Exclude GL/GLES — EGL conflicts with SDL2's display context.
@@ -789,6 +834,7 @@ impl GpuPipeline {
             &device,
             &mutate_pipeline_layout,
             mutate_source,
+            mutate_options,
             &pipeline_cache,
         );
 
@@ -1027,6 +1073,8 @@ impl GpuPipeline {
             chain_update_flags_buf,
             mutate_pipeline,
             mutate_group_size,
+            mutate_source: Arc::from(mutate_source),
+            mutate_options,
             rasterize_error_pipeline,
             select_pipeline,
             bin_polygons_pipeline,
@@ -1138,8 +1186,12 @@ impl GpuPipeline {
         Ok(())
     }
 
-    pub(super) fn set_benchmark_mutate_shader(&mut self, source: &str) -> Result<(), String> {
-        let key = BenchmarkMutateKey::new(source)?;
+    pub(super) fn set_benchmark_mutate_shader(
+        &mut self,
+        source: &str,
+        options: BenchmarkMutateOptions,
+    ) -> Result<(), String> {
+        let key = BenchmarkMutateKey::new(source, options)?;
         if let Some(entry) = self
             .benchmark_mutate_pipelines
             .iter()
@@ -1147,19 +1199,25 @@ impl GpuPipeline {
         {
             self.mutate_pipeline = entry.pipeline.clone();
             self.mutate_group_size = entry.key.group_size;
+            self.mutate_source = Arc::clone(&entry.key.source);
+            self.mutate_options = entry.key.options;
             return Ok(());
         }
         if self.benchmark_mutate_pipelines.len() == MAX_BENCHMARK_MUTATE_PIPELINES {
             return Err("benchmark mutate pipeline cache is full".into());
         }
         let pipeline = if self.benchmark_mutate_pipelines.is_empty()
-            && source == include_str!("../shaders/mutate.wgsl")
-        {
+            && key.matches_installed(
+                &self.mutate_source,
+                self.mutate_group_size,
+                self.mutate_options,
+            ) {
             self.mutate_pipeline.clone()
         } else {
-            self.compile_benchmark_mutate(source)?
+            self.compile_benchmark_mutate(source, options)?
         };
         let group_size = key.group_size;
+        let source = Arc::clone(&key.source);
         self.benchmark_mutate_pipelines
             .push(BenchmarkMutatePipeline {
                 key,
@@ -1168,10 +1226,16 @@ impl GpuPipeline {
         // Preparation and diagnostics retain the selected pipeline and source width.
         self.mutate_pipeline = pipeline;
         self.mutate_group_size = group_size;
+        self.mutate_source = source;
+        self.mutate_options = options;
         Ok(())
     }
 
-    fn compile_benchmark_mutate(&self, source: &str) -> Result<ComputePipeline, String> {
+    fn compile_benchmark_mutate(
+        &self,
+        source: &str,
+        options: BenchmarkMutateOptions,
+    ) -> Result<ComputePipeline, String> {
         let scopes = [
             self.device.push_error_scope(ErrorFilter::Validation),
             self.device.push_error_scope(ErrorFilter::OutOfMemory),
@@ -1181,6 +1245,7 @@ impl GpuPipeline {
             &self.device,
             &self.mutate_pipeline_layout,
             source,
+            options,
             &self.pipeline_cache,
         );
         let mut errors = Vec::with_capacity(3);
@@ -1411,6 +1476,7 @@ fn create_mutate_pipeline_from_source(
     device: &Device,
     layout: &PipelineLayout,
     source: &str,
+    options: BenchmarkMutateOptions,
     cache: &PipelineCache,
 ) -> ComputePipeline {
     let shader = device.create_shader_module(ShaderModuleDescriptor {
@@ -1422,7 +1488,7 @@ fn create_mutate_pipeline_from_source(
         layout: Some(layout),
         module: &shader,
         entry_point: Some("main"),
-        compilation_options: PipelineCompilationOptions::default(),
+        compilation_options: benchmark_mutate_compilation_options(options),
         cache: Some(cache),
     })
 }
@@ -1772,11 +1838,12 @@ mod benchmark_tests {
     use sha2::{Digest, Sha256};
 
     use super::{
-        benchmark_bin_source, benchmark_mutate_group_size_from_source, bin_polygons_source,
+        benchmark_bin_source, benchmark_mutate_compilation_options,
+        benchmark_mutate_group_size_from_source, bin_polygons_source,
         specialize_benchmark_bin_source, specialize_bin_source, specialize_raster_source,
         validate_benchmark_bin_source, validate_benchmark_mutate_source,
-        validate_benchmark_raster_source, BenchmarkMutateKey, BenchmarkRasterKey,
-        MAX_BENCHMARK_SOURCE_BYTES,
+        validate_benchmark_raster_source, BenchmarkMutateKey, BenchmarkMutateOptions,
+        BenchmarkRasterKey, BUNDLED_MUTATE_OPTIONS, MAX_BENCHMARK_SOURCE_BYTES,
     };
 
     const HISTORICAL_MUTATE: &str = include_str!(
@@ -1851,26 +1918,119 @@ mod benchmark_tests {
             (GROUPED_MUTATE_G64, 64),
             (bundled, bundled_group),
         ] {
-            let key = BenchmarkMutateKey::new(original).unwrap();
+            let key = BenchmarkMutateKey::new(original, BenchmarkMutateOptions::default()).unwrap();
             assert_eq!(key.group_size, group);
             assert_eq!(key.source.as_ref(), original);
-            assert_eq!(key, BenchmarkMutateKey::new(original).unwrap());
+            assert_eq!(
+                key,
+                BenchmarkMutateKey::new(original, BenchmarkMutateOptions::default()).unwrap()
+            );
             for suffix in ["\n", "\n// candidate λ"] {
-                let changed = BenchmarkMutateKey::new(&format!("{original}{suffix}")).unwrap();
+                let changed = BenchmarkMutateKey::new(
+                    &format!("{original}{suffix}"),
+                    BenchmarkMutateOptions::default(),
+                )
+                .unwrap();
                 assert_ne!(key, changed);
                 assert_eq!(changed.group_size, group);
             }
         }
-        let grouped = BenchmarkMutateKey::new("const OFFSPRING_GROUP_SIZE: u32 = 4u;").unwrap();
+        let grouped = BenchmarkMutateKey::new(
+            "const OFFSPRING_GROUP_SIZE: u32 = 4u;",
+            BenchmarkMutateOptions::default(),
+        )
+        .unwrap();
         assert_eq!(grouped.group_size, 4);
-        assert_ne!(grouped, BenchmarkMutateKey::new(HISTORICAL_MUTATE).unwrap());
         assert_ne!(
-            BenchmarkMutateKey::new(GROUPED_MUTATE_G1).unwrap(),
-            BenchmarkMutateKey::new(GROUPED_MUTATE_G64).unwrap()
+            grouped,
+            BenchmarkMutateKey::new(HISTORICAL_MUTATE, BenchmarkMutateOptions::default()).unwrap()
         );
-        assert_eq!(grouped, BenchmarkMutateKey::new(&grouped.source).unwrap());
-        assert!(BenchmarkMutateKey::new("const OFFSPRING_GROUP_SIZE: u32 = 3u;").is_err());
+        assert_ne!(
+            BenchmarkMutateKey::new(GROUPED_MUTATE_G1, BenchmarkMutateOptions::default()).unwrap(),
+            BenchmarkMutateKey::new(GROUPED_MUTATE_G64, BenchmarkMutateOptions::default()).unwrap()
+        );
+        assert_eq!(
+            grouped,
+            BenchmarkMutateKey::new(&grouped.source, BenchmarkMutateOptions::default()).unwrap()
+        );
+        assert!(BenchmarkMutateKey::new(
+            "const OFFSPRING_GROUP_SIZE: u32 = 3u;",
+            BenchmarkMutateOptions::default()
+        )
+        .is_err());
         assert!(wgpu::PipelineCompilationOptions::default().zero_initialize_workgroup_memory);
+    }
+
+    #[test]
+    fn mutate_compilation_policy_changes_only_zeroing() {
+        let defaults = wgpu::PipelineCompilationOptions::default();
+        assert!(BenchmarkMutateOptions::default().zero_initialize_workgroup_memory);
+        for zero_initialize_workgroup_memory in [true, false] {
+            let actual = benchmark_mutate_compilation_options(BenchmarkMutateOptions {
+                zero_initialize_workgroup_memory,
+            });
+            assert_eq!(
+                actual.zero_initialize_workgroup_memory,
+                zero_initialize_workgroup_memory
+            );
+            assert_eq!(actual.constants, defaults.constants);
+            assert_eq!(actual.constants, []);
+        }
+    }
+
+    #[test]
+    fn mutate_cache_invalidates_on_policy_including_bundled_source() {
+        let bundled = include_str!("../shaders/mutate.wgsl");
+        let installed = BenchmarkMutateKey::new(bundled, BUNDLED_MUTATE_OPTIONS).unwrap();
+        assert_eq!(
+            installed.group_size,
+            benchmark_mutate_group_size_from_source(bundled).unwrap()
+        );
+        for source in [
+            HISTORICAL_MUTATE,
+            GROUPED_MUTATE_G1,
+            GROUPED_MUTATE_G64,
+            bundled,
+        ] {
+            for zero_initialize_workgroup_memory in [true, false] {
+                let options = BenchmarkMutateOptions {
+                    zero_initialize_workgroup_memory,
+                };
+                let key = BenchmarkMutateKey::new(source, options).unwrap();
+                assert_eq!(key.options, options);
+                assert_eq!(key, BenchmarkMutateKey::new(source, options).unwrap());
+                let other = BenchmarkMutateKey::new(
+                    source,
+                    BenchmarkMutateOptions {
+                        zero_initialize_workgroup_memory: !zero_initialize_workgroup_memory,
+                    },
+                )
+                .unwrap();
+                assert_ne!(key, other);
+                if source == bundled {
+                    assert_eq!(key == installed, options == BUNDLED_MUTATE_OPTIONS);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn future_bundled_false_policy_cannot_reuse_initial_pipeline_for_historical_true() {
+        let bundled = include_str!("../shaders/mutate.wgsl");
+        let future_options = BenchmarkMutateOptions {
+            zero_initialize_workgroup_memory: false,
+        };
+        let requested =
+            BenchmarkMutateKey::new(bundled, BenchmarkMutateOptions::default()).unwrap();
+        assert!(requested.options.zero_initialize_workgroup_memory);
+        assert!(!requested.matches_installed(bundled, requested.group_size, future_options));
+        assert!(requested.matches_installed(bundled, requested.group_size, requested.options));
+        let future_request = BenchmarkMutateKey::new(bundled, future_options).unwrap();
+        assert!(future_request.matches_installed(
+            bundled,
+            future_request.group_size,
+            future_options
+        ));
     }
 
     #[test]
