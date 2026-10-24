@@ -1,0 +1,313 @@
+--- .cache/evolution-qualification-prepared-20261024/qualification-contract-fix-106/run-campaign.py	2026-10-24 15:36:26.347722212 +0100
++++ .cache/evolution-next-20261024/kernel-contract-108/run-campaign.py	2026-10-24 15:53:10.268828507 +0100
+@@ -1,20 +1,18 @@
+ #!/usr/bin/env python3
+-"""One-shot, bounded prepared-throughput campaign. Importing performs no I/O.
++"""Import-only validation for prepared raster kernel evidence.
+ 
+-Only main may create campaign evidence or run the frozen executable. No native
+-analyzed verdict is authoritative. Independent full-byte L1 review follows timing.
++No scheduling, clock creation, evidence writes, or executable launch is provided.
++The parent freezes each phase specification and owns all execution.
+ """
+ import hashlib
+ import importlib.util
+ import json
+ import math
+-import os
+-from pathlib import Path
+ import statistics as descriptive
+ import sys
+-import time
++from pathlib import Path
+ 
+-# Keep the consumed original namespace, including its exclusive one-shot clock.
++# Historical constants support the unchanged 106 CPU regression contracts only.
+ ROOT = Path("/home/nick/git/artgen-backend-rust")
+ BASE = ROOT / ".cache/evolution-qualification-prepared-20261024"
+ TARGET = BASE / "campaign"
+@@ -180,7 +178,7 @@
+         require(type(gpu[key]) is int and 0 < gpu[key] <= 2**64 - 1, f"invalid GPU {key}")
+ 
+ 
+-def validate_row(row, phase, reference, diagnostic=False):
++def validate_row(row, phase, reference, diagnostic=False, *, source_sha256=AE1, manifest_hash=MANIFEST):
+     _, cases, seed, batches, enabled, candidate = phase
+     require(row.get("schema") == "engine-lab-prepared-v2", "wrong row schema")
+     require(row.get("case_id") in cases, "wrong row case")
+@@ -195,8 +193,8 @@
+     actual = enabled and row["variant"] == candidate
+     require(type(row.get("finalize_overlap")) is bool and row["finalize_overlap"] == actual,
+             "wrong actual installed overlap mode")
+-    require(row.get("params_sha256") == PARAMS and row.get("source_sha256") == AE1
+-            and row.get("fixture_manifest_sha256") == MANIFEST, "row identity mismatch")
++    require(row.get("params_sha256") == PARAMS and row.get("source_sha256") == source_sha256
++            and row.get("fixture_manifest_sha256") == manifest_hash, "row identity mismatch")
+     require(row.get("gpu") == reference["gpu"], "row GPU/backend/driver differs from qualification")
+     for key in ("initial_state_sha256", "final_state_sha256"):
+         require(row.get(key) == reference[key], f"row {key} differs from this phase qualification")
+@@ -219,15 +217,44 @@
+         require(math.isclose(rate, batches * 16384 / row["elapsed_seconds"], rel_tol=1e-6), "wrong rate")
+ 
+ 
++def phase_identities(spec, phase):
++    """Resolve one frozen phase's manifest and arm identities at the boundary.
++
++    The legacy shader-only shape supports read-only 106 regression fixtures.
++    Explicit source identities require the kernel experiment's false modes.
++    """
++    identity = spec["identities"]
++    fields = ("reference_shader", "reference_sha256", "candidate_shader", "candidate_sha256")
++    explicit = any(field in identity for field in fields)
++    if explicit:
++        require(all(field in identity for field in (*fields, "manifest_sha256")),
++                "incomplete explicit phase identities")
++        require(phase[4] is False, "kernel experiment requires both overlap modes false")
++        sources = {"reference": (identity["reference_shader"], identity["reference_sha256"]),
++                   phase[5]: (identity["candidate_shader"], identity["candidate_sha256"])}
++    else:
++        require("shader" in identity, "missing shader identities")
++        sources = {"reference": (identity["shader"], AE1), phase[5]: (identity["shader"], AE1)}
++    require(phase[5] != "reference", "candidate arm collides with reference")
++    manifest = identity.get("manifest")
++    manifest_hash = identity.get("manifest_sha256", MANIFEST)
++    for path, digest in [(manifest, manifest_hash), *sources.values()]:
++        require(isinstance(path, str) and Path(path).is_absolute(), "identity path must be absolute")
++        require(isinstance(digest, str) and len(digest) == 64
++                and all(char in "0123456789abcdef" for char in digest), "invalid identity SHA256")
++    return manifest, manifest_hash, sources
++
++
+ def validate_summary(summary, phase, spec):
+     _, cases, seed, batches, enabled, candidate = phase
++    manifest, manifest_hash, sources_expected = phase_identities(spec, phase)
+     require(summary.get("schema") == spec["schema"] and summary.get("status") == "completed",
+             "native summary incomplete/schema mismatch")
+     require(type(summary.get("error_count")) is int and summary["error_count"] == 0
+             and summary.get("errors") == [], "native summary errors")
+     require(summary.get("warmup_batches") == 8 and summary.get("timestamp_mode") == "stages",
+             "summary warmup/timestamps mismatch")
+-    require(summary.get("fixture_manifest_sha256") == MANIFEST, "summary manifest mismatch")
++    require(summary.get("fixture_manifest_sha256") == manifest_hash, "summary manifest mismatch")
+     for key, expected in (("completed_trials", 10 * len(cases)), ("expected_trials", 10 * len(cases)),
+                           ("completed_diagnostics", 2 * len(cases)), ("expected_diagnostics", 2 * len(cases))):
+         require(type(summary.get(key)) is int and summary[key] == expected, f"wrong summary {key}")
+@@ -236,15 +263,16 @@
+                        ("diagnostics", True), ("finalize_overlap", enabled),
+                        ("case", "all" if len(cases) == 3 else cases[0]), ("mutate_zero_initialize", None)):
+         require(type(config.get(key)) is type(value) and config[key] == value, f"wrong config {key}")
+-    require(config.get("manifest") == spec["identities"]["manifest"], "config manifest differs")
+-    shader = spec["identities"]["shader"]
+-    require(config.get("reference_shader") == shader and config.get("variants") == [[candidate, shader]],
++    require(config.get("manifest") == manifest, "config manifest differs")
++    require(config.get("reference_shader") == sources_expected["reference"][0]
++            and config.get("variants") == [[candidate, sources_expected[candidate][0]]],
+             "shader paths/variants differ")
+     sources = summary["sources"]
+     require(len(sources) == 2, "wrong source count")
+     for source, name, mode in zip(sources, ("reference", candidate), (False, enabled), strict=True):
+-        require(source.get("name") == name and source.get("sha256") == AE1
+-                and source.get("path") == shader and source.get("shader_stage") == "raster"
++        path, digest = sources_expected[name]
++        require(source.get("name") == name and source.get("sha256") == digest
++                and source.get("path") == path and source.get("shader_stage") == "raster"
+                 and type(source.get("finalize_overlap")) is bool and source["finalize_overlap"] == mode,
+                 "source identity/expected mode mismatch")
+         require(source.get("mutate_group_size") is None and source.get("mutate_options") is None,
+@@ -300,21 +328,25 @@
+ 
+ 
+ def validate_phase(compare, b, folder, phase, spec, fixtures, gpu_identities):
++    _, manifest_hash, sources_expected = phase_identities(spec, phase)
+     output = folder / "output"
+     summary = b.object_value(b.read_json(output / "summary.json", 2 * 1024 * 1024), "native summary")
+     validate_summary(summary, phase, spec)
+     require(summary["config"].get("output") == str(output), "output path mismatch")
+     _, cases, seed, batches, _, candidate = phase
+-    require(sha(output / "manifest.json") == MANIFEST, "exported manifest mismatch")
++    require(sha(output / "manifest.json") == manifest_hash, "exported manifest mismatch")
+     for arm in ("reference", candidate):
+-        require(sha(output / f"{arm}.wgsl") == AE1
+-                and (output / f"{arm}.wgsl").stat().st_size == 13162, "exported AE1 bytes mismatch")
++        path, digest = sources_expected[arm]
++        require(sha(Path(path)) == digest, "frozen source changed")
++        require(sha(output / f"{arm}.wgsl") == digest
++                and (output / f"{arm}.wgsl").stat().st_size == Path(path).stat().st_size,
++                "exported source bytes mismatch")
+     references = {}
+     for case, metadata in zip(cases, summary["cases"], strict=True):
+         qualification = output / f"qualification-{case}"
+         record = b.read_json(qualification / "result.json", 2 * 1024 * 1024)
+         args = b.argparse.Namespace(seed=seed, batches=batches, timeout=600)
+-        validate_qualification(b, record, fixtures[case], args, MANIFEST)
++        validate_qualification(b, record, fixtures[case], args, manifest_hash)
+         check_work(record["counters"], batches)
+         require(record.get("schema") == spec["schema"] and record.get("warmup_batches") == 8
+                 and record.get("finalize_overlap") is False and record.get("timestamp_samples") == batches,
+@@ -342,7 +374,8 @@
+     for rows, diagnostic in ((normal, False), (diagnostics, True)):
+         for row in rows:
+             require(row.get("candidate") == (row["variant"] if diagnostic else candidate), "candidate mismatch")
+-            validate_row(row, phase, references[row["case_id"]], diagnostic)
++            validate_row(row, phase, references[row["case_id"]], diagnostic,
++                         source_sha256=sources_expected[row["variant"]][1], manifest_hash=manifest_hash)
+             require(row.get("setup_timing_boundaries") == summary.get("setup_timing_boundaries")
+                     == references[row["case_id"]].get("setup_timing_boundaries")
+                     and bool(row.get("setup_timing_boundaries")), "startup clock labels mismatch")
+@@ -419,151 +452,12 @@
+     return result
+ 
+ 
+-def preflight(b):
+-    require(sha(TARGET / "spec.json") == SPEC_SHA, "frozen spec changed")
+-    spec = b.read_json(TARGET / "spec.json")
+-    identity = spec["identities"]
+-    require(sha(BUILD / "binary.json") == "0a74ea946a0940a600fddfa393977d376f2c5fec477185d189b967e9c37b5f84",
+-            "binary record changed")
+-    binary_record = b.read_json(BUILD / "binary.json")
+-    binary = Path(binary_record["immutable_copy"])
+-    require(binary == BUILD / "build/engine-qualification-lab", "unexpected executable path")
+-    require(sha(binary) == identity["binary_sha256"] == binary_record["sha256"], "binary changed")
+-    require(binary.stat().st_mode & 0o777 == 0o555, "binary mode changed")
+-    profile = binary_record["cargo_artifact"]["profile"]
+-    require(profile["opt_level"] == "3" and profile["debug_assertions"] is False
+-            and profile["test"] is False and binary_record["observer_capture"] is False, "profile/instrumentation")
+-    require(sha(BUILD / "source-hashes.json") == identity["source_freeze_sha256"]
+-            == binary_record["source_freeze_sha256"], "source freeze changed")
+-    inventory = b.read_json(BUILD / "source-hashes.json")
+-    require(len(inventory) <= 100, "source inventory bound")
+-    actual_inventory = b.inventory(BUILD / "source")
+-    require({name: entry["sha256"] for name, entry in actual_inventory.items()} == inventory,
+-            "source inventory changed, including extra files")
+-    manifest = Path(identity["manifest"])
+-    require(sha(manifest) == MANIFEST, "manifest changed")
+-    fixtures = {c["case_id"]: c for c in b.load_manifest(manifest)["cases"]}
+-    require(set(fixtures) == set(CASES), "fixture coverage changed")
+-    shader = Path(identity["shader"])
+-    require(sha(shader) == AE1 and shader.stat().st_size == 13162, "AE1 shader changed")
+-    require(shader.read_bytes() == (BUILD / "source/src/shaders/rasterize_error.wgsl").read_bytes(),
+-            "AE1 differs from private source")
+-    return spec, binary, manifest, shader, fixtures
+-
+-
+-def checkpoint(b, state):
+-    number = state["checkpoint"] + 1
+-    state["checkpoint"] = number
+-    state["updated_utc"] = b.utc_now()
+-    unique = TARGET / f"checkpoint-{number:03d}.json"
+-    b.write_json(unique, state)
+-    temporary = TARGET / f"progress-{number:03d}.pending"
+-    os.link(unique, temporary)
+-    os.replace(temporary, TARGET / "progress.json")
+-
+-
+-def command_for(binary, manifest, shader, folder, phase):
++def command_for(binary, manifest, shader, folder, phase, *, candidate_shader):
++    """Build a command only; the caller owns admission and execution."""
+     _, cases, seed, batches, enabled, candidate = phase
++    require(enabled is False, "kernel experiment requires both overlap modes false")
+     return [str(binary), "--manifest", str(manifest), "--reference-shader", str(shader),
+-            "--variant", f"{candidate}={shader}", "--output", str(folder / "output"),
++            "--variant", f"{candidate}={candidate_shader}", "--output", str(folder / "output"),
+             "--pairs", "5", "--batches", str(batches), "--seed", str(seed),
+             "--case", "all" if len(cases) == 3 else cases[0], "--shader-stage", "raster",
+-            "--diagnostics", "true", "--finalize-overlap", str(enabled).lower()]
+-
+-
+-def run_phases(compare, b, state, deadline, spec, binary, manifest, shader, fixtures):
+-    gpu_identities, reserved = {}, {}
+-    for phase in PHASES:
+-        name = phase[0]
+-        require(state["state"] not in ("INCONCLUSIVE", "REJECT"), "terminal state cannot run")
+-        folder = TARGET / name
+-        folder.mkdir()
+-        (folder / "cwd").mkdir()
+-        entry = {"phase": name, "valid": False, "directory": str(folder)}
+-        state["phases"].append(entry)
+-        checkpoint(b, state)
+-        print(f"phase {name} starting", flush=True)
+-        require(sha(binary) == spec["identities"]["binary_sha256"], "binary changed between phases")
+-        require(sha(manifest) == MANIFEST and sha(shader) == AE1, "inputs changed between phases")
+-        process = admitted_call(deadline, time.monotonic(), True, lambda timeout, folder=folder, phase=phase: b.run_process(
+-            command_for(binary, manifest, shader, folder, phase), folder / "cwd", folder / "evidence", timeout))
+-        entry["process"] = process
+-        entry["work"] = partial_work(b, folder / "output")
+-        checkpoint(b, state)
+-        require(process.get("status") == "completed" and process.get("returncode") == 0, "child stopped/failed")
+-        require(time.monotonic() < deadline, "deadline exceeded after child")
+-        entry.update(validate_phase(compare, b, folder, phase, spec, fixtures, gpu_identities))
+-        require(time.monotonic() < deadline, "deadline exceeded during validation")
+-        if name in ("aa", "train"):
+-            entry["gate"] = gate(compare, entry["ratios"], aa=name == "aa")
+-            outcome = "pass" if entry["gate"]["pass"] else "fail"
+-        else:
+-            reserved.update(entry["ratios"])
+-            outcome = "pass"  # Validity only. No reserved per-case timing decision.
+-        state["state"] = transition(state["state"], name, outcome)
+-        checkpoint(b, state)
+-        print(f"phase {name} {state['state']}", flush=True)
+-        if state["state"] in ("INCONCLUSIVE", "REJECT"):
+-            return
+-    state["reserved_gate"] = gate(compare, reserved)
+-    state["state"] = transition(state["state"], "reserved-gate",
+-                                "pass" if state["reserved_gate"]["pass"] else "fail")
+-
+-
+-def main(argv=None):
+-    require(not (sys.argv[1:] if argv is None else argv), "this frozen command accepts no arguments")
+-    started = time.monotonic()  # Fresh clock precedes lock and every preflight operation.
+-    deadline = started + 1800
+-    compare, b = load_helpers()
+-    require(sha(TARGET / "spec.json") == SPEC_SHA, "frozen spec changed")
+-    state = {"state": "NEW", "checkpoint": 0, "phases": [], "errors": [],
+-             "started_utc": b.utc_now(), "monotonic_start": started, "monotonic_deadline": deadline,
+-             "spec_sha256": SPEC_SHA, "helper_sha256": HELPERS,
+-             "scope": "conditional prepared throughput; old warmup2 REJECT unchanged; no adoption/default flip",
+-             "limitations": "AA eight batches only; conditional timing intervals, one reserved seed per case; "
+-                            "isolation/causal limiter/whole-app startup unresolved; independent byte-L1 audit follows"}
+-    b.write_json(TARGET / "clock.json", state)  # Exclusive one-shot marker. Never resume/retry this namespace.
+-    failures = (Invalid, b.BenchError, OSError, ValueError, KeyError, TypeError, OverflowError,
+-                AttributeError, IndexError, ZeroDivisionError, RecursionError, KeyboardInterrupt)
+-    try:
+-        with compare.cancellation_signals(), b.benchmark_lock(b.DEFAULT_ROOT / "benchmark.lock"):
+-            checkpoint(b, state)
+-            spec, binary, manifest, shader, fixtures = preflight(b)
+-            run_phases(compare, b, state, deadline, spec, binary, manifest, shader, fixtures)
+-            require(time.monotonic() < deadline, "deadline exceeded during analysis")
+-            if state["state"] == "PASS_PREPARED_CONDITIONAL":
+-                logical = sum(p["work"]["logical_evaluations_lower_bound"] for p in state["phases"])
+-                require(logical == spec["expected_full_evaluations"]["logical_total"], "logical total mismatch")
+-    except failures as exc:
+-        state["state"] = "INCONCLUSIVE"
+-        state["errors"].append(f"{type(exc).__name__}: {exc}")
+-        if state["phases"]:
+-            last = state["phases"][-1]
+-            try:
+-                last["partial_work_after_stop"] = partial_work(b, Path(last["directory"]) / "output")
+-            except (Invalid, b.BenchError, OSError, ValueError, TypeError) as partial_error:
+-                state["errors"].append(f"partial accounting failed: {partial_error}")
+-    state["controller_wall_seconds"] = time.monotonic() - started
+-    if time.monotonic() >= deadline:
+-        state["state"] = "INCONCLUSIVE"
+-        state["errors"].append("campaign deadline exhausted, including analysis/export")
+-    checkpoint(b, state)
+-    pending = TARGET / "result.pending.json"
+-    b.write_json(pending, state)
+-    if time.monotonic() >= deadline and state["state"] != "INCONCLUSIVE":
+-        state["state"] = "INCONCLUSIVE"
+-        state["errors"].append("deadline exhausted during final evidence export")
+-        checkpoint(b, state)
+-        pending = TARGET / "result-overdue.pending.json"
+-        b.write_json(pending, state)
+-    os.replace(pending, TARGET / "result.json")
+-    print(f"campaign {state['state']}", flush=True)
+-    return 0 if state["state"] == "PASS_PREPARED_CONDITIONAL" else 2
+-
+-
+-if __name__ == "__main__":
+-    try:
+-        raise SystemExit(main())
+-    except (Invalid, OSError) as error:
+-        print(f"campaign INCONCLUSIVE: {error}", flush=True)
+-        raise SystemExit(2) from error
++            "--diagnostics", "true", "--finalize-overlap", "false"]

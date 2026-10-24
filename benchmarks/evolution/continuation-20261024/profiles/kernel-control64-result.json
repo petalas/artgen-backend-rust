@@ -1,0 +1,443 @@
+{
+  "controller_wall_seconds": 261.0872464669992,
+  "deadline": 29398.378001292,
+  "errors": [],
+  "gate": {
+    "gate": "AA",
+    "pass": true,
+    "statistics": {
+      "aggregate": {
+        "interval95": [
+          0.9920412544958963,
+          0.9999422922563419
+        ],
+        "ratio": 0.9957093896470577
+      },
+      "bootstrap_seed": 20261024,
+      "cases": {
+        "darwin": {
+          "geomean_ratio": 0.9952828695156057,
+          "interval95": [
+            0.9906986777782634,
+            1.0009573604654092
+          ],
+          "interval_statistic": "exp(mean(log(paired ratio)))",
+          "paired_ratios": {
+            "cv": 0.005911833547342208,
+            "max": 1.0056233947615996,
+            "mean": 0.9953002129134194,
+            "median": 0.9939988716021563,
+            "min": 0.9887209189999571,
+            "n": 5,
+            "range": 0.0169024757616425,
+            "raw": [
+              0.9939988716021563,
+              0.991031114461228,
+              0.9971267647421559,
+              1.0056233947615996,
+              0.9887209189999571
+            ]
+          }
+        },
+        "ff": {
+          "geomean_ratio": 0.9925670601030556,
+          "interval95": [
+            0.9850402124965634,
+            1.0028909458250306
+          ],
+          "interval_statistic": "exp(mean(log(paired ratio)))",
+          "paired_ratios": {
+            "cv": 0.01058480071968417,
+            "max": 1.0123523379446728,
+            "mean": 0.9926222562587864,
+            "median": 0.9910400858127553,
+            "min": 0.981980578389186,
+            "n": 5,
+            "range": 0.030371759555486877,
+            "raw": [
+              0.9910400858127553,
+              1.0123523379446728,
+              0.991931669729082,
+              0.981980578389186,
+              0.9858066094182361
+            ]
+          }
+        },
+        "mona": {
+          "geomean_ratio": 0.9992897211655165,
+          "interval95": [
+            0.9937340928794842,
+            1.0041919249008369
+          ],
+          "interval_statistic": "exp(mean(log(paired ratio)))",
+          "paired_ratios": {
+            "cv": 0.005936140575323349,
+            "max": 1.0069480214367292,
+            "mean": 0.9993073525612404,
+            "median": 1.000684811556788,
+            "min": 0.9899177336875992,
+            "n": 5,
+            "range": 0.01703028774913007,
+            "raw": [
+              1.000684811556788,
+              0.9957894730695024,
+              0.9899177336875992,
+              1.0069480214367292,
+              1.003196723055583
+            ]
+          }
+        }
+      },
+      "resamples": 10000,
+      "uncertainty": "conditional on same-seed timing repeats; exploratory, not independent search seeds"
+    }
+  },
+  "monotonic_start": 28498.378001292,
+  "process": {
+    "artifact_file_byte_limit": 67108864,
+    "command": [
+      "/home/nick/git/artgen-backend-rust/.cache/evolution-qualification-prepared-20261024/build-100/build/engine-qualification-lab",
+      "--manifest",
+      "/home/nick/git/artgen-backend-rust/.cache/evolution-bench/baseline-20261023T172054.919294Z-95742/fixtures/manifest.json",
+      "--reference-shader",
+      "/home/nick/git/artgen-backend-rust/.cache/evolution-profiling-20261024/build-finalize-v1/source/src/shaders/rasterize_error.wgsl",
+      "--variant",
+      "control=/home/nick/git/artgen-backend-rust/.cache/evolution-profiling-20261024/build-finalize-v1/source/src/shaders/rasterize_error.wgsl",
+      "--output",
+      "/home/nick/git/artgen-backend-rust/.cache/evolution-next-20261024/control-64/worker/output",
+      "--pairs",
+      "5",
+      "--batches",
+      "64",
+      "--seed",
+      "7",
+      "--case",
+      "all",
+      "--shader-stage",
+      "raster",
+      "--diagnostics",
+      "true",
+      "--finalize-overlap",
+      "false"
+    ],
+    "cwd": "/home/nick/git/artgen-backend-rust/.cache/evolution-next-20261024/control-64/worker/cwd",
+    "process_wall_seconds": 258.65030651399866,
+    "returncode": 0,
+    "started_utc": "2026-10-24T14:46:27.448460+00:00",
+    "status": "completed"
+  },
+  "protocol": "kernel-control64-20261024-v1",
+  "scope": "new AA64 control only; no old samples, no candidate, no adoption",
+  "spec_sha256": "6f0d0ff3acd5b73be5a9b76cfbe3a65e7b6dae0f3e607817669b59960084629a",
+  "started_utc": "2026-10-24T14:46:27.327669+00:00",
+  "status": "PASS_CONTROL_ONLY",
+  "validated": {
+    "ratios": {
+      "darwin": [
+        0.9939988716021563,
+        0.991031114461228,
+        0.9971267647421559,
+        1.0056233947615996,
+        0.9887209189999571
+      ],
+      "ff": [
+        0.9910400858127553,
+        1.0123523379446728,
+        0.991931669729082,
+        0.981980578389186,
+        0.9858066094182361
+      ],
+      "mona": [
+        1.000684811556788,
+        0.9957894730695024,
+        0.9899177336875992,
+        1.0069480214367292,
+        1.003196723055583
+      ]
+    },
+    "startup": {
+      "drain": "already included in scored elapsed; never added again",
+      "per_arm": {
+        "diagnostic/darwin/control": {
+          "preparation_seconds": {
+            "count": 1,
+            "first": 0.897831234,
+            "max": 0.897831234,
+            "median": 0.897831234,
+            "min": 0.897831234
+          },
+          "source_install_seconds": {
+            "count": 1,
+            "first": 1.1982e-05,
+            "max": 1.1982e-05,
+            "median": 1.1982e-05,
+            "min": 1.1982e-05
+          }
+        },
+        "diagnostic/darwin/reference": {
+          "preparation_seconds": {
+            "count": 1,
+            "first": 0.893691584,
+            "max": 0.893691584,
+            "median": 0.893691584,
+            "min": 0.893691584
+          },
+          "source_install_seconds": {
+            "count": 1,
+            "first": 1.1962e-05,
+            "max": 1.1962e-05,
+            "median": 1.1962e-05,
+            "min": 1.1962e-05
+          }
+        },
+        "diagnostic/ff/control": {
+          "preparation_seconds": {
+            "count": 1,
+            "first": 0.821521494,
+            "max": 0.821521494,
+            "median": 0.821521494,
+            "min": 0.821521494
+          },
+          "source_install_seconds": {
+            "count": 1,
+            "first": 1.1612e-05,
+            "max": 1.1612e-05,
+            "median": 1.1612e-05,
+            "min": 1.1612e-05
+          }
+        },
+        "diagnostic/ff/reference": {
+          "preparation_seconds": {
+            "count": 1,
+            "first": 0.817835201,
+            "max": 0.817835201,
+            "median": 0.817835201,
+            "min": 0.817835201
+          },
+          "source_install_seconds": {
+            "count": 1,
+            "first": 1.2153e-05,
+            "max": 1.2153e-05,
+            "median": 1.2153e-05,
+            "min": 1.2153e-05
+          }
+        },
+        "diagnostic/mona/control": {
+          "preparation_seconds": {
+            "count": 1,
+            "first": 0.997860419,
+            "max": 0.997860419,
+            "median": 0.997860419,
+            "min": 0.997860419
+          },
+          "source_install_seconds": {
+            "count": 1,
+            "first": 1.1591e-05,
+            "max": 1.1591e-05,
+            "median": 1.1591e-05,
+            "min": 1.1591e-05
+          }
+        },
+        "diagnostic/mona/reference": {
+          "preparation_seconds": {
+            "count": 1,
+            "first": 0.9889037,
+            "max": 0.9889037,
+            "median": 0.9889037,
+            "min": 0.9889037
+          },
+          "source_install_seconds": {
+            "count": 1,
+            "first": 1.2093e-05,
+            "max": 1.2093e-05,
+            "median": 1.2093e-05,
+            "min": 1.2093e-05
+          }
+        },
+        "normal/darwin/control": {
+          "preparation_seconds": {
+            "count": 5,
+            "first": 0.919711864,
+            "max": 0.921709162,
+            "median": 0.915156205,
+            "min": 0.911549816
+          },
+          "source_install_seconds": {
+            "count": 5,
+            "first": 1.3375e-05,
+            "max": 1.3375e-05,
+            "median": 1.1581e-05,
+            "min": 1.1392e-05
+          }
+        },
+        "normal/darwin/reference": {
+          "preparation_seconds": {
+            "count": 5,
+            "first": 0.913956689,
+            "max": 0.914281046,
+            "median": 0.91166266,
+            "min": 0.896813752
+          },
+          "source_install_seconds": {
+            "count": 5,
+            "first": 1.3565e-05,
+            "max": 1.4127e-05,
+            "median": 1.3265e-05,
+            "min": 1.086e-05
+          }
+        },
+        "normal/ff/control": {
+          "preparation_seconds": {
+            "count": 5,
+            "first": 0.846996116,
+            "max": 0.873637444,
+            "median": 0.853740899,
+            "min": 0.846996116
+          },
+          "source_install_seconds": {
+            "count": 5,
+            "first": 1.1602e-05,
+            "max": 1.4316e-05,
+            "median": 1.3345e-05,
+            "min": 1.0981e-05
+          }
+        },
+        "normal/ff/reference": {
+          "preparation_seconds": {
+            "count": 5,
+            "first": 0.845178736,
+            "max": 0.863768782,
+            "median": 0.855577168,
+            "min": 0.812493421
+          },
+          "source_install_seconds": {
+            "count": 5,
+            "first": 1.087e-05,
+            "max": 1.1592e-05,
+            "median": 1.1221e-05,
+            "min": 1.082e-05
+          }
+        },
+        "normal/mona/control": {
+          "preparation_seconds": {
+            "count": 5,
+            "first": 0.96469619,
+            "max": 1.00461576,
+            "median": 0.998352266,
+            "min": 0.96469619
+          },
+          "source_install_seconds": {
+            "count": 5,
+            "first": 1.3936e-05,
+            "max": 1.3936e-05,
+            "median": 1.1702e-05,
+            "min": 1.1001e-05
+          }
+        },
+        "normal/mona/reference": {
+          "preparation_seconds": {
+            "count": 5,
+            "first": 0.958708404,
+            "max": 1.019082754,
+            "median": 0.999939529,
+            "min": 0.958708404
+          },
+          "source_install_seconds": {
+            "count": 5,
+            "first": 1.1541e-05,
+            "max": 1.4738e-05,
+            "median": 1.1541e-05,
+            "min": 1.1422e-05
+          }
+        }
+      },
+      "qualification_preparation": "unmeasured placeholder; excluded",
+      "scope": "host brackets exclude other checks; not whole application startup; no causal claim",
+      "shared_per_case": [
+        {
+          "case_id": "ff",
+          "device_initialization_seconds": 15.160497475,
+          "source_precompile_seconds": 0.786783662
+        },
+        {
+          "case_id": "mona",
+          "device_initialization_seconds": 10.767411751000001,
+          "source_precompile_seconds": 0.793241172
+        },
+        {
+          "case_id": "darwin",
+          "device_initialization_seconds": 10.984643822,
+          "source_precompile_seconds": 0.820880066
+        }
+      ]
+    },
+    "valid": true,
+    "work": {
+      "category_counters": {
+        "diagnostic": {
+          "completed_batches": 384,
+          "completed_evaluations": 6291456,
+          "completed_iterations": 24576,
+          "submitted_batches": 384,
+          "submitted_evaluations": 6291456,
+          "submitted_iterations": 24576
+        },
+        "normal": {
+          "completed_batches": 1920,
+          "completed_evaluations": 31457280,
+          "completed_iterations": 122880,
+          "submitted_batches": 1920,
+          "submitted_evaluations": 31457280,
+          "submitted_iterations": 122880
+        },
+        "qualification": {
+          "completed_batches": 192,
+          "completed_evaluations": 3145728,
+          "completed_iterations": 12288,
+          "submitted_batches": 192,
+          "submitted_evaluations": 3145728,
+          "submitted_iterations": 12288
+        }
+      },
+      "interpretation": "partial counters and source-accounted warmups are lower bounds; resets excluded",
+      "logical_evaluations_lower_bound": 46006272,
+      "read_errors": [],
+      "successful_preparations_lower_bound": 39,
+      "warmup_evaluations_source_accounted_lower_bound": 5111808
+    }
+  },
+  "validator_sha256": "652a4599517eadc3ee4c07b74847d39b69a20c8c6f44dd3b0401b4cfbb5bee09",
+  "work": {
+    "category_counters": {
+      "diagnostic": {
+        "completed_batches": 384,
+        "completed_evaluations": 6291456,
+        "completed_iterations": 24576,
+        "submitted_batches": 384,
+        "submitted_evaluations": 6291456,
+        "submitted_iterations": 24576
+      },
+      "normal": {
+        "completed_batches": 1920,
+        "completed_evaluations": 31457280,
+        "completed_iterations": 122880,
+        "submitted_batches": 1920,
+        "submitted_evaluations": 31457280,
+        "submitted_iterations": 122880
+      },
+      "qualification": {
+        "completed_batches": 192,
+        "completed_evaluations": 3145728,
+        "completed_iterations": 12288,
+        "submitted_batches": 192,
+        "submitted_evaluations": 3145728,
+        "submitted_iterations": 12288
+      }
+    },
+    "interpretation": "partial counters and source-accounted warmups are lower bounds; resets excluded",
+    "logical_evaluations_lower_bound": 46006272,
+    "read_errors": [],
+    "successful_preparations_lower_bound": 39,
+    "warmup_evaluations_source_accounted_lower_bound": 5111808
+  }
+}

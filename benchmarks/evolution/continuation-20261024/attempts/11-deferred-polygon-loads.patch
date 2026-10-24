@@ -1,0 +1,52 @@
+--- AE1/rasterize_error.wgsl
++++ selection-107/candidate.wgsl
+@@ -146,21 +146,21 @@
+ }
+ 
+ /// Rasterize a polygon and alpha-blend if pixel is inside.
+-fn rasterize_blend(poly: DecodedPolygon, fx: f32, fy: f32, r: ptr<function, f32>, g: ptr<function, f32>, b: ptr<function, f32>) {
+-    // Read vertices decoded by the cooperative loader
+-    let pv0 = poly.pv0;
+-    let pv1 = poly.pv1;
+-    let pv2 = poly.pv2;
+-
++fn rasterize_blend(slot: u32, fx: f32, fy: f32, r: ptr<function, f32>, g: ptr<function, f32>, b: ptr<function, f32>) {
+     // AABB culling: skip polygons whose bounding box doesn't contain this pixel
+-    let bb_min_x = poly.bb_min_x;
+-    let bb_max_x = poly.bb_max_x;
+-    let bb_min_y = poly.bb_min_y;
+-    let bb_max_y = poly.bb_max_y;
++    let bb_min_x = shared_polys[slot].bb_min_x;
++    let bb_max_x = shared_polys[slot].bb_max_x;
++    let bb_min_y = shared_polys[slot].bb_min_y;
++    let bb_max_y = shared_polys[slot].bb_max_y;
+ 
+     if fx < bb_min_x || fx > bb_max_x || fy < bb_min_y || fy > bb_max_y {
+         return;
+     }
++
++    // Fetch decoded vertices only after the existing AABB cull.
++    let pv0 = shared_polys[slot].pv0;
++    let pv1 = shared_polys[slot].pv1;
++    let pv2 = shared_polys[slot].pv2;
+ 
+     // Half-space triangle test (3 edge evaluations)
+     let e0 = edge_fn(pv0.x, pv0.y, pv1.x, pv1.y, fx, fy);
+@@ -173,7 +173,7 @@
+ 
+     if all_pos || all_neg {
+         // Unpack color and alpha blend: out = src * alpha + dst * (1 - alpha)
+-        let pcolor = unpack_color(Polygon(vec4<u32>(poly.color_packed, 0u, 0u, 0u)));
++        let pcolor = unpack_color(Polygon(vec4<u32>(shared_polys[slot].color_packed, 0u, 0u, 0u)));
+         let alpha = pcolor.w;
+         let inv_alpha = 1.0 - alpha;
+         let src_r = pcolor.x * 255.0;
+@@ -224,7 +224,7 @@
+     pixel_error_old = u32(abs(old_ri - refr) + abs(old_gi - refg) + abs(old_bi - refb));
+ 
+     for (var i = 0u; i < tile_poly_count; i++) {
+-        rasterize_blend(shared_polys[i], fx, fy, &r, &g, &b);
++        rasterize_blend(i, fx, fy, &r, &g, &b);
+     }
+ 
+     // L1 error: quantize to u8 integers (floor) so error matches

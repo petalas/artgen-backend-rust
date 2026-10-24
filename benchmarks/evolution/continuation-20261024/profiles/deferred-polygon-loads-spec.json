@@ -1,0 +1,121 @@
+{
+  "protocol": "deferred-raster-loads-20261024-v1",
+  "claim": "Determine whether delayed shared vertex/color loads improve completed fixed-parameter engine throughput on this device. No claim of measured memory traffic.",
+  "schema": "engine-lab-prepared-v2",
+  "control": {
+    "result": "/home/nick/git/artgen-backend-rust/.cache/evolution-next-20261024/control-64/result.json",
+    "sha256": "1ae16db79f7d6737cbec90720e6a1042b1cf5750cec995bf0edf0e03a61c68f9",
+    "status": "PASS_CONTROL_ONLY",
+    "samples_reused_in_AB": false
+  },
+  "identities": {
+    "binary_json": "/home/nick/git/artgen-backend-rust/.cache/evolution-qualification-prepared-20261024/build-100/binary.json",
+    "binary_sha256": "97d176f3b5f97c818d19a5e25b2f75e9e587bf1925a948c330b78e2022512ab1",
+    "source_freeze_sha256": "9cc71d312fe5c2358c4b32eef4b00681f5e2884242169b6c26777ea3baae6fc5",
+    "manifest": "/home/nick/git/artgen-backend-rust/.cache/evolution-bench/baseline-20261023T172054.919294Z-95742/fixtures/manifest.json",
+    "shader": "/home/nick/git/artgen-backend-rust/.cache/evolution-profiling-20261024/build-finalize-v1/source/src/shaders/rasterize_error.wgsl",
+    "helpers": {
+      "scripts/compare-evolution.py": "33b5b3c655e8a5378291f4916dc1ca0aa6d5d4b25229a032398f8c30491c4486",
+      "scripts/evolution-bench.py": "6de8a7450e89e9734019cc279c8c9a2f9e0bb5b36bbffe617d65cc9243ae0c73"
+    }
+  },
+  "candidate": {
+    "label": "deferred",
+    "source": "/home/nick/git/artgen-backend-rust/.cache/evolution-next-20261024/selection-107/candidate.wgsl",
+    "sha256": "c2c484608af8faa6f3e22ce1ab4d735bf4f936498c9ff9c253f315476f4b435b",
+    "reference_sha256": "ae1fd75fdc118debf2a50cbad699e513b5af0dcbfa3754b45966f7a8ee925af3"
+  },
+  "phases": [
+    {
+      "name": "train",
+      "manifest": "/home/nick/git/artgen-backend-rust/.cache/evolution-bench/baseline-20261023T172054.919294Z-95742/fixtures/manifest.json",
+      "manifest_sha256": "82dfe207ecd20ae964edf4528f1a90fe4176b21f4ac0911b305da1e1edf1c5aa",
+      "cases": [
+        "ff",
+        "mona",
+        "darwin"
+      ],
+      "seed": 7
+    },
+    {
+      "name": "reserved-ff",
+      "manifest": "/home/nick/git/artgen-backend-rust/.cache/evolution-qualification/acceptance-07/reserved-v1/manifest.json",
+      "manifest_sha256": "880115ff3e75703abf23370fe67b21052c7be302196683532efc959207f9f841",
+      "cases": [
+        "ff"
+      ],
+      "seed": 11
+    },
+    {
+      "name": "reserved-mona",
+      "manifest": "/home/nick/git/artgen-backend-rust/.cache/evolution-qualification/acceptance-07/reserved-v1/manifest.json",
+      "manifest_sha256": "880115ff3e75703abf23370fe67b21052c7be302196683532efc959207f9f841",
+      "cases": [
+        "mona"
+      ],
+      "seed": 13
+    },
+    {
+      "name": "reserved-darwin",
+      "manifest": "/home/nick/git/artgen-backend-rust/.cache/evolution-qualification/acceptance-07/reserved-v1/manifest.json",
+      "manifest_sha256": "880115ff3e75703abf23370fe67b21052c7be302196683532efc959207f9f841",
+      "cases": [
+        "darwin"
+      ],
+      "seed": 17
+    }
+  ],
+  "fixed": {
+    "pairs_per_case": 5,
+    "order": [
+      "AB",
+      "BA",
+      "AB",
+      "BA",
+      "AB"
+    ],
+    "batches": 64,
+    "warmup_batches": 8,
+    "diagnostics": true,
+    "timestamp_mode": "stages",
+    "finalize_overlap": false,
+    "mutate_group": 1,
+    "mutate_zero_initialize": true,
+    "params_sha256": "755575d7c391eaa45ba8358724d0c66ae499c445a388badb5d465fb07a824f60",
+    "fitness_tolerance": 2e-05,
+    "all_evolution_parameters": "frozen unchanged"
+  },
+  "gate_each_complete_phase": {
+    "aggregate_ratio_strictly_greater": 1.005,
+    "aggregate_CI_lower_strictly_greater": 1.0,
+    "each_case_paired_median_at_least": 0.995,
+    "each_case_CI_lower_at_least": 0.99,
+    "bootstrap_draws": 10000,
+    "bootstrap_seed": 20261024,
+    "math": "same compare.statistics paired log means, equal cases, stratified resampling"
+  },
+  "bounds": {
+    "max_native_workers": 4,
+    "seconds": 1800,
+    "child_seconds_max": 600,
+    "cleanup_reserve_seconds": 30,
+    "child_timeout": "min(600,remaining-30)",
+    "retries": 0,
+    "extra_samples": 0,
+    "exclusions": 0,
+    "serial_benchmark_lock": true
+  },
+  "stopping": {
+    "invalid": "INCONCLUSIVE, no further GPU work",
+    "valid_train_fail": "REJECT, no reserved work",
+    "valid_train_pass": "candidate-specific numerical fixtures required before reserved timing; no extra training samples",
+    "valid_reserved_fail": "REJECT, no adoption",
+    "all_pass": "conditional performance candidate; independent audit and final exact source review before keeping shader"
+  },
+  "numerical_fixtures": "Only if training passes: use actual existing raster numerical checker with exact candidate bytes and production options, all five workgroups. Build/proof outside timing. No change to comparisons/tolerances.",
+  "reserved_policy": "Distinct mature drawings and fixed seeds, own reference qualification endpoints. Collect all three valid reserved matrices before statistical gate.",
+  "startup": "Native setup timers retained separately, never added to completed-engine throughput; no application startup or isolation claim.",
+  "formal_policy1_KEEP": false,
+  "old_experiments": "all prior REJECT/INCONCLUSIVE unchanged, no historical rates reused",
+  "frozen_utc": "2026-10-24T14:52:47.834222+00:00"
+}

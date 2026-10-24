@@ -39,3 +39,22 @@ without candidate measurements.
 
 Explain the Number requires stable controls and keeps setup separate. Prove It
 Works requires the actual completed work and saved numerical states.
+
+## Completed control
+
+PASS_CONTROL_ONLY. The one process completed in 261.087 seconds, with zero
+controller/native errors and all 30 timing, six diagnostic and three qualification
+records validated. Reported logical work matches all frozen totals. No candidate
+source was loaded.
+
+Aggregate B/A ratio is 0.995709390, conditional 95% interval
+[0.992041254,0.999942292]. Paired medians are ff 0.991040086, mona 1.000684812 and
+darwin 0.993998872. All declared bands pass. The aggregate interval need not
+include one, and a nonzero control offset remains. This does not establish
+background isolation, a cause for the earlier variation, or generally lower
+noise for longer windows.
+
+The [machine result](profiles/kernel-control64-result.json) retains every pair,
+per-case ranges/intervals, setup clocks and completed-work accounting. Independent
+byte-L1 auditing will follow this investigation's timing. No control rates enter
+the candidate comparison.
