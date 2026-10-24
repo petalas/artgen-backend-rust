@@ -1,0 +1,656 @@
+--- /dev/null
++++ b/.cache/evolution-qualification-prepared-20261024/controller-102/run-campaign.py
+@@ -0,0 +1,525 @@
++#!/usr/bin/env python3
++"""One-shot, bounded prepared-throughput campaign. Importing performs no I/O.
++
++Only main may create campaign evidence or run the frozen executable. No native
++analyzed verdict is authoritative. Independent full-byte L1 review follows timing.
++"""
++import hashlib
++import importlib.util
++import json
++import math
++import os
++from pathlib import Path
++import statistics as descriptive
++import sys
++import time
++
++D = Path(__file__).resolve().parent
++ROOT = D.parents[2]
++BASE = D.parent
++TARGET = BASE / "campaign"
++BUILD = BASE / "build-100"
++SPEC_SHA = "60ecdd6427bb6932f911d6ae96a711e6224f556b8be46866bf7f28c41f780d84"
++HELPERS = {"compare-evolution.py": "33b5b3c655e8a5378291f4916dc1ca0aa6d5d4b25229a032398f8c30491c4486",
++           "evolution-bench.py": "6de8a7450e89e9734019cc279c8c9a2f9e0bb5b36bbffe617d65cc9243ae0c73"}
++AE1 = "ae1fd75fdc118debf2a50cbad699e513b5af0dcbfa3754b45966f7a8ee925af3"
++MANIFEST = "82dfe207ecd20ae964edf4528f1a90fe4176b21f4ac0911b305da1e1edf1c5aa"
++PARAMS = "755575d7c391eaa45ba8358724d0c66ae499c445a388badb5d465fb07a824f60"
++CASES = ("ff", "mona", "darwin")
++PHASES = (("aa", CASES, 7, 8, False, "control"),
++          ("train", CASES, 7, 64, True, "overlap"),
++          ("reserved-ff", ("ff",), 11, 64, True, "overlap"),
++          ("reserved-mona", ("mona",), 13, 64, True, "overlap"),
++          ("reserved-darwin", ("darwin",), 17, 64, True, "overlap"))
++CANONICAL = ("parents", "offspring", "parent_total_errors", "parent_framebuffers",
++             "offspring_errors", "chain_update_flags", "fitness_packed")
++COUNTERS = tuple(f"{side}_{unit}" for side in ("submitted", "completed")
++                 for unit in ("batches", "iterations", "evaluations"))
++
++
++class Invalid(Exception):
++    """Invalid evidence or inability to complete the frozen protocol."""
++
++
++def require(condition, message):
++    if not condition:
++        raise Invalid(message)
++
++
++def sha(path):
++    require(path.is_file() and not path.is_symlink(), f"missing/symlink input {path}")
++    require(path.stat().st_size <= 512 * 1024 * 1024, f"oversize input {path}")
++    with path.open("rb") as stream:
++        return hashlib.file_digest(stream, "sha256").hexdigest()
++
++
++def load_helpers():
++    for name, expected in HELPERS.items():
++        require(sha(ROOT / "scripts" / name) == expected, f"helper changed: {name}")
++    previous = sys.dont_write_bytecode
++    sys.dont_write_bytecode = True
++    try:
++        spec = importlib.util.spec_from_file_location("prepared_compare", ROOT / "scripts/compare-evolution.py")
++        require(spec is not None and spec.loader is not None, "missing helper loader")
++        compare = importlib.util.module_from_spec(spec)
++        spec.loader.exec_module(compare)
++    finally:
++        sys.dont_write_bytecode = previous
++    compare.BOOTSTRAP_SEED = 20261024
++    compare.RESAMPLES = 10000
++    return compare, compare.bench
++
++
++def check_work(counters, batches):
++    expected = {"batches": batches, "iterations": batches * 64,
++                "evaluations": batches * 64 * 256}
++    require(isinstance(counters, dict) and set(counters) == set(COUNTERS), "counter keys differ")
++    for side in ("submitted", "completed"):
++        for unit, count in expected.items():
++            value = counters[f"{side}_{unit}"]
++            require(type(value) is int and value == count, f"wrong work: {side}_{unit}")
++
++
++def finite(value, positive=False):
++    require(type(value) in (int, float) and math.isfinite(value)
++            and (value > 0 if positive else value >= 0), "invalid duration/rate")
++    return value
++
++
++def gate(compare, ratios, aa=False):
++    require(set(ratios) == set(CASES) and all(len(ratios[c]) == 5 for c in CASES),
++            "gate requires all three complete five-pair cases")
++    stats = compare.statistics(ratios)
++    aggregate = stats["aggregate"]
++    if aa:
++        passed = 0.99 <= aggregate["interval95"][0] <= aggregate["interval95"][1] <= 1.01
++        passed = passed and all(0.98 <= c["interval95"][0] <= c["interval95"][1] <= 1.02
++                                and 0.99 <= c["paired_ratios"]["median"] <= 1.01
++                                for c in stats["cases"].values())
++    else:
++        passed = aggregate["ratio"] > 1.03 and aggregate["interval95"][0] > 1.0
++        passed = passed and all(c["paired_ratios"]["median"] >= 0.995
++                                and c["interval95"][0] >= 0.99 for c in stats["cases"].values())
++    return {"pass": passed, "statistics": stats, "gate": "AA" if aa else "AB"}
++
++
++def transition(state, phase, outcome):
++    expected = {"NEW": "aa", "AA_PASSED": "train", "TRAIN_PASSED": "reserved-ff",
++                "RESERVED_FF_VALID": "reserved-mona", "RESERVED_MONA_VALID": "reserved-darwin",
++                "RESERVED_COMPLETE": "reserved-gate"}
++    require(expected.get(state) == phase, "illegal phase transition or attempted rerun")
++    if outcome == "invalid" or (phase == "aa" and outcome == "fail"):
++        return "INCONCLUSIVE"
++    if outcome == "fail":
++        require(phase in ("train", "reserved-gate"), "reserved timing peek forbidden")
++        return "REJECT"
++    require(outcome == "pass", "unknown outcome")
++    return {"aa": "AA_PASSED", "train": "TRAIN_PASSED", "reserved-ff": "RESERVED_FF_VALID",
++            "reserved-mona": "RESERVED_MONA_VALID", "reserved-darwin": "RESERVED_COMPLETE",
++            "reserved-gate": "PASS_PREPARED_CONDITIONAL"}[phase]
++
++
++def admitted_call(deadline, now, locked, execute):
++    require(locked, "benchmark lock busy or not acquired")
++    timeout = min(600, deadline - now - 30)
++    require(timeout > 0, "insufficient deadline for child and cleanup reserve")
++    return execute(timeout)
++
++
++def matrix(rows, phase):
++    _, cases, _, _, _, candidate = phase
++    expected = [(case, pair, order, arm) for case in cases for pair in range(5)
++                for order, arm in enumerate(("reference", candidate) if pair % 2 == 0
++                                            else (candidate, "reference"))]
++    actual = [(r.get("case_id"), r.get("pair"), r.get("order"), r.get("variant")) for r in rows]
++    require(actual == expected, "incomplete, duplicate, reordered or wrong case/pair matrix")
++    require(all(type(r.get("pair")) is int and type(r.get("order")) is int for r in rows),
++            "pair/order must be integers")
++    ratios = {case: [] for case in cases}
++    for left, right in zip(rows[::2], rows[1::2], strict=True):
++        pair = {r["variant"]: r for r in (left, right)}
++        ratios[left["case_id"]].append(finite(pair[candidate]["evals_per_second"], True) /
++                                       finite(pair["reference"]["evals_per_second"], True))
++    return ratios
++
++
++def read_lines(b, path, maximum):
++    require(path.is_file() and not path.is_symlink() and path.stat().st_size <= 4 * 1024 * 1024,
++            f"missing/oversize rows: {path}")
++    lines = path.read_text().splitlines()
++    require(len(lines) <= maximum, "too many rows")
++    try:
++        rows = [json.loads(line, parse_constant=b.reject_constant, object_pairs_hook=b.unique_object)
++                for line in lines]
++    except (ValueError, RecursionError, UnicodeError) as exc:
++        raise Invalid(f"invalid row JSON in {path}: {exc}") from exc
++    require(all(isinstance(row, dict) for row in rows), "row must be an object")
++    return rows
++
++
++def canonical_hash(b, path):
++    state = b.read_json(path, 32 * 1024 * 1024)
++    require(all(isinstance(state.get(k), list) for k in CANONICAL), "missing canonical fields")
++    encoded = json.dumps([state[k] for k in CANONICAL], separators=(",", ":"),
++                         ensure_ascii=False, allow_nan=False).encode()
++    return hashlib.sha256(encoded).hexdigest()
++
++
++def validate_gpu(gpu):
++    require(isinstance(gpu, dict) and set(gpu) ==
++            {"name", "vendor", "device", "device_type", "backend", "driver", "driver_info",
++             "timestamp_period_ns", "allocated_chains", "offspring_capacity",
++             "max_storage_buffer_binding_size", "max_buffer_size"},
++            "missing GPU/backend/driver identities")
++    for key in ("name", "device_type", "backend", "driver", "driver_info"):
++        require(isinstance(gpu[key], str) and bool(gpu[key]), f"missing GPU {key}")
++    for key in ("vendor", "device"):
++        require(type(gpu[key]) is int and 0 <= gpu[key] <= 2**32 - 1, f"invalid GPU {key}")
++    finite(gpu["timestamp_period_ns"], True)
++    for key in ("allocated_chains", "offspring_capacity", "max_storage_buffer_binding_size", "max_buffer_size"):
++        require(type(gpu[key]) is int and 0 < gpu[key] <= 2**64 - 1, f"invalid GPU {key}")
++
++
++def validate_row(row, phase, reference, diagnostic=False):
++    _, cases, seed, batches, enabled, candidate = phase
++    require(row.get("schema") == "engine-lab-prepared-v2", "wrong row schema")
++    require(row.get("case_id") in cases, "wrong row case")
++    for key, expected in (("seed", seed), ("batches", batches), ("warmup_batches", 8),
++                          ("timing_eligible", not diagnostic), ("correctness", True),
++                          ("error_count", 0), ("mutate_group_size", 1),
++                          ("mutate_zero_initialize_workgroup_memory", True)):
++        require(type(row.get(key)) is type(expected) and row[key] == expected, f"wrong row {key}")
++    require(row.get("errors") == [] and row.get("timestamp_mode") == "stages", "row errors/mode")
++    require(row.get("shader_stage") == "raster", "wrong shader stage")
++    require(row.get("variant") in ("reference", candidate), "wrong arm")
++    actual = enabled and row["variant"] == candidate
++    require(type(row.get("finalize_overlap")) is bool and row["finalize_overlap"] == actual,
++            "wrong actual installed overlap mode")
++    require(row.get("params_sha256") == PARAMS and row.get("source_sha256") == AE1
++            and row.get("fixture_manifest_sha256") == MANIFEST, "row identity mismatch")
++    require(row.get("gpu") == reference["gpu"], "row GPU/backend/driver differs from qualification")
++    for key in ("initial_state_sha256", "final_state_sha256"):
++        require(row.get(key) == reference[key], f"row {key} differs from this phase qualification")
++    check_work(row.get("counters"), batches)
++    require(type(row.get("timestamp_samples")) is int and row["timestamp_samples"] == batches,
++            "wrong Stages samples")
++    stages = row.get("sampled_gpu_stage_totals_ns")
++    require(isinstance(stages, list) and len(stages) == 4, "wrong Stages data")
++    for value in stages:
++        finite(value)
++    for key in ("source_install_seconds", "preparation_seconds", "elapsed_seconds", "drain_seconds"):
++        finite(row.get(key), positive=key == "elapsed_seconds" and not diagnostic)
++    require(row["drain_seconds"] <= row["elapsed_seconds"], "drain exceeds included elapsed")
++    if diagnostic:
++        require("evals_per_second" in row and row["evals_per_second"] is None, "diagnostic has rate")
++        for key in ("initial_max_tile_occupancy", "validation_max_tile_occupancy"):
++            require(type(row.get(key)) is int and 0 <= row[key] <= 256, "invalid diagnostic occupancy")
++    else:
++        rate = finite(row.get("evals_per_second"), True)
++        require(math.isclose(rate, batches * 16384 / row["elapsed_seconds"], rel_tol=1e-6), "wrong rate")
++
++
++def validate_summary(summary, phase, spec):
++    _, cases, seed, batches, enabled, candidate = phase
++    require(summary.get("schema") == spec["schema"] and summary.get("status") == "completed",
++            "native summary incomplete/schema mismatch")
++    require(type(summary.get("error_count")) is int and summary["error_count"] == 0
++            and summary.get("errors") == [], "native summary errors")
++    require(summary.get("warmup_batches") == 8 and summary.get("timestamp_mode") == "stages",
++            "summary warmup/timestamps mismatch")
++    require(summary.get("fixture_manifest_sha256") == MANIFEST, "summary manifest mismatch")
++    for key, expected in (("completed_trials", 10 * len(cases)), ("expected_trials", 10 * len(cases)),
++                          ("completed_diagnostics", 2 * len(cases)), ("expected_diagnostics", 2 * len(cases))):
++        require(type(summary.get(key)) is int and summary[key] == expected, f"wrong summary {key}")
++    config = summary["config"]
++    for key, value in (("pairs", 5), ("batches", batches), ("seed", seed), ("shader_stage", "raster"),
++                       ("diagnostics", True), ("finalize_overlap", enabled),
++                       ("case", "all" if len(cases) == 3 else cases[0]), ("mutate_zero_initialize", None)):
++        require(type(config.get(key)) is type(value) and config[key] == value, f"wrong config {key}")
++    require(config.get("manifest") == spec["identities"]["manifest"], "config manifest differs")
++    shader = spec["identities"]["shader"]
++    require(config.get("reference_shader") == shader and config.get("variants") == [[candidate, shader]],
++            "shader paths/variants differ")
++    sources = summary["sources"]
++    require(len(sources) == 2, "wrong source count")
++    for source, name, mode in zip(sources, ("reference", candidate), (False, enabled), strict=True):
++        require(source.get("name") == name and source.get("sha256") == AE1
++                and source.get("path") == shader and source.get("shader_stage") == "raster"
++                and type(source.get("finalize_overlap")) is bool and source["finalize_overlap"] == mode,
++                "source identity/expected mode mismatch")
++        require(source.get("mutate_group_size") is None and source.get("mutate_options") is None,
++                "unexpected mutation source override")
++    require([c.get("case_id") for c in summary["cases"]] == list(cases), "summary case coverage")
++    check_work(summary["diagnostic_counters"], batches * 2 * len(cases))
++
++
++def validate_phase(compare, b, folder, phase, spec, fixtures, gpu_identities):
++    output = folder / "output"
++    summary = b.object_value(b.read_json(output / "summary.json", 2 * 1024 * 1024), "native summary")
++    validate_summary(summary, phase, spec)
++    require(summary["config"].get("output") == str(output), "output path mismatch")
++    _, cases, seed, batches, _, candidate = phase
++    require(sha(output / "manifest.json") == MANIFEST, "exported manifest mismatch")
++    for arm in ("reference", candidate):
++        require(sha(output / f"{arm}.wgsl") == AE1
++                and (output / f"{arm}.wgsl").stat().st_size == 13162, "exported AE1 bytes mismatch")
++    references = {}
++    for case, metadata in zip(cases, summary["cases"], strict=True):
++        qualification = output / f"qualification-{case}"
++        record = b.read_json(qualification / "result.json", 2 * 1024 * 1024)
++        args = b.argparse.Namespace(seed=seed, batches=batches, timeout=600)
++        b.validate_result(record, fixtures[case], args, False, MANIFEST)
++        require(json.dumps(record["params"], sort_keys=True) ==
++                json.dumps(fixtures[case]["params"], sort_keys=True), "typed params differ")
++        check_work(record["counters"], batches)
++        require(record.get("schema") == spec["schema"] and record.get("warmup_batches") == 8
++                and record.get("finalize_overlap") is False and record.get("timestamp_samples") == batches,
++                "qualification schema/warmup/actual mode/samples")
++        require(b.read_json(qualification / "device-errors.json") == [], "qualification device errors")
++        compare.verify_initial_state(qualification, record)
++        b.verify_saved_state(qualification, record)
++        validate_gpu(record["gpu"])
++        require(metadata.get("params") == fixtures[case]["params"]
++                and metadata.get("params_sha256") == PARAMS and metadata.get("finalize_overlap") is False
++                and metadata.get("mutate_group_size") == 1
++                and metadata.get("mutate_zero_initialize_workgroup_memory") is True, "case identity/options")
++        for field in ("initial_state_sha256", "final_state_sha256", "gpu"):
++            require(metadata.get(field) == record[field], f"case qualification mismatch {field}")
++        finite(metadata.get("device_initialization_seconds"))
++        finite(metadata.get("source_precompile_seconds"))
++        require(case not in gpu_identities or gpu_identities[case] == record["gpu"], "GPU identity drift")
++        gpu_identities[case] = record["gpu"]
++        references[case] = record
++    normal = read_lines(b, output / "trials.jsonl", 30)
++    diagnostics = read_lines(b, output / "diagnostics.jsonl", 6)
++    ratios = matrix(normal, phase)
++    require([(r.get("case_id"), r.get("variant")) for r in diagnostics] ==
++            [(case, arm) for case in cases for arm in ("reference", candidate)], "diagnostic coverage")
++    for rows, diagnostic in ((normal, False), (diagnostics, True)):
++        for row in rows:
++            require(row.get("candidate") == (row["variant"] if diagnostic else candidate), "candidate mismatch")
++            validate_row(row, phase, references[row["case_id"]], diagnostic)
++            require(row.get("setup_timing_boundaries") == summary.get("setup_timing_boundaries")
++                    == references[row["case_id"]].get("setup_timing_boundaries")
++                    and bool(row.get("setup_timing_boundaries")), "startup clock labels mismatch")
++            if diagnostic:
++                saved = output / f"diagnostic-{row['case_id']}-{row['variant']}"
++                require(b.read_json(saved / "result.json") == row, "diagnostic row export differs")
++                for edge in ("initial", "final"):
++                    require(canonical_hash(b, saved / f"{edge}-state.json") == row[f"{edge}_state_sha256"],
++                            "diagnostic canonical hash differs")
++    return {"ratios": ratios, "startup": startup(summary, normal, diagnostics),
++            "work": partial_work(b, output), "valid": True}
++
++
++def startup(summary, normal, diagnostics):
++    groups = {}
++    for pipeline, rows in (("normal", normal), ("diagnostic", diagnostics)):
++        for row in rows:
++            key = f"{pipeline}/{row['case_id']}/{row['variant']}"
++            groups.setdefault(key, []).append(row)
++    result = {"shared_per_case": [{k: c[k] for k in ("case_id", "device_initialization_seconds",
++                                                    "source_precompile_seconds")} for c in summary["cases"]],
++              "per_arm": {}, "qualification_preparation": "unmeasured placeholder; excluded",
++              "scope": "host brackets exclude other checks; not whole application startup; no causal claim",
++              "drain": "already included in scored elapsed; never added again"}
++    for key, rows in groups.items():
++        result["per_arm"][key] = {}
++        for field in ("source_install_seconds", "preparation_seconds"):
++            values = [r[field] for r in rows]
++            result["per_arm"][key][field] = {"first": values[0], "median": descriptive.median(values),
++                                           "min": min(values), "max": max(values), "count": len(values)}
++    return result
++
++
++def partial_work(b, output):
++    result = {"category_counters": {}, "successful_preparations_lower_bound": 0,
++              "interpretation": "partial counters and source-accounted warmups are lower bounds; resets excluded",
++              "read_errors": []}
++    entries = []
++    for category, filename, bound in (("normal", "trials.jsonl", 30), ("diagnostic", "diagnostics.jsonl", 6)):
++        path = output / filename
++        if path.is_file():
++            # Parse independently so a truncated final line cannot erase earlier completed work.
++            require(path.stat().st_size <= 4 * 1024 * 1024, "partial rows oversized")
++            lines = path.read_text().splitlines()
++            require(len(lines) <= bound, "partial row bound exceeded")
++            for index, line in enumerate(lines):
++                try:
++                    row = json.loads(line, parse_constant=b.reject_constant, object_pairs_hook=b.unique_object)
++                    entries.append((category, row))
++                except (ValueError, TypeError) as exc:
++                    result["read_errors"].append(f"{filename}:{index + 1}: {exc}")
++    for case in CASES:
++        path = output / f"qualification-{case}" / "result.json"
++        if path.is_file():
++            try:
++                entries.append(("qualification", b.read_json(path, 2 * 1024 * 1024)))
++            except (b.BenchError, OSError) as exc:
++                result["read_errors"].append(str(exc))
++    for category, row in entries:
++        total = result["category_counters"].setdefault(category, dict.fromkeys(COUNTERS, 0))
++        if not isinstance(row, dict) or not isinstance(row.get("counters"), dict):
++            result["read_errors"].append(f"invalid {category} partial record")
++            continue
++        for key in COUNTERS:
++            value = row["counters"].get(key)
++            if type(value) is int and value >= 0:
++                total[key] += value
++        if row.get("correctness") is True and row.get("error_count") == 0 and row.get("errors") == []:
++            result["successful_preparations_lower_bound"] += 1
++    preps = result["successful_preparations_lower_bound"]
++    result["warmup_evaluations_source_accounted_lower_bound"] = preps * 8 * 16384
++    result["logical_evaluations_lower_bound"] = preps * 8 * 16384 + sum(
++        c["completed_evaluations"] for c in result["category_counters"].values())
++    return result
++
++
++def preflight(b):
++    require(sha(TARGET / "spec.json") == SPEC_SHA, "frozen spec changed")
++    spec = b.read_json(TARGET / "spec.json")
++    identity = spec["identities"]
++    require(sha(BUILD / "binary.json") == "0a74ea946a0940a600fddfa393977d376f2c5fec477185d189b967e9c37b5f84",
++            "binary record changed")
++    binary_record = b.read_json(BUILD / "binary.json")
++    binary = Path(binary_record["immutable_copy"])
++    require(binary == BUILD / "build/engine-qualification-lab", "unexpected executable path")
++    require(sha(binary) == identity["binary_sha256"] == binary_record["sha256"], "binary changed")
++    require(binary.stat().st_mode & 0o777 == 0o555, "binary mode changed")
++    profile = binary_record["cargo_artifact"]["profile"]
++    require(profile["opt_level"] == "3" and profile["debug_assertions"] is False
++            and profile["test"] is False and binary_record["observer_capture"] is False, "profile/instrumentation")
++    require(sha(BUILD / "source-hashes.json") == identity["source_freeze_sha256"]
++            == binary_record["source_freeze_sha256"], "source freeze changed")
++    inventory = b.read_json(BUILD / "source-hashes.json")
++    require(len(inventory) <= 100, "source inventory bound")
++    actual_inventory = b.inventory(BUILD / "source")
++    require({name: entry["sha256"] for name, entry in actual_inventory.items()} == inventory,
++            "source inventory changed, including extra files")
++    manifest = Path(identity["manifest"])
++    require(sha(manifest) == MANIFEST, "manifest changed")
++    fixtures = {c["case_id"]: c for c in b.load_manifest(manifest)["cases"]}
++    require(set(fixtures) == set(CASES), "fixture coverage changed")
++    shader = Path(identity["shader"])
++    require(sha(shader) == AE1 and shader.stat().st_size == 13162, "AE1 shader changed")
++    require(shader.read_bytes() == (BUILD / "source/src/shaders/rasterize_error.wgsl").read_bytes(),
++            "AE1 differs from private source")
++    return spec, binary, manifest, shader, fixtures
++
++
++def checkpoint(b, state):
++    number = state["checkpoint"] + 1
++    state["checkpoint"] = number
++    state["updated_utc"] = b.utc_now()
++    unique = TARGET / f"checkpoint-{number:03d}.json"
++    b.write_json(unique, state)
++    temporary = TARGET / f"progress-{number:03d}.pending"
++    os.link(unique, temporary)
++    os.replace(temporary, TARGET / "progress.json")
++
++
++def command_for(binary, manifest, shader, folder, phase):
++    _, cases, seed, batches, enabled, candidate = phase
++    return [str(binary), "--manifest", str(manifest), "--reference-shader", str(shader),
++            "--variant", f"{candidate}={shader}", "--output", str(folder / "output"),
++            "--pairs", "5", "--batches", str(batches), "--seed", str(seed),
++            "--case", "all" if len(cases) == 3 else cases[0], "--shader-stage", "raster",
++            "--diagnostics", "true", "--finalize-overlap", str(enabled).lower()]
++
++
++def run_phases(compare, b, state, deadline, spec, binary, manifest, shader, fixtures):
++    gpu_identities, reserved = {}, {}
++    for phase in PHASES:
++        name = phase[0]
++        require(state["state"] not in ("INCONCLUSIVE", "REJECT"), "terminal state cannot run")
++        folder = TARGET / name
++        folder.mkdir()
++        (folder / "cwd").mkdir()
++        entry = {"phase": name, "valid": False, "directory": str(folder)}
++        state["phases"].append(entry)
++        checkpoint(b, state)
++        print(f"phase {name} starting", flush=True)
++        require(sha(binary) == spec["identities"]["binary_sha256"], "binary changed between phases")
++        require(sha(manifest) == MANIFEST and sha(shader) == AE1, "inputs changed between phases")
++        process = admitted_call(deadline, time.monotonic(), True, lambda timeout, folder=folder, phase=phase: b.run_process(
++            command_for(binary, manifest, shader, folder, phase), folder / "cwd", folder / "evidence", timeout))
++        entry["process"] = process
++        entry["work"] = partial_work(b, folder / "output")
++        checkpoint(b, state)
++        require(process.get("status") == "completed" and process.get("returncode") == 0, "child stopped/failed")
++        require(time.monotonic() < deadline, "deadline exceeded after child")
++        entry.update(validate_phase(compare, b, folder, phase, spec, fixtures, gpu_identities))
++        require(time.monotonic() < deadline, "deadline exceeded during validation")
++        if name in ("aa", "train"):
++            entry["gate"] = gate(compare, entry["ratios"], aa=name == "aa")
++            outcome = "pass" if entry["gate"]["pass"] else "fail"
++        else:
++            reserved.update(entry["ratios"])
++            outcome = "pass"  # Validity only. No reserved per-case timing decision.
++        state["state"] = transition(state["state"], name, outcome)
++        checkpoint(b, state)
++        print(f"phase {name} {state['state']}", flush=True)
++        if state["state"] in ("INCONCLUSIVE", "REJECT"):
++            return
++    state["reserved_gate"] = gate(compare, reserved)
++    state["state"] = transition(state["state"], "reserved-gate",
++                                "pass" if state["reserved_gate"]["pass"] else "fail")
++
++
++def main(argv=None):
++    require(not (sys.argv[1:] if argv is None else argv), "this frozen command accepts no arguments")
++    started = time.monotonic()  # Fresh clock precedes lock and every preflight operation.
++    deadline = started + 1800
++    compare, b = load_helpers()
++    require(sha(TARGET / "spec.json") == SPEC_SHA, "frozen spec changed")
++    state = {"state": "NEW", "checkpoint": 0, "phases": [], "errors": [],
++             "started_utc": b.utc_now(), "monotonic_start": started, "monotonic_deadline": deadline,
++             "spec_sha256": SPEC_SHA, "helper_sha256": HELPERS,
++             "scope": "conditional prepared throughput; old warmup2 REJECT unchanged; no adoption/default flip",
++             "limitations": "AA eight batches only; conditional timing intervals, one reserved seed per case; "
++                            "isolation/causal limiter/whole-app startup unresolved; independent byte-L1 audit follows"}
++    b.write_json(TARGET / "clock.json", state)  # Exclusive one-shot marker. Never resume/retry this namespace.
++    failures = (Invalid, b.BenchError, OSError, ValueError, KeyError, TypeError, OverflowError,
++                AttributeError, IndexError, ZeroDivisionError, RecursionError, KeyboardInterrupt)
++    try:
++        with compare.cancellation_signals(), b.benchmark_lock(b.DEFAULT_ROOT / "benchmark.lock"):
++            checkpoint(b, state)
++            spec, binary, manifest, shader, fixtures = preflight(b)
++            run_phases(compare, b, state, deadline, spec, binary, manifest, shader, fixtures)
++            require(time.monotonic() < deadline, "deadline exceeded during analysis")
++            if state["state"] == "PASS_PREPARED_CONDITIONAL":
++                logical = sum(p["work"]["logical_evaluations_lower_bound"] for p in state["phases"])
++                require(logical == spec["expected_full_evaluations"]["logical_total"], "logical total mismatch")
++    except failures as exc:
++        state["state"] = "INCONCLUSIVE"
++        state["errors"].append(f"{type(exc).__name__}: {exc}")
++        if state["phases"]:
++            last = state["phases"][-1]
++            try:
++                last["partial_work_after_stop"] = partial_work(b, Path(last["directory"]) / "output")
++            except (Invalid, b.BenchError, OSError, ValueError, TypeError) as partial_error:
++                state["errors"].append(f"partial accounting failed: {partial_error}")
++    state["controller_wall_seconds"] = time.monotonic() - started
++    if time.monotonic() >= deadline:
++        state["state"] = "INCONCLUSIVE"
++        state["errors"].append("campaign deadline exhausted, including analysis/export")
++    checkpoint(b, state)
++    pending = TARGET / "result.pending.json"
++    b.write_json(pending, state)
++    if time.monotonic() >= deadline and state["state"] != "INCONCLUSIVE":
++        state["state"] = "INCONCLUSIVE"
++        state["errors"].append("deadline exhausted during final evidence export")
++        checkpoint(b, state)
++        pending = TARGET / "result-overdue.pending.json"
++        b.write_json(pending, state)
++    os.replace(pending, TARGET / "result.json")
++    print(f"campaign {state['state']}", flush=True)
++    return 0 if state["state"] == "PASS_PREPARED_CONDITIONAL" else 2
++
++
++if __name__ == "__main__":
++    try:
++        raise SystemExit(main())
++    except (Invalid, OSError) as error:
++        print(f"campaign INCONCLUSIVE: {error}", flush=True)
++        raise SystemExit(2) from error
+--- /dev/null
++++ b/.cache/evolution-qualification-prepared-20261024/controller-102/test-controller.py
+@@ -0,0 +1,125 @@
++"""CPU-only contract tests. No worker, subprocess or actual campaign writes."""
++import importlib.util
++from pathlib import Path
++import unittest
++
++HERE = Path(__file__).resolve().parent
++SPEC = importlib.util.spec_from_file_location("controller", HERE / "run-campaign.py")
++C = importlib.util.module_from_spec(SPEC)
++SPEC.loader.exec_module(C)
++
++
++class ControllerContract(unittest.TestCase):
++    @classmethod
++    def setUpClass(cls):
++        cls.compare, _ = C.load_helpers()
++
++    def test_constant_ratios_use_frozen_math_and_gates(self):
++        for ratio, aa, passed in ((1.0, True, True), (1.1, True, False),
++                                  (1.05, False, True), (1.02, False, False)):
++            with self.subTest(ratio=ratio, aa=aa):
++                result = C.gate(self.compare, {c: [ratio] * 5 for c in C.CASES}, aa)
++                self.assertEqual(result["pass"], passed)
++                self.assertAlmostEqual(result["statistics"]["aggregate"]["ratio"], ratio)
++                self.assertEqual(result["statistics"]["bootstrap_seed"], 20261024)
++                self.assertEqual(result["statistics"]["resamples"], 10000)
++
++    def test_equivalence_does_not_require_one_inside_interval(self):
++        self.assertTrue(C.gate(self.compare, {c: [1.005] * 5 for c in C.CASES}, True)["pass"])
++
++    def test_missing_case_or_pair_cannot_reach_gate(self):
++        for ratios in ({"ff": [1.05] * 5}, {c: [1.05] * 4 for c in C.CASES},
++                       {"ff": [1.05] * 5, "mona": [1.05] * 5}):
++            with self.assertRaises(C.Invalid):
++                C.gate(self.compare, ratios)
++
++    def test_work_rejects_skipped_work_extra_keys_and_boolean_counts(self):
++        valid = {"submitted_batches": 8, "completed_batches": 8,
++                 "submitted_iterations": 512, "completed_iterations": 512,
++                 "submitted_evaluations": 131072, "completed_evaluations": 131072}
++        C.check_work(valid, 8)
++        for changed in (dict(valid, completed_iterations=511), dict(valid, hidden_work=0),
++                        dict(valid, submitted_batches=True), dict(valid, completed_evaluations=0)):
++            with self.assertRaises(C.Invalid):
++                C.check_work(changed, 8)
++
++    def test_complete_alternating_matrix_and_candidate_over_reference(self):
++        rows = []
++        for case in ("ff", "mona", "darwin"):
++            for pair, arms in enumerate((("reference", "overlap"), ("overlap", "reference"),
++                                         ("reference", "overlap"), ("overlap", "reference"),
++                                         ("reference", "overlap"))):
++                for order, arm in enumerate(arms):
++                    rows.append({"case_id": case, "pair": pair, "order": order, "variant": arm,
++                                 "evals_per_second": 105 if arm == "overlap" else 100})
++        self.assertEqual(C.matrix(rows, C.PHASES[1]), {c: [1.05] * 5 for c in C.CASES})
++        for wrong in (rows[:-1], [*rows, rows[0]], rows[1:] + rows[:1], rows[:10] * 3):
++            with self.assertRaises(C.Invalid):
++                C.matrix(wrong, C.PHASES[1])
++
++    def test_reserved_cases_complete_before_statistical_decision(self):
++        state = C.transition("NEW", "aa", "pass")
++        state = C.transition(state, "train", "pass")
++        with self.assertRaises(C.Invalid):
++            C.transition(state, "reserved-gate", "fail")
++        with self.assertRaises(C.Invalid):
++            C.transition(state, "reserved-ff", "fail")
++        state = C.transition(state, "reserved-ff", "pass")
++        state = C.transition(state, "reserved-mona", "pass")
++        state = C.transition(state, "reserved-darwin", "pass")
++        self.assertEqual(C.transition(state, "reserved-gate", "pass"), "PASS_PREPARED_CONDITIONAL")
++        self.assertEqual(C.transition(state, "reserved-gate", "fail"), "REJECT")
++
++    def test_invalid_and_aa_failure_stop_without_adoption_or_resume(self):
++        self.assertEqual(C.transition("NEW", "aa", "fail"), "INCONCLUSIVE")
++        self.assertEqual(C.transition("AA_PASSED", "train", "fail"), "REJECT")
++        for state, phase in (("NEW", "aa"), ("AA_PASSED", "train"),
++                             ("TRAIN_PASSED", "reserved-ff"), ("RESERVED_FF_VALID", "reserved-mona")):
++            self.assertEqual(C.transition(state, phase, "invalid"), "INCONCLUSIVE")
++        for terminal in ("INCONCLUSIVE", "REJECT", "PASS_PREPARED_CONDITIONAL"):
++            with self.assertRaises(C.Invalid):
++                C.transition(terminal, "aa", "pass")
++
++    def test_deadline_or_busy_lock_prevents_any_fake_execution(self):
++        called = []
++        for deadline, now, locked in ((30, 0, True), (29, 0, True), (1800, 0, False)):
++            with self.assertRaises(C.Invalid):
++                C.admitted_call(deadline, now, locked, lambda timeout: called.append(timeout))
++        self.assertEqual(called, [])
++        C.admitted_call(1800, 0, True, lambda timeout: called.append(timeout))
++        C.admitted_call(100, 40, True, lambda timeout: called.append(timeout))
++        self.assertEqual(called, [600, 30])
++
++    def test_native_row_wrong_work_rate_or_actual_mode_is_invalid(self):
++        reference = {"gpu": {"backend": "synthetic"}, "initial_state_sha256": "1" * 64,
++                     "final_state_sha256": "2" * 64}
++        row = dict(reference, schema="engine-lab-prepared-v2", case_id="ff", seed=7, batches=64,
++                   warmup_batches=8, timing_eligible=True, correctness=True, error_count=0, errors=[],
++                   mutate_group_size=1, mutate_zero_initialize_workgroup_memory=True,
++                   timestamp_mode="stages", shader_stage="raster", variant="overlap", finalize_overlap=True,
++                   params_sha256=C.PARAMS, source_sha256=C.AE1, fixture_manifest_sha256=C.MANIFEST,
++                   timestamp_samples=64, sampled_gpu_stage_totals_ns=[1, 2, 3, 4],
++                   source_install_seconds=0.1, preparation_seconds=2, elapsed_seconds=10, drain_seconds=1,
++                   evals_per_second=104857.6,
++                   counters={"submitted_batches": 64, "completed_batches": 64,
++                             "submitted_iterations": 4096, "completed_iterations": 4096,
++                             "submitted_evaluations": 1048576, "completed_evaluations": 1048576})
++        C.validate_row(row, C.PHASES[1], reference)
++        for changed in (dict(row, evals_per_second=999), dict(row, finalize_overlap=False),
++                        dict(row, timestamp_samples=63), dict(row, preparation_seconds=float("nan")),
++                        dict(row, final_state_sha256="3" * 64),
++                        dict(row, counters=dict(row["counters"], completed_evaluations=0))):
++            with self.assertRaises(C.Invalid):
++                C.validate_row(changed, C.PHASES[1], reference)
++        diagnostic = dict(row, timing_eligible=False, elapsed_seconds=0, drain_seconds=0,
++                          evals_per_second=None, initial_max_tile_occupancy=256,
++                          validation_max_tile_occupancy=256)
++        C.validate_row(diagnostic, C.PHASES[1], reference, True)
++        for changed in (dict(diagnostic, evals_per_second=1),
++                        dict(diagnostic, validation_max_tile_occupancy=257)):
++            with self.assertRaises(C.Invalid):
++                C.validate_row(changed, C.PHASES[1], reference, True)
++
++
++if __name__ == "__main__":
++    unittest.main(verbosity=2)

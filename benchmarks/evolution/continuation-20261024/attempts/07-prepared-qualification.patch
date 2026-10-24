@@ -1,0 +1,418 @@
+--- archived/examples/engine-lab.rs
++++ private/examples/engine-qualification-lab.rs
+@@ -32,7 +32,13 @@
+ };
+ use serde::Serialize;
+ 
+-const SCHEMA: &str = "engine-lab-v1";
++const SCHEMA: &str = "engine-lab-prepared-v2";
++const WARMUP_BATCHES: u32 = 8;
++const SETUP_TIMING_BOUNDARIES: &str = "Monotonic host elapsed seconds. Shared per-case device_initialization_seconds brackets only block_on(GpuEvolver::new); source_precompile_seconds brackets only precompile_sources, including its existing zero-warmup seeded setup, source installs and error-scope completion. Per-row source_install_seconds brackets only ShaderStage::install, including existing cache lookup/drain and finalize-mode selection; preparation_seconds brackets the whole prepare_seeded_benchmark, including seed/full fitness/reset, fixed warmups, existing drain and final seeded reset. None means the operation was not reached; a returned failure retains its elapsed duration. Execution checks, qualification and extra CPU verification/snapshots/hashes/serialization are harness work outside these startup brackets. Qualification TrialRecord.setup_seconds remains its inherited unmeasured placeholder, not application startup. These fields are separate from measured throughput and are not a whole-application startup total.";
++
++fn help() -> String {
++    format!("{USAGE}\nFixed preparation policy: {WARMUP_BATCHES} Stages warmup batches.\n{SETUP_TIMING_BOUNDARIES}")
++}
+ const MAX_SOURCE_BYTES: u64 = 256 * 1024;
+ const MAX_ROW_BYTES: usize = 64 * 1024;
+ const MAX_TRIALS: usize = 3 * 16 * 10 * 2;
+@@ -50,7 +56,7 @@
+     "finalize-overlap",
+ ];
+ const MAX_ARGS: usize = 2 * (16 + FLAGS.len());
+-const USAGE: &str = "engine-lab --reference-shader PATH --variant NAME=PATH [--variant NAME=PATH ...]\n  --output NEWDIR [--manifest PATH] [--pairs 1..10] [--batches 1..64] [--seed U64] [--case ff|mona|darwin|all]\n  [--shader-stage bin|raster|mutate] [--diagnostics true|false] [--mutate-zero-initialize true|false] [--finalize-overlap true|false]\nFinalize overlap inherits the constructor default when absent. An explicit flag pins reference false and candidate to the requested mode. True requires identical reference/candidate shader bytes and mutation options.\nMutation zeroing defaults to true; the flag requires stage mutate and applies only to candidates. Reference always uses true.\nDefaults: fixtures .cache/evolution-bench/fixtures/v1/manifest.json, pairs 2, batches 8, shader-stage bin, diagnostics false.\nFixed manifest parameters: 4 chains, lambda 64, 64 iterations, raster WG 32x16, resolution 384.\nTwo Stages warmups, default seed 7 and all cases; use a parent process timeout. No GPU work for --help.";
++const USAGE: &str = "engine-qualification-lab --reference-shader PATH --variant NAME=PATH [--variant NAME=PATH ...]\n  --output NEWDIR [--manifest PATH] [--pairs 1..10] [--batches 1..64] [--seed U64] [--case ff|mona|darwin|all]\n  [--shader-stage bin|raster|mutate] [--diagnostics true|false] [--mutate-zero-initialize true|false] [--finalize-overlap true|false]\nFinalize overlap inherits the constructor default when absent. An explicit flag pins reference false and candidate to the requested mode. True requires identical reference/candidate shader bytes and mutation options.\nMutation zeroing defaults to true; the flag requires stage mutate and applies only to candidates. Reference always uses true.\nDefaults: fixtures .cache/evolution-bench/fixtures/v1/manifest.json, pairs 2, batches 8, shader-stage bin, diagnostics false.\nFixed manifest parameters: 4 chains, lambda 64, 64 iterations, raster WG 32x16, resolution 384.\nFixed Stages preparation policy below, default seed 7 and all cases; use a parent process timeout. No GPU work for --help.";
+ 
+ #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+ #[serde(rename_all = "lowercase")]
+@@ -338,7 +344,10 @@
+     seed: u64,
+     batches: u32,
+     warmup_batches: u32,
++    setup_timing_boundaries: &'static str,
+     timestamp_mode: &'static str,
++    source_install_seconds: Option<f64>,
++    preparation_seconds: Option<f64>,
+     elapsed_seconds: f64,
+     drain_seconds: f64,
+     counters: BenchmarkCounters,
+@@ -381,8 +390,11 @@
+             order: 0,
+             seed: config.seed,
+             batches: config.batches,
+-            warmup_batches: 2,
++            warmup_batches: WARMUP_BATCHES,
++            setup_timing_boundaries: SETUP_TIMING_BOUNDARIES,
+             timestamp_mode: "stages",
++            source_install_seconds: None,
++            preparation_seconds: None,
+             elapsed_seconds: 0.0,
+             drain_seconds: 0.0,
+             counters: BenchmarkCounters::default(),
+@@ -409,6 +421,8 @@
+ 
+ #[derive(Serialize)]
+ struct QualifiedCase {
++    device_initialization_seconds: f64,
++    source_precompile_seconds: Option<f64>,
+     finalize_overlap: bool,
+     case_id: String,
+     mutate_group_size: u32,
+@@ -438,6 +452,7 @@
+     sources: &'a [Source],
+     fixture_manifest_sha256: String,
+     warmup_batches: u32,
++    setup_timing_boundaries: &'static str,
+     timestamp_mode: &'static str,
+     completed_trials: usize,
+     expected_trials: usize,
+@@ -455,7 +470,7 @@
+ fn main() -> Result<()> {
+     let args = collect_cli_args(std::env::args().skip(1));
+     if args == ["--help"] {
+-        println!("{USAGE}");
++        println!("{}", help());
+         return Ok(());
+     }
+     let config = Config::parse(&args)?;
+@@ -485,7 +500,8 @@
+         config: &config,
+         sources: &sources,
+         fixture_manifest_sha256: fixtures::sha256(&manifest),
+-        warmup_batches: 2,
++        warmup_batches: WARMUP_BATCHES,
++        setup_timing_boundaries: SETUP_TIMING_BOUNDARIES,
+         timestamp_mode: "stages",
+         completed_trials: 0,
+         expected_trials: config.cases().count()
+@@ -556,16 +572,19 @@
+         );
+         // One device per case, retained across all sources and pairs. Cases run
+         // serially so only one full set of evolution buffers is resident at once.
++        let device_initialization = Instant::now();
+         let mut evolver = futures_lite::future::block_on(GpuEvolver::new(
+             &input.rgba,
+             input.fixture.width,
+             input.fixture.height,
+             &input.drawing,
+         ));
+-        precompile_sources(&mut evolver, &input, summary)?;
+-        let (initial, endpoint) = qualify(&mut evolver, &input, summary)?;
++        let device_initialization_seconds = device_initialization.elapsed().as_secs_f64();
+         let params_sha256 = fixtures::sha256(&serde_json::to_vec(&input.manifest.params)?);
++        let case_index = summary.cases.len();
+         summary.cases.push(QualifiedCase {
++            device_initialization_seconds,
++            source_precompile_seconds: None,
+             finalize_overlap: evolver.benchmark_finalize_overlap(),
+             case_id: case.into(),
+             mutate_group_size: evolver.benchmark_mutate_group_size(),
+@@ -573,10 +592,23 @@
+                 .benchmark_mutate_zero_initialize_workgroup_memory(),
+             params: input.manifest.params.clone(),
+             params_sha256,
+-            initial_state_sha256: state_hash(&initial)?,
+-            final_state_sha256: state_hash(&endpoint)?,
++            initial_state_sha256: String::new(),
++            final_state_sha256: String::new(),
+             gpu: evolver.benchmark_provenance(),
+         });
++        let source_precompile = Instant::now();
++        let precompiled = precompile_sources(&mut evolver, &input, summary);
++        summary.cases[case_index].source_precompile_seconds =
++            Some(source_precompile.elapsed().as_secs_f64());
++        precompiled?;
++        let (initial, endpoint) = qualify(&mut evolver, &input, summary)?;
++        summary.cases[case_index].finalize_overlap = evolver.benchmark_finalize_overlap();
++        summary.cases[case_index].mutate_group_size = evolver.benchmark_mutate_group_size();
++        summary.cases[case_index].mutate_zero_initialize_workgroup_memory =
++            evolver.benchmark_mutate_zero_initialize_workgroup_memory();
++        summary.cases[case_index].gpu = evolver.benchmark_provenance();
++        summary.cases[case_index].initial_state_sha256 = state_hash(&initial)?;
++        summary.cases[case_index].final_state_sha256 = state_hash(&endpoint)?;
+         write_summary(summary)?;
+         if let Some(file) = diagnostics.as_mut() {
+             run_diagnostics(&mut evolver, &input, &initial, &endpoint, summary, file)?;
+@@ -601,7 +633,7 @@
+ ) -> Result<()> {
+     let scopes = evolver.benchmark_error_scopes();
+     // Establish the fixed workgroup before compiling every source. Qualification
+-    // still owns the single numerical oracle and the existing two warmups.
++    // still owns the single numerical oracle and the fixed Stages warmups.
+     let result = (|| -> Result<()> {
+         evolver
+             .prepare_seeded_benchmark(
+@@ -632,7 +664,7 @@
+         case_id: case.into(),
+         seed: config.seed,
+         batches: config.batches,
+-        warmup_batches: 2,
++        warmup_batches: WARMUP_BATCHES,
+         diagnostic: false,
+         timestamp_mode: TimestampMode::Stages,
+     }
+@@ -677,7 +709,12 @@
+     record: &trial::TrialRecord,
+     finalize_overlap: bool,
+ ) -> Result<serde_json::Value> {
+-    let mut value = serde_json::to_value(record)?;
++    // Preserve typed f32 wire decimals before Value can widen them to f64.
++    let bytes = serde_json::to_vec(record)?;
++    let mut value: serde_json::Value = serde_json::from_slice(&bytes)?;
++    value["schema"] = SCHEMA.into();
++    value["warmup_batches"] = WARMUP_BATCHES.into();
++    value["setup_timing_boundaries"] = SETUP_TIMING_BOUNDARIES.into();
+     value["finalize_overlap"] = finalize_overlap.into();
+     Ok(value)
+ }
+@@ -933,12 +970,17 @@
+ ) -> Result<()> {
+     let params = &input.manifest.params;
+     row.params_sha256 = fixtures::sha256(&serde_json::to_vec(params)?);
+-    config.shader_stage.install(evolver, source)?;
++    let source_install = Instant::now();
++    let installed = config.shader_stage.install(evolver, source);
++    row.source_install_seconds = Some(source_install.elapsed().as_secs_f64());
++    installed?;
+     check_execution(evolver, source)?;
+     row.execution = EngineExecution::installed(evolver);
+-    evolver
+-        .prepare_seeded_benchmark(&input.drawing, params, config.seed, 2, true)
+-        .map_err(anyhow::Error::msg)?;
++    let preparation = Instant::now();
++    let prepared =
++        evolver.prepare_seeded_benchmark(&input.drawing, params, config.seed, WARMUP_BATCHES, true);
++    row.preparation_seconds = Some(preparation.elapsed().as_secs_f64());
++    prepared.map_err(anyhow::Error::msg)?;
+     check_execution(evolver, source)?;
+     let initial = evolver
+         .benchmark_snapshot(params.chain_count, params.lambda)
+@@ -1900,6 +1942,8 @@
+             }
+         }
+         let case = QualifiedCase {
++            device_initialization_seconds: 0.125,
++            source_precompile_seconds: Some(0.25),
+             finalize_overlap: false,
+             case_id: "ff".into(),
+             mutate_group_size: 16,
+@@ -1921,6 +1965,165 @@
+             .is_none());
+         assert_eq!(value["gpu"], gpu);
+         assert!(value["params"].get("mutate_group_size").is_none());
++        Ok(())
++    }
++
++    fn wire_quality() -> trial::ChainQuality {
++        trial::ChainQuality {
++            chain: 1,
++            triangles: 2,
++            stored_error: 3,
++            framebuffer_error: 3,
++            scalar_error: 4,
++            stored_fitness: 97.3,
++            expected_stored_fitness: 97.3,
++            scalar_fitness: 97.1,
++            differing_pixels: 1,
++            max_channel_delta: 2,
++            total_channel_delta: 3,
++            pixel_audit: artgen_backend_rust::benchmark::uncertainty::PixelAudit::default(),
++        }
++    }
++
++    fn wire_record() -> Result<trial::TrialRecord> {
++        use artgen_backend_rust::benchmark::reference;
++        Ok(trial::TrialRecord {
++            protocol_version: 1,
++            status: "completed".into(),
++            error_count: 0,
++            errors: Vec::new(),
++            case_id: "mona".into(),
++            seed: 19,
++            batches: 8,
++            diagnostic: false,
++            elapsed_seconds: 1.234_567_890_123_456_7,
++            drain_seconds: 0.023_456_789_012_345_67,
++            setup_seconds: 2.345_678_901_234_567,
++            evals_per_second: Some(106_168.320_955_872_3),
++            counters: BenchmarkCounters {
++                completed_batches: 8,
++                ..BenchmarkCounters::default()
++            },
++            initial_state_sha256: "initial".into(),
++            final_state_sha256: "final".into(),
++            initial_similarity_percent: 98.2,
++            final_fitness_percent: vec![97.3, 98.2],
++            fixture_manifest_sha256: "manifest".into(),
++            initial_complexity: reference::complexity(&[], 1, 1, [8, 8])?,
++            final_complexity: vec![reference::complexity(&[], 1, 1, [8, 8])?],
++            validation_max_tile_occupancy: Some(2),
++            correctness: true,
++            initial_quality: vec![wire_quality()],
++            final_quality: vec![wire_quality()],
++            gpu: BenchmarkProvenance {
++                timestamp_period_ns: 0.2,
++                ..provenance()
++            },
++            params: MutationParams::default(),
++            timestamp_samples: 8,
++            sampled_gpu_stage_totals_ns: [0.1, 0.2, 0.3, 0.4],
++            timestamp_mode: TimestampMode::Stages,
++            batch_compute_envelope: None,
++            start_mode: "mature_drawing_restart".into(),
++        })
++    }
++
++    #[test]
++    fn qualification_producer_preserves_every_typed_field_and_exact_manifest_params() -> Result<()>
++    {
++        let record = wire_record()?;
++        let expected: serde_json::Value = serde_json::from_slice(&serde_json::to_vec(&record)?)?;
++        let params: serde_json::Value = serde_json::from_str(
++            r#"{
++            "addPolygonProb":0.5,"removePolygonProb":0.000862,"reorderPolygonProb":0.002,
++            "offsetPolygonProb":0.00565,"movePointProb":0.000294,"removePointProb":0.002,
++            "microAdjustProb":0.002786,"changeColorProb":0.000473,"adjustBrightnessProb":0.000473,
++            "adjustSaturationProb":0.001333,"scalePolygonProb":0.00565,"rotatePolygonProb":0.002,
++            "adjacentSwapProb":0.002,"mergePolygonProb":0.000667,"clonePolygonProb":0.071429,
++            "mediumMoveProb":0.004,"swapColorsProb":0.00565,"movePointMaxDelta":0.113,
++            "microAdjustDelta":0.001,"newPointMaxDistance":0.005,"offsetPolygonMagnitude":0.01,
++            "mediumMoveDelta":0.03,"mergeCentroidThreshold":0.15,"mergeColorThreshold":0.2,
++            "minAlpha":10,"maxAlpha":65,"minPolygons":1,"maxPolygons":1000,"crossoverProb":0.2,
++            "spatialCrossoverWeight":0.66,"tournamentSize":3,"chainCount":4,"lambda":64,
++            "singleMutationMode":true,"adaptiveMutation":false,"rasterizeWg":[32,16],"gpuBatchIters":64
++        }"#,
++        )?;
++        for enabled in [false, true] {
++            let value = qualification_value(&record, enabled)?;
++            let mut wire: serde_json::Value = serde_json::from_slice(&serde_json::to_vec(&value)?)?;
++            assert_eq!(wire["schema"], "engine-lab-prepared-v2");
++            assert_eq!(wire["warmup_batches"], 8);
++            assert_eq!(wire["finalize_overlap"], enabled);
++            assert_eq!(wire["params"], params);
++            assert_eq!(wire["initial_similarity_percent"], 98.2);
++            assert_eq!(wire["initial_quality"][0]["stored_fitness"], 97.3);
++            assert_eq!(wire["elapsed_seconds"], 1.234_567_890_123_456_7);
++            for key in [
++                "schema",
++                "warmup_batches",
++                "setup_timing_boundaries",
++                "finalize_overlap",
++            ] {
++                wire.as_object_mut()
++                    .context("qualification must be an object")?
++                    .remove(key);
++            }
++            assert_eq!(wire, expected);
++        }
++        assert_ne!(serde_json::to_value(&record)?["params"], params);
++        Ok(())
++    }
++
++    #[test]
++    fn prepared_rows_distinguish_unattempted_setup_and_separate_finite_durations() -> Result<()> {
++        let config = Config::parse(&args())?;
++        let source = Source {
++            finalize_overlap: Some(false),
++            shader_stage: ShaderStage::Raster,
++            mutate_group_size: None,
++            mutate_options: None,
++            name: "candidate".into(),
++            path: "same-ae1.wgsl".into(),
++            sha256: "same-ae1".into(),
++            wgsl: String::new(),
++        };
++        let mut row = TrialRow::new(
++            &config,
++            &source,
++            "ff",
++            "manifest",
++            provenance(),
++            EngineExecution {
++                finalize_overlap: false,
++                group_size: 1,
++                zero_initialize_workgroup_memory: true,
++            },
++            true,
++        );
++        let initial: serde_json::Value = serde_json::from_slice(&serde_json::to_vec(&row)?)?;
++        assert_eq!(initial["schema"], "engine-lab-prepared-v2");
++        assert_eq!(initial["warmup_batches"], 8);
++        assert!(initial["source_install_seconds"].is_null());
++        assert!(initial["preparation_seconds"].is_null());
++        row.source_install_seconds = Some(0.0);
++        row.preparation_seconds = Some(2.125);
++        row.elapsed_seconds = 0.5;
++        row.counters.completed_evaluations = 16_384;
++        finish_row(&mut row)?;
++        let wire: serde_json::Value = serde_json::from_slice(&serde_json::to_vec(&row)?)?;
++        assert_eq!(wire["source_install_seconds"].as_f64(), Some(0.0));
++        assert_eq!(wire["preparation_seconds"].as_f64(), Some(2.125));
++        assert!(row.source_install_seconds.is_some_and(f64::is_finite));
++        assert!(row.preparation_seconds.is_some_and(f64::is_finite));
++        assert_eq!(wire["evals_per_second"], 32_768.0);
++        row.errors.push("preparation failed after returning".into());
++        finish_row(&mut row)?;
++        assert_eq!(row.preparation_seconds, Some(2.125));
++        assert!(!row.correctness && row.evals_per_second.is_none());
++        assert_eq!(spec(&config, "ff").warmup_batches, 8);
++        assert_eq!(spec(&config, "ff").timestamp_mode, TimestampMode::Stages);
++        assert!(help().contains("Fixed preparation policy: 8 Stages warmup batches."));
++        assert!(help().contains("not a whole-application startup total"));
+         Ok(())
+     }
+ 
+@@ -1957,7 +2160,8 @@
+             config: &config,
+             sources: &sources,
+             fixture_manifest_sha256: "manifest".into(),
+-            warmup_batches: 2,
++            warmup_batches: WARMUP_BATCHES,
++            setup_timing_boundaries: SETUP_TIMING_BOUNDARIES,
+             timestamp_mode: "stages",
+             completed_trials: 0,
+             expected_trials: 12,
+@@ -1970,6 +2174,19 @@
+         for rate in [3.0, 1.0, 2.0, 4.0] {
+             add_rate(&mut summary, "ff", 1, 0, rate);
+         }
++        summary.cases.push(QualifiedCase {
++            device_initialization_seconds: 0.125,
++            source_precompile_seconds: Some(0.25),
++            finalize_overlap: false,
++            case_id: "ff".into(),
++            mutate_group_size: 1,
++            mutate_zero_initialize_workgroup_memory: true,
++            params: MutationParams::default(),
++            params_sha256: "params".into(),
++            initial_state_sha256: "initial".into(),
++            final_state_sha256: "final".into(),
++            gpu: provenance(),
++        });
+         summary.completed_diagnostics = 1;
+         add_counters(
+             &mut summary.diagnostic_counters,
+@@ -1980,9 +2197,23 @@
+             },
+         );
+         let value: serde_json::Value = serde_json::from_slice(&serde_json::to_vec(&summary)?)?;
+-        assert_eq!(value["schema"], SCHEMA);
++        assert_eq!(value["schema"], "engine-lab-prepared-v2");
++        assert_eq!(value["warmup_batches"], 8);
++        assert!(value["setup_timing_boundaries"]
++            .as_str()
++            .context("missing setup boundaries")?
++            .contains("qualification and extra CPU verification"));
+         assert_eq!(value["sources"][0]["sha256"], "abc");
+         assert_eq!(value["sources"][0]["shader_stage"], "bin");
++        assert_eq!(
++            value["cases"][0]["device_initialization_seconds"].as_f64(),
++            Some(0.125)
++        );
++        assert_eq!(
++            value["cases"][0]["source_precompile_seconds"].as_f64(),
++            Some(0.25)
++        );
++        assert!(value.get("device_initialization_seconds").is_none());
+         assert_eq!(value["completed_trials"], 0);
+         assert_eq!(value["expected_trials"], 12);
+         assert_eq!(value["completed_diagnostics"], 1);
