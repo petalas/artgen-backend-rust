@@ -1,0 +1,87 @@
+{
+  "created_utc": "2026-10-24T12:54:21.286300+00:00",
+  "baseline_commit": "c495198",
+  "root_runtime_changes_allowed": false,
+  "purpose": "locate first-trial finalization-overlap penalty, not reopen failed adoption",
+  "original_screen_disposition": "REJECT",
+  "original_results_immutable": true,
+  "workload": {
+    "manifest": ".cache/evolution-bench/baseline-20261023T172054.919294Z-95742/fixtures/manifest.json",
+    "case": "mona",
+    "seed": 7,
+    "batches": 8,
+    "warmup": 2,
+    "pairs": 2,
+    "params_sha256": "755575d7c391eaa45ba8358724d0c66ae499c445a388badb5d465fb07a824f60"
+  },
+  "hypotheses": [
+    {
+      "rank": 1,
+      "hypothesis": "first candidate performs extra synchronous backend finalization",
+      "prediction": "extra elapsed appears in prefix or tail encoder.finish brackets on particular batch calls"
+    },
+    {
+      "rank": 2,
+      "hypothesis": "extra device or submission work surfaces as completion waiting",
+      "prediction": "queue.submit or nested poll elapsed explains the first-candidate difference instead of front-end recording"
+    },
+    {
+      "rank": 3,
+      "hypothesis": "warmup does not exercise the new path in the actual prepared state",
+      "prediction": "actual guarded split count is zero during candidate warmup before first measured split"
+    }
+  ],
+  "promotion_eligible": false,
+  "observation_does_not_establish": [
+    "speedup",
+    "repeatability",
+    "driver/JIT cause",
+    "recoverable stall"
+  ],
+  "next": "prepare the private observer from source reports91/92 under CPU/GPU hold",
+  "frozen_utc": "2026-10-24T13:02:02.981600+00:00",
+  "classification": "UNSCORED_DIAGNOSTIC",
+  "instrumented_invocations_maximum": 1,
+  "conditional_uninstrumented_control_maximum": 1,
+  "control_condition": "Only if the instrumented invocation does not retain the retrospective first-trial symptom. All observations retained, neither run changes original gate.",
+  "native_timing_eligible": true,
+  "original_workload_clock_preserved": true,
+  "diagnostics": true,
+  "fixed_work_per_timed_row": {
+    "completed_batches": 8,
+    "completed_iterations": 512,
+    "completed_evaluations": 131072,
+    "timestamp_samples": 8
+  },
+  "source_preimage": ".cache/evolution-profiling-20261024/build-finalize-v1/source",
+  "observer_target": "first-use-engine-lab",
+  "capture_limits": {
+    "batch_rows_per_timed_row": 64,
+    "readback_rows_per_timed_row": 65,
+    "span_slots_per_record": 12,
+    "sidecar_bytes": 2097152,
+    "outer_timeout_seconds": 120,
+    "timed_rows": 4
+  },
+  "coverage": {
+    "warmup_spans": "excluded",
+    "warmup_guard_counts": "before/after preparation lifetime-counter snapshots",
+    "lifetime_counters": "never reset by seeded reset; includes prior qualification and diagnostic work",
+    "direct_spans": [
+      "compute recording/acquisition",
+      "prefix finish",
+      "prior collection",
+      "parameter/control uploads",
+      "tail encoder acquisition",
+      "tail copies",
+      "final finish",
+      "queue submit",
+      "post-submit prior collection",
+      "map registration"
+    ],
+    "nested_spans": "poll, callback receive waits, decode and unmap; do not add to parents"
+  },
+  "success_predicate": "The symptom is reproduced with correct work/state and valid sidecars, and its excess can be located to direct brackets or bounded unattributed gaps. Locating a bracket does not establish lower-level cause or recoverable savings.",
+  "failure_predicate": "Invalid sidecars, wrong work, lost symptom, unresolved gaps or inconsistent source provenance withhold attribution; retain all evidence.",
+  "no_optimization_authority_from_diagnostic": true
+}
