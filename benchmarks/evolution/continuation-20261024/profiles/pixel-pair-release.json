@@ -1,0 +1,221 @@
+{
+  "status": "PASS",
+  "source_commit": "bb255c04f41f6889c3dc43067e7ef9a11d63c1e6",
+  "source_inventory_sha256": "3c7b620ae2f67d51aadaeb6159678eddb02a44ebf96067bd3ea48d09f8b63f55",
+  "source_files": 83,
+  "artifacts": {
+    "evolution-bench": {
+      "sha256": "1cf30fea6f7cb91f645b192c9b6a148fa500196eef1d463ebd17701e884a2fa2",
+      "path": "/home/nick/git/artgen-backend-rust/target/release/examples/evolution-bench",
+      "immutable_copy": "/home/nick/git/artgen-backend-rust/.cache/evolution-pixel-pair-safe-20261024/delivery/binaries/evolution-bench",
+      "cargo_artifact": {
+        "reason": "compiler-artifact",
+        "package_id": "path+file:///home/nick/git/artgen-backend-rust#0.1.0",
+        "manifest_path": "/home/nick/git/artgen-backend-rust/Cargo.toml",
+        "target": {
+          "kind": [
+            "example"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "name": "evolution-bench",
+          "src_path": "/home/nick/git/artgen-backend-rust/examples/evolution-bench.rs",
+          "edition": "2021",
+          "doc": false,
+          "doctest": false,
+          "test": false
+        },
+        "profile": {
+          "opt_level": "3",
+          "debuginfo": 2,
+          "debug_assertions": false,
+          "overflow_checks": false,
+          "test": false
+        },
+        "features": [],
+        "filenames": [
+          "/home/nick/git/artgen-backend-rust/target/release/examples/evolution-bench"
+        ],
+        "executable": "/home/nick/git/artgen-backend-rust/target/release/examples/evolution-bench",
+        "fresh": false
+      },
+      "embedded_shaders": {
+        "mutate": {
+          "offset": 498711,
+          "bytes": 47345,
+          "sha256": "3a36417746ab19b0c800c718e8c87795c17d9bff78114fd65bc8369b016578d8"
+        },
+        "bin_polygons": {
+          "offset": 492821,
+          "bytes": 5828,
+          "sha256": "598b32eab7ae998f2d644b36a5d71d17997772ed06dbd5c0b726130ef51d13d9"
+        },
+        "rasterize_error": {
+          "offset": 568264,
+          "bytes": 17344,
+          "sha256": "83c505bcc9220f39c11354692cdec3828e4d76681df8468ea93d597b4f4ceb7b"
+        },
+        "select": {
+          "offset": 546792,
+          "bytes": 10786,
+          "sha256": "bfd33b7bb029ded82387dfa9ad0ed8159c0a8b0977cb13509c18821dc6dbb279"
+        },
+        "init_framebuffers": {
+          "offset": 588331,
+          "bytes": 8617,
+          "sha256": "d5a753f5e28c301ef6214304ed61636142cf92fe7b9c0150da8e0ad6ae497bad"
+        },
+        "update_framebuffers": {
+          "offset": 597026,
+          "bytes": 8510,
+          "sha256": "baf1eb544fd0461b0a3d93fe030b37d4123001b8e4527c4c376e39490f17a243"
+        }
+      }
+    },
+    "engine-lab": {
+      "sha256": "70491fbcf1d811268e97430002b4752b10f26db62ce3ed6af3b1bde7276dc364",
+      "path": "/home/nick/git/artgen-backend-rust/target/release/examples/engine-lab",
+      "immutable_copy": "/home/nick/git/artgen-backend-rust/.cache/evolution-pixel-pair-safe-20261024/delivery/binaries/engine-lab",
+      "cargo_artifact": {
+        "reason": "compiler-artifact",
+        "package_id": "path+file:///home/nick/git/artgen-backend-rust#0.1.0",
+        "manifest_path": "/home/nick/git/artgen-backend-rust/Cargo.toml",
+        "target": {
+          "kind": [
+            "example"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "name": "engine-lab",
+          "src_path": "/home/nick/git/artgen-backend-rust/examples/engine-lab.rs",
+          "edition": "2021",
+          "doc": false,
+          "doctest": false,
+          "test": false
+        },
+        "profile": {
+          "opt_level": "3",
+          "debuginfo": 2,
+          "debug_assertions": false,
+          "overflow_checks": false,
+          "test": false
+        },
+        "features": [],
+        "filenames": [
+          "/home/nick/git/artgen-backend-rust/target/release/examples/engine-lab"
+        ],
+        "executable": "/home/nick/git/artgen-backend-rust/target/release/examples/engine-lab",
+        "fresh": false
+      },
+      "embedded_shaders": {
+        "mutate": {
+          "offset": 380250,
+          "bytes": 47345,
+          "sha256": "3a36417746ab19b0c800c718e8c87795c17d9bff78114fd65bc8369b016578d8"
+        },
+        "bin_polygons": {
+          "offset": 457778,
+          "bytes": 5828,
+          "sha256": "598b32eab7ae998f2d644b36a5d71d17997772ed06dbd5c0b726130ef51d13d9"
+        },
+        "rasterize_error": {
+          "offset": 463834,
+          "bytes": 17344,
+          "sha256": "83c505bcc9220f39c11354692cdec3828e4d76681df8468ea93d597b4f4ceb7b"
+        },
+        "select": {
+          "offset": 428331,
+          "bytes": 10786,
+          "sha256": "bfd33b7bb029ded82387dfa9ad0ed8159c0a8b0977cb13509c18821dc6dbb279"
+        },
+        "init_framebuffers": {
+          "offset": 483107,
+          "bytes": 8617,
+          "sha256": "d5a753f5e28c301ef6214304ed61636142cf92fe7b9c0150da8e0ad6ae497bad"
+        },
+        "update_framebuffers": {
+          "offset": 491802,
+          "bytes": 8510,
+          "sha256": "baf1eb544fd0461b0a3d93fe030b37d4123001b8e4527c4c376e39490f17a243"
+        }
+      }
+    },
+    "artgen-backend-rust": {
+      "sha256": "c0a5128573754a83e9469b88f6d53a8f981640f048ba90dc6330083a0074fc60",
+      "path": "/home/nick/git/artgen-backend-rust/target/release/artgen-backend-rust",
+      "immutable_copy": "/home/nick/git/artgen-backend-rust/.cache/evolution-pixel-pair-safe-20261024/delivery/binaries/artgen-backend-rust",
+      "cargo_artifact": {
+        "reason": "compiler-artifact",
+        "package_id": "path+file:///home/nick/git/artgen-backend-rust#0.1.0",
+        "manifest_path": "/home/nick/git/artgen-backend-rust/Cargo.toml",
+        "target": {
+          "kind": [
+            "bin"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "name": "artgen-backend-rust",
+          "src_path": "/home/nick/git/artgen-backend-rust/src/main.rs",
+          "edition": "2021",
+          "doc": true,
+          "doctest": false,
+          "test": true
+        },
+        "profile": {
+          "opt_level": "3",
+          "debuginfo": 2,
+          "debug_assertions": false,
+          "overflow_checks": false,
+          "test": false
+        },
+        "features": [],
+        "filenames": [
+          "/home/nick/git/artgen-backend-rust/target/release/artgen-backend-rust"
+        ],
+        "executable": "/home/nick/git/artgen-backend-rust/target/release/artgen-backend-rust",
+        "fresh": false
+      },
+      "embedded_shaders": {
+        "mutate": {
+          "offset": 630343,
+          "bytes": 47345,
+          "sha256": "3a36417746ab19b0c800c718e8c87795c17d9bff78114fd65bc8369b016578d8"
+        },
+        "bin_polygons": {
+          "offset": 781617,
+          "bytes": 5828,
+          "sha256": "598b32eab7ae998f2d644b36a5d71d17997772ed06dbd5c0b726130ef51d13d9"
+        },
+        "rasterize_error": {
+          "offset": 801746,
+          "bytes": 17344,
+          "sha256": "83c505bcc9220f39c11354692cdec3828e4d76681df8468ea93d597b4f4ceb7b"
+        },
+        "select": {
+          "offset": 678456,
+          "bytes": 10786,
+          "sha256": "bfd33b7bb029ded82387dfa9ad0ed8159c0a8b0977cb13509c18821dc6dbb279"
+        },
+        "init_framebuffers": {
+          "offset": 822718,
+          "bytes": 8617,
+          "sha256": "d5a753f5e28c301ef6214304ed61636142cf92fe7b9c0150da8e0ad6ae497bad"
+        },
+        "update_framebuffers": {
+          "offset": 831413,
+          "bytes": 8510,
+          "sha256": "baf1eb544fd0461b0a3d93fe030b37d4123001b8e4527c4c376e39490f17a243"
+        }
+      }
+    }
+  },
+  "build_log_sha256": "d2bde74440215a7fd8da276b698669379b0244ee9ea6dac6dc3e72aaac1f1114",
+  "cpu_tests": {
+    "pipeline": 18,
+    "engine_lab": 14
+  },
+  "warnings": 0
+}

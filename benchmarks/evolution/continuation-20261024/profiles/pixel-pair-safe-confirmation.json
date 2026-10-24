@@ -530,7 +530,7 @@
   "evolution_parameters_changed": false,
   "cpu_pipeline_tests_passed": 18,
   "cpu_lab_tests_passed": 14,
-  "production_build": "PENDING_AFTER_SOURCE_COMMIT",
+  "production_build": "PASS",
   "artifact_sha256": {
     "spec.json": "5b3f835986d350981f23ce35b282a4d4cefc933293d05dbedc8a68c555810ca7",
     "train-result.json": "6e59e77c01b0b81bb7d28615a5c9c7f01a36a075c6959f84e0dafba890cad9e7",
@@ -543,5 +543,7 @@
     "delivery/pipeline-tests.log": "3891ed3830d36c8b06e9294e85da654e58ee0aef5d6b334bb549ab9a1f7e943b",
     "delivery/lab-tests.log": "f45ff5e7ec034377c8dbacf12aa8248efacd062f10ce10075dfa4204de60a5bf"
   },
-  "limits": "Fixed image corpora, same-seed repeated timing, one RTX5090/Dozen device/session. No hardware-counter cause, UI/preview, startup or new original-to-current ratio claim."
+  "limits": "Fixed image corpora, same-seed repeated timing, one RTX5090/Dozen device/session. No hardware-counter cause, UI/preview, startup or new original-to-current ratio claim.",
+  "default_path_verification": "PENDING",
+  "release_build_record": "pixel-pair-release.json"
 }

@@ -1,0 +1,75 @@
+--- /dev/null
++++ b/run.py
+@@ -0,0 +1,72 @@
++"""One unscored default-binary verification, separate from qualification."""
++import hashlib
++import importlib.util
++from pathlib import Path
++
++ROOT = Path('/home/nick/git/artgen-backend-rust')
++HERE = Path(__file__).resolve().parent
++SPEC_SHA = '43a4371dbe18fbe4d0a92feb1fe93d053cf14d00d91c5393095af7cffdd4b874'
++
++
++def load(path, digest, name):
++    with path.open('rb') as stream:
++        if hashlib.file_digest(stream, 'sha256').hexdigest() != digest:
++            raise ValueError('validator source changed')
++    spec = importlib.util.spec_from_file_location(name, path)
++    module = importlib.util.module_from_spec(spec)
++    spec.loader.exec_module(module)
++    return module
++
++
++def main():
++    trainer = load(ROOT / '.cache/evolution-pixel-pair-safe-20261024/run-training.py',
++                   '1151632fec2699076e14109577852779984bae55f3cb7c1c98829ef63a1623bb', 'trainer')
++    validator = load(ROOT / '.cache/evolution-observation-20261024/validate-data.py',
++                     'a7d93212a70bb0f41ce6a5f4042713165fcde01cc56c7ff7619cba412c6cfbdb', 'numerical')
++    c = trainer.load_contract()
++    compare, b = c.load_helpers()
++    c.require(c.sha(HERE / 'spec.json') == SPEC_SHA, 'verification specification changed')
++    spec = b.read_json(HERE / 'spec.json')
++    c.require(spec['score_eligible'] is False and spec['comparison'] is False, 'verification must be unscored')
++    binary, manifest = Path(spec['binary']), Path(spec['manifest'])
++    c.require(c.sha(binary) == spec['binary_sha256'], 'delivered binary changed')
++    c.require(c.sha(manifest) == spec['manifest_sha256'], 'manifest changed')
++    c.require(c.sha(ROOT / 'src/shaders/rasterize_error.wgsl') == spec['raster_sha256'], 'bundled source changed')
++    c.require(c.sha(Path(spec['expected_endpoint_record'])) == spec['expected_endpoint_sha256'], 'qualified endpoint changed')
++    c.require(c.sha(Path(spec['reference_qualification_record'])) == spec['reference_qualification_sha256'], 'reference qualification changed')
++    result = {'mode': spec['mode'], 'score_eligible': False, 'comparison': False,
++              'status': 'INCONCLUSIVE', 'errors': [], 'started_utc': b.utc_now()}
++    b.write_json(HERE / 'started.json', result)
++    folder = HERE / 'worker'
++    folder.mkdir()
++    (folder / 'cwd').mkdir()
++    command = [str(binary), 'trial', '--manifest', str(manifest), '--case', 'mona',
++               '--seed', '7', '--batches', '64', '--warmup', '2', '--diagnostic', 'false',
++               '--profile-mode', 'stages', '--output', str(folder / 'output')]
++    try:
++        with compare.cancellation_signals(), b.benchmark_lock(b.DEFAULT_ROOT / 'benchmark.lock'):
++            result['process'] = b.run_process(command, folder / 'cwd', folder / 'evidence', 120)
++        c.require(result['process']['status'] == 'completed' and result['process']['returncode'] == 0,
++                  'default binary process failed')
++        record = b.read_json(folder / 'output/result.json')
++        expected = b.read_json(Path(spec['expected_endpoint_record']))
++        for key in ('initial_state_sha256', 'final_state_sha256', 'gpu', 'counters'):
++            c.require(record[key] == expected[key], 'default candidate replay mismatch: ' + key)
++        reference = b.read_json(Path(spec['reference_qualification_record']))
++        c.require(b.replay_errors(record, reference) == [], 'default path differs from full qualification')
++        snapshots, numerical_checks = validator.numerical(c, compare, b, spec, record)
++        result.update(status='PASS', snapshots=snapshots, numerical_checks=numerical_checks,
++                      checks=validator.CHECKS, counters=record['counters'],
++                      binary_sha256=c.sha(binary), result_sha256=c.sha(folder / 'output/result.json'),
++                      timing_fields_excluded=True)
++    except (c.Invalid, b.BenchError, OSError, ValueError, KeyError, TypeError, AttributeError,
++            IndexError, OverflowError, RecursionError, KeyboardInterrupt) as exc:
++        result['errors'].append(f'{type(exc).__name__}: {exc}')
++    result['finished_utc'] = b.utc_now()
++    b.write_json(HERE / 'verification-result.json', result)
++    print(result['status'])
++    return 0 if result['status'] == 'PASS' else 2
++
++
++if __name__ == '__main__':
++    raise SystemExit(main())

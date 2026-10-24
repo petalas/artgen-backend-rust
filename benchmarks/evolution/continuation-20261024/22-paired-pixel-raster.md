@@ -78,10 +78,13 @@ candidate in this cohort. Source review passes all 28 declared invariants.
 
 ## Source and remaining work
 
-Focused CPU checks pass: 18 pipeline tests and 14 lab tests. The normal production
-release build and default-path delivery verification are pending after the source
-commit; their results will be recorded separately. No application or preview
-latency claim follows from the resident throughput result.
+Focused CPU checks pass: 18 pipeline tests and 14 lab tests. The normal release
+build passes for the application, evolution-bench and engine-lab with optimization
+3 and debug assertions disabled. All six complete shader strings are verified in
+each fresh executable; the [release record](profiles/pixel-pair-release.json) pins
+the actual Cargo artifacts and 83-file source freeze. One separately frozen,
+unscored default-path verification is pending; it contributes no performance
+samples. No UI or preview latency claim follows from the resident throughput result.
 
 The raster/error interval remains the largest sampled GPU stage. Training
 trial-average raster medians decrease from about 436/560/556 microseconds to
