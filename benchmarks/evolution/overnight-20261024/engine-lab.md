@@ -29,6 +29,13 @@ and separate reference qualification artifacts. A failed check stops the job;
 invalid rows have no throughput score. It accepts up to sixteen variants. Each
 comparison alternates reference/candidate order across pairs.
 
+`--shader-stage bin|raster` selects which pipeline the supplied sources replace;
+the default is `bin`. `--diagnostics true` adds one untimed overflow replay per
+source and case. Those rows have null throughput, separate counters and saved
+snapshots. They must match the same qualified trajectory and remain below the
+256-entry bin capacity. Diagnostics instrument the actual installed binner,
+including variants that accumulate a local count and store it once.
+
 ## Initial physical proof
 
 The first resident A/A used identical tile-parallel shader bytes on both sides,
@@ -51,3 +58,21 @@ Evidence is under `.cache/evolution-overnight-20261024/aa-resident-01/` and
 `negative-source-gate/`. Both use the archived executable, source inventory and
 Cargo artifact record under `.cache/evolution-overnight-20261024/build/`.
 The first failed launcher setup is retained as `aa-resident/`; it ran no GPU work.
+
+The expanded loop subsequently passed a reference/reference integration check
+with two normal trials and two overflow replays on ff. Normal work and diagnostic
+work each completed 262,144 evaluations. Occupancy was 66 and all replay, numeric
+and device checks passed. The evidence is in `v2-overflow-smoke/`. Its timings are
+integration evidence, not a candidate comparison. The expanded full-bin checker
+also passed 832 paired comparisons and 1,664 dispatches in
+`baseline-full-buffers/`.
+
+The retained focused CPU checks and two independent source reviews cover the
+installation caches, workgroup recreation, timer and error gates. Existing
+production GPU waits are bounded by the supervisor's process timeout. The
+pre-existing large pipeline constructor remains intact to keep resource order
+and layout unchanged. Its added fields are empty caches and optional overrides;
+splitting that constructor belongs to a separate validated refactor. The lab's
+64-line main and 66-line schema test are mostly typed data declarations and one
+cohesive result path. Other new operations stay within a page. Wgpu allocation
+inside ordinary engine work remains included in elapsed time.

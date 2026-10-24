@@ -1,5 +1,6 @@
 use std::num::NonZeroU64;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use wgpu::*;
 use wgpu::util::DeviceExt;
@@ -7,6 +8,30 @@ use wgpu::util::DeviceExt;
 use super::buffers::{
     ControlFlags, GpuDrawingState, GpuParams, GPU_DRAWING_STATE_SIZE,
 };
+
+// Capacity for 17 lab sources, five supported raster workgroups, and two modes.
+const MAX_BENCHMARK_BIN_PIPELINES: usize = 17 * 5 * 2;
+const MAX_BENCHMARK_SOURCE_BYTES: usize = 256 * 1024;
+const MAX_BENCHMARK_RASTER_PIPELINES: usize = 17 * 5;
+
+#[derive(Debug, PartialEq, Eq)]
+struct BenchmarkRasterKey {
+    source: Arc<str>,
+    wg: [u32; 2],
+}
+
+struct BenchmarkRasterPipeline {
+    key: BenchmarkRasterKey,
+    pipeline: ComputePipeline,
+    shader: ShaderModule,
+}
+
+struct BenchmarkBinPipeline {
+    source: Arc<str>,
+    wg: [u32; 2],
+    validation: bool,
+    pipeline: ComputePipeline,
+}
 
 pub struct GpuPipeline {
     pub device: Device,
@@ -46,9 +71,14 @@ pub struct GpuPipeline {
     // Rasterize pipeline recreation support — stored for creating new pipeline variants
     rasterize_error_shader: ShaderModule,
     rasterize_error_pipeline_layout: PipelineLayout,
+    benchmark_raster_source: Option<Arc<str>>,
+    benchmark_raster_pipelines: Vec<BenchmarkRasterPipeline>,
 
     // Bin polygons pipeline recreation support (tile size must match rasterize WG)
     bin_polygons_pipeline_layout: PipelineLayout,
+    // Empty in production. Source and compiled handles survive benchmark prepares.
+    benchmark_bin_source: Option<Arc<str>>,
+    benchmark_bin_pipelines: Vec<BenchmarkBinPipeline>,
 
     // Init framebuffers pipeline recreation support
     init_framebuffers_pipeline_layout: PipelineLayout,
@@ -979,7 +1009,11 @@ impl GpuPipeline {
             update_framebuffers_pipeline,
             rasterize_error_shader,
             rasterize_error_pipeline_layout,
+            benchmark_raster_source: None,
+            benchmark_raster_pipelines: Vec::new(),
             bin_polygons_pipeline_layout,
+            benchmark_bin_source: None,
+            benchmark_bin_pipelines: Vec::new(),
             init_framebuffers_pipeline_layout,
             update_framebuffers_pipeline_layout,
             pipeline_cache,
@@ -1006,32 +1040,57 @@ impl GpuPipeline {
         }
     }
 
-    /// Recreate the rasterize_error pipeline with a new workgroup size.
-    /// Also recreates the bin_polygons pipeline since tile size must match.
+    /// Recreate the `rasterize_error` pipeline with a new workgroup size.
+    /// Also recreates the `bin_polygons` pipeline since tile size must match.
     /// This is called between batches when the user changes the workgroup size.
+    ///
+    /// # Panics
+    /// Panics if a benchmark override cannot be recreated. Checked benchmark
+    /// preparation propagates this error through `try_set_rasterize_wg` instead.
     pub fn set_rasterize_wg(&mut self, wg: [u32; 2]) {
+        self.try_set_rasterize_wg(wg)
+            .expect("workgroup pipeline recreation failed");
+    }
+
+    pub(super) fn try_set_rasterize_wg(&mut self, wg: [u32; 2]) -> Result<(), String> {
         if wg == self.rasterize_wg {
-            return;
+            return Ok(());
         }
+        // Compile the installed candidate before changing any active pipeline.
+        let bin = if let Some(source) = self.benchmark_bin_source.clone() {
+            self.cached_benchmark_bin(source, wg, self.benchmark_validation)?
+        } else if self.benchmark_validation {
+            self.cached_benchmark_bin(
+                Arc::from(include_str!("../shaders/bin_polygons.wgsl")),
+                wg,
+                true,
+            )?
+        } else {
+            create_bin_polygons_pipeline(
+                &self.device,
+                &self.bin_polygons_pipeline_layout,
+                wg,
+                &self.pipeline_cache,
+            )
+        };
         println!(
             "Recreating rasterize_error + bin_polygons pipelines: {}x{} -> {}x{}",
             self.rasterize_wg[0], self.rasterize_wg[1], wg[0], wg[1]
         );
-        let (pipeline, shader) = create_rasterize_pipeline(
-            &self.device,
-            &self.rasterize_error_pipeline_layout,
-            wg,
-            &self.pipeline_cache,
-        );
+        let (pipeline, shader) = if let Some(source) = self.benchmark_raster_source.clone() {
+            self.cached_benchmark_raster(source, wg)?
+        } else {
+            create_rasterize_pipeline(
+                &self.device,
+                &self.rasterize_error_pipeline_layout,
+                wg,
+                &self.pipeline_cache,
+            )
+        };
         self.rasterize_error_pipeline = pipeline;
         self.rasterize_error_shader = shader;
 
-        self.bin_polygons_pipeline = create_bin_polygons_pipeline(
-            &self.device,
-            &self.bin_polygons_pipeline_layout,
-            wg,
-            &self.pipeline_cache,
-        );
+        self.bin_polygons_pipeline = bin;
 
         self.init_framebuffers_pipeline = create_init_framebuffers_pipeline(
             &self.device,
@@ -1049,32 +1108,191 @@ impl GpuPipeline {
 
         self.rasterize_wg = wg;
         self.num_tiles = self.image_width.div_ceil(wg[0]) * self.image_height.div_ceil(wg[1]);
-        if self.benchmark_validation {
-            self.set_benchmark_validation(true);
-        }
+        Ok(())
     }
 
-    /// Only benchmark replays install this variant. The production source is unchanged.
-    pub(super) fn set_benchmark_validation(&mut self, enabled: bool) {
-        let source = bin_polygons_source(self.rasterize_wg);
-        let source = if enabled {
-            benchmark_bin_source(&source)
+    pub(super) fn set_benchmark_raster_shader(&mut self, source: &str) -> Result<(), String> {
+        validate_benchmark_raster_source(source)?;
+        let source = self
+            .benchmark_raster_pipelines
+            .iter()
+            .find(|entry| entry.key.source.as_ref() == source)
+            .map_or_else(|| Arc::from(source), |entry| Arc::clone(&entry.key.source));
+        let (pipeline, shader) =
+            self.cached_benchmark_raster(Arc::clone(&source), self.rasterize_wg)?;
+        self.rasterize_error_pipeline = pipeline;
+        self.rasterize_error_shader = shader;
+        self.benchmark_raster_source = Some(source);
+        Ok(())
+    }
+
+    fn cached_benchmark_raster(
+        &mut self,
+        source: Arc<str>,
+        wg: [u32; 2],
+    ) -> Result<(ComputePipeline, ShaderModule), String> {
+        let key = BenchmarkRasterKey { source, wg };
+        if let Some(entry) = self
+            .benchmark_raster_pipelines
+            .iter()
+            .find(|entry| entry.key == key)
+        {
+            return Ok((entry.pipeline.clone(), entry.shader.clone()));
+        }
+        if self.benchmark_raster_pipelines.len() == MAX_BENCHMARK_RASTER_PIPELINES {
+            return Err("benchmark raster pipeline cache is full".into());
+        }
+        let (pipeline, shader) = if self.benchmark_raster_pipelines.is_empty()
+            && self.benchmark_raster_source.is_none()
+            && wg == self.rasterize_wg
+            && key.source.as_ref() == include_str!("../shaders/rasterize_error.wgsl")
+        {
+            (
+                self.rasterize_error_pipeline.clone(),
+                self.rasterize_error_shader.clone(),
+            )
         } else {
-            source
+            self.compile_benchmark_raster(&key.source, wg)?
         };
-        let shader = self.device.create_shader_module(ShaderModuleDescriptor {
-            label: Some("benchmark_bin_shader"),
-            source: ShaderSource::Wgsl(source.into()),
-        });
-        self.bin_polygons_pipeline = self.device.create_compute_pipeline(&ComputePipelineDescriptor {
-            label: Some("benchmark_bin_pipeline"),
-            layout: Some(&self.bin_polygons_pipeline_layout),
-            module: &shader,
-            entry_point: Some("main"),
-            compilation_options: PipelineCompilationOptions::default(),
-            cache: Some(&self.pipeline_cache),
-        });
+        self.benchmark_raster_pipelines
+            .push(BenchmarkRasterPipeline {
+                key,
+                pipeline: pipeline.clone(),
+                shader: shader.clone(),
+            });
+        Ok((pipeline, shader))
+    }
+
+    fn compile_benchmark_raster(
+        &self,
+        source: &str,
+        wg: [u32; 2],
+    ) -> Result<(ComputePipeline, ShaderModule), String> {
+        let specialized = specialize_raster_source(source, wg);
+        let scopes = [
+            self.device.push_error_scope(ErrorFilter::Validation),
+            self.device.push_error_scope(ErrorFilter::OutOfMemory),
+            self.device.push_error_scope(ErrorFilter::Internal),
+        ];
+        let compiled = create_rasterize_pipeline_from_source(
+            &self.device,
+            &self.rasterize_error_pipeline_layout,
+            &specialized,
+            &self.pipeline_cache,
+        );
+        let mut errors = Vec::with_capacity(3);
+        for scope in scopes.into_iter().rev() {
+            if let Some(error) = futures_lite::future::block_on(scope.pop()) {
+                errors.push(error.to_string());
+            }
+        }
+        if !errors.is_empty() {
+            return Err(errors.join("; "));
+        }
+        Ok(compiled)
+    }
+
+    pub(super) fn set_benchmark_bin_shader(&mut self, source: &str) -> Result<(), String> {
+        validate_benchmark_bin_source(source)?;
+        let source = self
+            .benchmark_bin_pipelines
+            .iter()
+            .find(|entry| entry.source.as_ref() == source)
+            .map_or_else(|| Arc::from(source), |entry| Arc::clone(&entry.source));
+        let pipeline = self.cached_benchmark_bin(
+            Arc::clone(&source),
+            self.rasterize_wg,
+            self.benchmark_validation,
+        )?;
+        self.bin_polygons_pipeline = pipeline;
+        self.benchmark_bin_source = Some(source);
+        Ok(())
+    }
+
+    /// Instrument the actual installed source, including after workgroup changes.
+    pub(super) fn set_benchmark_validation(&mut self, enabled: bool) -> Result<(), String> {
+        if enabled == self.benchmark_validation {
+            return Ok(());
+        }
+        let source = self
+            .benchmark_bin_source
+            .clone()
+            .unwrap_or_else(|| Arc::from(include_str!("../shaders/bin_polygons.wgsl")));
+        self.bin_polygons_pipeline =
+            self.cached_benchmark_bin(source, self.rasterize_wg, enabled)?;
         self.benchmark_validation = enabled;
+        Ok(())
+    }
+
+    fn cached_benchmark_bin(
+        &mut self,
+        source: Arc<str>,
+        wg: [u32; 2],
+        validation: bool,
+    ) -> Result<ComputePipeline, String> {
+        if let Some(entry) = self.benchmark_bin_pipelines.iter().find(|entry| {
+            entry.source == source && entry.wg == wg && entry.validation == validation
+        }) {
+            return Ok(entry.pipeline.clone());
+        }
+        if self.benchmark_bin_pipelines.len() == MAX_BENCHMARK_BIN_PIPELINES {
+            return Err("benchmark bin pipeline cache is full".into());
+        }
+        let pipeline = if self.benchmark_bin_pipelines.is_empty()
+            && self.benchmark_bin_source.is_none()
+            && !self.benchmark_validation
+            && !validation
+            && wg == self.rasterize_wg
+            && source.as_ref() == include_str!("../shaders/bin_polygons.wgsl")
+        {
+            self.bin_polygons_pipeline.clone()
+        } else {
+            self.compile_benchmark_bin(&source, wg, validation)?
+        };
+        self.benchmark_bin_pipelines.push(BenchmarkBinPipeline {
+            source,
+            wg,
+            validation,
+            pipeline: pipeline.clone(),
+        });
+        Ok(pipeline)
+    }
+
+    // Pipeline compilation and scope completion use wgpu's blocking driver path.
+    // The lab's parent process timeout bounds a stalled driver, as for GPU drain.
+    fn compile_benchmark_bin(
+        &self,
+        source: &str,
+        wg: [u32; 2],
+        validation: bool,
+    ) -> Result<ComputePipeline, String> {
+        let specialized = specialize_bin_source(source, wg);
+        let specialized = if validation {
+            benchmark_bin_source(&specialized)?
+        } else {
+            specialized
+        };
+        let scopes = [
+            self.device.push_error_scope(ErrorFilter::Validation),
+            self.device.push_error_scope(ErrorFilter::OutOfMemory),
+            self.device.push_error_scope(ErrorFilter::Internal),
+        ];
+        let pipeline = create_bin_pipeline_from_source(
+            &self.device,
+            &self.bin_polygons_pipeline_layout,
+            &specialized,
+            &self.pipeline_cache,
+        );
+        let mut errors = Vec::with_capacity(3);
+        for scope in scopes.into_iter().rev() {
+            if let Some(error) = futures_lite::future::block_on(scope.pop()) {
+                errors.push(error.to_string());
+            }
+        }
+        if !errors.is_empty() {
+            return Err(errors.join("; "));
+        }
+        Ok(pipeline)
     }
 
     /// Save pipeline cache data to disk for faster startup next time.
@@ -1109,10 +1327,16 @@ fn create_rasterize_pipeline(
     wg: [u32; 2],
     cache: &PipelineCache,
 ) -> (ComputePipeline, ShaderModule) {
-    let source = include_str!("../shaders/rasterize_error.wgsl")
-        .replace("const WG_X: u32 = 16;", &format!("const WG_X: u32 = {};", wg[0]))
-        .replace("const WG_Y: u32 = 16;", &format!("const WG_Y: u32 = {};", wg[1]));
+    let source = specialize_raster_source(include_str!("../shaders/rasterize_error.wgsl"), wg);
+    create_rasterize_pipeline_from_source(device, layout, &source, cache)
+}
 
+fn create_rasterize_pipeline_from_source(
+    device: &Device,
+    layout: &PipelineLayout,
+    source: &str,
+    cache: &PipelineCache,
+) -> (ComputePipeline, ShaderModule) {
     let shader = device.create_shader_module(ShaderModuleDescriptor {
         label: Some("rasterize_error_shader"),
         source: ShaderSource::Wgsl(source.into()),
@@ -1130,6 +1354,32 @@ fn create_rasterize_pipeline(
     (pipeline, shader)
 }
 
+fn specialize_raster_source(source: &str, wg: [u32; 2]) -> String {
+    source
+        .replace(
+            "const WG_X: u32 = 16;",
+            &format!("const WG_X: u32 = {};", wg[0]),
+        )
+        .replace(
+            "const WG_Y: u32 = 16;",
+            &format!("const WG_Y: u32 = {};", wg[1]),
+        )
+}
+
+fn validate_benchmark_raster_source(source: &str) -> Result<(), String> {
+    if source.is_empty() || source.len() > MAX_BENCHMARK_SOURCE_BYTES {
+        return Err("raster shader must contain 1..262144 bytes".into());
+    }
+    for marker in ["const WG_X: u32 = 16;", "const WG_Y: u32 = 16;"] {
+        if source.matches(marker).count() != 1 {
+            return Err(format!(
+                "raster specialization must match {marker:?} exactly once"
+            ));
+        }
+    }
+    Ok(())
+}
+
 // Only the rasterize/error, init-framebuffers, and update-framebuffers shaders
 // use these options. Every shared value they read is explicitly written before
 // a workgroup barrier; unused polygon/reduction slots are never read. Avoid the
@@ -1144,7 +1394,7 @@ fn rasterize_compilation_options(device: &Device) -> PipelineCompilationOptions<
     }
 }
 
-/// Create a bin_polygons compute pipeline with tile size matching the rasterize workgroup.
+/// Create a `bin_polygons` compute pipeline with tile size matching the rasterize workgroup.
 fn create_bin_polygons_pipeline(
     device: &Device,
     layout: &PipelineLayout,
@@ -1152,7 +1402,15 @@ fn create_bin_polygons_pipeline(
     cache: &PipelineCache,
 ) -> ComputePipeline {
     let source = bin_polygons_source(wg);
+    create_bin_pipeline_from_source(device, layout, &source, cache)
+}
 
+fn create_bin_pipeline_from_source(
+    device: &Device,
+    layout: &PipelineLayout,
+    source: &str,
+    cache: &PipelineCache,
+) -> ComputePipeline {
     let shader = device.create_shader_module(ShaderModuleDescriptor {
         label: Some("bin_polygons_shader"),
         source: ShaderSource::Wgsl(source.into()),
@@ -1163,23 +1421,51 @@ fn create_bin_polygons_pipeline(
         layout: Some(layout),
         module: &shader,
         entry_point: Some("main"),
-        compilation_options: Default::default(),
+        compilation_options: PipelineCompilationOptions::default(),
         cache: Some(cache),
     })
 }
 
 fn bin_polygons_source(wg: [u32; 2]) -> String {
-    include_str!("../shaders/bin_polygons.wgsl")
-        .replace("const TILE_W: u32 = 16;", &format!("const TILE_W: u32 = {};", wg[0]))
-        .replace("const TILE_H: u32 = 16;", &format!("const TILE_H: u32 = {};", wg[1]))
+    specialize_bin_source(include_str!("../shaders/bin_polygons.wgsl"), wg)
 }
 
-fn benchmark_bin_source(source: &str) -> String {
-    let marker = "let slot = atomicAdd(&tile_counts[tile_global], 1u);";
-    assert_eq!(source.matches(marker).count(), 1, "benchmark bin instrumentation must match once");
-    // The benchmark capacity gate reserves the last word beyond every active tile.
-    // It is never reset by binning and retains the maximum across ALL iterations.
-    source.replace(marker, &format!("{marker}\n                atomicMax(&tile_counts[arrayLength(&tile_counts) - 1u], slot + 1u);"))
+fn specialize_bin_source(source: &str, wg: [u32; 2]) -> String {
+    source
+        .replace(
+            "const TILE_W: u32 = 16;",
+            &format!("const TILE_W: u32 = {};", wg[0]),
+        )
+        .replace(
+            "const TILE_H: u32 = 16;",
+            &format!("const TILE_H: u32 = {};", wg[1]),
+        )
+}
+
+fn validate_benchmark_bin_source(source: &str) -> Result<(), String> {
+    if source.is_empty() || source.len() > MAX_BENCHMARK_SOURCE_BYTES {
+        return Err("bin shader must contain 1..262144 bytes".into());
+    }
+    for marker in ["const TILE_W: u32 = 16;", "const TILE_H: u32 = 16;"] {
+        if source.matches(marker).count() != 1 {
+            return Err(format!(
+                "bin specialization must match {marker:?} exactly once"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn benchmark_bin_source(source: &str) -> Result<String, String> {
+    let add = "let slot = atomicAdd(&tile_counts[tile_global], 1u);";
+    let store = "atomicStore(&tile_counts[tile_global], raw_count);";
+    // The reserved last word records uncapped occupancy over ALL iterations.
+    // Recognize exactly one known counting mechanism in the installed source.
+    match (source.matches(add).count(), source.matches(store).count()) {
+        (1, 0) => Ok(source.replace(add, &format!("{add}\n                atomicMax(&tile_counts[arrayLength(&tile_counts) - 1u], slot + 1u);"))),
+        (0, 1) => Ok(source.replace(store, &format!("atomicMax(&tile_counts[arrayLength(&tile_counts) - 1u], raw_count);\n        {store}"))),
+        _ => Err("benchmark bin instrumentation requires exactly one recognized count marker".into()),
+    }
 }
 
 /// Create an init_framebuffers compute pipeline with the given workgroup size.
@@ -1243,19 +1529,165 @@ fn pipeline_cache_path(adapter_info: &AdapterInfo) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod benchmark_tests {
-    use super::{benchmark_bin_source, bin_polygons_source};
+    use super::{
+        benchmark_bin_source, bin_polygons_source, specialize_bin_source,
+        specialize_raster_source, validate_benchmark_bin_source,
+        validate_benchmark_raster_source, BenchmarkRasterKey, MAX_BENCHMARK_SOURCE_BYTES,
+    };
+
+    #[test]
+    fn raster_source_specialization_preserves_candidate_and_cache_identity() {
+        let original = include_str!("../shaders/rasterize_error.wgsl");
+        let candidate = format!("{original}\n// actual candidate");
+        validate_benchmark_raster_source(&candidate).unwrap();
+        for wg in [[32, 16], [16, 16], [32, 8], [16, 8], [8, 8]] {
+            let source = specialize_raster_source(&candidate, wg);
+            assert!(source.ends_with("// actual candidate"));
+            assert!(source.contains(&format!("const WG_X: u32 = {};", wg[0])));
+            assert!(source.contains(&format!("const WG_Y: u32 = {};", wg[1])));
+            let module = wgpu::naga::front::wgsl::parse_str(&source).unwrap();
+            wgpu::naga::valid::Validator::new(
+                wgpu::naga::valid::ValidationFlags::all(),
+                wgpu::naga::valid::Capabilities::all(),
+            )
+            .validate(&module)
+            .unwrap();
+            let key = BenchmarkRasterKey {
+                source: candidate.as_str().into(),
+                wg,
+            };
+            assert_eq!(
+                key,
+                BenchmarkRasterKey {
+                    source: candidate.as_str().into(),
+                    wg
+                }
+            );
+            assert_ne!(
+                key,
+                BenchmarkRasterKey {
+                    source: original.into(),
+                    wg
+                }
+            );
+            assert_ne!(
+                key,
+                BenchmarkRasterKey {
+                    source: candidate.as_str().into(),
+                    wg: [1, 1]
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn raster_source_boundaries_and_marker_cardinality_fail_closed() {
+        let original = include_str!("../shaders/rasterize_error.wgsl");
+        assert!(validate_benchmark_raster_source("").is_err());
+        assert!(
+            validate_benchmark_raster_source(&" ".repeat(MAX_BENCHMARK_SOURCE_BYTES + 1)).is_err()
+        );
+        for marker in ["const WG_X: u32 = 16;", "const WG_Y: u32 = 16;"] {
+            assert!(validate_benchmark_raster_source(&original.replace(marker, "")).is_err());
+            assert!(validate_benchmark_raster_source(&format!("{original}\n{marker}")).is_err());
+        }
+    }
 
     #[test]
     fn benchmark_bin_variants_validate_without_a_gpu() {
         for wg in [[32, 16], [16, 16], [32, 8], [16, 8], [8, 8]] {
             let normal = bin_polygons_source(wg);
             assert!(!normal.contains("atomicMax"));
-            let source = benchmark_bin_source(&normal);
+            let source = benchmark_bin_source(&normal).unwrap();
             let module = wgpu::naga::front::wgsl::parse_str(&source).unwrap();
             wgpu::naga::valid::Validator::new(
                 wgpu::naga::valid::ValidationFlags::all(),
                 wgpu::naga::valid::Capabilities::all(),
-            ).validate(&module).unwrap();
+            )
+            .validate(&module)
+            .unwrap();
         }
+    }
+
+    #[test]
+    fn candidate_sources_keep_workgroup_and_validation_specialization() {
+        let original = include_str!("../shaders/bin_polygons.wgsl");
+        let annotation = original
+            .lines()
+            .find(|line| line.starts_with("@compute @workgroup_size("))
+            .unwrap();
+        for internal_wg in [32, 64, 128, 256] {
+            let candidate = original
+                .replace(
+                    annotation,
+                    &format!("@compute @workgroup_size({internal_wg}, 1, 1)"),
+                )
+                .replace("+= 32u", &format!("+= {internal_wg}u"));
+            validate_benchmark_bin_source(&candidate).unwrap();
+            for wg in [[32, 16], [16, 16], [32, 8], [16, 8], [8, 8]] {
+                let specialized = specialize_bin_source(&candidate, wg);
+                assert!(specialized.contains(&format!("@workgroup_size({internal_wg}, 1, 1)")));
+                assert!(specialized.contains(&format!("const TILE_W: u32 = {};", wg[0])));
+                assert!(specialized.contains(&format!("const TILE_H: u32 = {};", wg[1])));
+                let validation = benchmark_bin_source(&specialized).unwrap();
+                assert!(validation.contains(
+                    "atomicMax(&tile_counts[arrayLength(&tile_counts) - 1u], slot + 1u)"
+                ));
+                let module = wgpu::naga::front::wgsl::parse_str(&validation).unwrap();
+                wgpu::naga::valid::Validator::new(
+                    wgpu::naga::valid::ValidationFlags::all(),
+                    wgpu::naga::valid::Capabilities::all(),
+                )
+                .validate(&module)
+                .unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn candidate_source_boundaries_and_instrumentation_fail_closed() {
+        let original = include_str!("../shaders/bin_polygons.wgsl");
+        assert!(validate_benchmark_bin_source("").is_err());
+        assert!(
+            validate_benchmark_bin_source(&" ".repeat(MAX_BENCHMARK_SOURCE_BYTES + 1)).is_err()
+        );
+        assert!(
+            validate_benchmark_bin_source(&original.replace("const TILE_W: u32 = 16;", ""))
+                .is_err()
+        );
+        assert!(
+            validate_benchmark_bin_source(&format!("{original}\nconst TILE_H: u32 = 16;")).is_err()
+        );
+        assert!(benchmark_bin_source("no atomicAdd marker").is_err());
+        assert!(benchmark_bin_source(&format!("{original}\n{original}")).is_err());
+    }
+
+    #[test]
+    fn local_count_validation_uses_uncapped_actual_store() {
+        let source = r"
+const TILE_W: u32 = 16;
+const TILE_H: u32 = 16;
+@group(0) @binding(0) var<storage, read_write> tile_counts: array<atomic<u32>>;
+@compute @workgroup_size(32, 1, 1)
+fn main() {
+    let tile_global = 0u;
+    let raw_count = 257u;
+    atomicStore(&tile_counts[tile_global], raw_count);
+}";
+        validate_benchmark_bin_source(source).unwrap();
+        let instrumented = benchmark_bin_source(source).unwrap();
+        assert!(instrumented
+            .contains("atomicMax(&tile_counts[arrayLength(&tile_counts) - 1u], raw_count);"));
+        assert!(instrumented.contains("atomicStore(&tile_counts[tile_global], raw_count);"));
+        let module = wgpu::naga::front::wgsl::parse_str(&instrumented).unwrap();
+        wgpu::naga::valid::Validator::new(
+            wgpu::naga::valid::ValidationFlags::all(),
+            wgpu::naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap();
+        let mixed = format!("{source}\nlet slot = atomicAdd(&tile_counts[tile_global], 1u);");
+        assert!(benchmark_bin_source(&mixed).is_err());
+        assert!(benchmark_bin_source(&format!("{source}\n{source}")).is_err());
     }
 }

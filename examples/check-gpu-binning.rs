@@ -11,24 +11,38 @@
 //! This diagnoses an N2 baseline probe that repeats the complete reset/scatter
 //! body twice inside the existing one-lane workgroup: final buffers must match
 //! N1. Both paired modes retain the consumed-prefix and analytical truth checks.
+//! They also check one 384x384 image at raster tile size 32x16, outside the
+//! workgroup/image crossproduct. Its 288 tiles exercise the second tile stripe
+//! for an internal 256-lane binner. Internal bin lanes do not change raster tiles.
 //!
 //! Bounds: five supported workgroups, three original images plus four narrow
 //! 512/513-axis images in either paired mode, three offspring, at most 1000
-//! polygons, 195 tiles per offspring and 20 checks per buffer fixture. A consumed
+//! polygons, 195 tiles per offspring in the original grid, exactly 288 in the
+//! targeted configuration, and 20 checks per buffer fixture. A consumed
 //! or full-buffer check dispatches both GPU binners. Only one image's buffers
 //! are live at once.
 //! Each workgroup/image has 17 standard checks and six packed-edge checks in
-//! either paired mode: 805 paired checks and 1610 GPU dispatches in total.
+//! either paired mode: 805 paired checks and 1610 GPU dispatches in that grid.
+//! The targeted configuration adds 17 standard, six packed-edge, and four
+//! cache-stripe checks: 832 paired checks and 1664 GPU dispatches in total.
+//! Its stripe batches have polygon counts 31/32/33, 63/64/65, 127/128/129,
+//! and 255/256/257. Standard and packed checks retain empty/500/999/1000
+//! coverage and overflow-to-empty history. Each targeted count/index readback
+//! is 888192 bytes for all three offspring, below 1 MiB. Buffer histories
+//! persist within each fixture. Use full-buffers to validate shader variants;
+//! consumed-only does not prove equality of stale suffixes or skipped counts.
 //! Strict mode runs only the standard checks, for 255 GPU dispatches in total.
 //! Each mapping/poll has a 120-second limit. GPU work stays on this main thread.
 //! Rule 3 deviation: wgpu and the scalar oracle allocate during this finite
-//! checker, with one fixture live at a time and at most 195 tiles per offspring.
+//! checker, with one fixture live at a time and at most 288 tiles per offspring.
 //! Rule 7 deviation: existing `GpuPipeline` construction has internal unbounded
 //! adapter/compilation waits; the outer process timeout bounds the whole run.
 //! Rules 8/9 deviation: formatting/assertion macros and wgpu's single mapping
 //! callback use the existing framework interfaces, with no recursive callbacks.
 //! Verification: the command above checks actual count/index readbacks. Keep the
 //! bounds and outer timeout when extending cases; production APIs are unchanged.
+//! Rule 10 deviation: this source preparation runs rustfmt and static inspection
+//! only. The parent owns Cargo compilation and GPU proof before adoption.
 
 use std::{sync::mpsc, time::Duration};
 
@@ -46,6 +60,11 @@ use wgpu::util::DeviceExt;
 const WORKGROUPS: [[u32; 2]; 5] = [[32, 16], [16, 16], [32, 8], [16, 8], [8, 8]];
 const IMAGE_SIZES: [[u32; 2]; 3] = [[64, 48], [65, 51], [17, 19]];
 const GUARD_SIZES: [[u32; 2]; 4] = [[512, 19], [513, 19], [19, 512], [19, 513]];
+const STRIPE_SIZE: [u32; 2] = [384, 384];
+const STRIPE_RASTER_WG: [u32; 2] = [32, 16];
+const STRIPE_TILES: usize = 288;
+const STRIPE_COUNTS: [[usize; 3]; 4] =
+    [[31, 32, 33], [63, 64, 65], [127, 128, 129], [255, 256, 257]];
 const OFFSPRING: usize = 3;
 const BIN_CAPACITY: usize = 256;
 const TIMEOUT: Duration = Duration::from_secs(120);
@@ -104,10 +123,15 @@ fn main() -> Result<()> {
             }
         }
     }
+    if scope != Scope::Strict {
+        pipeline.set_rasterize_wg(STRIPE_RASTER_WG);
+        let reference = reference_pipeline(&pipeline);
+        dispatches += check_stripe_grid(&pipeline, &reference, scope)?;
+    }
     match scope {
         Scope::Strict => println!("GPU dirty-binning candidate checks passed: 5 workgroups, 3 images, {dispatches} dispatches"),
-        Scope::ConsumedOnly => println!("GPU consumed-only checks passed: 5 workgroups, 7 images, {dispatches} paired checks, {} GPU dispatches", dispatches * 2),
-        Scope::FullBuffers => println!("GPU full-buffers checks passed: 5 workgroups, 7 images, {dispatches} paired checks, {} GPU dispatches", dispatches * 2),
+        Scope::ConsumedOnly => println!("GPU consumed-only checks passed: 5 workgroups, 7 images plus 1 targeted configuration, {dispatches} paired checks, {} GPU dispatches", dispatches * 2),
+        Scope::FullBuffers => println!("GPU full-buffers checks passed: 5 workgroups, 7 images plus 1 targeted configuration, {dispatches} paired checks, {} GPU dispatches", dispatches * 2),
     }
     Ok(())
 }
@@ -168,12 +192,13 @@ fn new_bins(
     reference: Option<&wgpu::ComputePipeline>,
     scope: Scope,
 ) -> Bins {
-    assert!(IMAGE_SIZES.contains(&image_size) || GUARD_SIZES.contains(&image_size));
+    let stripe_grid = image_size == STRIPE_SIZE && p.rasterize_wg == STRIPE_RASTER_WG;
+    assert!(IMAGE_SIZES.contains(&image_size) || GUARD_SIZES.contains(&image_size) || stripe_grid);
     assert!(WORKGROUPS.contains(&p.rasterize_wg));
     let tiles =
         image_size[0].div_ceil(p.rasterize_wg[0]) * image_size[1].div_ceil(p.rasterize_wg[1]);
-    assert!(tiles <= 195);
-    let slots = usize::try_from(tiles).expect("at most 195 tiles") * OFFSPRING;
+    assert!(tiles <= 195 || (stripe_grid && tiles == STRIPE_TILES as u32));
+    let slots = usize::try_from(tiles).expect("at most 288 tiles") * OFFSPRING;
     let expected: Vec<u32> = (0..slots * (BIN_CAPACITY + 1))
         .map(|i| 0xA000_0000 | u32::try_from(i).expect("bounded buffer word index"))
         .collect();
@@ -193,7 +218,9 @@ fn new_bins(
 }
 
 fn new_bin_buffers(p: &GpuPipeline, poison: &[u32], slots: usize) -> BinBuffers {
-    assert!(slots <= 195 * OFFSPRING && poison.len() == slots * (BIN_CAPACITY + 1));
+    assert!(slots <= 195 * OFFSPRING || slots == STRIPE_TILES * OFFSPRING);
+    assert!(poison.len() == slots * (BIN_CAPACITY + 1));
+    assert!(std::mem::size_of_val(poison) < 1024 * 1024);
     let usage =
         wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST;
     let counts = p
@@ -441,7 +468,7 @@ fn check_consumed_gpu(
 }
 
 fn consumed(state: &GpuDrawingState, tile: usize, size: [u32; 2], wg: [u32; 2]) -> bool {
-    let tile = u32::try_from(tile).expect("at most 195 tiles");
+    let tile = u32::try_from(tile).expect("at most 288 tiles");
     let columns = size[0].div_ceil(wg[0]);
     let x = tile % columns * wg[0];
     let y = tile / columns * wg[1];
@@ -558,6 +585,38 @@ fn check_fixture(
         p.rasterize_wg, bins.dispatches
     );
     Ok(bins.dispatches)
+}
+
+fn check_stripe_grid(
+    p: &GpuPipeline,
+    reference: &wgpu::ComputePipeline,
+    scope: Scope,
+) -> Result<usize> {
+    assert!(p.rasterize_wg == STRIPE_RASTER_WG && scope != Scope::Strict);
+    let mut checks = check_fixture(p, STRIPE_SIZE, Some(reference), scope)?;
+    checks += check_packed_edges(p, STRIPE_SIZE, reference, scope)?;
+    let mut bins = new_bins(p, STRIPE_SIZE, Some(reference), scope);
+    let full = [0, 0, STRIPE_SIZE[0], STRIPE_SIZE[1]];
+    let polygons = [polygon([[0, 0], [65535, 0], [0, 65535]]); 257];
+    // Keep the same poison/stale history across all four partial cache stripes.
+    for counts in STRIPE_COUNTS {
+        let states: Vec<_> = counts
+            .into_iter()
+            .map(|count| drawing(&polygons[..count], full))
+            .collect();
+        check_dispatch(
+            p,
+            &mut bins,
+            &states,
+            &format!("cache stripe polygon counts {counts:?}, full image"),
+        )?;
+    }
+    checks += bins.dispatches;
+    ensure!(checks == 27, "targeted configuration check count changed");
+    println!(
+        "size={STRIPE_SIZE:?}, wg={STRIPE_RASTER_WG:?}: {checks} targeted paired checks passed"
+    );
+    Ok(checks)
 }
 
 fn check_regions(p: &GpuPipeline, bins: &mut Bins, states: &mut [GpuDrawingState]) -> Result<()> {

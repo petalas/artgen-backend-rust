@@ -210,7 +210,7 @@ impl GpuEvolver {
             return Err(format!("warmup_batches exceeds {MAX_WARMUP_BATCHES}"));
         }
         self.flush_pending();
-        self.pipeline.set_rasterize_wg(params.rasterize_wg);
+        self.pipeline.try_set_rasterize_wg(params.rasterize_wg)?;
         self.reset_seeded_benchmark(drawing, params.chain_count, seed)?;
         for _ in 0..warmup_batches {
             self.run_batch(params, profile);
@@ -237,6 +237,27 @@ impl GpuEvolver {
         validate_resources(p, params)
     }
 
+    /// Install a lab bin shader while drained, retaining device, layouts and buffers.
+    /// Repeated sources reuse compiled handles. Preparation and validation retain
+    /// the override; compilation uses the production bin options and pipeline cache.
+    ///
+    /// # Errors
+    /// Rejects a failed drain, oversized/malformed source, full cache or GPU errors.
+    pub fn benchmark_set_bin_shader(&mut self, source: &str) -> Result<(), String> {
+        self.benchmark_drain()?;
+        self.pipeline.set_benchmark_bin_shader(source)
+    }
+
+    /// Install and cache the actual raster source, retaining it across prepares
+    /// and workgroup changes. Uses the production layout and compilation options.
+    ///
+    /// # Errors
+    /// Rejects a failed drain, invalid source, exhausted cache or GPU errors.
+    pub fn benchmark_set_raster_shader(&mut self, source: &str) -> Result<(), String> {
+        self.benchmark_drain()?;
+        self.pipeline.set_benchmark_raster_shader(source)
+    }
+
     /// Replace binning only for an untimed replay. Prepare resets the persistent
     /// diagnostic word; snapshot reports the maximum over every binned offspring.
     ///
@@ -244,7 +265,7 @@ impl GpuEvolver {
     /// Returns an error if the preceding GPU work cannot be fully drained.
     pub fn benchmark_set_validation(&mut self, enabled: bool) -> Result<(), String> {
         self.benchmark_drain()?;
-        self.pipeline.set_benchmark_validation(enabled);
+        self.pipeline.set_benchmark_validation(enabled)?;
         let p = &self.pipeline;
         p.queue
             .write_buffer(&p.tile_counts_buf, p.tile_counts_buf.size() - 4, &[0; 4]);
