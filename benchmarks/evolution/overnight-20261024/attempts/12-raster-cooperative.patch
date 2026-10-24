@@ -1,0 +1,76 @@
+diff --git a/src/shaders/rasterize_error.wgsl b/src/shaders/rasterize_error.wgsl
+index 41d92a7..0246ab2 100644
+--- a/src/shaders/rasterize_error.wgsl
++++ b/src/shaders/rasterize_error.wgsl
+@@ -11,12 +11,10 @@
+ // Workgroup size is configurable. pipeline.rs uses string replacement on the
+ // WG_X/WG_Y constants below when creating non-default pipeline variants.
+ // Supported configurations: 16x16 (256 threads), 16x8 (128 threads), 8x8 (64 threads).
+-// Tile capacity and shared memory arrays scale with WG_X * WG_Y.
++// Shared polygon capacity is fixed at the clamped tile polygon limit.
+ const WG_X: u32 = 16;
+ const WG_Y: u32 = 16;
+ const THREAD_COUNT: u32 = WG_X * WG_Y;
+-const TILE_CAP: u32 = THREAD_COUNT * 3u;
+-const LOADS_PER_THREAD: u32 = 3u;
+ const TILE_MAX_POLYS: u32 = 256u;
+ 
+ struct Polygon {
+@@ -119,10 +117,10 @@ struct Params {
+ @group(0) @binding(6) var<storage, read>       chain_framebuffers: array<u32>;
+ @group(1) @binding(0) var<uniform>             params:             Params;
+ 
+-// Shared memory arrays sized to thread count.
+-// shared_polys: TILE_CAP polygons (THREAD_COUNT * 3 * 16 bytes)
++// Shared polygon capacity follows the tile polygon clamp.
++// shared_polys: TILE_MAX_POLYS polygons (256 * 16 bytes)
+ // shared_errors: one u32 per subgroup for cross-subgroup reduction (max 256/4 = 64 subgroups)
+-var<workgroup> shared_polys: array<Polygon, TILE_CAP>;
++var<workgroup> shared_polys: array<Polygon, TILE_MAX_POLYS>;
+ var<workgroup> shared_errors: array<u32, 128>;      // only num_subgroups entries are used
+ var<workgroup> shared_errors_old: array<u32, 128>;  // old errors for incremental eval
+ var<workgroup> shared_skip_tile: u32;               // set by thread 0 if tile is outside dirty bbox
+@@ -242,7 +240,6 @@ fn main(
+         tile_poly_count = min(tile_counts_buf[tile_global], TILE_MAX_POLYS);
+         tile_data_base = chain_id * num_tiles * TILE_MAX_POLYS + tile_id * TILE_MAX_POLYS;
+     }
+-    let sm_tile_count = (tile_poly_count + TILE_CAP - 1u) / TILE_CAP;
+ 
+     // Per-pixel setup — only valid pixels read reference/framebuffer
+     let valid_pixel = px < w && py < h && chain_id < chain_count;
+@@ -278,26 +275,18 @@ fn main(
+     // Tile-culled rasterization: ALL threads participate in shared memory loads
+     // (critical for partial tiles where out-of-bounds threads are responsible
+     // for loading polygon slots that in-bounds threads need for rasterization).
+-    for (var sm_tile = 0u; sm_tile < sm_tile_count; sm_tile++) {
+-        let sm_tile_base = sm_tile * TILE_CAP;
+-        let sm_tile_end = min(TILE_CAP, tile_poly_count - sm_tile_base);
+-
+-        for (var load_pass = 0u; load_pass < LOADS_PER_THREAD; load_pass++) {
+-            let slot = local_idx + load_pass * THREAD_COUNT;
+-            if slot < sm_tile_end {
+-                let poly_idx = tile_data[tile_data_base + sm_tile_base + slot];
+-                shared_polys[slot] = working_states[chain_id].polygons[poly_idx];
+-            }
+-        }
+-        workgroupBarrier();
++    for (var slot = local_idx; slot < tile_poly_count; slot += THREAD_COUNT) {
++        let poly_idx = tile_data[tile_data_base + slot];
++        shared_polys[slot] = working_states[chain_id].polygons[poly_idx];
++    }
++    workgroupBarrier();
+ 
+-        if valid_pixel {
+-            for (var i = 0u; i < sm_tile_end; i++) {
+-                rasterize_blend(shared_polys[i], fx, fy, &r, &g, &b);
+-            }
++    if valid_pixel {
++        for (var i = 0u; i < tile_poly_count; i++) {
++            rasterize_blend(shared_polys[i], fx, fy, &r, &g, &b);
+         }
+-        workgroupBarrier();
+     }
++    // The polygon cache is never overwritten; no post-blend barrier is needed.
+ 
+     // L1 error: quantize to u8 integers (floor) so error matches
+     // framebuffer precision (pack_fb_pixel truncates to u8).

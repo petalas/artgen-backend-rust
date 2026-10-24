@@ -1,0 +1,13 @@
+diff --git a/src/shaders/rasterize_error.wgsl b/src/shaders/rasterize_error.wgsl
+index 41d92a7..0db6be8 100644
+--- a/src/shaders/rasterize_error.wgsl
++++ b/src/shaders/rasterize_error.wgsl
+@@ -122,7 +122,7 @@ struct Params {
+ // Shared memory arrays sized to thread count.
+ // shared_polys: TILE_CAP polygons (THREAD_COUNT * 3 * 16 bytes)
+ // shared_errors: one u32 per subgroup for cross-subgroup reduction (max 256/4 = 64 subgroups)
+-var<workgroup> shared_polys: array<Polygon, TILE_CAP>;
++var<workgroup> shared_polys: array<Polygon, min(TILE_CAP, TILE_MAX_POLYS)>;
+ var<workgroup> shared_errors: array<u32, 128>;      // only num_subgroups entries are used
+ var<workgroup> shared_errors_old: array<u32, 128>;  // old errors for incremental eval
+ var<workgroup> shared_skip_tile: u32;               // set by thread 0 if tile is outside dirty bbox
