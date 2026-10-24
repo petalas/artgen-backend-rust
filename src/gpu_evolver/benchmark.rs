@@ -12,10 +12,11 @@ use wgpu::{Buffer, BufferDescriptor, BufferUsages, CommandEncoderDescriptor, Map
 
 use super::buffers::{drawing_to_gpu, ControlFlags, GpuDrawingState, GPU_DRAWING_STATE_SIZE};
 use super::{GpuEvolver, PassTimings};
+use super::execution::ResourceSizes;
 use crate::models::drawing::Drawing;
 use crate::mutation_params::MutationParams;
 use crate::settings::{
-    GPU_MAX_BATCH_ITERS, GPU_MAX_LAMBDA, MAX_POLYGONS_PER_IMAGE, TILE_MAX_POLYS,
+    GPU_MAX_BATCH_ITERS, GPU_MAX_LAMBDA, MAX_POLYGONS_PER_IMAGE,
 };
 
 pub use super::pipeline::{
@@ -548,12 +549,8 @@ fn validate_dispatch(
     if pixels == 0 || pixels > u64::from(u32::MAX) / 765 {
         return Err("image is empty or u32 error accumulator can overflow".into());
     }
-    let dispatch = [
-        p.image_width.div_ceil(wg_x),
-        p.image_height.div_ceil(wg_y),
-        params.chain_count,
-        params.chain_count * params.lambda,
-    ];
+    let work = p.workload(params);
+    let dispatch = [work.raster.x, work.raster.y, work.active, work.offspring];
     if wg_x * wg_y > limits.max_compute_invocations_per_workgroup
         || wg_x * wg_y > limits.max_compute_workgroup_size_x
         || dispatch
@@ -569,60 +566,12 @@ fn validate_resources(
     p: &super::pipeline::GpuPipeline,
     params: &MutationParams,
 ) -> Result<(), String> {
-    let active = u64::from(params.chain_count);
-    let offspring = active * u64::from(params.lambda);
-    let tiles = u64::from(p.image_width.div_ceil(params.rasterize_wg[0]))
-        * u64::from(p.image_height.div_ceil(params.rasterize_wg[1]));
-    let pixels = u64::from(p.image_width) * u64::from(p.image_height);
-    let state_size = GPU_DRAWING_STATE_SIZE as u64;
+    let work = p.workload(params);
+    let required = ResourceSizes::new(u64::from(work.active), u64::from(work.offspring),
+        [p.image_width, p.image_height], work.raster);
     let limits = p.device.limits();
-    let requirements = [
-        ("parent states", &p.chain_states_buf, active * state_size),
-        (
-            "working states",
-            &p.working_states_buf,
-            offspring * state_size,
-        ),
-        (
-            "error accumulators",
-            &p.error_accumulators_buf,
-            offspring * 8,
-        ),
-        (
-            "tile data",
-            &p.tile_data_buf,
-            offspring * tiles * u64::from(TILE_MAX_POLYS) * 4,
-        ),
-        ("tile counts", &p.tile_counts_buf, offspring * tiles * 4 + 4),
-        (
-            "parent framebuffers",
-            &p.chain_framebuffers_buf,
-            active * pixels * 4,
-        ),
-        ("parent errors", &p.chain_total_errors_buf, active * 4),
-        ("update flags", &p.chain_update_flags_buf, active * 16),
-        ("fitness", &p.fitness_packed_buf, active * 4),
-    ];
-    for (label, buffer, needed) in requirements {
-        check_buffer_capacity(
-            label,
-            buffer.size(),
-            needed,
-            limits
-                .max_buffer_size
-                .min(limits.max_storage_buffer_binding_size),
-        )?;
-    }
-    Ok(())
-}
-
-fn check_buffer_capacity(label: &str, actual: u64, needed: u64, limit: u64) -> Result<(), String> {
-    if needed > actual || needed > limit || needed / 4 > u64::from(u32::MAX) {
-        return Err(format!(
-            "{label} requires {needed} bytes, allocation {actual}, device limit {limit}"
-        ));
-    }
-    Ok(())
+    required.validate(p.allocated_resources(),
+        limits.max_buffer_size.min(limits.max_storage_buffer_binding_size))
 }
 
 fn validate_shape(params: &MutationParams) -> Result<(), String> {
@@ -946,9 +895,6 @@ mod tests {
 
     #[test]
     fn capacity_checks_fail_closed_at_allocation_and_device_limits() {
-        assert!(check_buffer_capacity("tile data", 1024, 1024, 2048).is_ok());
-        assert!(check_buffer_capacity("tile data", 1024, 1028, 2048).is_err());
-        assert!(check_buffer_capacity("tile data", 2048, 1028, 1024).is_err());
         let mut params = MutationParams::default();
         assert!(validate_shape(&params).is_ok());
         params.lambda = 3;

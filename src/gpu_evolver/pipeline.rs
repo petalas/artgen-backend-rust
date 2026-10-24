@@ -5,6 +5,8 @@ use std::sync::Arc;
 use wgpu::*;
 use wgpu::util::DeviceExt;
 
+use super::execution::{AllocationPlan, RasterGrid, ResourceSizes, Workload};
+
 use super::buffers::{
     ControlFlags, GpuDrawingState, GpuParams, GPU_DRAWING_STATE_SIZE,
 };
@@ -237,32 +239,12 @@ impl GpuPipeline {
         let adapter_info = adapter.get_info();
         println!("Selected GPU adapter: {:?}", adapter_info.name);
 
-        // Cap chain_count to fit within the adapter's max storage buffer binding size.
-        // Largest buffer is chain_states or working_states (chain_count * GPU_DRAWING_STATE_SIZE).
-        let adapter_limits = adapter.limits();
-        let max_ssbo = adapter_limits.max_storage_buffer_binding_size;
-        let max_chains_by_buffer = max_ssbo / (GPU_DRAWING_STATE_SIZE as u64);
-        let chain_count = chain_count.min(max_chains_by_buffer as u32);
-
-        // Calculate the largest buffer we actually need (working_states with offspring_capacity)
-        let max_lambda = crate::settings::GPU_MAX_LAMBDA as u64;
-        let max_buffer_needed = (chain_count as u64) * max_lambda * (GPU_DRAWING_STATE_SIZE as u64);
-        // Clamp to adapter limit (don't request more than hardware supports)
-        let max_buffer_size = max_buffer_needed.min(max_ssbo);
-
-        // Tile culling buffers can be large: offspring_capacity * num_tiles * TILE_MAX_POLYS * 4
-        // Compute the max tile buffer size we might need (for max resolution / min WG size)
-        let tile_max_polys = crate::settings::TILE_MAX_POLYS as u64;
-        let max_offspring_capacity = (max_ssbo / (GPU_DRAWING_STATE_SIZE as u64))
-            .min((chain_count as u64) * max_lambda);
-        // Worst case tile count: max resolution with smallest WG (8x8)
-        let max_tiles = ((image_width as u64 + 7) / 8) * ((image_height as u64 + 7) / 8);
-        let tile_data_size = max_offspring_capacity * max_tiles * tile_max_polys * 4;
-        let tile_counts_size = max_offspring_capacity * max_tiles * 4;
-        // The tile_data buffer can exceed max_ssbo on large configs — clamp it
-        let tile_data_size = tile_data_size.min(max_ssbo);
-        let tile_counts_size = tile_counts_size.min(max_ssbo);
-        let max_buffer_size = max_buffer_size.max(tile_data_size).max(tile_counts_size);
+        let allocation = AllocationPlan::new(
+            chain_count, [image_width, image_height],
+            adapter.limits().max_storage_buffer_binding_size,
+        );
+        let chain_count = allocation.chain_count;
+        let max_buffer_size = allocation.max_buffer_size;
 
         let required_limits = Limits {
             max_storage_buffer_binding_size: max_buffer_size,
@@ -313,14 +295,11 @@ impl GpuPipeline {
             println!("Loaded pipeline cache from disk");
         }
 
-        // --- Buffer sizes ---
-        let _chain_states_size = (chain_count as usize) * GPU_DRAWING_STATE_SIZE;
-        // Offspring capacity: chain_count * max_lambda, capped by SSBO limit
-        let max_lambda = crate::settings::GPU_MAX_LAMBDA as usize;
-        let offspring_capacity = ((max_ssbo as usize) / GPU_DRAWING_STATE_SIZE)
-            .min(chain_count as usize * max_lambda);
-        let working_states_size = offspring_capacity * GPU_DRAWING_STATE_SIZE;
-        let error_accumulators_size = offspring_capacity * 8; // 2x u32 per offspring (stride-2: new error + old error for incremental eval)
+        let resources = allocation.resources;
+        let offspring_capacity = allocation.offspring_capacity as usize;
+        let working_states_size = resources.working;
+        let error_accumulators_size = usize::try_from(resources.errors)
+            .expect("error accumulator allocation fits host address space");
 
         // --- Create buffers ---
 
@@ -459,23 +438,12 @@ impl GpuPipeline {
             crate::settings::RASTERIZE_WG_X_DEFAULT,
             crate::settings::RASTERIZE_WG_Y_DEFAULT,
         ];
-        let num_tiles_x = image_width.div_ceil(rasterize_wg[0]);
-        let num_tiles_y = image_height.div_ceil(rasterize_wg[1]);
-        let num_tiles = num_tiles_x * num_tiles_y;
+        let grid = RasterGrid::new([image_width, image_height], rasterize_wg);
+        let num_tiles = grid.x * grid.y;
 
-        // Use worst-case (smallest WG = most tiles) for buffer allocation
-        let max_num_tiles_x = image_width.div_ceil(8); // smallest WG_X = 8
-        let max_num_tiles_y = image_height.div_ceil(8); // smallest WG_Y = 8
-        let max_num_tiles = max_num_tiles_x * max_num_tiles_y;
-
-        let tile_max_polys = crate::settings::TILE_MAX_POLYS;
-        let tile_data_buf_size = (offspring_capacity as u64) * (max_num_tiles as u64) * (tile_max_polys as u64) * 4;
-        let tile_counts_buf_size = (offspring_capacity as u64) * (max_num_tiles as u64) * 4;
-
-        // Clamp to device max buffer size
-        let device_max = device.limits().max_buffer_size;
-        let tile_data_buf_size = tile_data_buf_size.min(device_max);
-        let tile_counts_buf_size = tile_counts_buf_size.min(device_max);
+        let max_num_tiles = RasterGrid::new([image_width, image_height], [8, 8]).tiles();
+        let tile_data_buf_size = resources.tile_data;
+        let tile_counts_buf_size = resources.tile_counts;
 
         let tile_data_buf = device.create_buffer(&BufferDescriptor {
             label: Some("tile_data"),
@@ -500,12 +468,9 @@ impl GpuPipeline {
         );
 
         // --- Incremental evaluation buffers ---
-        // Chain framebuffers: cached RGBA per chain (chain_count * W * H * 4 bytes)
-        // Clamp to device limits — fewer chains may be usable for incremental eval
-        let pixels_per_chain = (image_width as u64) * (image_height as u64);
-        let chain_framebuffers_ideal = (chain_count as u64) * pixels_per_chain * 4;
-        let ssbo_limit = device.limits().max_storage_buffer_binding_size;
-        let chain_framebuffers_size = chain_framebuffers_ideal.min(device_max).min(ssbo_limit);
+        // Allocation preserves the existing independent framebuffer clamp.
+        let pixels_per_chain = u64::from(image_width) * u64::from(image_height);
+        let chain_framebuffers_size = resources.framebuffers;
         let chain_framebuffers_buf = device.create_buffer(&BufferDescriptor {
             label: Some("chain_framebuffers"),
             size: chain_framebuffers_size,
@@ -514,7 +479,7 @@ impl GpuPipeline {
         });
 
         // Chain total errors: raw u32 error sum per chain
-        let chain_total_errors_size = (chain_count as u64) * 4;
+        let chain_total_errors_size = resources.parent_errors;
         let chain_total_errors_buf = device.create_buffer(&BufferDescriptor {
             label: Some("chain_total_errors"),
             size: chain_total_errors_size,
@@ -524,7 +489,7 @@ impl GpuPipeline {
 
         // Chain update flags: per-chain acceptance flag + dirty bbox for update_framebuffers
         // Layout: [accepted: u32, dirty_bbox_lo: u32, dirty_bbox_hi: u32, padding: u32] × chain_count
-        let chain_update_flags_size = (chain_count as u64) * 16;
+        let chain_update_flags_size = resources.updates;
         let chain_update_flags_buf = device.create_buffer(&BufferDescriptor {
             label: Some("chain_update_flags"),
             size: chain_update_flags_size,
@@ -1115,6 +1080,25 @@ impl GpuPipeline {
         }
     }
 
+    pub(super) fn raster_grid(&self, tile: [u32; 2]) -> RasterGrid {
+        RasterGrid::new([self.image_width, self.image_height], tile)
+    }
+
+    pub(super) fn workload(&self, params: &crate::mutation_params::MutationParams) -> Workload {
+        Workload::for_batch(params, [self.image_width, self.image_height],
+            self.chain_count, self.offspring_capacity, self.mutate_group_size)
+    }
+
+    pub(super) fn allocated_resources(&self) -> ResourceSizes {
+        ResourceSizes {
+            parents: self.chain_states_buf.size(), working: self.working_states_buf.size(),
+            errors: self.error_accumulators_buf.size(), tile_data: self.tile_data_buf.size(),
+            tile_counts: self.tile_counts_buf.size(), framebuffers: self.chain_framebuffers_buf.size(),
+            parent_errors: self.chain_total_errors_buf.size(), updates: self.chain_update_flags_buf.size(),
+            fitness: self.fitness_packed_buf.size(),
+        }
+    }
+
     /// Recreate the `rasterize_error` pipeline with a new workgroup size.
     /// Also recreates the `bin_polygons` pipeline since tile size must match.
     /// This is called between batches when the user changes the workgroup size.
@@ -1182,7 +1166,8 @@ impl GpuPipeline {
         );
 
         self.rasterize_wg = wg;
-        self.num_tiles = self.image_width.div_ceil(wg[0]) * self.image_height.div_ceil(wg[1]);
+        let grid = self.raster_grid(wg);
+        self.num_tiles = grid.x * grid.y;
         Ok(())
     }
 

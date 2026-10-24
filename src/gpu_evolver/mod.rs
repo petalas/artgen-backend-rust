@@ -1,6 +1,7 @@
 pub mod benchmark;
 pub mod buffers;
 pub mod pipeline;
+mod execution;
 
 use std::time::Instant;
 
@@ -146,8 +147,8 @@ impl GpuEvolver {
         init_offspring_rng(&pipeline, 0);
 
         let rwg = pipeline.rasterize_wg;
-        let wg_x = image_width.div_ceil(rwg[0]);
-        let wg_y = image_height.div_ceil(rwg[1]);
+        let grid = pipeline.raster_grid(rwg);
+        let (wg_x, wg_y) = (grid.x, grid.y);
         println!(
             "GPU evolver initialized: {} active chains (max {}), offspring capacity {}, {}x{} image, {:.1} MB GPU memory, rasterize dispatch {}x{}x{} (wg {}x{})",
             active_chains,
@@ -189,8 +190,8 @@ impl GpuEvolver {
     fn dispatch_init_framebuffers(&mut self, active_chains: u32) {
         let p = &self.pipeline;
         let rwg = p.rasterize_wg;
-        let wg_x = p.image_width.div_ceil(rwg[0]);
-        let wg_y = p.image_height.div_ceil(rwg[1]);
+        let grid = p.raster_grid(rwg);
+        let (wg_x, wg_y) = (grid.x, grid.y);
 
         // Zero chain_total_errors before init
         let zeros = vec![0u8; p.chain_count as usize * 4];
@@ -292,9 +293,10 @@ impl GpuEvolver {
         }
 
         let p = &self.pipeline;
-        let iterations = mutation_params.gpu_batch_iters.max(1);
+        let work = p.workload(mutation_params);
+        let iterations = work.iterations;
         let batch_envelope = self.benchmark_batch_envelope && collect_timestamps;
-        let active = mutation_params.chain_count.min(p.chain_count);
+        let active = work.active;
         self.active_chain_count = active;
 
         // 1. Pick which staging set to use for THIS batch's copies.
@@ -332,16 +334,9 @@ impl GpuEvolver {
             label: Some("gpu_evolver_batch"),
         });
 
-        let rwg = p.rasterize_wg;
-        let wg_x = p.image_width.div_ceil(rwg[0]);
-        let wg_y = p.image_height.div_ceil(rwg[1]);
-        let lambda = mutation_params.lambda;
-        let mutate_dispatch_y = lambda.div_ceil(p.mutate_group_size);
-
-        // Runtime check: active * lambda must fit in offspring_capacity
-        assert!(active * lambda <= p.offspring_capacity,
-            "active({}) * lambda({}) = {} exceeds offspring_capacity({})",
-            active, lambda, active * lambda, p.offspring_capacity);
+        let (wg_x, wg_y) = (work.raster.x, work.raster.y);
+        let offspring = work.offspring;
+        let mutate_dispatch_y = work.mutate_y;
 
         // Bulk iterations use two passes. The sampled final iteration uses four
         // separate passes for the original per-stage timestamp pairs.
@@ -383,12 +378,12 @@ impl GpuEvolver {
                 pass.set_pipeline(&p.bin_polygons_pipeline);
                 pass.set_bind_group(0, &p.bin_polygons_bind_group, &[]);
                 pass.set_bind_group(1, &p.params_bind_group, &[]);
-                pass.dispatch_workgroups(active * lambda, 1, 1);
+                pass.dispatch_workgroups(offspring, 1, 1);
 
                 pass.set_pipeline(&p.rasterize_error_pipeline);
                 pass.set_bind_group(0, &p.rasterize_error_bind_group, &[]);
                 pass.set_bind_group(1, &p.params_bind_group, &[]);
-                pass.dispatch_workgroups(wg_x, wg_y, active * lambda);
+                pass.dispatch_workgroups(wg_x, wg_y, offspring);
             }
             {
                 let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
@@ -438,7 +433,7 @@ impl GpuEvolver {
                 pass.set_pipeline(&p.bin_polygons_pipeline);
                 pass.set_bind_group(0, &p.bin_polygons_bind_group, &[]);
                 pass.set_bind_group(1, &p.params_bind_group, &[]);
-                pass.dispatch_workgroups(active * lambda, 1, 1);
+                pass.dispatch_workgroups(offspring, 1, 1);
             }
 
             {
@@ -453,7 +448,7 @@ impl GpuEvolver {
                 pass.set_pipeline(&p.rasterize_error_pipeline);
                 pass.set_bind_group(0, &p.rasterize_error_bind_group, &[]);
                 pass.set_bind_group(1, &p.params_bind_group, &[]);
-                pass.dispatch_workgroups(wg_x, wg_y, active * lambda);
+                pass.dispatch_workgroups(wg_x, wg_y, offspring);
             }
 
             {
@@ -530,7 +525,7 @@ impl GpuEvolver {
         let submission_index = p.queue.submit(std::iter::once(encoder.finish()));
 
         self.iteration += iterations;
-        let evaluations = iterations as u64 * active as u64 * lambda as u64;
+        let evaluations = work.evaluations;
         self.total_evaluations += evaluations;
         self.benchmark_counters.record_submission(iterations, evaluations);
 
@@ -932,8 +927,8 @@ impl GpuEvolver {
 
         // Submit 2: bin polygons + rasterize_error
         let rwg = p.rasterize_wg;
-        let wg_x = p.image_width.div_ceil(rwg[0]);
-        let wg_y = p.image_height.div_ceil(rwg[1]);
+        let grid = p.raster_grid(rwg);
+        let (wg_x, wg_y) = (grid.x, grid.y);
 
         let params = default_gpu_params(p.image_width, p.image_height, active);
         let params_bytes: &[u8] = bytemuck::bytes_of(&params);
