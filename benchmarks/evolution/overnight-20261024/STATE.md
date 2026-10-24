@@ -37,10 +37,18 @@ binning operations, packed bounds and alternate G1 lane widths failed their shor
 filters. Matched compilation options did not rescue indirect raster compaction.
 Direct adjacent-tile grouping also failed and was removed in `fe5e829`; its fresh
 coverage, fault and host-edge proofs remain archived in
-[report 20](20-direct-raster-coarsening.md). Two triangle-edge microexperiments passed their short filter. The sole selected
+[report 20](20-direct-raster-coarsening.md). Two triangle-edge microexperiments
+passed their short filter. The sole selected
 candidate passed numerical fixtures, but its full confirmation was interrupted
 before completion. It remains unadopted; see [report 21](21-raster-edge-micros.md).
-After recovery, the accepted defaults are being compared directly against the
-original archived engine. No partial candidate timings are promoted.
+After recovery, the fresh direct comparison of accepted defaults passes all 33
+workers with exact canonical outputs and zero reported errors. It measures
+4.584441 times original throughput, conditional 95% interval [4.524493, 4.645300].
+The independent artifact audit and complete production release build pass;
+[report 22](22-original-to-final.md) records the evidence and limits. No partial
+candidate timings are promoted.
 Earlier live-preview results retain their original dispositions and are outside
-this engine-only score. Work continues until the morning cutoff.
+this engine-only score. The scheduler was deleted at the 07:00 UTC cutoff. The
+already-started final
+comparison, audit, production build and record were finished afterward. No new
+optimization experiment started after the cutoff.

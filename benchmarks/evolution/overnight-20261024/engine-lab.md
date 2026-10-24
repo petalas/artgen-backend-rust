@@ -95,8 +95,10 @@ Pinned historical and grouped sources keep CPU tests independent of the current
 production winner. The checker covers every integer lambda 1–64, including partial
 groups. A grouped RNG-corruption integration test also failed canonical replay
 and withheld its candidate rate; see `mutation-group-negative-gate/` and immutable
-`build-v8/`. Grouped performance remains an experiment until the frozen short,
-full-training, reserved and direct-GPU gates pass.
+`build-v8/`. The selected G1 implementation subsequently passed those gates and
+was adopted;
+[report 13](13-one-offspring-workgroups.md) records that result. Other grouped
+variants retain their individual experimental dispositions.
 
 The actual source installer rejected a deliberately corrupted final RNG update:
 the qualified initial state matched, but the final canonical state failed in six
