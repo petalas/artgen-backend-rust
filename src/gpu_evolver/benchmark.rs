@@ -18,6 +18,8 @@ use crate::settings::{
     GPU_MAX_BATCH_ITERS, GPU_MAX_LAMBDA, MAX_POLYGONS_PER_IMAGE, TILE_MAX_POLYS,
 };
 
+pub use super::pipeline::benchmark_mutate_group_size_from_source;
+
 const MAX_WARMUP_BATCHES: u32 = 1024;
 const READBACK_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -242,14 +244,20 @@ impl GpuEvolver {
 
     /// Install and cache a lab mutation source using the original layout and
     /// production options, including workgroup-memory zeroing. Retains the handle
-    /// across prepares, raster workgroup changes and diagnostic toggles. Dispatch
-    /// remains one workgroup per active chain; physical lanes do not change lambda.
+    /// across prepares, raster workgroup changes and diagnostic toggles. Logical
+    /// group width comes from the source; physical lanes do not change lambda.
     ///
     /// # Errors
     /// Rejects a failed drain, invalid source, exhausted cache or GPU errors.
     pub fn benchmark_set_mutate_shader(&mut self, source: &str) -> Result<(), String> {
         self.benchmark_drain()?;
         self.pipeline.set_benchmark_mutate_shader(source)
+    }
+
+    /// Actual logical offspring width retained with the selected mutation pipeline.
+    #[must_use]
+    pub fn benchmark_mutate_group_size(&self) -> u32 {
+        self.pipeline.mutate_group_size
     }
 
     /// Install a lab bin shader while drained, retaining device, layouts and buffers.

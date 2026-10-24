@@ -19,6 +19,17 @@ const MAX_BENCHMARK_MUTATE_PIPELINES: usize = 17;
 #[derive(Debug, PartialEq, Eq)]
 struct BenchmarkMutateKey {
     source: Arc<str>,
+    group_size: u32,
+}
+
+impl BenchmarkMutateKey {
+    fn new(source: &str) -> Result<Self, String> {
+        let group_size = benchmark_mutate_group_size_from_source(source)?;
+        Ok(Self {
+            source: Arc::from(source),
+            group_size,
+        })
+    }
 }
 
 struct BenchmarkMutatePipeline {
@@ -74,6 +85,7 @@ pub struct GpuPipeline {
 
     // Compute pipelines
     pub mutate_pipeline: ComputePipeline,
+    pub(super) mutate_group_size: u32,
     pub rasterize_error_pipeline: ComputePipeline,
     pub select_pipeline: ComputePipeline,
     pub bin_polygons_pipeline: ComputePipeline,
@@ -146,6 +158,10 @@ impl GpuPipeline {
     ) -> Self {
         assert!(initial_states.len() >= chain_count as usize);
         assert_eq!(reference_rgba.len(), (image_width * image_height * 4) as usize);
+
+        let mutate_source = include_str!("../shaders/mutate.wgsl");
+        let mutate_group_size = benchmark_mutate_group_size_from_source(mutate_source)
+            .expect("bundled mutation source must have valid group metadata");
 
         // --- Device + Queue ---
         // Exclude GL/GLES — EGL conflicts with SDL2's display context.
@@ -775,7 +791,7 @@ impl GpuPipeline {
         let mutate_pipeline = create_mutate_pipeline_from_source(
             &device,
             &mutate_pipeline_layout,
-            include_str!("../shaders/mutate.wgsl"),
+            mutate_source,
             &pipeline_cache,
         );
 
@@ -1013,6 +1029,7 @@ impl GpuPipeline {
             chain_total_errors_buf,
             chain_update_flags_buf,
             mutate_pipeline,
+            mutate_group_size,
             rasterize_error_pipeline,
             select_pipeline,
             bin_polygons_pipeline,
@@ -1130,13 +1147,14 @@ impl GpuPipeline {
     }
 
     pub(super) fn set_benchmark_mutate_shader(&mut self, source: &str) -> Result<(), String> {
-        validate_benchmark_mutate_source(source)?;
+        let key = BenchmarkMutateKey::new(source)?;
         if let Some(entry) = self
             .benchmark_mutate_pipelines
             .iter()
-            .find(|entry| entry.key.source.as_ref() == source)
+            .find(|entry| entry.key == key)
         {
             self.mutate_pipeline = entry.pipeline.clone();
+            self.mutate_group_size = entry.key.group_size;
             return Ok(());
         }
         if self.benchmark_mutate_pipelines.len() == MAX_BENCHMARK_MUTATE_PIPELINES {
@@ -1149,16 +1167,15 @@ impl GpuPipeline {
         } else {
             self.compile_benchmark_mutate(source)?
         };
+        let group_size = key.group_size;
         self.benchmark_mutate_pipelines
             .push(BenchmarkMutatePipeline {
-                key: BenchmarkMutateKey {
-                    source: Arc::from(source),
-                },
+                key,
                 pipeline: pipeline.clone(),
             });
-        // Prepares, raster workgroup changes and diagnostics leave this handle intact.
-        // Dispatch remains (active, 1, 1); source never supplies dispatch metadata.
+        // Preparation and diagnostics retain the selected pipeline and source width.
         self.mutate_pipeline = pipeline;
+        self.mutate_group_size = group_size;
         Ok(())
     }
 
@@ -1464,6 +1481,101 @@ fn validate_benchmark_mutate_source(source: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Read the exact logical offspring width without compiling or rewriting WGSL.
+/// Marker-free historical sources use 64, independently of physical lane count.
+///
+/// # Errors
+/// Rejects oversized/empty sources and missing, duplicate or nonliteral markers.
+pub fn benchmark_mutate_group_size_from_source(source: &str) -> Result<u32, String> {
+    const NAME: &str = "OFFSPRING_GROUP_SIZE";
+    const PREFIX: &str = "const OFFSPRING_GROUP_SIZE: u32 = ";
+    validate_benchmark_mutate_source(source)?;
+    if !source.contains(NAME) {
+        return Ok(64);
+    }
+    let mut group_size = None;
+    let mut offset = 0;
+    let mut previous = (0, "");
+    while let Some((start, token)) = next_mutate_source_token(source, &mut offset)? {
+        if token == NAME && previous.1 == "const" {
+            if group_size.is_some() {
+                return Err("duplicate OFFSPRING_GROUP_SIZE declaration".into());
+            }
+            let declaration = source[previous.0..]
+                .split_once(';')
+                .map(|(declaration, _)| declaration)
+                .ok_or("missing OFFSPRING_GROUP_SIZE declaration terminator")?;
+            let literal = declaration
+                .strip_prefix(PREFIX)
+                .and_then(|s| s.strip_suffix('u'));
+            group_size = Some(match literal {
+                Some("1") => 1,
+                Some("2") => 2,
+                Some("4") => 4,
+                Some("8") => 8,
+                Some("16") => 16,
+                Some("32") => 32,
+                Some("64") => 64,
+                _ => return Err(
+                    "OFFSPRING_GROUP_SIZE must be an exact literal power of two in 1..64".into(),
+                ),
+            });
+        }
+        previous = (start, token);
+    }
+    group_size.ok_or_else(|| {
+        "OFFSPRING_GROUP_SIZE is present without its exact const declaration".into()
+    })
+}
+
+// Each cursor advance consumes at least one source byte, bounded by the 256 KiB
+// source cap. Comments cannot supply a declaration; nested comments use no stack.
+fn next_mutate_source_token<'a>(
+    source: &'a str,
+    offset: &mut usize,
+) -> Result<Option<(usize, &'a str)>, String> {
+    let bytes = source.as_bytes();
+    while *offset < bytes.len() {
+        let tail = &bytes[*offset..];
+        if tail[0].is_ascii_whitespace() {
+            *offset += 1;
+        } else if tail.starts_with(b"//") {
+            *offset += tail.iter().position(|&b| b == b'\n').unwrap_or(tail.len());
+        } else if tail.starts_with(b"/*") {
+            *offset += 2;
+            let mut depth = 1;
+            while *offset < bytes.len() && depth > 0 {
+                let tail = &bytes[*offset..];
+                if tail.starts_with(b"/*") {
+                    depth += 1;
+                    *offset += 2;
+                } else if tail.starts_with(b"*/") {
+                    depth -= 1;
+                    *offset += 2;
+                } else {
+                    *offset += 1;
+                }
+            }
+            if depth != 0 {
+                return Err("unterminated comment in mutation group metadata".into());
+            }
+        } else {
+            let start = *offset;
+            let ch = source[start..].chars().next().expect("cursor is within source");
+            *offset += ch.len_utf8();
+            if ch.is_ascii_alphanumeric() || ch == '_' {
+                while *offset < bytes.len()
+                    && (bytes[*offset].is_ascii_alphanumeric() || bytes[*offset] == b'_')
+                {
+                    *offset += 1;
+                }
+            }
+            return Ok(Some((start, &source[start..*offset])));
+        }
+    }
+    Ok(None)
+}
+
 /// Create a rasterize_error compute pipeline with the given workgroup size.
 /// Uses string replacement on the shader source since naga does not support
 /// override constants in @workgroup_size or const expressions.
@@ -1704,12 +1816,62 @@ fn pipeline_cache_path(adapter_info: &AdapterInfo) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod benchmark_tests {
+    use sha2::{Digest, Sha256};
+
     use super::{
-        benchmark_bin_source, bin_polygons_source, specialize_bin_source,
-        specialize_benchmark_bin_source, specialize_raster_source, validate_benchmark_bin_source,
-        validate_benchmark_mutate_source, validate_benchmark_raster_source,
-        BenchmarkMutateKey, BenchmarkRasterKey, MAX_BENCHMARK_SOURCE_BYTES,
+        benchmark_bin_source, benchmark_mutate_group_size_from_source, bin_polygons_source,
+        specialize_benchmark_bin_source, specialize_bin_source, specialize_raster_source,
+        validate_benchmark_bin_source, validate_benchmark_mutate_source,
+        validate_benchmark_raster_source, BenchmarkMutateKey, BenchmarkRasterKey,
+        MAX_BENCHMARK_SOURCE_BYTES,
     };
+
+    const HISTORICAL_MUTATE: &str = include_str!(
+        "../../benchmarks/evolution/overnight-20261024/fixtures/mutate-e133-reference.wgsl"
+    );
+    const GROUPED_MUTATE_G1: &str = include_str!(
+        "../../benchmarks/evolution/overnight-20261024/fixtures/mutate-g1-wg64-copy64.wgsl"
+    );
+    // Metadata/cache fixture only; this empty kernel does not test mutation equivalence.
+    const GROUPED_MUTATE_G64: &str = "const OFFSPRING_GROUP_SIZE: u32 = 64u;\n\
+        @compute @workgroup_size(64) fn main() {}";
+
+    #[test]
+    fn mutate_fixtures_pin_historical_and_grouped_valid_wgsl() {
+        for (source, expected_sha256) in [
+            (
+                HISTORICAL_MUTATE,
+                "e13308a7cc59071043a3f5750a7f25214933ae4645cd016875f2dfa12c3dfe73",
+            ),
+            (
+                GROUPED_MUTATE_G1,
+                "3a36417746ab19b0c800c718e8c87795c17d9bff78114fd65bc8369b016578d8",
+            ),
+        ] {
+            assert_eq!(
+                format!("{:x}", Sha256::digest(source.as_bytes())),
+                expected_sha256
+            );
+        }
+        assert!(!HISTORICAL_MUTATE.contains("OFFSPRING_GROUP_SIZE"));
+        for (source, group) in [
+            (HISTORICAL_MUTATE, 64),
+            (GROUPED_MUTATE_G1, 1),
+            (GROUPED_MUTATE_G64, 64),
+        ] {
+            assert_eq!(
+                benchmark_mutate_group_size_from_source(source).unwrap(),
+                group
+            );
+            let module = wgpu::naga::front::wgsl::parse_str(source).unwrap();
+            wgpu::naga::valid::Validator::new(
+                wgpu::naga::valid::ValidationFlags::all(),
+                wgpu::naga::valid::Capabilities::all(),
+            )
+            .validate(&module)
+            .unwrap();
+        }
+    }
 
     #[test]
     fn mutate_source_boundaries_need_no_specialization_markers() {
@@ -1727,26 +1889,89 @@ mod benchmark_tests {
     }
 
     #[test]
-    fn mutate_cache_keys_preserve_exact_source_without_dispatch_metadata() {
-        let original = include_str!("../shaders/mutate.wgsl");
-        let key = BenchmarkMutateKey {
-            source: original.into(),
-        };
-        assert_eq!(
-            key,
-            BenchmarkMutateKey {
-                source: original.to_owned().into()
+    fn mutate_cache_keys_couple_exact_source_and_checked_group_width() {
+        let bundled = include_str!("../shaders/mutate.wgsl");
+        let bundled_group = benchmark_mutate_group_size_from_source(bundled).unwrap();
+        for (original, group) in [
+            (HISTORICAL_MUTATE, 64),
+            (GROUPED_MUTATE_G1, 1),
+            (GROUPED_MUTATE_G64, 64),
+            (bundled, bundled_group),
+        ] {
+            let key = BenchmarkMutateKey::new(original).unwrap();
+            assert_eq!(key.group_size, group);
+            assert_eq!(key.source.as_ref(), original);
+            assert_eq!(key, BenchmarkMutateKey::new(original).unwrap());
+            for suffix in ["\n", "\n// candidate λ"] {
+                let changed = BenchmarkMutateKey::new(&format!("{original}{suffix}")).unwrap();
+                assert_ne!(key, changed);
+                assert_eq!(changed.group_size, group);
             }
+        }
+        let grouped = BenchmarkMutateKey::new("const OFFSPRING_GROUP_SIZE: u32 = 4u;").unwrap();
+        assert_eq!(grouped.group_size, 4);
+        assert_ne!(grouped, BenchmarkMutateKey::new(HISTORICAL_MUTATE).unwrap());
+        assert_ne!(
+            BenchmarkMutateKey::new(GROUPED_MUTATE_G1).unwrap(),
+            BenchmarkMutateKey::new(GROUPED_MUTATE_G64).unwrap()
         );
-        for suffix in ["\n", "\n// candidate λ"] {
-            assert_ne!(
-                key,
-                BenchmarkMutateKey {
-                    source: format!("{original}{suffix}").into()
-                }
+        assert_eq!(grouped, BenchmarkMutateKey::new(&grouped.source).unwrap());
+        assert!(BenchmarkMutateKey::new("const OFFSPRING_GROUP_SIZE: u32 = 3u;").is_err());
+        assert!(wgpu::PipelineCompilationOptions::default().zero_initialize_workgroup_memory);
+    }
+
+    #[test]
+    fn mutate_group_source_accepts_only_supported_exact_literals_and_historical_sources() {
+        assert_eq!(
+            benchmark_mutate_group_size_from_source(HISTORICAL_MUTATE).unwrap(),
+            64
+        );
+        for group in [1, 2, 4, 8, 16, 32, 64] {
+            let source = format!(
+                "// λ\n/* outer /* nested */ comment */\n\
+                const OFFSPRING_GROUP_SIZE: u32 = {group}u;\n\
+                let logical = OFFSPRING_GROUP_SIZE * 2u; // OFFSPRING_GROUP_SIZE"
+            );
+            assert_eq!(
+                benchmark_mutate_group_size_from_source(&source).unwrap(),
+                group
             );
         }
-        assert!(wgpu::PipelineCompilationOptions::default().zero_initialize_workgroup_memory);
+        let maximum = format!("//{}", " ".repeat(MAX_BENCHMARK_SOURCE_BYTES - 2));
+        assert_eq!(
+            benchmark_mutate_group_size_from_source(&maximum).unwrap(),
+            64
+        );
+        assert!(benchmark_mutate_group_size_from_source(&format!("{maximum} ")).is_err());
+        assert!(benchmark_mutate_group_size_from_source("").is_err());
+    }
+
+    #[test]
+    fn mutate_group_source_rejects_missing_nonliteral_malformed_and_duplicate_markers() {
+        for literal in ["0u", "3u", "63u", "128u", "4294967297u", "0x4u", "04u",
+            "4", "4U", "-4u", "4.0u", "4u + 0u", "u32(4)", "OTHER", "4 u"]
+        {
+            let source = format!("const OFFSPRING_GROUP_SIZE: u32 = {literal};");
+            assert!(benchmark_mutate_group_size_from_source(&source).is_err(), "{source}");
+        }
+        for source in [
+            "OFFSPRING_GROUP_SIZE",
+            "// const OFFSPRING_GROUP_SIZE: u32 = 4u;",
+            "/* const OFFSPRING_GROUP_SIZE: u32 = 4u; */",
+            "/* /* nested */ const OFFSPRING_GROUP_SIZE: u32 = 4u; */",
+            "const OFFSPRING_GROUP_SIZE: u32 = 4u",
+            "const\nOFFSPRING_GROUP_SIZE: u32 = 4u;",
+            "const OFFSPRING_GROUP_SIZE:u32 = 4u;",
+            "const OFFSPRING_GROUP_SIZE: u32 =  4u;",
+            "const /* comment */ OFFSPRING_GROUP_SIZE: u32 = 4u;",
+            "override OFFSPRING_GROUP_SIZE: u32 = 4u;",
+            "const OFFSPRING_GROUP_SIZE: u32 = 4u; /* unterminated",
+            "const OFFSPRING_GROUP_SIZE: u32 = 4u; const OFFSPRING_GROUP_SIZE: u32 = 4u;",
+            "const OFFSPRING_GROUP_SIZE: u32 = 4u; const\nOFFSPRING_GROUP_SIZE: u32 = 4u;",
+            "// const OFFSPRING_GROUP_SIZE: u32 = 4u;\nconst OFFSPRING_GROUP_SIZE = 16u;",
+        ] {
+            assert!(benchmark_mutate_group_size_from_source(source).is_err(), "{source}");
+        }
     }
 
     #[test]

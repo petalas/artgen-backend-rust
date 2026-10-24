@@ -22,8 +22,8 @@ use artgen_backend_rust::{
     },
     gpu_evolver::{
         benchmark::{
-            BenchmarkCounters, BenchmarkProvenance, BenchmarkSnapshot,
-            COMPACT_RASTER_ACCEPTED_C_SHA256,
+            benchmark_mutate_group_size_from_source, BenchmarkCounters, BenchmarkProvenance,
+            BenchmarkSnapshot, COMPACT_RASTER_ACCEPTED_C_SHA256,
         },
         GpuEvolver,
     },
@@ -191,6 +191,7 @@ fn valid_name(name: &str) -> bool {
 struct Source {
     shader_stage: ShaderStage,
     compact_raster: bool,
+    mutate_group_size: Option<u32>,
     name: String,
     path: PathBuf,
     sha256: String,
@@ -209,6 +210,11 @@ fn read_sources(config: &Config) -> Result<Vec<Source>> {
         let bytes = fixtures::read_bounded(path, MAX_SOURCE_BYTES)?;
         let wgsl = String::from_utf8(bytes).context("shader must be UTF-8")?;
         let sha256 = fixtures::sha256(wgsl.as_bytes());
+        let mutate_group_size = if config.shader_stage == ShaderStage::Mutate {
+            Some(benchmark_mutate_group_size_from_source(&wgsl).map_err(anyhow::Error::msg)?)
+        } else {
+            None
+        };
         ensure!(
             !config.compact_raster || sha256 == COMPACT_RASTER_ACCEPTED_C_SHA256,
             "{name}: compact raster requires the exact accepted a292 C source"
@@ -224,6 +230,7 @@ fn read_sources(config: &Config) -> Result<Vec<Source>> {
         sources.push(Source {
             shader_stage: config.shader_stage,
             compact_raster: config.compact_raster && name != "reference",
+            mutate_group_size,
             name: name.into(),
             path: path.clone(),
             sha256,
@@ -240,6 +247,7 @@ struct TrialRow {
     variant: String,
     shader_stage: ShaderStage,
     compact_raster: bool,
+    mutate_group_size: u32,
     timing_eligible: bool,
     initial_max_tile_occupancy: Option<u32>,
     validation_max_tile_occupancy: Option<u32>,
@@ -275,6 +283,7 @@ impl TrialRow {
         case: &str,
         manifest: &str,
         gpu: BenchmarkProvenance,
+        mutate_group_size: u32,
         timing_eligible: bool,
     ) -> Self {
         Self {
@@ -283,6 +292,7 @@ impl TrialRow {
             variant: source.name.clone(),
             shader_stage: config.shader_stage,
             compact_raster: false,
+            mutate_group_size,
             timing_eligible,
             initial_max_tile_occupancy: None,
             validation_max_tile_occupancy: None,
@@ -321,6 +331,7 @@ impl TrialRow {
 struct QualifiedCase {
     case_id: String,
     compact_raster: bool,
+    mutate_group_size: u32,
     params: MutationParams,
     params_sha256: String,
     initial_state_sha256: String,
@@ -473,6 +484,7 @@ fn run_cases(summary: &mut Summary<'_>, rows: &mut File) -> Result<()> {
         summary.cases.push(QualifiedCase {
             case_id: case.into(),
             compact_raster: evolver.benchmark_compact_raster(),
+            mutate_group_size: evolver.benchmark_mutate_group_size(),
             params: input.manifest.params.clone(),
             params_sha256,
             initial_state_sha256: state_hash(&initial)?,
@@ -793,6 +805,7 @@ fn run_trial(
         &input.fixture.id,
         &input.manifest_sha256,
         evolver.benchmark_provenance(),
+        evolver.benchmark_mutate_group_size(),
         timing_eligible,
     );
     if let Err(error) = execute_trial(
@@ -808,8 +821,12 @@ fn run_trial(
         row.errors.push(format!("{error:#}"));
     }
     row.compact_raster = evolver.benchmark_compact_raster();
+    row.mutate_group_size = evolver.benchmark_mutate_group_size();
     if row.compact_raster != source.compact_raster {
         row.errors.push("actual compact raster mode differs from requested source mode".into());
+    }
+    if source.mutate_group_size.is_some_and(|group| group != row.mutate_group_size) {
+        row.errors.push("actual mutation group size differs from selected source metadata".into());
     }
     row
 }
@@ -826,6 +843,7 @@ fn execute_trial(
     row.params_sha256 = fixtures::sha256(&serde_json::to_vec(params)?);
     install_source(evolver, config, source)?;
     row.compact_raster = evolver.benchmark_compact_raster();
+    row.mutate_group_size = evolver.benchmark_mutate_group_size();
     evolver
         .prepare_seeded_benchmark(&input.drawing, params, config.seed, 2, true)
         .map_err(anyhow::Error::msg)?;
@@ -1076,6 +1094,19 @@ mod tests {
     use super::*;
     use artgen_backend_rust::gpu_evolver::benchmark::{BenchmarkControl, BenchmarkPackedState};
 
+    const HISTORICAL_MUTATE: &str = include_str!(
+        "../benchmarks/evolution/overnight-20261024/fixtures/mutate-e133-reference.wgsl"
+    );
+    const GROUPED_MUTATE_G1: &str = include_str!(
+        "../benchmarks/evolution/overnight-20261024/fixtures/mutate-g1-wg64-copy64.wgsl"
+    );
+    // Preflight/schema fixtures only; empty kernels do not test mutation equivalence.
+    const GROUPED_MUTATE_G64: &str = "const OFFSPRING_GROUP_SIZE: u32 = 64u;\n\
+        @compute @workgroup_size(64) fn main() {}";
+    const GROUPED_MUTATE_G4: &str = "// candidate λ\n\
+        const OFFSPRING_GROUP_SIZE: u32 = 4u;\n\
+        @compute @workgroup_size(64) fn main() {}";
+
     fn args() -> Vec<String> {
         [
             "--reference-shader",
@@ -1209,6 +1240,7 @@ mod tests {
         let source = Source {
             shader_stage: ShaderStage::Bin,
             compact_raster: false,
+            mutate_group_size: None,
             name: "candidate".into(),
             path: "candidate.wgsl".into(),
             sha256: "abc".into(),
@@ -1217,7 +1249,7 @@ mod tests {
         let result = (|| -> Result<()> {
             for maximum in [None, Some(257), Some(256)] {
                 let mut row =
-                    TrialRow::new(&config, &source, "ff", "manifest", provenance(), false);
+                    TrialRow::new(&config, &source, "ff", "manifest", provenance(), 64, false);
                 let mut state = white();
                 state.validation_max_tile_occupancy = maximum;
                 record_diagnostic_state(&config, &mut row, &state, "initial")?;
@@ -1524,39 +1556,109 @@ mod tests {
             config.shader_stage = ShaderStage::Mutate;
             config.reference_shader = directory.join("reference.wgsl");
             config.variants[0].1 = directory.join("candidate.wgsl");
-            let original = include_str!("../src/shaders/mutate.wgsl");
-            let candidate = format!("{original}\n// candidate λ\n");
-            fs::write(&config.reference_shader, original)?;
-            fs::write(&config.variants[0].1, &candidate)?;
-            let sources = read_sources(&config)?;
-            assert_eq!(sources.len(), 2);
-            for (source, expected) in sources.iter().zip([original, candidate.as_str()]) {
-                assert_eq!(source.shader_stage, ShaderStage::Mutate);
-                assert_eq!(source.wgsl, expected);
-                assert_eq!(source.sha256, fixtures::sha256(expected.as_bytes()));
-                let serialized = serde_json::to_value(source)?;
-                assert_eq!(serialized["shader_stage"], "mutate");
-                assert!(serialized.get("wgsl").is_none());
-                for timing_eligible in [true, false] {
-                    let row = TrialRow::new(
-                        &config,
-                        source,
-                        "ff",
-                        "manifest",
-                        provenance(),
-                        timing_eligible,
-                    );
-                    let value = serde_json::to_value(row)?;
-                    assert_eq!(value["shader_stage"], "mutate");
-                    assert_eq!(value["source_sha256"], source.sha256);
-                    assert_eq!(value["timing_eligible"], timing_eligible);
+            let bundled = include_str!("../src/shaders/mutate.wgsl");
+            let bundled_group =
+                benchmark_mutate_group_size_from_source(bundled).map_err(anyhow::Error::msg)?;
+            for (original, group) in [
+                (HISTORICAL_MUTATE, 64),
+                (GROUPED_MUTATE_G1, 1),
+                (GROUPED_MUTATE_G64, 64),
+                (bundled, bundled_group),
+            ] {
+                fs::write(&config.reference_shader, original)?;
+                fs::write(&config.variants[0].1, GROUPED_MUTATE_G4)?;
+                let sources = read_sources(&config)?;
+                assert_eq!(sources.len(), 2);
+                for (source, (expected, group)) in sources
+                    .iter()
+                    .zip([(original, group), (GROUPED_MUTATE_G4, 4)])
+                {
+                    assert_mutate_source_rows(&config, source, expected, group)?;
                 }
+                assert_ne!(sources[0].sha256, sources[1].sha256);
             }
-            assert_ne!(sources[0].sha256, sources[1].sha256);
             Ok(())
         })();
         fs::remove_dir_all(directory)?;
         result
+    }
+
+    fn assert_mutate_source_rows(
+        config: &Config,
+        source: &Source,
+        expected: &str,
+        group: u32,
+    ) -> Result<()> {
+        assert_eq!(source.shader_stage, ShaderStage::Mutate);
+        assert_eq!(source.wgsl, expected);
+        assert_eq!(source.sha256, fixtures::sha256(expected.as_bytes()));
+        let serialized = serde_json::to_value(source)?;
+        assert_eq!(serialized["shader_stage"], "mutate");
+        assert_eq!(source.mutate_group_size, Some(group));
+        assert_eq!(serialized["mutate_group_size"], group);
+        assert!(serialized.get("wgsl").is_none());
+        for timing_eligible in [true, false] {
+            let row = TrialRow::new(
+                config,
+                source,
+                "ff",
+                "manifest",
+                provenance(),
+                group,
+                timing_eligible,
+            );
+            let value = serde_json::to_value(row)?;
+            assert_eq!(value["shader_stage"], "mutate");
+            assert_eq!(value["source_sha256"], source.sha256);
+            assert_eq!(value["timing_eligible"], timing_eligible);
+            assert_eq!(value["mutate_group_size"], group);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn normal_and_diagnostic_rows_record_actual_group_without_changing_gpu_identity() -> Result<()> {
+        let config = Config::parse(&args())?;
+        let mut source = Source {
+            shader_stage: ShaderStage::Mutate,
+            compact_raster: false,
+            mutate_group_size: Some(4),
+            name: "candidate".into(),
+            path: "candidate.wgsl".into(),
+            sha256: "abc".into(),
+            wgsl: "const OFFSPRING_GROUP_SIZE: u32 = 4u;".into(),
+        };
+        let gpu = serde_json::to_value(provenance())?;
+        for requested in [None, Some(4)] {
+            source.mutate_group_size = requested;
+            for actual in [1, 4, 16, 32, 64] {
+                for timing_eligible in [true, false] {
+                    let row = TrialRow::new(
+                        &config, &source, "ff", "manifest", provenance(), actual, timing_eligible,
+                    );
+                    let value = serde_json::to_value(row)?;
+                    assert_eq!(value["mutate_group_size"], actual);
+                    assert_eq!(value["gpu"], gpu);
+                    assert!(value["gpu"].get("mutate_group_size").is_none());
+                    assert_eq!(value["timing_eligible"], timing_eligible);
+                }
+            }
+        }
+        let case = QualifiedCase {
+            case_id: "ff".into(),
+            compact_raster: false,
+            mutate_group_size: 16,
+            params: MutationParams::default(),
+            params_sha256: "params".into(),
+            initial_state_sha256: "initial".into(),
+            final_state_sha256: "final".into(),
+            gpu: provenance(),
+        };
+        let value = serde_json::to_value(case)?;
+        assert_eq!(value["mutate_group_size"], 16);
+        assert_eq!(value["gpu"], gpu);
+        assert!(value["params"].get("mutate_group_size").is_none());
+        Ok(())
     }
 
     #[test]
@@ -1566,6 +1668,7 @@ mod tests {
             Source {
                 shader_stage: config.shader_stage,
                 compact_raster: false,
+                mutate_group_size: None,
                 name: "reference".into(),
                 path: "reference.wgsl".into(),
                 sha256: "abc".into(),
@@ -1574,6 +1677,7 @@ mod tests {
             Source {
                 shader_stage: config.shader_stage,
                 compact_raster: false,
+                mutate_group_size: None,
                 name: "candidate".into(),
                 path: "candidate.wgsl".into(),
                 sha256: "def".into(),

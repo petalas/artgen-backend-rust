@@ -10,7 +10,9 @@
 //! Sources are compiled once, verbatim, through the public mutation pipeline's
 //! actual bind-group layouts, with default compilation options. No engine API,
 //! solver, source rewriting, or scored campaign is involved. In particular,
-//! physical workgroups of 128/256/512 lanes still receive dispatch(4, 1, 1).
+//! marker-free physical workgroups of 128/256/512 lanes retain dispatch(4, 1, 1).
+//! An exact `OFFSPRING_GROUP_SIZE` declaration changes only dispatch Y to
+//! `ceil(fixture.lambda / source_group_size)`, using the engine's checked parser.
 //! A candidate can clone in 2/4/8 lanes per child, `storageBarrier()`, then run the
 //! original RNG/mutation body in the first 64 lanes. This tool does not assume
 //! that implementation. Every header bit and every active polygon word must
@@ -22,7 +24,7 @@
 //! cases at lambdas 1/3/32/33/64 and crossover 0/1; 36 targeted dense cases plus
 //! 36 immediate small-parent history probes. Three candidates mean 1472 GPU
 //! dispatches; four mean 1840. All 1024 parents remain bound because tournament
-//! selection uses arrayLength, although only four workgroups produce children.
+//! selection uses arrayLength, although only four chains produce children.
 //! The maximum is 256 offspring, each with 1000 physical polygon slots.
 //!
 //! Resource/checkpoint decisions: only this example is owned. Device setup and
@@ -71,6 +73,7 @@ use std::{
 use anyhow::{bail, ensure, Context, Result};
 use artgen_backend_rust::{
     gpu_evolver::{
+        benchmark::benchmark_mutate_group_size_from_source,
         buffers::{default_gpu_params, GpuDrawingState, GpuParams, GPU_DRAWING_STATE_SIZE},
         pipeline::GpuPipeline,
     },
@@ -128,6 +131,7 @@ struct Source {
     name: String,
     text: String,
     sha256: String,
+    mutate_group_size: u32,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -376,6 +380,9 @@ fn load_sources(options: &Options, evidence: &mut Evidence) -> Result<Vec<Source
             read_source(&arg.path).with_context(|| format!("load source {}", arg.name))?;
         let path_text = bounded_path(&path)?;
         let sha256 = hash(text.as_bytes());
+        let mutate_group_size = benchmark_mutate_group_size_from_source(&text)
+            .map_err(anyhow::Error::msg)
+            .with_context(|| format!("mutation group metadata for {}", arg.name))?;
         let copy = format!("{}.wgsl", arg.name);
         let mut destination = OpenOptions::new()
             .write(true)
@@ -384,11 +391,13 @@ fn load_sources(options: &Options, evidence: &mut Evidence) -> Result<Vec<Source
         destination.write_all(text.as_bytes())?;
         destination.flush()?;
         evidence.event(&json!({"event":"source", "name":arg.name, "path":path_text,
-            "copy":copy, "sha256":sha256, "bytes":text.len()}))?;
+            "copy":copy, "sha256":sha256, "bytes":text.len(),
+            "mutate_group_size":mutate_group_size}))?;
         sources.push(Source {
             name: arg.name.clone(),
             text,
             sha256,
+            mutate_group_size,
         });
     }
     Ok(sources)
@@ -435,7 +444,8 @@ fn run(options: &Options, evidence: &mut Evidence, deadline: Instant) -> Result<
     let fixtures = fixtures();
     evidence.event(
         &json!({"event":"begin", "schema":1, "fixtures":fixtures.len(),
-        "variants":options.sources.len(), "dispatch":[4,1,1], "parents":PARENTS,
+        "variants":options.sources.len(), "dispatch_rule":"[4,ceil(lambda/mutate_group_size),1]",
+        "parents":PARENTS,
         "offspring_capacity":OFFSPRING, "polygons_per_slot":POLYGONS,
         "parent_bytes":PARENT_BYTES, "output_bytes":OUTPUT_BYTES, "staging_bytes":SNAPSHOT_BYTES,
         "seed":SEED, "outer_process_timeout_seconds":600, "poll_map_timeout_seconds":120,
@@ -659,7 +669,7 @@ fn compile_variants(
         remaining(deadline)?;
         evidence.event(
             &json!({"event":"compilation_started", "variant":source.name,
-            "sha256":source.sha256}),
+            "sha256":source.sha256, "mutate_group_size":source.mutate_group_size}),
         )?;
         let scopes = error_scopes(device);
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -682,7 +692,7 @@ fn compile_variants(
         finish_scopes(device, scopes, evidence, &source.name, deadline)?;
         evidence.event(
             &json!({"event":"compilation_completed", "variant":source.name,
-            "sha256":source.sha256}),
+            "sha256":source.sha256, "mutate_group_size":source.mutate_group_size}),
         )?;
         variants.push(Variant {
             source,
@@ -817,7 +827,7 @@ fn run_fixtures(
         let failures_before = evidence.failed;
         for variant_index in 0..variants.len() {
             let variant = &variants[variant_index];
-            dispatch(p, buffers, variant, &mut actual, index, evidence, deadline)?;
+            dispatch(p, buffers, variant, &mut actual, (index, case), evidence, deadline)?;
             let reference = if variant_index == 0 {
                 None
             } else {
@@ -953,7 +963,7 @@ fn dispatch(
     buffers: &Buffers,
     variant: &Variant,
     actual: &mut [u32],
-    fixture: usize,
+    fixture: (usize, Fixture),
     evidence: &mut Evidence,
     deadline: Instant,
 ) -> Result<()> {
@@ -962,8 +972,11 @@ fn dispatch(
         "dispatch budget exhausted"
     );
     remaining(deadline)?;
+    let (fixture, case) = fixture;
+    let dimensions = mutation_dispatch(case, variant.source.mutate_group_size);
     evidence.event(&json!({"event":"dispatch_started", "fixture":fixture,
-        "variant":variant.source.name, "dispatch":[4,1,1]}))?;
+        "variant":variant.source.name, "dispatch":dimensions,
+        "mutate_group_size":variant.source.mutate_group_size}))?;
     let scopes = error_scopes(&p.device);
     p.queue.write_buffer(
         &buffers.output,
@@ -977,7 +990,7 @@ fn dispatch(
         0,
         bytemuck::cast_slice(&variant.prior[OUTPUT_WORDS..]),
     );
-    let encoder = encode_dispatch(p, buffers, &variant.pipeline);
+    let encoder = encode_dispatch(p, buffers, &variant.pipeline, dimensions);
     let read = readback(p, buffers, encoder, actual, evidence, deadline);
     // Resolve scopes even when poll/map fails; mapped views never escape readback.
     let scope_result = finish_scopes(&p.device, scopes, evidence, &variant.source.name, deadline);
@@ -989,10 +1002,19 @@ fn dispatch(
         "readback_bytes":SNAPSHOT_BYTES, "gpu_scopes_clear":true}))
 }
 
+fn mutation_dispatch(fixture: Fixture, group_size: u32) -> [u32; 3] {
+    [
+        u32::try_from(ACTIVE_CHAINS).expect("active chain count is 4"),
+        fixture.lambda.div_ceil(group_size),
+        1,
+    ]
+}
+
 fn encode_dispatch(
     p: &GpuPipeline,
     buffers: &Buffers,
     pipeline: &wgpu::ComputePipeline,
+    dimensions: [u32; 3],
 ) -> wgpu::CommandEncoder {
     let mut encoder = p
         .device
@@ -1007,11 +1029,7 @@ fn encode_dispatch(
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &buffers.states_group, &[]);
         pass.set_bind_group(1, &buffers.params_group, &[]);
-        pass.dispatch_workgroups(
-            u32::try_from(ACTIVE_CHAINS).expect("active chain count is 4"),
-            1,
-            1,
-        );
+        pass.dispatch_workgroups(dimensions[0], dimensions[1], dimensions[2]);
     }
     encoder.copy_buffer_to_buffer(&buffers.output, 0, &buffers.staging, 0, OUTPUT_BYTES);
     encoder.copy_buffer_to_buffer(
@@ -1259,6 +1277,162 @@ fn compare_produced(reference: &[u32], actual: &[u32], slot: usize, result: &mut
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const HISTORICAL_MUTATE: &str = include_str!(
+        "../benchmarks/evolution/overnight-20261024/fixtures/mutate-e133-reference.wgsl"
+    );
+    const GROUPED_MUTATE_G1: &str = include_str!(
+        "../benchmarks/evolution/overnight-20261024/fixtures/mutate-g1-wg64-copy64.wgsl"
+    );
+    // Source/evidence metadata only; this empty kernel does not test GPU equivalence.
+    const GROUPED_MUTATE_G64: &str = "const OFFSPRING_GROUP_SIZE: u32 = 64u;\n\
+        @compute @workgroup_size(64) fn main() {}";
+
+    #[test]
+    fn source_metadata_and_evidence_derive_group_for_each_exact_source() -> Result<()> {
+        let directory = std::env::temp_dir().join(format!(
+            "check-gpu-mutation-sources-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir(&directory)?;
+        let result = (|| -> Result<()> {
+            let bundled = include_str!("../src/shaders/mutate.wgsl");
+            let bundled_group =
+                benchmark_mutate_group_size_from_source(bundled).map_err(anyhow::Error::msg)?;
+            let inputs = [
+                (HISTORICAL_MUTATE, 64),
+                (GROUPED_MUTATE_G1, 1),
+                (GROUPED_MUTATE_G64, 64),
+                (bundled, bundled_group),
+            ];
+            let mut options = Options {
+                sources: Vec::new(),
+                output: directory.join("evidence"),
+            };
+            for (index, (text, _)) in inputs.iter().enumerate() {
+                let path = directory.join(format!("source-{index}.wgsl"));
+                fs::write(&path, text)?;
+                options.sources.push(SourceArg {
+                    name: format!("source-{index}"),
+                    path,
+                });
+            }
+            let mut evidence = Evidence::new(&options.output)?;
+            let sources = load_sources(&options, &mut evidence)?;
+            drop(evidence);
+            let events = fs::read_to_string(options.output.join("events.jsonl"))?;
+            assert_eq!(sources.len(), inputs.len());
+            assert_eq!(events.lines().count(), inputs.len());
+            for ((source, (text, group)), line) in sources.iter().zip(inputs).zip(events.lines()) {
+                assert_source_metadata_evidence(source, text, group, line, &options.output)?;
+            }
+            let case = Fixture {
+                lambda: 33,
+                ..fixtures()[0]
+            };
+            assert_eq!(
+                mutation_dispatch(case, sources[1].mutate_group_size),
+                [4, 33, 1]
+            );
+            assert_eq!(
+                mutation_dispatch(case, sources[2].mutate_group_size),
+                [4, 1, 1]
+            );
+            Ok(())
+        })();
+        fs::remove_dir_all(directory)?;
+        result
+    }
+
+    fn assert_source_metadata_evidence(
+        source: &Source,
+        text: &str,
+        group: u32,
+        line: &str,
+        output: &Path,
+    ) -> Result<()> {
+        assert_eq!(source.text, text);
+        assert_eq!(source.sha256, hash(text.as_bytes()));
+        assert_eq!(source.mutate_group_size, group);
+        let event: Value = serde_json::from_str(line)?;
+        assert_eq!(event["event"], "source");
+        assert_eq!(event["name"], source.name);
+        assert_eq!(event["sha256"], source.sha256);
+        assert_eq!(event["mutate_group_size"], group);
+        assert_eq!(event["bytes"], text.len());
+        assert_eq!(
+            fs::read_to_string(output.join(format!("{}.wgsl", source.name)))?,
+            text
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn all_lambda_tails_cover_each_absolute_offspring_once() {
+        let cases = fixtures();
+        for group in [1, 2, 4, 8, 16, 32, 64] {
+            let source = format!("const OFFSPRING_GROUP_SIZE: u32 = {group}u;");
+            let checked = benchmark_mutate_group_size_from_source(&source).unwrap();
+            for lambda in 1..=64 {
+                let case = Fixture { lambda, ..cases[0] };
+                let [active, groups, z] = mutation_dispatch(case, checked);
+                assert_eq!(active, 4);
+                assert_eq!(z, 1);
+                assert!((1..=64).contains(&groups));
+                let mut visits = [0u8; OFFSPRING];
+                for chain in 0..active {
+                    for y in 0..groups {
+                        for leader in 0..checked {
+                            let local = y.checked_mul(checked).unwrap()
+                                .checked_add(leader).unwrap();
+                            if local < lambda {
+                                let id = chain.checked_mul(lambda).unwrap()
+                                    .checked_add(local).unwrap();
+                                visits[id as usize] += 1;
+                            }
+                        }
+                    }
+                }
+                let produced = ACTIVE_CHAINS * lambda as usize;
+                assert!(visits[..produced].iter().all(|&visits| visits == 1));
+                assert!(visits[produced..].iter().all(|&visits| visits == 0));
+            }
+        }
+    }
+
+    #[test]
+    fn fixture_matrix_keeps_all_lambda_modes_historical_dispatch_and_parent_bounds() {
+        let cases = fixtures();
+        assert_eq!(cases.len(), 368);
+        let baseline = benchmark_mutate_group_size_from_source(HISTORICAL_MUTATE).unwrap();
+        assert_eq!(baseline, 64);
+        for lambda in 1..=64 {
+            let modes: Vec<_> = cases
+                .iter()
+                .filter(|case| {
+                    case.lambda == lambda
+                        && case.counts == SMALL
+                        && case.crossover == 0.2
+                        && !case.history_probe
+                })
+                .map(|case| (case.single, case.adaptive))
+                .collect();
+            assert_eq!(
+                modes,
+                [(false, false), (false, true), (true, false), (true, true)]
+            );
+            assert_eq!(
+                mutation_dispatch(Fixture { lambda, ..cases[0] }, baseline),
+                [4, 1, 1]
+            );
+            let last = (u32::try_from(PARENTS).unwrap() - 1)
+                .checked_mul(lambda)
+                .unwrap()
+                .checked_add(lambda - 1)
+                .unwrap();
+            assert!(last < 65_536);
+        }
+    }
 
     #[test]
     fn help_and_argument_bounds_need_no_gpu() {

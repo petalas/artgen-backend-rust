@@ -337,6 +337,7 @@ impl GpuEvolver {
         let wg_x = p.image_width.div_ceil(rwg[0]);
         let wg_y = p.image_height.div_ceil(rwg[1]);
         let lambda = mutation_params.lambda;
+        let mutate_dispatch_y = lambda.div_ceil(p.mutate_group_size);
         let compact = p.benchmark_compact_raster().then(|| {
             p.benchmark_compact_raster_resources().expect("enabled compact resources")
         });
@@ -383,7 +384,7 @@ impl GpuEvolver {
                 pass.set_pipeline(&p.mutate_pipeline);
                 pass.set_bind_group(0, &p.mutate_bind_group, &[]);
                 pass.set_bind_group(1, &p.params_bind_group, &[]);
-                pass.dispatch_workgroups(active, 1, 1);
+                pass.dispatch_workgroups(active, mutate_dispatch_y, 1);
 
                 pass.set_pipeline(&p.bin_polygons_pipeline);
                 pass.set_bind_group(0, &p.bin_polygons_bind_group, &[]);
@@ -444,7 +445,7 @@ impl GpuEvolver {
                 pass.set_pipeline(&p.mutate_pipeline);
                 pass.set_bind_group(0, &p.mutate_bind_group, &[]);
                 pass.set_bind_group(1, &p.params_bind_group, &[]);
-                pass.dispatch_workgroups(active, 1, 1);
+                pass.dispatch_workgroups(active, mutate_dispatch_y, 1);
             }
 
             {
