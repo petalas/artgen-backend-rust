@@ -26,3 +26,7 @@ history.
 **Shader variant**:
 An alternative program for an evolution stage that preserves the search's fixed
 evolutionary rules.
+
+**Pending batch**:
+Submitted evaluations whose completion and any resulting drawing have not yet
+been collected.

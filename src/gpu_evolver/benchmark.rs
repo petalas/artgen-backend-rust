@@ -348,12 +348,12 @@ impl GpuEvolver {
 
     #[must_use]
     pub fn benchmark_envelope_timings(&self) -> BenchmarkEnvelopeTimings {
-        self.benchmark_envelope_timings
+        self.readback.benchmark_envelope_timings
     }
 
     #[must_use]
     pub fn benchmark_counters(&self) -> BenchmarkCounters {
-        self.benchmark_counters
+        self.readback.benchmark_counters
     }
 
     /// Includes the existing required production readbacks and final best flush.
@@ -363,7 +363,7 @@ impl GpuEvolver {
     /// Returns an error if any submitted batch has not completed after flushing.
     pub fn benchmark_drain(&mut self) -> Result<BenchmarkCounters, String> {
         self.flush_pending();
-        let counters = self.benchmark_counters;
+        let counters = self.readback.benchmark_counters;
         if counters.submitted_batches != counters.completed_batches
             || counters.submitted_iterations != counters.completed_iterations
             || counters.submitted_evaluations != counters.completed_evaluations
@@ -462,19 +462,17 @@ impl GpuEvolver {
         );
         self.framebuffers_initialized = false;
         self.iteration = 0;
-        self.best_fitness_bits = 0;
-        self.chain_fitness.fill(0.0);
+        self.readback.best_fitness_bits = 0;
+        self.readback.chain_fitness.fill(0.0);
         let p = &self.pipeline;
         p.queue
             .write_buffer(&p.tile_counts_buf, p.tile_counts_buf.size() - 4, &[0; 4]);
         let fitness = self.evaluate_chain_fitness(active);
         self.dispatch_init_framebuffers(active);
         self.reset_benchmark_gpu_buffers(active, seed, fitness)?;
-        self.staging_idx = 0;
-        self.pending_best_chain = None;
-        self.deferred_best_readback = false;
+        self.readback.reset_staging();
         self.total_evaluations = 0;
-        self.benchmark_counters = BenchmarkCounters::default();
+        self.readback.benchmark_counters = BenchmarkCounters::default();
         self.reset_pass_timings();
         self.start_time = Instant::now();
         Ok(fitness)
@@ -497,7 +495,7 @@ impl GpuEvolver {
         encoder.clear_buffer(&p.chain_update_flags_buf, 0, None);
         // Retain diagnostic initial-drawing occupancy, but discard warmup history.
         encoder.clear_buffer(&p.tile_counts_buf, 0, Some(p.tile_counts_buf.size() - 4));
-        let packed_fitness: Vec<_> = self.chain_fitness[..active as usize]
+        let packed_fitness: Vec<_> = self.readback.chain_fitness[..active as usize]
             .iter()
             .map(|fitness| fitness.to_bits())
             .collect();

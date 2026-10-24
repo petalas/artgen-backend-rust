@@ -39,6 +39,30 @@ Bundled programs, historical programs and diagnostic binners are existing reason
 for the installation seam. A generic cache abstraction or another GPU adapter
 would add no needed variation.
 
+## Pending readback
+
+`gpu_evolver::readback` owns one pending batch with its map completions, staging
+slot, queued winning chain and collected observations. The optional drawing map
+is the authority for whether that batch contains a drawing copy. Batch metadata
+and receivers can no longer be detached or paired with a separate deferred flag.
+
+`GpuEvolver` retains command recording. A conflict on the single drawing staging
+buffer still collects before parameter uploads. Otherwise the new submission
+precedes prior collection, and map registration follows collection. Copy source
+selection remains at the same position in the encoder. Terminal flush still
+prefers a newer synchronous drawing over an older deferred drawing.
+
+Ordinary reinitialization preserves staging alternation; seeded preparation resets
+it to zero after the GPU reset. The ownership change preserves existing channel
+and drawing allocations and the existing blocking/error policy.
+
+`check-gpu-lifecycle` records ordinary returns without per-batch drains. Both
+timestamp modes cover ordinary evolution, reset with pending work and seeded
+repreparation with pending work. Compare its `comparison.json` exactly between
+reference and candidate; the companion summary and snapshots retain numerical
+quality, terminal maximum-parent checks and errors. It is an unscored correctness
+check, not a throughput measurement.
+
 ## Verification
 
 Run `cargo test --lib --locked` and the relevant example tests. Real GPU checks
