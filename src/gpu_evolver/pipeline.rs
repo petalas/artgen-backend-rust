@@ -1276,7 +1276,17 @@ impl GpuPipeline {
         Ok(compiled)
     }
 
-    pub(super) fn set_benchmark_bin_shader(&mut self, source: &str) -> Result<(), String> {
+    /// Install a binning source through the engine's specialization and pipeline cache.
+    ///
+    /// The caller must own this pipeline exclusively and drain submitted GPU work
+    /// before calling. The source is retained across raster workgroup changes;
+    /// compilation uses the current workgroup and benchmark validation setting.
+    ///
+    /// # Errors
+    /// Returns an error for invalid source bounds or specialization markers, a
+    /// full benchmark cache, or GPU pipeline compilation failure. The installed
+    /// source and active pipeline remain unchanged on error.
+    pub fn set_benchmark_bin_shader(&mut self, source: &str) -> Result<(), String> {
         validate_benchmark_bin_source(source)?;
         let source = self
             .benchmark_bin_pipelines

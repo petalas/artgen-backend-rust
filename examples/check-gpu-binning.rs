@@ -45,10 +45,25 @@
 //! callback use the existing framework interfaces, with no recursive callbacks.
 //! Verification: the command above checks actual count/index readbacks. Keep the
 //! bounds and outer timeout when extending cases; production APIs are unchanged.
+//! `--shader PATH` installs a 1..262144-byte UTF-8 WGSL source through the
+//! actual engine factory before fixture work. CLI and CPU WGSL validation run
+//! before GPU initialization. The installed source survives all workgroup changes.
+//! Shader runs require `--output NEWDIR` and retain exact source bytes, SHA-256,
+//! scope and completion evidence there. NEWDIR must not exist and its parent
+//! must exist. A metadata record alone is not a pass; only `result.json` records
+//! completed GPU checks. No output directory is created for legacy runs.
+//! No-argument runs retain their original output and strict candidate contract.
 //! Rule 10 deviation: this source preparation runs rustfmt and static inspection
 //! only. The parent owns Cargo compilation and GPU proof before adoption.
 
-use std::{sync::mpsc, time::Duration};
+use std::{
+    ffi::OsString,
+    fs::{self, File, OpenOptions},
+    io::{Read, Write},
+    path::{Path, PathBuf},
+    sync::mpsc,
+    time::Duration,
+};
 
 use anyhow::{bail, ensure, Context, Result};
 use artgen_backend_rust::{
@@ -59,6 +74,7 @@ use artgen_backend_rust::{
     settings::TILE_MAX_POLYS,
 };
 use bytemuck::Zeroable;
+use sha2::{Digest, Sha256};
 use wgpu::util::DeviceExt;
 
 const WORKGROUPS: [[u32; 2]; 5] = [[32, 16], [16, 16], [32, 8], [16, 8], [8, 8]];
@@ -74,13 +90,31 @@ const STRIPE_COUNTS: [[usize; 3]; 4] =
 const OFFSPRING: usize = 3;
 const BIN_CAPACITY: usize = 256;
 const TIMEOUT: Duration = Duration::from_secs(120);
+const MAX_SOURCE_BYTES: usize = 256 * 1024;
+const USAGE: &str =
+    "usage: check-gpu-binning [--scope consumed-only|full-buffers] [--shader PATH --output NEWDIR]\n\
+     --shader requires a nonempty UTF-8 WGSL file at most 256 KiB and --output.\n\
+     NEWDIR must not exist and its parent must exist. No arguments select the legacy strict checks.";
+const REFERENCE_SHA256: &str = "27bbf8473e9ae1f68cb7ccb3a747e6f6fb8b9106bd7a42e16e88ea017a88f61f";
 type DirtyBox = [u32; 4];
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Scope {
     Strict,
     ConsumedOnly,
     FullBuffers,
+}
+
+struct Config {
+    scope: Scope,
+    shader: Option<OptionalSource>,
+}
+
+struct OptionalSource {
+    path: PathBuf,
+    output: PathBuf,
+    text: String,
+    sha256: String,
 }
 
 struct BinBuffers {
@@ -105,13 +139,26 @@ struct Bins {
 }
 
 fn main() -> Result<()> {
-    let scope = parse_scope()?;
+    let Some(config) = parse_config(std::env::args_os().skip(1))? else {
+        println!("{USAGE}");
+        return Ok(());
+    };
+    let scope = config.scope;
     ensure!(usize::try_from(TILE_MAX_POLYS)? == BIN_CAPACITY);
     let reference = [0, 0, 0, 255].repeat(65 * 51);
     let initial = vec![GpuDrawingState::zeroed()];
     let mut pipeline =
         futures_lite::future::block_on(GpuPipeline::new(1, 65, 51, &reference, &initial));
     ensure!(usize::try_from(pipeline.offspring_capacity)? >= OFFSPRING);
+    let evidence = if let Some(source) = &config.shader {
+        pipeline
+            .set_benchmark_bin_shader(&source.text)
+            .map_err(anyhow::Error::msg)
+            .context("invalid bin shader for the actual GPU factory")?;
+        Some((retain_source(source, scope)?, source))
+    } else {
+        None
+    };
     let mut dispatches = 0;
     for workgroup in WORKGROUPS {
         pipeline.set_rasterize_wg(workgroup);
@@ -135,6 +182,9 @@ fn main() -> Result<()> {
         dispatches += check_stripe_grid(&pipeline, &reference, scope)?;
         dispatches += check_wide_stripe_grid(&pipeline, &reference, scope)?;
     }
+    if let Some((directory, source)) = evidence {
+        record_result(&directory, source, scope, dispatches)?;
+    }
     match scope {
         Scope::Strict => println!("GPU dirty-binning candidate checks passed: 5 workgroups, 3 images, {dispatches} dispatches"),
         Scope::ConsumedOnly => println!("GPU consumed-only checks passed: 5 workgroups, 7 images plus 2 targeted configurations, {dispatches} paired checks, {} GPU dispatches", dispatches * 2),
@@ -143,18 +193,168 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn parse_scope() -> Result<Scope> {
-    let mut args = std::env::args_os().skip(1);
-    match (args.next(), args.next(), args.next()) {
-        (None, None, None) => Ok(Scope::Strict),
-        (Some(flag), Some(scope), None) if flag == "--scope" && scope == "consumed-only" => {
-            Ok(Scope::ConsumedOnly)
-        }
-        (Some(flag), Some(scope), None) if flag == "--scope" && scope == "full-buffers" => {
-            Ok(Scope::FullBuffers)
-        }
-        _ => bail!("usage: check-gpu-binning [--scope consumed-only|full-buffers]"),
+fn parse_config(args: impl Iterator<Item = OsString>) -> Result<Option<Config>> {
+    let args: Vec<_> = args.take(7).collect();
+    if args.len() == 1 && (args[0] == "--help" || args[0] == "-h") {
+        return Ok(None);
     }
+    ensure!(args.len() <= 6 && args.len().is_multiple_of(2), USAGE);
+    let mut scope = None;
+    let mut path = None;
+    let mut output = None;
+    for pair in args.as_chunks::<2>().0 {
+        let flag = pair[0].to_str().context("CLI flags must be UTF-8")?;
+        let value = pair[1].to_str().context("CLI values must be UTF-8")?;
+        match flag {
+            "--scope" => {
+                ensure!(scope.is_none(), "duplicate --scope");
+                scope = Some(match value {
+                    "consumed-only" => Scope::ConsumedOnly,
+                    "full-buffers" => Scope::FullBuffers,
+                    _ => bail!("invalid scope; {USAGE}"),
+                });
+            }
+            "--shader" => {
+                ensure!(path.is_none(), "duplicate --shader");
+                ensure!(
+                    !value.is_empty() && !value.starts_with("--"),
+                    "missing shader path"
+                );
+                path = Some(PathBuf::from(value));
+            }
+            "--output" => {
+                ensure!(output.is_none(), "duplicate --output");
+                ensure!(
+                    !value.is_empty() && !value.starts_with("--"),
+                    "missing output path"
+                );
+                output = Some(PathBuf::from(value));
+            }
+            _ => bail!("unknown flag {flag:?}; {USAGE}"),
+        }
+    }
+    let shader = match (path, output) {
+        (None, None) => None,
+        (Some(path), Some(output)) => Some(read_source(path, output)?),
+        _ => bail!("--shader and --output must be supplied together; {USAGE}"),
+    };
+    Ok(Some(Config {
+        scope: scope.unwrap_or(Scope::Strict),
+        shader,
+    }))
+}
+
+fn read_source(path: PathBuf, output: PathBuf) -> Result<OptionalSource> {
+    let file = File::open(&path).with_context(|| format!("open shader {}", path.display()))?;
+    let metadata = file.metadata()?;
+    ensure!(metadata.is_file(), "shader must be a regular file");
+    ensure!(
+        metadata.len() <= MAX_SOURCE_BYTES as u64,
+        "shader exceeds 256 KiB"
+    );
+    // Bound the opened target itself, including symlinks and files growing after metadata.
+    let mut bytes = Vec::with_capacity(MAX_SOURCE_BYTES + 1);
+    file.take((MAX_SOURCE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    ensure!(
+        !bytes.is_empty() && bytes.len() <= MAX_SOURCE_BYTES,
+        "shader must contain 1..262144 bytes"
+    );
+    let text = String::from_utf8(bytes).context("shader must be UTF-8")?;
+    for marker in ["const TILE_W: u32 = 16;", "const TILE_H: u32 = 16;"] {
+        ensure!(
+            text.matches(marker).count() == 1,
+            "invalid bin specialization marker {marker:?}"
+        );
+    }
+    let module = wgpu::naga::front::wgsl::parse_str(&text)
+        .map_err(|error| anyhow::anyhow!("invalid WGSL: {}", error.emit_to_string(&text)))?;
+    wgpu::naga::valid::Validator::new(
+        wgpu::naga::valid::ValidationFlags::all(),
+        wgpu::naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .map_err(|error| anyhow::anyhow!("invalid WGSL: {error}"))?;
+    match fs::symlink_metadata(&output) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).context("inspect output path"),
+        Ok(_) => bail!("output must be a new directory"),
+    }
+    let parent = output
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    ensure!(
+        fs::metadata(parent)?.is_dir(),
+        "output parent must be an existing directory"
+    );
+    ensure!(
+        format!(
+            "{:x}",
+            Sha256::digest(include_bytes!(
+                "../benchmarks/evolution/v1/experiments/reference-bin-dd52d50.wgsl"
+            ))
+        ) == REFERENCE_SHA256,
+        "frozen GPU reference source changed"
+    );
+    Ok(OptionalSource {
+        path,
+        output,
+        sha256: format!("{:x}", Sha256::digest(text.as_bytes())),
+        text,
+    })
+}
+
+fn scope_name(scope: Scope) -> &'static str {
+    match scope {
+        Scope::Strict => "strict",
+        Scope::ConsumedOnly => "consumed-only",
+        Scope::FullBuffers => "full-buffers",
+    }
+}
+
+fn retain_source(source: &OptionalSource, scope: Scope) -> Result<PathBuf> {
+    let directory = &source.output;
+    fs::create_dir(directory)?;
+    write_new(&directory.join("source.wgsl"), source.text.as_bytes())?;
+    let metadata = serde_json::json!({
+        "status": "source-installed-checks-not-complete", "scope": scope_name(scope),
+        "source_path": source.path, "source_sha256": source.sha256,
+        "source_bytes": source.text.len(), "source_copy": "source.wgsl",
+        "reference_sha256": REFERENCE_SHA256,
+        "benchmark_validation": false, "compilation_options": "production-default",
+        "expected_checks": if scope == Scope::Strict { 255 } else { 835 },
+        "expected_gpu_dispatches": if scope == Scope::Strict { 255 } else { 1670 },
+    });
+    write_new(
+        &directory.join("metadata.json"),
+        &serde_json::to_vec_pretty(&metadata)?,
+    )?;
+    Ok(directory.clone())
+}
+
+fn record_result(
+    directory: &Path,
+    source: &OptionalSource,
+    scope: Scope,
+    checks: usize,
+) -> Result<()> {
+    let result = serde_json::json!({
+        "status": "passed", "scope": scope_name(scope), "source_sha256": source.sha256,
+        "checks": checks, "gpu_dispatches": checks * if scope == Scope::Strict { 1 } else { 2 },
+    });
+    write_new(
+        &directory.join("result.json"),
+        &serde_json::to_vec_pretty(&result)?,
+    )?;
+    println!("Shader proof evidence: {}", directory.display());
+    Ok(())
+}
+
+fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
+    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
+    file.write_all(bytes)?;
+    Ok(())
 }
 
 fn reference_pipeline(p: &GpuPipeline) -> wgpu::ComputePipeline {
@@ -874,4 +1074,252 @@ fn dirty_boxes([w, h]: [u32; 2], [tw, th]: [u32; 2]) -> [DirtyBox; 30] {
         [0, 0, 0, h],
         [0, 0, w, 0],
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const VALID: &str = "const TILE_W: u32 = 16;\nconst TILE_H: u32 = 16;\n@compute @workgroup_size(1) fn main() {}\n";
+    const VALID_SHA256: &str = "0cdfed85897b82314e8521faa07986c9f9c238245723be3559bfc64834d061da";
+
+    struct TestDirectory(PathBuf);
+
+    impl TestDirectory {
+        fn new() -> Result<Self> {
+            let path = Path::new(".cache/evolution-overnight-20261024/hot-bin-checker/cpu-tests")
+                .join(uuid::Uuid::new_v4().to_string());
+            fs::create_dir_all(&path)?;
+            Ok(Self(path))
+        }
+    }
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.0).expect("remove this test's directory");
+        }
+    }
+
+    fn shader_args(path: &Path, output: &Path) -> Vec<OsString> {
+        vec![
+            "--shader".into(),
+            path.into(),
+            "--output".into(),
+            output.into(),
+        ]
+    }
+
+    #[test]
+    fn legacy_cli_and_help() -> Result<()> {
+        for (args, scope) in [
+            (vec![], Scope::Strict),
+            (vec!["--scope", "consumed-only"], Scope::ConsumedOnly),
+            (vec!["--scope", "full-buffers"], Scope::FullBuffers),
+        ] {
+            let config = parse_config(args.into_iter().map(OsString::from))?.unwrap();
+            assert_eq!(config.scope, scope);
+            assert!(config.shader.is_none());
+        }
+        for flag in ["--help", "-h"] {
+            assert!(parse_config([OsString::from(flag)].into_iter())?.is_none());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_cli_is_rejected() {
+        let cases: &[&[&str]] = &[
+            &["--scope"],
+            &["--scope", "strict"],
+            &["--unknown", "x"],
+            &["--scope", "full-buffers", "--scope", "consumed-only"],
+            &["--shader", "a", "--shader", "b"],
+            &["--output", "a", "--output", "b"],
+            &["--shader", "a"],
+            &["--output", "a"],
+            &["--shader", "", "--output", "a"],
+            &["--shader", "--output", "--output", "a"],
+            &["--shader", "a", "--output", ""],
+            &["--help", "--scope", "full-buffers"],
+            &[
+                "--scope",
+                "full-buffers",
+                "--shader",
+                "a",
+                "--output",
+                "b",
+                "extra",
+            ],
+        ];
+        for args in cases {
+            assert!(
+                parse_config(args.iter().map(OsString::from)).is_err(),
+                "{args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn selected_source_and_scope_retain_exact_evidence() -> Result<()> {
+        let directory = TestDirectory::new()?;
+        let path = directory.0.join("input.wgsl");
+        fs::write(&path, VALID)?;
+        for scope in [Scope::Strict, Scope::ConsumedOnly, Scope::FullBuffers] {
+            let output = directory.0.join(scope_name(scope));
+            let mut args = shader_args(&path, &output);
+            if scope != Scope::Strict {
+                args.extend(["--scope".into(), scope_name(scope).into()]);
+            }
+            let config = parse_config(args.into_iter())?.unwrap();
+            assert_eq!(config.scope, scope);
+            let source = config.shader.unwrap();
+            assert_eq!(source.sha256, VALID_SHA256);
+            assert_eq!(source.text.as_bytes(), VALID.as_bytes());
+            assert!(!output.exists());
+            fs::write(&path, "changed after validation")?;
+            let retained = retain_source(&source, scope)?;
+            assert_eq!(fs::read(retained.join("source.wgsl"))?, VALID.as_bytes());
+            let metadata: serde_json::Value =
+                serde_json::from_slice(&fs::read(retained.join("metadata.json"))?)?;
+            assert_eq!(metadata["scope"], scope_name(scope));
+            assert_eq!(metadata["source_sha256"], VALID_SHA256);
+            assert_eq!(metadata["source_bytes"], VALID.len());
+            assert_eq!(metadata["reference_sha256"], REFERENCE_SHA256);
+            assert_eq!(metadata["benchmark_validation"], false);
+            assert!(!retained.join("result.json").exists());
+            let checks = if scope == Scope::Strict { 255 } else { 835 };
+            record_result(&retained, &source, scope, checks)?;
+            let result: serde_json::Value =
+                serde_json::from_slice(&fs::read(retained.join("result.json"))?)?;
+            assert_eq!(result["status"], "passed");
+            assert_eq!(result["scope"], scope_name(scope));
+            assert_eq!(result["source_sha256"], VALID_SHA256);
+            assert_eq!(result["checks"], checks);
+            assert_eq!(
+                result["gpu_dispatches"],
+                if scope == Scope::Strict { 255 } else { 1670 }
+            );
+            fs::write(&path, VALID)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn shader_flags_accept_either_order() -> Result<()> {
+        let directory = TestDirectory::new()?;
+        let path = directory.0.join("input.wgsl");
+        fs::write(&path, VALID)?;
+        let args = vec![
+            "--scope".into(),
+            "full-buffers".into(),
+            "--output".into(),
+            directory.0.join("proof").into_os_string(),
+            "--shader".into(),
+            path.into_os_string(),
+        ];
+        let config = parse_config(args.into_iter())?.unwrap();
+        assert_eq!(config.scope, Scope::FullBuffers);
+        assert_eq!(config.shader.unwrap().sha256, VALID_SHA256);
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_sources_fail_before_output_creation() -> Result<()> {
+        let directory = TestDirectory::new()?;
+        let path = directory.0.join("input.wgsl");
+        let output = directory.0.join("proof");
+        assert!(parse_config(shader_args(&path, &output).into_iter()).is_err());
+        for bytes in [
+            vec![],
+            vec![0xff],
+            vec![b' '; MAX_SOURCE_BYTES + 1],
+            format!("{VALID} this is malformed WGSL").into_bytes(),
+            VALID.replace("const TILE_W: u32 = 16;", "").into_bytes(),
+            format!("{VALID}const TILE_H: u32 = 16;").into_bytes(),
+            VALID
+                .replace("fn main() {}", "fn main() { let x: u32 = true; }")
+                .into_bytes(),
+        ] {
+            fs::write(&path, bytes)?;
+            assert!(parse_config(shader_args(&path, &output).into_iter()).is_err());
+            assert!(!output.exists());
+        }
+        assert!(parse_config(shader_args(&directory.0, &output).into_iter()).is_err());
+        fs::write(&path, VALID)?;
+        assert!(
+            parse_config(shader_args(&path, &directory.0.join("missing/proof")).into_iter())
+                .is_err()
+        );
+        assert!(!directory.0.join("missing").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn size_limit_is_inclusive() -> Result<()> {
+        let directory = TestDirectory::new()?;
+        let path = directory.0.join("input.wgsl");
+        let output = directory.0.join("proof");
+        let mut bytes = VALID.as_bytes().to_vec();
+        bytes.resize(MAX_SOURCE_BYTES, b' ');
+        fs::write(&path, &bytes)?;
+        let config = parse_config(shader_args(&path, &output).into_iter())?.unwrap();
+        assert_eq!(config.shader.unwrap().text.as_bytes(), bytes);
+        assert!(!output.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn existing_output_is_never_overwritten() -> Result<()> {
+        let directory = TestDirectory::new()?;
+        let path = directory.0.join("input.wgsl");
+        let output = directory.0.join("proof");
+        fs::write(&path, VALID)?;
+        fs::write(&output, b"keep this file")?;
+        assert!(parse_config(shader_args(&path, &output).into_iter()).is_err());
+        assert_eq!(fs::read(&output)?, b"keep this file");
+        fs::remove_file(&output)?;
+        fs::create_dir(&output)?;
+        assert!(parse_config(shader_args(&path, &output).into_iter()).is_err());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_targets_obey_source_bound_and_output_exclusion() -> Result<()> {
+        use std::os::unix::fs::symlink;
+        let directory = TestDirectory::new()?;
+        let path = directory.0.join("input.wgsl");
+        let link = directory.0.join("input-link.wgsl");
+        let output = directory.0.join("proof");
+        fs::write(&path, vec![b' '; MAX_SOURCE_BYTES + 1])?;
+        symlink("input.wgsl", &link)?;
+        assert!(parse_config(shader_args(&link, &output).into_iter()).is_err());
+        fs::write(&path, VALID)?;
+        symlink("missing-directory", &output)?;
+        assert!(parse_config(shader_args(&link, &output).into_iter()).is_err());
+        assert!(fs::symlink_metadata(&output)?.file_type().is_symlink());
+        fs::remove_file(&output)?;
+        let config = parse_config(shader_args(&link, &output).into_iter())?.unwrap();
+        assert_eq!(config.shader.unwrap().sha256, VALID_SHA256);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_cli_is_rejected() {
+        use std::os::unix::ffi::OsStringExt;
+        let invalid = OsString::from_vec(vec![0xff]);
+        assert!(parse_config([invalid.clone(), "x".into()].into_iter()).is_err());
+        assert!(parse_config(
+            [
+                "--shader".into(),
+                invalid.clone(),
+                "--output".into(),
+                "new".into()
+            ]
+            .into_iter()
+        )
+        .is_err());
+        assert!(parse_config(["--scope".into(), invalid].into_iter()).is_err());
+    }
 }
