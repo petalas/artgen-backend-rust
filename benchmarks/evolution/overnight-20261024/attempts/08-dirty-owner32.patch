@@ -1,0 +1,37 @@
+diff --git a/src/shaders/bin_polygons.wgsl b/src/shaders/bin_polygons.wgsl
+index c0f9149..7d52a39 100644
+--- a/src/shaders/bin_polygons.wgsl
++++ b/src/shaders/bin_polygons.wgsl
+@@ -153,12 +153,29 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index)
+     }
+     workgroupBarrier();
+ 
+-    // One lane owns each tile, including its count reset for an empty drawing.
++    // Decode exactly as rasterize_error; every lane already passed the cache barrier.
++    let bbox_lo = working_states[offspring_id].fitness_bits;
++    let bbox_hi = working_states[offspring_id].stagnation_counter;
++    let dirty_min_x = bbox_lo & 0xFFFFu;
++    let dirty_min_y = (bbox_lo >> 16u) & 0xFFFFu;
++    let dirty_max_x = bbox_hi & 0xFFFFu;
++    let dirty_max_y = (bbox_hi >> 16u) & 0xFFFFu;
++
++    // One lane owns each consumed tile, including its reset for an empty drawing.
+     for (var tile_id = local_idx; tile_id < num_tiles; tile_id += 32u) {
+-        let tile_global = offspring_id * num_tiles + tile_id;
+-        atomicStore(&tile_counts[tile_global], 0u);
+         let tx = tile_id % num_tiles_x;
+         let ty = tile_id / num_tiles_x;
++        let tile_min_x = tx * TILE_W;
++        let tile_min_y = ty * TILE_H;
++        let tile_max_x = min(tile_min_x + TILE_W, w);
++        let tile_max_y = min(tile_min_y + TILE_H, h);
++        let no_overlap = tile_max_x <= dirty_min_x || tile_min_x >= dirty_max_x ||
++                         tile_max_y <= dirty_min_y || tile_min_y >= dirty_max_y;
++        if no_overlap {
++            continue;
++        }
++        let tile_global = offspring_id * num_tiles + tile_id;
++        atomicStore(&tile_counts[tile_global], 0u);
+ 
+         for (var pi = 0u; pi < poly_count; pi++) {
+             let bounds = polygon_bounds[pi];
