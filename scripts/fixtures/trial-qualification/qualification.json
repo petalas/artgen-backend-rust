@@ -1,0 +1,374 @@
+{
+  "batch_compute_envelope": null,
+  "batches": 8,
+  "case_id": "ff",
+  "correctness": true,
+  "counters": {
+    "completed_batches": 8,
+    "completed_evaluations": 131072,
+    "completed_iterations": 512,
+    "submitted_batches": 8,
+    "submitted_evaluations": 131072,
+    "submitted_iterations": 512
+  },
+  "diagnostic": false,
+  "drain_seconds": 0.041933576,
+  "elapsed_seconds": 0.382766235,
+  "error_count": 0,
+  "errors": [],
+  "evals_per_second": null,
+  "final_complexity": [
+    {
+      "bbox_area": {
+        "max": 0.4621434064641937,
+        "median": 0.02070987695702442,
+        "min": 0.000041463815261266745,
+        "p95": 0.19420557263631666
+      },
+      "overflowed_tiles": 0,
+      "tile_count": 288,
+      "tile_overlaps": {
+        "max": 65,
+        "min": 0,
+        "p50": 35,
+        "p95": 58
+      },
+      "triangle_area": {
+        "max": 0.2276072724797638,
+        "median": 0.004972352086940468,
+        "min": 7.97797685203605e-6,
+        "p95": 0.08096416841963194
+      },
+      "triangles": 437,
+      "vertices": 1311
+    },
+    {
+      "bbox_area": {
+        "max": 0.4621434064641937,
+        "median": 0.02066690277172656,
+        "min": 0.000041463815261266745,
+        "p95": 0.19420557263631666
+      },
+      "overflowed_tiles": 0,
+      "tile_count": 288,
+      "tile_overlaps": {
+        "max": 65,
+        "min": 0,
+        "p50": 35,
+        "p95": 58
+      },
+      "triangle_area": {
+        "max": 0.2276072724797638,
+        "median": 0.004935544710040048,
+        "min": 7.97797685203605e-6,
+        "p95": 0.08096416841963194
+      },
+      "triangles": 438,
+      "vertices": 1314
+    },
+    {
+      "bbox_area": {
+        "max": 0.4621434064641937,
+        "median": 0.02070987695702442,
+        "min": 0.000041463815261266745,
+        "p95": 0.19420557263631666
+      },
+      "overflowed_tiles": 0,
+      "tile_count": 288,
+      "tile_overlaps": {
+        "max": 65,
+        "min": 0,
+        "p50": 35,
+        "p95": 58
+      },
+      "triangle_area": {
+        "max": 0.2276072724797638,
+        "median": 0.004972352086940468,
+        "min": 7.97797685203605e-6,
+        "p95": 0.08090240877559274
+      },
+      "triangles": 437,
+      "vertices": 1311
+    },
+    {
+      "bbox_area": {
+        "max": 0.4621434064641937,
+        "median": 0.02070987695702442,
+        "min": 0.000041463815261266745,
+        "p95": 0.19420557263631666
+      },
+      "overflowed_tiles": 0,
+      "tile_count": 288,
+      "tile_overlaps": {
+        "max": 65,
+        "min": 0,
+        "p50": 35,
+        "p95": 58
+      },
+      "triangle_area": {
+        "max": 0.2276072724797638,
+        "median": 0.004972352086940468,
+        "min": 7.97797685203605e-6,
+        "p95": 0.08096416841963194
+      },
+      "triangles": 437,
+      "vertices": 1311
+    }
+  ],
+  "final_fitness_percent": [
+    97.38023,
+    97.380936,
+    97.37954,
+    97.38005
+  ],
+  "final_quality": [
+    {
+      "chain": 0,
+      "differing_pixels": 36,
+      "expected_stored_fitness": 97.38023,
+      "framebuffer_error": 2926380,
+      "max_channel_delta": 10,
+      "pixel_audit": {
+        "outside_nominal_quantum": 1,
+        "unexplained_pixels": 0,
+        "widest_channel_envelope": 10
+      },
+      "scalar_error": 2926376,
+      "scalar_fitness": 97.38024,
+      "stored_error": 2926380,
+      "stored_fitness": 97.38023,
+      "total_channel_delta": 48,
+      "triangles": 437
+    },
+    {
+      "chain": 1,
+      "differing_pixels": 36,
+      "expected_stored_fitness": 97.380936,
+      "framebuffer_error": 2925533,
+      "max_channel_delta": 10,
+      "pixel_audit": {
+        "outside_nominal_quantum": 1,
+        "unexplained_pixels": 0,
+        "widest_channel_envelope": 10
+      },
+      "scalar_error": 2925529,
+      "scalar_fitness": 97.38094,
+      "stored_error": 2925533,
+      "stored_fitness": 97.380936,
+      "total_channel_delta": 48,
+      "triangles": 438
+    },
+    {
+      "chain": 2,
+      "differing_pixels": 37,
+      "expected_stored_fitness": 97.37954,
+      "framebuffer_error": 2927167,
+      "max_channel_delta": 10,
+      "pixel_audit": {
+        "outside_nominal_quantum": 1,
+        "unexplained_pixels": 0,
+        "widest_channel_envelope": 10
+      },
+      "scalar_error": 2927162,
+      "scalar_fitness": 97.37955,
+      "stored_error": 2927167,
+      "stored_fitness": 97.37954,
+      "total_channel_delta": 49,
+      "triangles": 437
+    },
+    {
+      "chain": 3,
+      "differing_pixels": 36,
+      "expected_stored_fitness": 97.38005,
+      "framebuffer_error": 2926592,
+      "max_channel_delta": 10,
+      "pixel_audit": {
+        "outside_nominal_quantum": 1,
+        "unexplained_pixels": 0,
+        "widest_channel_envelope": 10
+      },
+      "scalar_error": 2926588,
+      "scalar_fitness": 97.38005,
+      "stored_error": 2926592,
+      "stored_fitness": 97.38005,
+      "total_channel_delta": 48,
+      "triangles": 437
+    }
+  ],
+  "final_state_sha256": "2d4c0a2651818b3e7e7d94528518c89d22c84e2083c804c552610c4086c3be43",
+  "finalize_overlap": false,
+  "fixture_manifest_sha256": "82dfe207ecd20ae964edf4528f1a90fe4176b21f4ac0911b305da1e1edf1c5aa",
+  "gpu": {
+    "allocated_chains": 1024,
+    "backend": "Vulkan",
+    "device": 11141,
+    "device_type": "DiscreteGpu",
+    "driver": "Dozen",
+    "driver_info": "Mesa 25.3.6 - kisak-mesa PPA",
+    "max_buffer_size": 134217728,
+    "max_storage_buffer_binding_size": 134217728,
+    "name": "Microsoft Direct3D12 (NVIDIA GeForce RTX 5090)",
+    "offspring_capacity": 8371,
+    "timestamp_period_ns": 1.0,
+    "vendor": 4318
+  },
+  "initial_complexity": {
+    "bbox_area": {
+      "max": 0.4621434064641937,
+      "median": 0.021352848698752425,
+      "min": 0.000041463815261266745,
+      "p95": 0.19420557263631666
+    },
+    "overflowed_tiles": 0,
+    "tile_count": 288,
+    "tile_overlaps": {
+      "max": 63,
+      "min": 0,
+      "p50": 35,
+      "p95": 57
+    },
+    "triangle_area": {
+      "max": 0.2276072724797638,
+      "median": 0.005014277723779603,
+      "min": 7.97797685203605e-6,
+      "p95": 0.08090240877559274
+    },
+    "triangles": 423,
+    "vertices": 1269
+  },
+  "initial_quality": [
+    {
+      "chain": 0,
+      "differing_pixels": 36,
+      "expected_stored_fitness": 97.34536,
+      "framebuffer_error": 2966665,
+      "max_channel_delta": 9,
+      "pixel_audit": {
+        "outside_nominal_quantum": 1,
+        "unexplained_pixels": 0,
+        "widest_channel_envelope": 9
+      },
+      "scalar_error": 2966661,
+      "scalar_fitness": 97.34536,
+      "stored_error": 2966665,
+      "stored_fitness": 97.34536,
+      "total_channel_delta": 48,
+      "triangles": 423
+    },
+    {
+      "chain": 1,
+      "differing_pixels": 36,
+      "expected_stored_fitness": 97.34536,
+      "framebuffer_error": 2966665,
+      "max_channel_delta": 9,
+      "pixel_audit": {
+        "outside_nominal_quantum": 1,
+        "unexplained_pixels": 0,
+        "widest_channel_envelope": 9
+      },
+      "scalar_error": 2966661,
+      "scalar_fitness": 97.34536,
+      "stored_error": 2966665,
+      "stored_fitness": 97.34536,
+      "total_channel_delta": 48,
+      "triangles": 423
+    },
+    {
+      "chain": 2,
+      "differing_pixels": 36,
+      "expected_stored_fitness": 97.34536,
+      "framebuffer_error": 2966665,
+      "max_channel_delta": 9,
+      "pixel_audit": {
+        "outside_nominal_quantum": 1,
+        "unexplained_pixels": 0,
+        "widest_channel_envelope": 9
+      },
+      "scalar_error": 2966661,
+      "scalar_fitness": 97.34536,
+      "stored_error": 2966665,
+      "stored_fitness": 97.34536,
+      "total_channel_delta": 48,
+      "triangles": 423
+    },
+    {
+      "chain": 3,
+      "differing_pixels": 36,
+      "expected_stored_fitness": 97.34536,
+      "framebuffer_error": 2966665,
+      "max_channel_delta": 9,
+      "pixel_audit": {
+        "outside_nominal_quantum": 1,
+        "unexplained_pixels": 0,
+        "widest_channel_envelope": 9
+      },
+      "scalar_error": 2966661,
+      "scalar_fitness": 97.34536,
+      "stored_error": 2966665,
+      "stored_fitness": 97.34536,
+      "total_channel_delta": 48,
+      "triangles": 423
+    }
+  ],
+  "initial_similarity_percent": 97.34536,
+  "initial_state_sha256": "34b1674c05cb0eed4b94e17ea7d17249f07b8880a8feaa78faefdc461c0f4046",
+  "params": {
+    "adaptiveMutation": false,
+    "addPolygonProb": 0.5,
+    "adjacentSwapProb": 0.002,
+    "adjustBrightnessProb": 0.000473,
+    "adjustSaturationProb": 0.001333,
+    "chainCount": 4,
+    "changeColorProb": 0.000473,
+    "clonePolygonProb": 0.071429,
+    "crossoverProb": 0.2,
+    "gpuBatchIters": 64,
+    "lambda": 64,
+    "maxAlpha": 65,
+    "maxPolygons": 1000,
+    "mediumMoveDelta": 0.03,
+    "mediumMoveProb": 0.004,
+    "mergeCentroidThreshold": 0.15,
+    "mergeColorThreshold": 0.2,
+    "mergePolygonProb": 0.000667,
+    "microAdjustDelta": 0.001,
+    "microAdjustProb": 0.002786,
+    "minAlpha": 10,
+    "minPolygons": 1,
+    "movePointMaxDelta": 0.113,
+    "movePointProb": 0.000294,
+    "newPointMaxDistance": 0.005,
+    "offsetPolygonMagnitude": 0.01,
+    "offsetPolygonProb": 0.00565,
+    "rasterizeWg": [
+      32,
+      16
+    ],
+    "removePointProb": 0.002,
+    "removePolygonProb": 0.000862,
+    "reorderPolygonProb": 0.002,
+    "rotatePolygonProb": 0.002,
+    "scalePolygonProb": 0.00565,
+    "singleMutationMode": true,
+    "spatialCrossoverWeight": 0.66,
+    "swapColorsProb": 0.00565,
+    "tournamentSize": 3
+  },
+  "protocol_version": 1,
+  "sampled_gpu_stage_totals_ns": [
+    708832.0,
+    397760.0,
+    3309568.0,
+    633696.0
+  ],
+  "schema": "engine-lab-prepared-v2",
+  "seed": 7,
+  "setup_seconds": 0.0,
+  "setup_timing_boundaries": "Monotonic host elapsed seconds. Shared per-case device_initialization_seconds brackets only block_on(GpuEvolver::new); source_precompile_seconds brackets only precompile_sources, including its existing zero-warmup seeded setup, source installs and error-scope completion. Per-row source_install_seconds brackets only ShaderStage::install, including existing cache lookup/drain and finalize-mode selection; preparation_seconds brackets the whole prepare_seeded_benchmark, including seed/full fitness/reset, fixed warmups, existing drain and final seeded reset. None means the operation was not reached; a returned failure retains its elapsed duration. Execution checks, qualification and extra CPU verification/snapshots/hashes/serialization are harness work outside these startup brackets. Qualification TrialRecord.setup_seconds remains its inherited unmeasured placeholder, not application startup. These fields are separate from measured throughput and are not a whole-application startup total.",
+  "start_mode": "mature_drawing_restart",
+  "status": "completed",
+  "timestamp_mode": "stages",
+  "timestamp_samples": 8,
+  "validation_max_tile_occupancy": null,
+  "warmup_batches": 8
+}

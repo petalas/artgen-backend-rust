@@ -63,16 +63,27 @@ reference and candidate; the companion summary and snapshots retain numerical
 quality, terminal maximum-parent checks and errors. It is an unscored correctness
 check, not a throughput measurement.
 
+## Trial qualification
+
+`benchmark::qualification` owns the measured batch clock, completed-work rule,
+canonical state identity and scoring purpose. Isolated trials and the resident
+lab share those rules while retaining their preparation and numerical checks.
+An unscored qualification remains distinct from a scored timing even when both
+have `diagnostic:false`. See [the result contract](trial-qualification.md).
+
 ## Verification
 
 Run `cargo test --lib --locked` and the relevant example tests. Real GPU checks
 must run serially under `.cache/evolution-bench/benchmark.lock`, with a parent
 process timeout. Use the standalone `check-gpu-programs` and
 `check-gpu-rasterization` examples; Dozen teardown crashes in threaded Rust GPU
-tests, as recorded in `docs/LEARNINGS.md`. Compare complete canonical state, cached framebuffer byte-L1,
-fitness and completed work before interpreting throughput. Compilation and
-snapshots stay outside engine timing; ordinary readback and final drain stay
+tests, as recorded in `docs/LEARNINGS.md`. Compare complete canonical state,
+cached framebuffer byte-L1, fitness and completed work before interpreting
+throughput. Compilation and snapshots stay outside engine timing; ordinary readback and final drain stay
 inside it.
+
+The [verification record](engine-architecture-validation.md) reports the fixed
+comparisons, their limits and the separate longer ff check.
 
 ## Power of Ten deviations retained by the refactor
 

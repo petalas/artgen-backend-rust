@@ -11,6 +11,7 @@ use serde::Serialize;
 
 use super::{
     fixtures::{self, LoadedFixture, PROTOCOL_VERSION},
+    qualification::{measure, state_hash, work_is_complete, Measurement, RecordPurpose},
     reference::{self, Complexity},
     uncertainty::{self, PixelAudit},
 };
@@ -108,6 +109,24 @@ pub struct TrialRecord {
 }
 
 impl TrialRecord {
+    /// Attach measured work with an explicit scoring purpose.
+    ///
+    /// # Errors
+    /// Scored timing requires a finite, positive elapsed clock. Final checks and
+    /// device errors still remove the score in `finish_record`.
+    pub fn record_measurement(
+        &mut self,
+        measurement: Measurement,
+        purpose: RecordPurpose,
+    ) -> Result<()> {
+        self.elapsed_seconds = measurement.elapsed_seconds;
+        self.drain_seconds = measurement.drain_seconds;
+        self.counters = measurement.counters;
+        self.evals_per_second =
+            purpose.rate(self.counters.completed_evaluations, self.elapsed_seconds)?;
+        Ok(())
+    }
+
     fn prepared(
         input: &LoadedFixture,
         spec: &TrialSpec,
@@ -205,13 +224,14 @@ fn execute(
     let mut record = prepare(evolver, input, spec, output)?;
     record.setup_seconds = setup.elapsed().as_secs_f64();
     let params = &input.manifest.params;
-    (
-        record.elapsed_seconds,
-        record.drain_seconds,
-        record.counters,
-    ) = measure(evolver, params, spec.batches)?;
-    record.evals_per_second =
-        Some(record.counters.completed_evaluations as f64 / record.elapsed_seconds);
+    let purpose = if spec.diagnostic {
+        RecordPurpose::Diagnostic
+    } else if spec.timestamp_mode == TimestampMode::BatchEnvelope {
+        RecordPurpose::Profile
+    } else {
+        RecordPurpose::Timing
+    };
+    record.record_measurement(measure(evolver, params, spec.batches)?, purpose)?;
     let final_state = evolver
         .benchmark_snapshot(params.chain_count, params.lambda)
         .map_err(anyhow::Error::msg)?;
@@ -334,39 +354,13 @@ pub fn complete_record(
     Ok(())
 }
 
-fn measure(
-    evolver: &mut GpuEvolver,
-    params: &MutationParams,
-    batches: u32,
-) -> Result<(f64, f64, BenchmarkCounters)> {
-    let start = Instant::now();
-    for _ in 0..batches {
-        // Returned drawing collection is part of the real engine batch path.
-        let _best = evolver.run_batch(params, true);
-    }
-    let drain = Instant::now();
-    let counters = evolver.benchmark_drain().map_err(anyhow::Error::msg)?;
-    let drain_seconds = drain.elapsed().as_secs_f64();
-    let elapsed = start.elapsed().as_secs_f64();
-    ensure!(elapsed.is_finite() && elapsed > 0.0, "invalid elapsed time");
-    Ok((elapsed, drain_seconds, counters))
-}
-
 fn check_work(
     c: BenchmarkCounters,
     params: &MutationParams,
     batches: u32,
     errors: &mut Vec<String>,
 ) {
-    let iterations = u64::from(batches) * u64::from(params.gpu_batch_iters);
-    let evaluations = iterations * u64::from(params.chain_count) * u64::from(params.lambda);
-    if c.completed_batches != u64::from(batches)
-        || c.submitted_batches != c.completed_batches
-        || c.completed_iterations != iterations
-        || c.submitted_iterations != iterations
-        || c.completed_evaluations != evaluations
-        || c.submitted_evaluations != evaluations
-    {
+    if !work_is_complete(c, params, batches) {
         errors.push(format!("submitted/completed work mismatch: {c:?}"));
     }
 }
@@ -523,22 +517,6 @@ fn fitness(error: u32, triangles: u32, pixels: usize) -> f32 {
     let mut result = 100.0 * (1.0 - error as f32 / (765.0 * pixels as f32));
     result -= result * PER_POINT_MULTIPLIER * (triangles * 3) as f32;
     result
-}
-
-fn state_hash(snapshot: &BenchmarkSnapshot) -> Result<String> {
-    // verify_control checks the active ID range and maximum score, and reports
-    // racy ID/score disagreement. These reporting words do not drive evolution.
-    // Decoding already strips padding; counters and diagnostic occupancy are omitted.
-    let canonical = (
-        &snapshot.parents,
-        &snapshot.offspring,
-        &snapshot.parent_total_errors,
-        &snapshot.parent_framebuffers,
-        &snapshot.offspring_errors,
-        &snapshot.chain_update_flags,
-        &snapshot.fitness_packed,
-    );
-    Ok(fixtures::sha256(&serde_json::to_vec(&canonical)?))
 }
 
 /// Export the canonical endpoint and its inspection drawings.
@@ -707,6 +685,62 @@ mod tests {
         check_work(c, &p, 1, &mut errors);
         assert_eq!(errors.len(), 1);
     }
+
+    #[test]
+    fn result_purpose_distinguishes_qualification_from_scored_timing() {
+        let input = input();
+        let state = snapshot();
+        for purpose in [RecordPurpose::Timing, RecordPurpose::Qualification] {
+            let mut record = prepared_record(&input, &state);
+            record
+                .record_measurement(
+                    Measurement {
+                        elapsed_seconds: 0.25,
+                        drain_seconds: 0.02,
+                        counters: record.counters,
+                    },
+                    purpose,
+                )
+                .unwrap();
+            complete_record(&mut record, &state, &input).unwrap();
+            finish_record(&mut record);
+            let value = serde_json::to_value(&record).unwrap();
+            assert_eq!(value["status"], "completed");
+            assert_eq!(value["diagnostic"], false);
+            assert_eq!(value["counters"]["completed_evaluations"], 1);
+            assert_eq!(
+                value["evals_per_second"],
+                if purpose == RecordPurpose::Timing {
+                    serde_json::json!(4.0)
+                } else {
+                    serde_json::Value::Null
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn result_interface_invalidates_incomplete_and_inconsistent_work() {
+        let input = input();
+        let state = snapshot();
+        for failure in 0..6 {
+            let mut record = prepared_record(&input, &state);
+            match failure {
+                0 => record.counters.submitted_batches = 0,
+                1 => record.counters.completed_batches = 0,
+                2 => record.counters.submitted_iterations = 0,
+                3 => record.counters.completed_iterations = 0,
+                4 => record.counters.submitted_evaluations = 0,
+                _ => record.counters.completed_evaluations = 0,
+            }
+            complete_record(&mut record, &state, &input).unwrap();
+            finish_record(&mut record);
+            assert_eq!(record.status, "invalid", "failure {failure}");
+            assert_eq!(record.error_count, 1);
+            assert!(record.errors[0].starts_with("submitted/completed work mismatch:"));
+            assert!(record.evals_per_second.is_none());
+        }
+    }
     #[test]
     fn pixel_gate_detects_wrong_channels_and_error_totals() {
         let (count, max, total) = pixel_difference(&[0xff00_0010], &[0xff00_0012]);
@@ -718,6 +752,10 @@ mod tests {
     fn replay_hash_excludes_telemetry_and_keeps_every_evolution_component() {
         let initial = snapshot();
         let expected = state_hash(&initial).unwrap();
+        assert_eq!(
+            expected, "57a29aaad3526be5f18ad438b112264fdb996b5f95da2a9bbb1625c965b54529",
+            "the persisted seven-field array encoding must remain byte-compatible"
+        );
         let mut telemetry = initial.clone();
         telemetry.control.best_chain_id = u32::MAX;
         telemetry.control.new_best_found = 1;

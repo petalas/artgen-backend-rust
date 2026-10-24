@@ -30,3 +30,11 @@ evolutionary rules.
 **Pending batch**:
 Submitted evaluations whose completion and any resulting drawing have not yet
 been collected.
+
+**Trial**:
+A search run with a fixed starting drawing, evolution parameters, seed and work
+budget.
+
+**Qualification**:
+Verification that a trial's start, completed work and results meet its fixed
+correctness requirements. Qualification does not itself assign a throughput score.

@@ -11,13 +11,13 @@ use std::{
     fs::{self, File, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
-    time::Instant,
 };
 
 use anyhow::{ensure, Context, Result};
 use artgen_backend_rust::{
     benchmark::{
         fixtures::{self, LoadedFixture, PROJECTS},
+        qualification::{compare_state, measure, state_hash, work_is_complete, RecordPurpose},
         trial::{self, TimestampMode, TrialSpec},
     },
     gpu_evolver::{
@@ -647,11 +647,10 @@ fn qualify_inner(
     let initial = evolver
         .benchmark_snapshot(params.chain_count, params.lambda)
         .map_err(anyhow::Error::msg)?;
-    (
-        record.elapsed_seconds,
-        record.drain_seconds,
-        record.counters,
-    ) = measure(evolver, params, spec.batches)?;
+    record.record_measurement(
+        measure(evolver, params, spec.batches)?,
+        RecordPurpose::Qualification,
+    )?;
     let endpoint = evolver
         .benchmark_snapshot(params.chain_count, params.lambda)
         .map_err(anyhow::Error::msg)?;
@@ -727,13 +726,11 @@ fn finish_row(row: &mut TrialRow) -> Result<()> {
     row.correctness = row.errors.is_empty();
     row.evals_per_second = None;
     if row.correctness && row.timing_eligible {
-        ensure!(
-            row.elapsed_seconds.is_finite() && row.elapsed_seconds > 0.0,
-            "invalid elapsed time"
-        );
-        row.evals_per_second = Some(
-            f64::from(u32::try_from(row.counters.completed_evaluations)?) / row.elapsed_seconds,
-        );
+        let rate =
+            RecordPurpose::Timing.rate(row.counters.completed_evaluations, row.elapsed_seconds)?;
+        // Retain the resident protocol's checked evaluation-count range.
+        let _bounded_evaluations = u32::try_from(row.counters.completed_evaluations)?;
+        row.evals_per_second = rate;
     }
     Ok(())
 }
@@ -900,8 +897,10 @@ fn execute_trial(
     check_pixels(&initial, &input.rgba, true, &mut row.errors)?;
     ensure!(row.errors.is_empty(), "initial trial state failed");
     if row.timing_eligible {
-        (row.elapsed_seconds, row.drain_seconds, row.counters) =
-            measure(evolver, params, config.batches)?;
+        let measurement = measure(evolver, params, config.batches)?;
+        row.elapsed_seconds = measurement.elapsed_seconds;
+        row.drain_seconds = measurement.drain_seconds;
+        row.counters = measurement.counters;
     } else {
         for _ in 0..config.batches {
             let _best = evolver.run_batch(params, true);
@@ -928,23 +927,6 @@ fn execute_trial(
     Ok(())
 }
 
-fn measure(
-    evolver: &mut GpuEvolver,
-    params: &MutationParams,
-    batches: u32,
-) -> Result<(f64, f64, BenchmarkCounters)> {
-    let start = Instant::now();
-    for _ in 0..batches {
-        let _best = evolver.run_batch(params, true);
-    }
-    let drain = Instant::now();
-    let counters = evolver.benchmark_drain().map_err(anyhow::Error::msg)?;
-    let drain_seconds = drain.elapsed().as_secs_f64();
-    let elapsed = start.elapsed().as_secs_f64();
-    ensure!(elapsed.is_finite() && elapsed > 0.0, "invalid elapsed time");
-    Ok((elapsed, drain_seconds, counters))
-}
-
 fn stage_times(evolver: &GpuEvolver) -> [f64; 4] {
     let p = evolver.pass_timings();
     [
@@ -962,70 +944,10 @@ fn check_work(
     samples: u64,
     errors: &mut Vec<String>,
 ) {
-    let iterations = u64::from(batches) * u64::from(p.gpu_batch_iters);
-    let evaluations = iterations * u64::from(p.chain_count) * u64::from(p.lambda);
-    if c.submitted_batches != u64::from(batches)
-        || c.completed_batches != u64::from(batches)
-        || c.submitted_iterations != iterations
-        || c.completed_iterations != iterations
-        || c.submitted_evaluations != evaluations
-        || c.completed_evaluations != evaluations
-        || samples != u64::from(batches)
-    {
+    if !work_is_complete(c, p, batches) || samples != u64::from(batches) {
         errors.push(format!(
             "work/timestamp count mismatch: {c:?}, samples={samples}"
         ));
-    }
-}
-
-fn state_hash(state: &BenchmarkSnapshot) -> Result<String> {
-    // Identical to the qualified trial protocol: seven decoded fields, no
-    // padding, control race/reporting words, counters, or occupancy diagnostics.
-    Ok(fixtures::sha256(&serde_json::to_vec(&(
-        &state.parents,
-        &state.offspring,
-        &state.parent_total_errors,
-        &state.parent_framebuffers,
-        &state.offspring_errors,
-        &state.chain_update_flags,
-        &state.fitness_packed,
-    ))?))
-}
-
-fn compare_state(
-    actual: &BenchmarkSnapshot,
-    expected: &BenchmarkSnapshot,
-    phase: &str,
-    errors: &mut Vec<String>,
-) {
-    let fields = [
-        ("parents", actual.parents == expected.parents),
-        ("offspring", actual.offspring == expected.offspring),
-        (
-            "parent_total_errors",
-            actual.parent_total_errors == expected.parent_total_errors,
-        ),
-        (
-            "parent_framebuffers",
-            actual.parent_framebuffers == expected.parent_framebuffers,
-        ),
-        (
-            "offspring_errors",
-            actual.offspring_errors == expected.offspring_errors,
-        ),
-        (
-            "chain_update_flags",
-            actual.chain_update_flags == expected.chain_update_flags,
-        ),
-        (
-            "fitness_packed",
-            actual.fitness_packed == expected.fitness_packed,
-        ),
-    ];
-    for (name, equal) in fields {
-        if !equal {
-            errors.push(format!("{phase} {name} differs from qualified reference"));
-        }
     }
 }
 
@@ -1353,6 +1275,49 @@ mod tests {
         })();
         fs::remove_dir_all(&config.output)?;
         result
+    }
+
+    #[test]
+    fn timing_rows_score_completed_work_and_preserve_clock_and_range_errors() -> Result<()> {
+        let config = Config::parse(&args())?;
+        let source = Source {
+            shader_stage: ShaderStage::Bin,
+            mutate_group_size: None,
+            mutate_options: None,
+            name: "reference".into(),
+            path: "reference.wgsl".into(),
+            sha256: "abc".into(),
+            wgsl: String::new(),
+        };
+        let mut row = TrialRow::new(
+            &config,
+            &source,
+            "ff",
+            "manifest",
+            provenance(),
+            MutationExecution {
+                group_size: 64,
+                zero_initialize_workgroup_memory: true,
+            },
+            true,
+        );
+        row.counters.completed_evaluations = 131_072;
+        row.elapsed_seconds = 0.25;
+        finish_row(&mut row)?;
+        assert_eq!(row.evals_per_second, Some(524_288.0));
+        row.counters.completed_evaluations = u64::from(u32::MAX) + 1;
+        row.elapsed_seconds = 0.0;
+        assert_eq!(
+            finish_row(&mut row).unwrap_err().to_string(),
+            "invalid elapsed time"
+        );
+        row.elapsed_seconds = 0.25;
+        assert!(finish_row(&mut row).is_err());
+        row.errors.push("device error".into());
+        finish_row(&mut row)?;
+        assert!(!row.correctness);
+        assert!(row.evals_per_second.is_none());
+        Ok(())
     }
 
     #[test]

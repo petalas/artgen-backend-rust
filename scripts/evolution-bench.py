@@ -552,6 +552,17 @@ def validate_quality_record(record, case):
 
 
 def validate_result(record, case, args, diagnostic, manifest_hash):
+    """Validate an ordinary scored timing or unscored diagnostic TrialRecord."""
+    purpose = "diagnostic" if diagnostic else "timing"
+    return _validate_trial_record(record, case, args, diagnostic, manifest_hash, purpose)
+
+
+def validate_qualification(record, case, args, manifest_hash):
+    """Validate an unscored qualification, even when diagnostic is false."""
+    return _validate_trial_record(record, case, args, False, manifest_hash, "qualification")
+
+
+def _validate_trial_record(record, case, args, diagnostic, manifest_hash, purpose):
     object_value(record, "result")
     require(record.get("timestamp_mode", "stages") == "stages"
             and record.get("batch_compute_envelope") is None,
@@ -582,9 +593,9 @@ def validate_result(record, case, args, diagnostic, manifest_hash):
                     f"wrong completed work: {field}, expected {expected}, got {counters.get(field)}")
     elapsed = finite(record.get("elapsed_seconds"), 1e-9, args.timeout, "elapsed_seconds")
     finite(record.get("drain_seconds"), 0, elapsed, "drain_seconds")
-    if diagnostic:
+    if purpose != "timing":
         require("evals_per_second" in record and record["evals_per_second"] is None,
-                "diagnostic evals_per_second must be null")
+                f"{purpose} evals_per_second must be null")
     else:
         rate = finite(record.get("evals_per_second"), 1e-9, 1e18, "evals_per_second")
         require(math.isclose(rate, counters["completed_evaluations"] / elapsed, rel_tol=1e-6),

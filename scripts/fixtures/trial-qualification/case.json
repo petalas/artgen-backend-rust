@@ -1,0 +1,71 @@
+{
+  "width": 384,
+  "height": 384,
+  "complexity": {
+    "triangles": 423,
+    "vertices": 1269,
+    "triangle_area": {
+      "min": 7.97797685203605e-06,
+      "median": 0.005014277723779603,
+      "p95": 0.08090240877559274,
+      "max": 0.2276072724797638
+    },
+    "bbox_area": {
+      "min": 4.1463815261266745e-05,
+      "median": 0.021352848698752425,
+      "p95": 0.19420557263631666,
+      "max": 0.4621434064641937
+    },
+    "tile_count": 288,
+    "tile_overlaps": {
+      "min": 0,
+      "p50": 35,
+      "p95": 57,
+      "max": 63
+    },
+    "overflowed_tiles": 0
+  },
+  "case_id": "ff",
+  "params": {
+    "addPolygonProb": 0.5,
+    "removePolygonProb": 0.000862,
+    "reorderPolygonProb": 0.002,
+    "offsetPolygonProb": 0.00565,
+    "movePointProb": 0.000294,
+    "removePointProb": 0.002,
+    "microAdjustProb": 0.002786,
+    "changeColorProb": 0.000473,
+    "adjustBrightnessProb": 0.000473,
+    "adjustSaturationProb": 0.001333,
+    "scalePolygonProb": 0.00565,
+    "rotatePolygonProb": 0.002,
+    "adjacentSwapProb": 0.002,
+    "mergePolygonProb": 0.000667,
+    "clonePolygonProb": 0.071429,
+    "mediumMoveProb": 0.004,
+    "swapColorsProb": 0.00565,
+    "movePointMaxDelta": 0.113,
+    "microAdjustDelta": 0.001,
+    "newPointMaxDistance": 0.005,
+    "offsetPolygonMagnitude": 0.01,
+    "mediumMoveDelta": 0.03,
+    "mergeCentroidThreshold": 0.15,
+    "mergeColorThreshold": 0.2,
+    "minAlpha": 10,
+    "maxAlpha": 65,
+    "minPolygons": 1,
+    "maxPolygons": 1000,
+    "crossoverProb": 0.2,
+    "spatialCrossoverWeight": 0.66,
+    "tournamentSize": 3,
+    "chainCount": 4,
+    "lambda": 64,
+    "singleMutationMode": true,
+    "adaptiveMutation": false,
+    "rasterizeWg": [
+      32,
+      16
+    ],
+    "gpuBatchIters": 64
+  }
+}
