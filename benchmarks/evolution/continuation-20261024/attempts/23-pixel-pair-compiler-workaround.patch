@@ -1,0 +1,34 @@
+--- a/candidate.wgsl
++++ b/candidate.wgsl
+@@ -333,15 +333,29 @@
+         return vec2<u32>(0u, 0u);
+     }
+ 
++    var r0 = pixel0.r;
++    var g0 = pixel0.g;
++    var b0 = pixel0.b;
++    var r1 = pixel1.r;
++    var g1 = pixel1.g;
++    var b1 = pixel1.b;
++
+     for (var i = 0u; i < tile_poly_count; i++) {
+         let poly = shared_polys[i];
+         if valid0 {
+-            rasterize_blend(poly, pixel0.fx, pixel0.fy, &pixel0.r, &pixel0.g, &pixel0.b);
++            rasterize_blend(poly, pixel0.fx, pixel0.fy, &r0, &g0, &b0);
+         }
+         if valid1 {
+-            rasterize_blend(poly, pixel1.fx, pixel1.fy, &pixel1.r, &pixel1.g, &pixel1.b);
++            rasterize_blend(poly, pixel1.fx, pixel1.fy, &r1, &g1, &b1);
+         }
+     }
++
++    pixel0.r = r0;
++    pixel0.g = g0;
++    pixel0.b = b0;
++    pixel1.r = r1;
++    pixel1.g = g1;
++    pixel1.b = b1;
+ 
+     // Only the already-integer errors cross pixels; each component is at most 1530.
+     return paired_pixel_errors(pixel0) + paired_pixel_errors(pixel1);

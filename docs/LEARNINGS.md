@@ -197,3 +197,18 @@ gate than `ChainQuality::passes_numerical_policy`.
 rounding differences. GPU candidate/reference canonical fields and stored errors
 versus framebuffer-byte L1 still require exact equality. Never relax those checks
 to accommodate a candidate.
+
+### WGSL validation can pass before a Naga SPIR-V compiler panic
+
+The paired-pixel raster prototype passed Naga 30.0.1 parsing and validation, then
+aborted in `back/spv/block.rs:3847` with `Expression [90] is not cached!` during
+pipeline construction. A CPU-only five-line shader reproduces this failure by
+passing a struct-member address such as `&pixel.r` to a function taking
+`ptr<function, f32>`. A standalone local scalar pointer compiles successfully.
+
+Validate through the actual SPIR-V writer before spending another GPU run on
+this pattern. Keep RGB accumulators in local scalars when passing their pointers
+to the blend helper. The source-only workaround compiles for all five raster
+shapes, but still needs exact GPU error/framebuffer and throughput qualification.
+The failed native cohort remains inconclusive; compiler success supplies no
+numerical or performance evidence. See [the retained reproducer and result](../benchmarks/evolution/continuation-20261024/21-paired-pixel-compiler-blocker.md).

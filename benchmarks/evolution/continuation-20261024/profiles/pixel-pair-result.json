@@ -1,0 +1,154 @@
+{
+  "protocol": "raster-pixel-pair-20261024-v1",
+  "status": "INCONCLUSIVE",
+  "reason": "Naga30 SPIRV generation panic before timing",
+  "adoption": false,
+  "score_eligible": false,
+  "performance": null,
+  "native_result_sha256": "70882daa27695c1d0dc96c57a85f65ebe2c2c59931725990d0f6b84d38e3caeb",
+  "failure_audit_sha256": "84e8a82ded7f55e0b96fd8100626bb92da91078e4c4a44ed7ed428970b83a941",
+  "failure_accounting_checks": 193,
+  "completed_timing_trials": 0,
+  "completed_diagnostics": 0,
+  "qualification_records": 0,
+  "native_process_returncode": -6,
+  "signature": "naga-30.0.1/src/back/spv/block.rs:3847:56: Expression [90] is not cached!",
+  "original_candidate": {
+    "sha256": "9996fe7ceb50a9b3bc70d0289a2c291b50689937146be0f4a61466089ebd8142",
+    "source_frozen_before_launch": true
+  },
+  "compiler_regression": {
+    "status": "PASS_CPU_COMPILER_REGRESSION",
+    "case_count": 10,
+    "results": [
+      {
+        "case": "reference",
+        "path": "/home/nick/git/artgen-backend-rust/.cache/evolution-pixel-pair-20261024/source-119/reference.wgsl",
+        "expected_exit": 0,
+        "exit": 0,
+        "stdout": "SPIRV_OK words=4139\n",
+        "stderr": "",
+        "observer_wall_seconds": 0.004166336999332998
+      },
+      {
+        "case": "original-default",
+        "path": "/home/nick/git/artgen-backend-rust/.cache/evolution-pixel-pair-20261024/source-119/candidate.wgsl",
+        "expected_exit": -6,
+        "exit": -6,
+        "stdout": "",
+        "stderr": "\nthread 'main' (142885) panicked at /home/nick/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/naga-30.0.1/src/back/spv/block.rs:3847:56:\ninternal error: entered unreachable code: Expression [90] is not cached!\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n",
+        "observer_wall_seconds": 0.007892816000094172
+      },
+      {
+        "case": "original-32x16",
+        "path": "/home/nick/git/artgen-backend-rust/.cache/evolution-pixel-pair-20261024/compiler-parent/original-32x16.wgsl",
+        "expected_exit": -6,
+        "exit": -6,
+        "stdout": "",
+        "stderr": "\nthread 'main' (142886) panicked at /home/nick/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/naga-30.0.1/src/back/spv/block.rs:3847:56:\ninternal error: entered unreachable code: Expression [90] is not cached!\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n",
+        "observer_wall_seconds": 0.008353297998837661
+      },
+      {
+        "case": "minimal-field",
+        "path": "/home/nick/git/artgen-backend-rust/.cache/evolution-pixel-pair-20261024/compiler-parent/field-pointer.wgsl",
+        "expected_exit": -6,
+        "exit": -6,
+        "stdout": "",
+        "stderr": "\nthread 'main' (142887) panicked at /home/nick/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/naga-30.0.1/src/back/spv/block.rs:3847:56:\ninternal error: entered unreachable code: Expression [1] is not cached!\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n",
+        "observer_wall_seconds": 0.006652582997048739
+      },
+      {
+        "case": "minimal-scalar",
+        "path": "/home/nick/git/artgen-backend-rust/.cache/evolution-pixel-pair-20261024/compiler-parent/scalar-pointer.wgsl",
+        "expected_exit": 0,
+        "exit": 0,
+        "stdout": "SPIRV_OK words=205\n",
+        "stderr": "",
+        "observer_wall_seconds": 0.0026728830052888952
+      },
+      {
+        "case": "workaround-32x16",
+        "path": "/home/nick/git/artgen-backend-rust/.cache/evolution-pixel-pair-20261024/compiler-parent/workaround-32x16.wgsl",
+        "expected_exit": 0,
+        "exit": 0,
+        "stdout": "SPIRV_OK words=5813\n",
+        "stderr": "",
+        "observer_wall_seconds": 0.00402919200132601
+      },
+      {
+        "case": "workaround-16x16",
+        "path": "/home/nick/git/artgen-backend-rust/.cache/evolution-pixel-pair-20261024/compiler-parent/workaround-16x16.wgsl",
+        "expected_exit": 0,
+        "exit": 0,
+        "stdout": "SPIRV_OK words=5805\n",
+        "stderr": "",
+        "observer_wall_seconds": 0.004168432998994831
+      },
+      {
+        "case": "workaround-32x8",
+        "path": "/home/nick/git/artgen-backend-rust/.cache/evolution-pixel-pair-20261024/compiler-parent/workaround-32x8.wgsl",
+        "expected_exit": 0,
+        "exit": 0,
+        "stdout": "SPIRV_OK words=5809\n",
+        "stderr": "",
+        "observer_wall_seconds": 0.003950465004891157
+      },
+      {
+        "case": "workaround-16x8",
+        "path": "/home/nick/git/artgen-backend-rust/.cache/evolution-pixel-pair-20261024/compiler-parent/workaround-16x8.wgsl",
+        "expected_exit": 0,
+        "exit": 0,
+        "stdout": "SPIRV_OK words=5805\n",
+        "stderr": "",
+        "observer_wall_seconds": 0.004208960002870299
+      },
+      {
+        "case": "workaround-8x8",
+        "path": "/home/nick/git/artgen-backend-rust/.cache/evolution-pixel-pair-20261024/compiler-parent/workaround-8x8.wgsl",
+        "expected_exit": 0,
+        "exit": 0,
+        "stdout": "SPIRV_OK words=5809\n",
+        "stderr": "",
+        "observer_wall_seconds": 0.0042638219965738244
+      }
+    ],
+    "sha256": "4df012dcb4cb19415f66b42d6a0e62a102372102772f8e652919836e9a7b7378",
+    "minimal_trigger": "struct Pixel { r: f32, g: f32, b: f32, }\n@group(0) @binding(0) var<storage, read_write> output: array<u32>;\nfn blend(r: ptr<function, f32>) { *r = *r + 1.0; }\n@compute @workgroup_size(1)\nfn main() { var pixel: Pixel; blend(&pixel.r); output[0] = u32(pixel.r); }\n",
+    "minimal_control": "struct Pixel { r: f32, g: f32, b: f32, }\n@group(0) @binding(0) var<storage, read_write> output: array<u32>;\nfn blend(r: ptr<function, f32>) { *r = *r + 1.0; }\n@compute @workgroup_size(1)\nfn main() { var value = 0.0; blend(&value); output[0] = u32(value); }\n",
+    "metadata": {
+      "utc": "2026-10-24T17:32:19.479678+00:00",
+      "rustc": "rustc 1.101.0-nightly (7189d39d9 2026-10-22)\nbinary: rustc\ncommit-hash: 7189d39d9ce936881b8132c6addeaf3e295cd455\ncommit-date: 2026-10-22\nhost: x86_64-unknown-linux-gnu\nrelease: 1.101.0-nightly\nLLVM version: 23.1.4\n",
+      "naga_version": "30.0.1",
+      "compiler_command": "/home/nick/git/artgen-backend-rust/.cache/evolution-pixel-pair-20261024/compiler-parent/compile-final-command.json",
+      "libraries": {
+        "/home/nick/git/artgen-backend-rust/target/release/build/naga/dad1db7e94fd9188/out/libnaga-dad1db7e94fd9188.rmeta": "82df95cdd6a423a19a5f573ca39862149cf2e13edfb141c33d843f2f018d6bee",
+        "/home/nick/git/artgen-backend-rust/target/release/build/naga/dad1db7e94fd9188/out/libnaga-dad1db7e94fd9188.rlib": "fe526f7ec6888adee06e26733d730f4f99dcaa2a35638919ba12999c0cbf4d65"
+      },
+      "probe_sha256": "3002cdb0311cd7ff406747bd8da9465a304a062a801729bc21f2a9701c6514c4",
+      "source_sha256": "8921f7cbefbd451f63cb847f2ada559d1175a8b2a377c08645ff31328a0b661e",
+      "root_sources_and_normal_binaries_preserved": true,
+      "setup_failures_retained": [
+        "compile.stderr",
+        "compile2.stderr",
+        "compile3.stderr",
+        "compile4.stderr"
+      ],
+      "scope": "Existing dependency artifacts only; no Cargo, dependency upgrade, root binary rebuild or GPU call."
+    },
+    "proof": {
+      "status": "WORKAROUND_UNQUALIFIED",
+      "original_inverse_exact": true,
+      "candidate_sha256": "83c505bcc9220f39c11354692cdec3828e4d76681df8468ea93d597b4f4ceb7b",
+      "original_sha256": "9996fe7ceb50a9b3bc70d0289a2c291b50689937146be0f4a61466089ebd8142",
+      "keeps_original_blend": "Exact inverse confines edits to six local RGB declarations, six final stores and two call argument lists. No arithmetic, shared state or host change.",
+      "compiler_regression_cases": 10,
+      "gpu_runs_for_workaround": 0,
+      "limitations": "Naga SPIRV compilation is not GPU numerical or throughput qualification. Default binding map/capabilities differ from full adapter descriptor. Earlier native cohort remains closed INCONCLUSIVE."
+    }
+  },
+  "protected_file_count": 83,
+  "numerical_qualification": "NOT_RUN; there are no correctness snapshots for this candidate. No performance ratio or GPU cause follows.",
+  "retry": false,
+  "reserved_started": false,
+  "workaround_qualification": "SOURCE_ONLY; no GPU run or comparison. A future source revision requires fresh protocol/evidence."
+}
