@@ -1,0 +1,363 @@
+{
+  "schema": "mutation-bbox-reuse-closed-v1",
+  "status": "REJECT",
+  "data_validity": "PASS",
+  "adoption": false,
+  "production_runtime_changed": false,
+  "evolution_parameters_changed": false,
+  "source_candidate_sha256": "f3dd47b2dc6c82e12c925c4d4cb41b2f5aeda28a016dc246796a61d9d17988dc",
+  "source_reference_sha256": "3a36417746ab19b0c800c718e8c87795c17d9bff78114fd65bc8369b016578d8",
+  "spec_sha256": "b2f4d27f142ed6809ce43385e4b7f7b8636477f37cefb93fcbb70b5c3b3126d4",
+  "validator_sha256": "1d0f7b4dd4b3fe901e238eb794cd53a525446d5eca2c15c907a7a8138abcc307",
+  "statistics": {
+    "aggregate": {
+      "interval95": [
+        0.9964030623091549,
+        1.0027407708482778
+      ],
+      "ratio": 0.9995297064271871
+    },
+    "bootstrap_seed": 20261024,
+    "cases": {
+      "darwin": {
+        "geomean_ratio": 0.9996459134895849,
+        "interval95": [
+          0.9940650743266637,
+          1.0060322611997297
+        ],
+        "interval_statistic": "exp(mean(log(paired ratio)))",
+        "paired_ratios": {
+          "cv": 0.007116417049087655,
+          "max": 1.01197379875676,
+          "mean": 0.9996711494032576,
+          "median": 0.9982408405443622,
+          "min": 0.9913730652226602,
+          "n": 5,
+          "range": 0.020600733534099858,
+          "raw": [
+            0.9946774135673706,
+            1.01197379875676,
+            0.9913730652226602,
+            1.0020906289251348,
+            0.9982408405443622
+          ]
+        }
+      },
+      "ff": {
+        "geomean_ratio": 1.0003655286945445,
+        "interval95": [
+          0.995495551046979,
+          1.0052593303383728
+        ],
+        "interval_statistic": "exp(mean(log(paired ratio)))",
+        "paired_ratios": {
+          "cv": 0.005574615843858229,
+          "max": 1.008228394500736,
+          "mean": 1.000381058212971,
+          "median": 0.9990275012360519,
+          "min": 0.9943073205477231,
+          "n": 5,
+          "range": 0.013921073953012897,
+          "raw": [
+            0.9943073205477231,
+            1.0054202678350406,
+            0.9949218069453035,
+            1.008228394500736,
+            0.9990275012360519
+          ]
+        }
+      },
+      "mona": {
+        "geomean_ratio": 0.9985784860315678,
+        "interval95": [
+          0.9933861473370594,
+          1.0044212786571443
+        ],
+        "interval_statistic": "exp(mean(log(paired ratio)))",
+        "paired_ratios": {
+          "cv": 0.006330864570254506,
+          "max": 1.0075534206543908,
+          "mean": 0.9985984853093614,
+          "median": 0.9959235635637192,
+          "min": 0.9900147337410385,
+          "n": 5,
+          "range": 0.017538686913352253,
+          "raw": [
+            0.9959235635637192,
+            1.0040022615749447,
+            0.9900147337410385,
+            1.0075534206543908,
+            0.9954984470127134
+          ]
+        }
+      }
+    },
+    "resamples": 10000,
+    "uncertainty": "conditional on same-seed timing repeats; exploratory, not independent search seeds"
+  },
+  "case_analysis": {
+    "darwin": {
+      "bbox": {
+        "rates": {
+          "cv": 0.004512802633579708,
+          "max": 258157.36487847264,
+          "mean": 256264.95436254362,
+          "median": 256027.82633680027,
+          "min": 254628.2418198965,
+          "n": 5,
+          "range": 3529.123058576137,
+          "raw": [
+            256686.1942020917,
+            258157.36487847264,
+            254628.2418198965,
+            255825.14457545694,
+            256027.82633680027
+          ]
+        },
+        "sampled_stage_median_trial_average_ns": [
+          99483.5,
+          55650.5,
+          555385.5,
+          92791.5
+        ]
+      },
+      "reference": {
+        "rates": {
+          "cv": 0.0042229351270913614,
+          "max": 258059.73947020367,
+          "mean": 256355.40235005488,
+          "median": 256479.01381913284,
+          "min": 255102.81510808546,
+          "n": 5,
+          "range": 2956.9243621182104,
+          "raw": [
+            258059.73947020367,
+            255102.81510808546,
+            256844.01841471007,
+            255291.4249381424,
+            256479.01381913284
+          ]
+        },
+        "sampled_stage_median_trial_average_ns": [
+          99512.0,
+          55347.0,
+          555894.0,
+          92667.5
+        ]
+      }
+    },
+    "ff": {
+      "bbox": {
+        "rates": {
+          "cv": 0.015369583770117627,
+          "max": 329265.6207840432,
+          "mean": 321945.3790136781,
+          "median": 319531.6159732157,
+          "min": 315963.35370858875,
+          "n": 5,
+          "range": 13302.267075454467,
+          "raw": [
+            329265.6207840432,
+            326133.25768469315,
+            319531.6159732157,
+            318833.04691784986,
+            315963.35370858875
+          ]
+        },
+        "sampled_stage_median_trial_average_ns": [
+          90481.5,
+          50253.0,
+          435523.0,
+          82569.0
+        ]
+      },
+      "reference": {
+        "rates": {
+          "cv": 0.017358468740018066,
+          "max": 331150.75588769105,
+          "mean": 321838.0511492003,
+          "median": 321162.54136017966,
+          "min": 316230.9737127891,
+          "n": 5,
+          "range": 14919.78217490192,
+          "raw": [
+            331150.75588769105,
+            324375.05799137306,
+            321162.54136017966,
+            316230.9737127891,
+            316270.9267939686
+          ]
+        },
+        "sampled_stage_median_trial_average_ns": [
+          90651.0,
+          50422.5,
+          435100.5,
+          82864.0
+        ]
+      }
+    },
+    "mona": {
+      "bbox": {
+        "rates": {
+          "cv": 0.00918684088596429,
+          "max": 264264.8193193799,
+          "mean": 261429.61972063518,
+          "median": 260369.4688739971,
+          "min": 258087.221489846,
+          "n": 5,
+          "range": 6177.5978295339155,
+          "raw": [
+            264121.0307641508,
+            264264.8193193799,
+            260305.55815580208,
+            260369.4688739971,
+            258087.221489846
+          ]
+        },
+        "sampled_stage_median_trial_average_ns": [
+          108858.0,
+          61801.0,
+          560613.5,
+          82866.0
+        ]
+      },
+      "reference": {
+        "rates": {
+          "cv": 0.009778226949071428,
+          "max": 265202.11030959536,
+          "mean": 261803.25676893283,
+          "median": 262930.99414002366,
+          "min": 258417.5325462059,
+          "n": 5,
+          "range": 6784.577763389447,
+          "raw": [
+            265202.11030959536,
+            263211.3785329891,
+            262930.99414002366,
+            258417.5325462059,
+            259254.26831585003
+          ]
+        },
+        "sampled_stage_median_trial_average_ns": [
+          108915.0,
+          61715.5,
+          560999.0,
+          81169.5
+        ]
+      }
+    }
+  },
+  "process": {
+    "artifact_file_byte_limit": 67108864,
+    "command": [
+      "/home/nick/git/artgen-backend-rust/.cache/evolution-qualification-prepared-20261024/build-100/build/engine-qualification-lab",
+      "--manifest",
+      "/home/nick/git/artgen-backend-rust/.cache/evolution-bench/baseline-20261023T172054.919294Z-95742/fixtures/manifest.json",
+      "--reference-shader",
+      "/home/nick/git/artgen-backend-rust/.cache/evolution-mechanism-20261024/source-115/reference.wgsl",
+      "--variant",
+      "bbox=/home/nick/git/artgen-backend-rust/.cache/evolution-mechanism-20261024/source-115/candidate.wgsl",
+      "--output",
+      "/home/nick/git/artgen-backend-rust/.cache/evolution-mechanism-20261024/train/output",
+      "--pairs",
+      "5",
+      "--batches",
+      "64",
+      "--seed",
+      "7",
+      "--case",
+      "all",
+      "--shader-stage",
+      "mutate",
+      "--diagnostics",
+      "true",
+      "--finalize-overlap",
+      "false"
+    ],
+    "cwd": "/home/nick/git/artgen-backend-rust/.cache/evolution-mechanism-20261024/train/cwd",
+    "process_wall_seconds": 275.0477870190007,
+    "returncode": 0,
+    "started_utc": "2026-10-24T16:15:42.564382+00:00",
+    "status": "completed"
+  },
+  "controller_wall_seconds": 277.39250786499906,
+  "work": {
+    "category_counters": {
+      "diagnostic": {
+        "completed_batches": 384,
+        "completed_evaluations": 6291456,
+        "completed_iterations": 24576,
+        "submitted_batches": 384,
+        "submitted_evaluations": 6291456,
+        "submitted_iterations": 24576
+      },
+      "normal": {
+        "completed_batches": 1920,
+        "completed_evaluations": 31457280,
+        "completed_iterations": 122880,
+        "submitted_batches": 1920,
+        "submitted_evaluations": 31457280,
+        "submitted_iterations": 122880
+      },
+      "qualification": {
+        "completed_batches": 192,
+        "completed_evaluations": 3145728,
+        "completed_iterations": 12288,
+        "submitted_batches": 192,
+        "submitted_evaluations": 3145728,
+        "submitted_iterations": 12288
+      }
+    },
+    "interpretation": "partial counters and source-accounted warmups are lower bounds; resets excluded",
+    "logical_evaluations_lower_bound": 46006272,
+    "read_errors": [],
+    "successful_preparations_lower_bound": 39,
+    "warmup_evaluations_source_accounted_lower_bound": 5111808
+  },
+  "native_errors": 0,
+  "normal_trials": 30,
+  "diagnostics": 6,
+  "qualifications": 3,
+  "direct_checker_started": false,
+  "reserved_started": false,
+  "retries": 0,
+  "extra_samples": 0,
+  "rust_builds": 0,
+  "audit": {
+    "checks_passed": 522,
+    "snapshots": 18,
+    "parent_checks": 72,
+    "cached_integer_mismatches": 0,
+    "max_fitness_delta": 0,
+    "current_reviewer": "parent offline audit using hash-pinned numerical functions from prior independent audit; no fresh independent audit claimed",
+    "preservation": {
+      "root_source_files": 78,
+      "normal_binaries": 3,
+      "comparison_helpers": 2
+    },
+    "code_provenance": {
+      "executed_source_sha256": "72496109a9bf305fca246434df496eafbbf9d2204fe533911f0c02d68c11ca39",
+      "linted_source_sha256": "8c6c8ba09dd87e53e7463a8a733b96adacc29e98bd0143983e71d4994e687466",
+      "result_sha256": "f0d5ad726a689bfa705cee5a005cda43e675e6425f83894774d806e8604b7afe",
+      "changes": "Unused loop-variable rename and datetime.UTC alias only; executed source retained immutable; no numerical function change or remeasurement."
+    }
+  },
+  "artifact_sha256": {
+    ".cache/evolution-mechanism-20261024/spec.json": "b2f4d27f142ed6809ce43385e4b7f7b8636477f37cefb93fcbb70b5c3b3126d4",
+    ".cache/evolution-mechanism-20261024/run-training.py": "5a87a82cbb92a381368d379ec865ce45af2b1632a6637f0f4a41bf3a6cd5ec90",
+    ".cache/evolution-mechanism-20261024/contract/run-campaign.py": "1d0f7b4dd4b3fe901e238eb794cd53a525446d5eca2c15c907a7a8138abcc307",
+    ".cache/evolution-mechanism-20261024/audit-training.json": "f0d5ad726a689bfa705cee5a005cda43e675e6425f83894774d806e8604b7afe",
+    ".cache/evolution-mechanism-20261024/audit-training-executed.py": "72496109a9bf305fca246434df496eafbbf9d2204fe533911f0c02d68c11ca39",
+    ".cache/evolution-mechanism-20261024/audit-training.py": "8c6c8ba09dd87e53e7463a8a733b96adacc29e98bd0143983e71d4994e687466",
+    ".cache/evolution-mechanism-20261024/source-115/freeze.json": "daca29e5c4996eb4fdf497c3dcd0e6b6d0816ca581fc79c2a06651231d5aa327",
+    ".cache/evolution-mechanism-20261024/train-result.json": "7b1f6560d42b6adf3bd09df410aa1cdb3b36cf0e0d52bceb78a9bf83dfb218ff",
+    ".cache/evolution-mechanism-20261024/train/output/summary.json": "58eba89c921effedfedfa660bf1ae7a1d6e4339c20423a690d1d7b73b0bf2f2d",
+    ".cache/evolution-mechanism-20261024/train/output/trials.jsonl": "6a9768d710fca2ca0b0b88c956e576dd6979c5347e7d9e2fa0ccc889320a3ff3"
+  },
+  "limits": [
+    "Same-seed training only; no direct 368-fixture or reserved qualification follows rejection.",
+    "No sampled-stage speedup, execution frequency, actual compiled-instruction saving or hardware limiter established.",
+    "No old A/A timing samples in A/B statistics; background host/GPU isolation unverified."
+  ],
+  "binary_sha256": "97d176f3b5f97c818d19a5e25b2f75e9e587bf1925a948c330b78e2022512ab1"
+}

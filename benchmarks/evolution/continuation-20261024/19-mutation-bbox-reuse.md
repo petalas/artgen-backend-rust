@@ -1,8 +1,23 @@
-# Test exact mutation bbox reuse
+# Reject mutation bbox reuse without a measured gain
 
-Status is SOURCE_FROZEN_UNQUALIFIED. This is one independent mutation experiment;
-no candidate workload has run. Production G1, bin598 and raster AE1 remain
-unchanged, with every evolution parameter fixed. Earlier experiments stay closed.
+Reject this candidate. The completed-engine candidate/reference ratio is
+0.999530, with conditional 95% interval [0.996403, 1.002741]. This shows no
+measurable throughput benefit. Both aggregate gain requirements fail: the
+ratio is not above 1.005 and the lower bound is not above 1. All case regression
+guards pass. No extra samples, 368-fixture checker, reserved run or Rust build
+follows. The ordinary engine and every evolution parameter remain unchanged.
+
+| Case | Paired ratio median | Minimum to maximum | 95% interval for paired geometric mean |
+| --- | ---: | ---: | ---: |
+| ff | 0.999028 | 0.994307 to 1.008228 | 0.995496 to 1.005259 |
+| mona | 0.995924 | 0.990015 to 1.007553 | 0.993386 to 1.004421 |
+| darwin | 0.998241 | 0.991373 to 1.011974 | 0.994065 to 1.006032 |
+
+Each case has five alternating pairs, 64 measured batches per arm, seed 7 and
+eight warmups. All fifteen pairs remain included. Statistics equally weight the
+cases and use 10,000 stratified paired-log bootstrap draws with seed 20261024.
+The interval is conditional on same-seed timing repeats. It does not cover
+independent search seeds, reserved drawings or other hardware.
 
 The [source patch](attempts/18-mutation-bbox-reuse.patch) captures the three original
 packed vertex words in the final per-polygon path of `single_mutate_offspring`.
@@ -19,45 +34,66 @@ reconstructs the candidate without fuzz. Candidate SHA256 is
 `f3dd47b2dc6c82e12c925c4d4cb41b2f5aeda28a016dc246796a61d9d17988dc`.
 No shared allocation, barrier, dispatch or parameter changes. Capturing three
 private words, testing equality and branching may cost more than the removed
-calculation. Guard frequency, compiled instruction savings and speed are unknown.
+calculation. Guard frequency and compiled instruction savings remain unmeasured;
+no helper-level speedup is established.
 
-The [frozen protocol](profiles/mutation-bbox-reuse-spec.json) uses the existing
-prepared release binary and hot mutation installer. Both sources retain G1,
-WG64 and automatic workgroup initialization TRUE. Both arms explicitly disable
-finalization overlap. There are five alternating pairs for each of ff, mona and
-darwin, seed 7, 64 measured batches and eight preparation batches with Stages
-timestamps. Previous A/A64 provides calibration and GPU identities only, not
-fresh noise evidence or samples for this comparison.
+The [frozen protocol](profiles/mutation-bbox-reuse-spec.json), committed before
+execution in d0c0e34, uses the existing immutable prepared release and hot mutation
+installer. Actual source and trial records confirm G1, WG64, automatic mutation
+initialization TRUE and finalization overlap FALSE for both arms. Binning and
+raster sources retain their accepted identities. Earlier A/A64 supplies calibration
+and GPU identities only; it is not fresh noise evidence and contributes no rates.
 
-The [training runner](attempts/20-bbox-training-runner.patch) keeps the existing
-complete-matrix gate. Aggregate ratio must exceed 1.005 and its 95% lower bound
-must exceed 1. Each case median must be at least 0.995 and lower bound at least
-0.99. Statistics retain all pairs, equally weight cases and use 10,000 stratified
-bootstrap draws with seed 20261024. Invalid work closes INCONCLUSIVE. A valid
-training failure closes REJECT. No retry, additional variant, sample or exclusion.
-A training pass requires the actual 368-fixture mutation checker with this source,
-G1 and initialization TRUE, then the fixed reserved-drawing confirmation. This
-single package has a 1,800-second deadline and at most four serial workers.
+The [training runner](attempts/20-bbox-training-runner.patch) preserves the complete
+matrix gate and deadline. The [stage contract](attempts/19-explicit-shader-stage-contract.patch)
+checks bin/raster/mutation provenance and requires explicit G1/TRUE metadata for
+mutation sources. Thirty CPU tests pass, including the original 26 and four
+[stage regressions](attempts/21-shader-stage-contract-tests.patch). Synthetic
+converted wire fixtures are not native mutation qualification. The initial test
+discovery skipped hyphenated filenames; the explicit loader ran all 30. Scoped
+Ruff passes without suppressions. The cohesive phase validator is 62 physical
+lines after explicit stage propagation, preserving its bounded association logic.
 
-The import-only [stage contract](attempts/19-explicit-shader-stage-contract.patch)
-now checks the declared bin, raster or mutation stage. Mutation-source metadata
-must explicitly retain G1 and TRUE initialization; raster/bin sources retain
-null mutation metadata. No rates, parameters, quality, canonical replay, work,
-occupancy, clock or statistical checks change. Thirty CPU tests pass, including
-the original 26 and four [stage regressions](attempts/21-shader-stage-contract-tests.patch).
-The converted wire fixtures are CPU tests, not native mutation qualification.
-The first discovery invocation found no hyphenated tests and is retained; the
-explicit loader ran all 30 successfully. Scoped Ruff passes without suppressions.
-The cohesive phase validator is 62 physical lines after stage propagation, with
-its existing bounded evidence association preserved.
+## Work and verification
 
-Mutation takes less sampled GPU time than raster. A faster bbox helper therefore
-has a limited whole-engine opportunity. The sampled intervals do not establish
-its execution frequency or whole-run share. Completed-engine timing includes
-normal readback and final drain, while setup and oracle exports remain outside.
+One native process exits zero after 275.048 seconds. The controller takes 277.393
+seconds, within its 1,800-second budget. Thirty timing trials complete 31,457,280
+evaluations. Six unscored diagnostics add 6,291,456 and three reference
+qualifications add 3,145,728. Thirty-nine successful preparations account for
+5,111,808 warmup evaluations, giving a source-accounted logical lower bound of
+46,006,272. Full-fitness/reset and other setup GPU work stay separate.
 
-Prove It Works requires exact replay, actual framebuffer RGB-byte-L1 and the
-existing fitness policy before a performance claim. Attack the Premise moved
-this experiment away from the failed cache-layout assumptions. Explain the
-Number keeps source-level redundancy separate from measured savings. Source,
-proofs and bounded CPU evidence are in `.cache/evolution-mechanism-20261024/`.
+The parent offline audit passes all 522 predicates. It reuses the unchanged,
+hash-pinned byte-L1, f32 fitness and independent bootstrap functions from the
+previous independent audit. Eighteen initial/final snapshots reproduce their
+seven-field canonical hashes, both diagnostic arms replay their reference
+qualification, and all 72 parents match exact cached-versus-framebuffer RGB-byte
+L1. Maximum independent f32 fitness difference is zero under the existing 2e-5
+policy. No scalar rerender or new independent reviewer is claimed.
+
+All 30 native rows retain correct work counters, parameters, source identities,
+execution options and 64 Stages samples. Rates equal completed work divided by
+elapsed time. Protected hashes preserve 78 runtime source files, three ordinary
+binaries and two comparison helpers. The raw output inventory remains unchanged.
+The audit retains its actual executed source; subsequent lint-only cleanup changes
+an unused variable name and the equivalent datetime.UTC alias, with no remeasurement.
+
+Completed-engine timing includes readback and final drain. Preparation, source
+installation and oracle export remain outside. Median sampled mutation averages
+are 90.651 versus 90.481 microseconds for ff, 108.915 versus 108.858 for mona and
+99.512 versus 99.484 for darwin. These medians summarize five trial averages, each
+sampling only 64 final iterations. They do not establish a stage speedup, guard
+frequency, hardware limiter or whole-run shares. The compiler may already remove
+the duplicate work, or the guard's cost may offset it; neither cause was measured.
+
+The host reported load average 0.01 on 16 logical CPUs at launch, with no other
+known benchmark/build. WSL host/GPU background isolation is unverified. The
+candidate never advanced to the direct 368-fixture or reserved-data gates and
+has no broader runtime qualification. Its rejection is final for this cohort.
+
+The [machine record](profiles/mutation-bbox-reuse-result.json) and
+`.cache/evolution-mechanism-20261024/` retain rows, snapshots, clocks, the actual
+command, source proof, setup distributions, CPU logs and rerunnable offline checks.
+Prove It Works drove raw state/error recomputation. Attack the Premise selected a
+different mechanism from the failed cache layouts. Explain the Number prevents a
+claim of savings from source-level redundancy alone.
