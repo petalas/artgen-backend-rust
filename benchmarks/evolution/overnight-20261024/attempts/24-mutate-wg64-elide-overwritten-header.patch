@@ -1,0 +1,38 @@
+--- a/src/shaders/mutate.wgsl
++++ b/src/shaders/mutate.wgsl
+@@ -148,7 +148,6 @@
+ // here, then each thread copies from shared memory to its offspring slot.
+ // This avoids lambda redundant global memory reads of the same ~16KB parent.
+ var<workgroup> shared_parent_poly_count: u32;
+-var<workgroup> shared_parent_fitness_bits: u32;
+ var<workgroup> shared_parent_mutation_scale: f32;
+ var<workgroup> shared_parent_polygons: array<Polygon, 1000>;
+ 
+@@ -574,7 +573,6 @@
+     // Thread 0 loads the scalar header fields
+     if offspring_local_idx == 0u {
+         shared_parent_poly_count = poly_count;
+-        shared_parent_fitness_bits = chain_states[chain_id].fitness_bits;
+         shared_parent_mutation_scale = chain_states[chain_id].mutation_scale;
+     }
+ 
+@@ -604,9 +602,7 @@
+         let parent_b = tournament_select(&rng, chain_id, chain_count);
+ 
+         // Initialize working state header from shared memory
+-        working_states[offspring_id].fitness_bits = shared_parent_fitness_bits;
+         working_states[offspring_id].mutation_scale = mutation_scale;
+-        working_states[offspring_id].stagnation_counter = 0u;
+ 
+         // Uniform crossover: parent A from shared memory, parent B from global
+         crossover_uniform_offspring(&rng, parent_b, offspring_id);
+@@ -631,9 +627,7 @@
+ 
+     // Copy parent to offspring slot from shared memory (not global)
+     working_states[offspring_id].polygon_count = poly_count;
+-    working_states[offspring_id].fitness_bits = shared_parent_fitness_bits;
+     working_states[offspring_id].mutation_scale = mutation_scale;
+-    working_states[offspring_id].stagnation_counter = 0u;
+ 
+     // Copy polygons from shared memory
+     for (var i = 0u; i < poly_count; i++) {
