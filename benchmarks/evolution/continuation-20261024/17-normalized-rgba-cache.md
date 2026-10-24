@@ -1,67 +1,93 @@
-# Cache normalized polygon color once per tile
+# Reject normalized RGBA caching for numerical inconsistency
 
-This independent source-only candidate moves the original `unpack_color` call
-into the cooperative polygon loader. Four scalar f32 fields replace the packed
-color word and padding. The pixel helper reconstructs its normalized RGBA vector,
-then retains every original RGB multiplication by 255, inverse-alpha expression
-and blend operand order. It starts directly from accepted AE1. No deferred-load
-changes, alpha-only rewrite or rejected source is composed or reopened.
+Reject the candidate for correctness. The campaign closes INCONCLUSIVE for
+performance: numerical validation stopped before any of the 30 planned timing
+rows. There is no throughput ratio or confidence interval. The worker returned
+one after 41.153 seconds; the controller retained 41.391 seconds. No retry, extra
+sample, source variant, reserved process or checker build follows. Production
+remains accepted AE1 with all evolution parameters unchanged.
 
-The [exact patch](attempts/14-normalized-rgba-cache.patch) changes workgroup-only
-records from 48 to 56 bytes. At 256 records the cache is 14,336 bytes. Unchanged
-reductions and conservatively padded globals bring the bound to 15,440, below
-the existing 16,352-byte request. This adds 2,048 cache bytes. Every consumed
-component has the same unique cooperative writer before the existing barrier.
-Partial-image lanes retain loading and barrier participation. Geometry, AABB and
-edge math, pixel ownership, integer errors, reductions, dispatch, settings and
-RNG remain fixed. The inverse source proof reconstructs every AE1 byte.
+The first ff reference qualification and reference diagnostic pass. The candidate
+diagnostic completes 64 batches but records nine errors: six final canonical
+fields differ and three cached error totals disagree with its own framebuffer.
+Initial canonical fields match exactly. Only final `offspring_errors` remains
+equal; parents, offspring, total errors, framebuffers, update flags and packed
+fitness differ.
 
-The hypothesis is that cooperative decode can remove repeated covered-pixel
-unpacking. Extra shared allocation and field reads, unconditional loader decode
-and compiled float materialization may offset or invalidate it. Source arithmetic
-and layout reasoning establish no hardware limiter, numerical equality or gain.
-Candidate SHA256 is
+| Candidate chain | Cached total | Actual framebuffer RGB L1 | Cached minus actual |
+| --- | ---: | ---: | ---: |
+| 0 | 2,717,604 | 2,717,585 | +19 |
+| 1 | 2,717,851 | 2,717,842 | +9 |
+| 2 | 2,715,810 | 2,715,788 | +22 |
+| 3 | 2,716,615 | 2,716,615 | 0 |
+
+Every reference delta is zero. These integer equalities are independent of the
+existing 2e-5 CPU/GPU fitness tolerance. Native expected fitness derives from the
+cached total and stays within that tolerance. Independently deriving fitness
+from actual framebuffer L1 reveals a chain-2 difference of
+0.00002288818359375, above 0.00002. That is an additional offline finding, not a
+tenth native error. No acceptance threshold was changed.
+
+## Source change and consistency boundary
+
+The [exact patch](attempts/14-normalized-rgba-cache.patch) starts directly from
+AE1. It replaces packed color and padding with four scalar f32 fields. The
+cooperative loader invokes the unchanged `unpack_color` builtin, stores normalized
+RGBA, and the original by-value pixel helper reconstructs its color vector. Every
+original RGB multiplication by 255, inverse-alpha expression and blend operand
+order remains. Geometry, AABB/edge math, ownership, barriers, integer error
+operations, dispatch and RNG are unchanged. It does not compose either rejected
+alpha-only or deferred-load work.
+
+The stride increases from 48 to 56 bytes. A 256-record cache uses 14,336 bytes;
+unchanged reductions and conservatively padded globals bring the bound to
+15,440, below the existing 16,352-byte request. Cache allocation grows by 2,048
+bytes. The source proof reverses exactly to AE1. Candidate SHA256 is
 `892c0019bbfa3f4a2e27388427c7fc7635308591f83b8a1f46dbff8a6856d6c9`.
-Source, generator, inverse, layout and initialization proof are under
-`.cache/evolution-rgba-20261024/source-110/`.
 
-## Frozen comparison
+The override changes the error-scoring pipeline. Initialization and accepted
+framebuffer-update kernels retain their original per-pixel color decoding.
+Selection caches `parent_total - old_dirty + new_dirty`, then the update kernel
+renders accepted geometry without recomputing that total. Therefore the scored
+and committed quantized pixels must agree. The endpoints establish a broken
+consistency contract. They do not identify the first faulty pixel/iteration,
+rounding, reassociation, driver behavior or compiled instruction cause. Identical
+helper text alone cannot prove identical effective output across these paths.
 
-The [new specification](profiles/normalized-rgba-cache-spec.json) fixes one
-candidate, five alternating pairs per ff/mona/darwin, 64 measured batches, seed 7,
-eight fixed preparation batches and ordinary Stages timestamps. The same
-immutable release lab compiles both shaders with the existing production options.
-Overlap stays false, mutation G1 and automatic mutation initialization stay fixed,
-and the full manifest parameters remain unchanged. No Rust rebuild is needed.
+## Method and retained work
 
-The earlier [64-batch control](15-engine-kernel-control.md) is calibration evidence
-only. Its rates do not enter this comparison. It is an earlier same-session
-observation and does not guarantee current background isolation or noise. Current
-preflight confirms the same accepted source files, helpers, binary identities and
-quiet host load. Fresh paired reference/candidate runs supply every A/B sample;
-no prior candidate samples or control correction are used.
+The [frozen protocol](profiles/normalized-rgba-cache-spec.json) declared five
+alternating pairs per image, 64 measured batches, seed 7, eight fixed warmups and
+Stages timestamps, using the existing immutable release binary. The previous
+64-batch A/A result was calibration only. None of its samples enters this test,
+and no new A/A or A/B timing result is claimed. The
+[runner](attempts/15-rgba-cache-training-runner.patch) reuses the hash-pinned
+26-test validator and passes syntax, pure gate controls and scoped Ruff. No Rust
+build or production-code edit was needed.
 
-Training must exceed aggregate ratio 1.005, have aggregate lower 95% bound strictly
-above 1, each paired case median at least 0.995 and each case lower bound at least
-0.99. The pinned paired-log bootstrap uses 10,000 draws, seed 20261024 and equal
-case weights. All pairs remain included. A valid failure stops REJECT; errors,
-incomplete work or numerical failure stop without a performance conclusion.
-There are no retries, extra samples, warmup changes or follow-up source variants.
+Retained work is one reference qualification and two diagnostics, including the
+incorrect candidate: 192 batches, 12,288 iterations and 3,145,728 evaluations.
+The unchanged controller conservatively counts two correctness-true preparations,
+yielding a 3,407,872 logical lower bound. Source order proves that all three
+preparations returned successfully before their initial snapshot and completed
+batches. Its separate refined bound includes 393,216 warmup evaluations and
+3,538,944 logical evaluations. Constructor/full-fitness/reset work stays separate.
+No failed-candidate work is discarded or converted into a scoring rate.
 
-Only a training pass can receive the candidate-specific five-workgroup numerical
-checker. Only that proof can permit three reserved-seed processes, using distinct
-mature drawings and seeds 11/13/17. Their complete matrix must clear the same gate.
-At most four GPU workers share a fresh 1,800-second package clock, with children
-capped at 600 seconds and remaining time minus 30 seconds. No formal policy1 KEEP
-or general driver claim follows.
+The independent measurement audit passes with all failures retained: 238 of 250
+recorded predicates pass, twelve reproduce expected process/candidate failures,
+and none is unexpected. Six snapshots and 24 parent byte-L1/f32 checks confirm
+the mismatch. All 232 protected inputs remain unchanged, including accepted
+Rust/WGSL, normal binaries, helpers, private sources and raw evidence. No scalar
+rerender, additional GPU job or compiled-code inspection was performed.
 
-The [runner](attempts/15-rgba-cache-training-runner.patch) reuses the hash-pinned,
-26-test import-only validator. Only paths, arm label and the new specification
-change; numerical/work/rate/source guards are retained. Syntax, pure gate controls
-and scoped Ruff pass. Preflight verifies 78 accepted Rust/WGSL files, all three
-normal binaries and two helpers. GPU compilation and numerical replay are the
-next gate, not consequences of the source proof.
+The [machine record](profiles/normalized-rgba-cache-result.json) and
+`.cache/evolution-rgba-20261024/` retain source proofs, exact patch reconstruction,
+process logs, clocks, snapshots, accounting and both offline reports. The earlier
+experiments retain their original dispositions. The
+[project learning](../../../docs/LEARNINGS.md) records the scoring/framebuffer
+contract so future performance work keeps the integer checks.
 
-Power of Ten fixes cache capacity and initialization ownership. Prove It Works
-requires actual compiled replay. Explain the Number keeps shared-memory and
-source-operation hypotheses separate from completed-engine throughput.
+Prove It Works required actual framebuffer byte comparisons. Explain the Number
+forbids performance claims from this invalid candidate. Boundary Discipline
+identifies the scored-pixel versus committed-pixel contract.

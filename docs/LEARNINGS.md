@@ -24,6 +24,12 @@ Project-specific gotchas and hard-won knowledge. Search here when you hit unexpe
 **Gotcha**: A reference byte sampled from `Rgba8Unorm` and multiplied by 255 can be slightly noninteger. Casting the sum of absolute errors to `u32` can then undercount. On the mature ff fixture, initialization cached 2,923,600 while its framebuffer's exact byte L1 was 2,966,665. Black-only references did not expose this.
 **Fix**: Round reconstructed reference channels before subtraction in both error shaders. The standalone GPU check now visits every reference byte with empty, opaque and translucent drawings and compares cached, full and framebuffer errors.
 
+### Color-cache changes must preserve committed framebuffer errors
+
+**Context**: A source-only raster experiment cached normalized polygon RGBA in four shared `f32` fields, keeping the blend expressions and evolution parameters unchanged.
+**Gotcha**: On Vulkan/Dozen, its first 64-batch ff diagnostic produced cached-minus-framebuffer RGB L1 deltas of `19,9,22,0`. Six final canonical fields differed from the reference. The error pipeline used the new cache while initialization and accepted-framebuffer rendering retained their original color paths. The retained endpoints do not establish the compiled rounding or instruction cause.
+**Fix**: Keep the accepted packed-color path. Any future cache optimization must compare cached totals with exact byte L1 from its actual committed framebuffers before timing. Fitness derived from the cached total alone is insufficient; the independent raw-L1 fitness also exceeded the existing tolerance on one chain. Preserve both exact integer consistency and reference-state replay. See the [numerical rejection record](../benchmarks/evolution/continuation-20261024/17-normalized-rgba-cache.md).
+
 ### Frozen floating-point metadata needs JSON roundtrip parsing
 
 **Context**: Comparing frozen geometry percentiles with benchmark trial metadata.

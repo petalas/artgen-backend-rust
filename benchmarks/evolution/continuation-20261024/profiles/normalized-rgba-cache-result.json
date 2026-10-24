@@ -1,0 +1,510 @@
+{
+  "protocol": "normalized-rgba-cache-20261024-v1",
+  "closure": {
+    "campaign": "INCONCLUSIVE",
+    "source": "REJECT_NUMERICAL",
+    "performance_verdict": "NONE; zero timing trials",
+    "native_status": "failed",
+    "native_errors": 9,
+    "native_GPU_workers": 1,
+    "candidate_diagnostics": 1,
+    "reference_diagnostics": 1,
+    "reference_qualifications": 1,
+    "timing_rows": 0,
+    "reserved_workers": 0,
+    "Rust_builds": 0,
+    "retries": 0,
+    "extra_samples": 0,
+    "production_changed": false,
+    "controller_logical_evaluations_lower_bound": 3407872,
+    "runtime_seconds": 41.39077757499763,
+    "closed_utc": "2026-10-24T15:30:23.232469+00:00",
+    "raw_result_sha256": "2436ec74d97d372930416ea9e9faea594c3794e6daf10cc47de40ac37b8eb289",
+    "audit": "pending"
+  },
+  "raw_supervisor": {
+    "adoption": false,
+    "controller_wall_seconds": 41.39077757499763,
+    "deadline": 32652.1091955,
+    "errors": [
+      "Invalid: training process failed"
+    ],
+    "monotonic_start": 30852.1091955,
+    "partial_work": {
+      "category_counters": {
+        "diagnostic": {
+          "completed_batches": 128,
+          "completed_evaluations": 2097152,
+          "completed_iterations": 8192,
+          "submitted_batches": 128,
+          "submitted_evaluations": 2097152,
+          "submitted_iterations": 8192
+        },
+        "qualification": {
+          "completed_batches": 64,
+          "completed_evaluations": 1048576,
+          "completed_iterations": 4096,
+          "submitted_batches": 64,
+          "submitted_evaluations": 1048576,
+          "submitted_iterations": 4096
+        }
+      },
+      "interpretation": "partial counters and source-accounted warmups are lower bounds; resets excluded",
+      "logical_evaluations_lower_bound": 3407872,
+      "read_errors": [],
+      "successful_preparations_lower_bound": 2,
+      "warmup_evaluations_source_accounted_lower_bound": 262144
+    },
+    "process": {
+      "artifact_file_byte_limit": 67108864,
+      "command": [
+        "/home/nick/git/artgen-backend-rust/.cache/evolution-qualification-prepared-20261024/build-100/build/engine-qualification-lab",
+        "--manifest",
+        "/home/nick/git/artgen-backend-rust/.cache/evolution-bench/baseline-20261023T172054.919294Z-95742/fixtures/manifest.json",
+        "--reference-shader",
+        "/home/nick/git/artgen-backend-rust/.cache/evolution-profiling-20261024/build-finalize-v1/source/src/shaders/rasterize_error.wgsl",
+        "--variant",
+        "rgba=/home/nick/git/artgen-backend-rust/.cache/evolution-rgba-20261024/source-110/candidate.wgsl",
+        "--output",
+        "/home/nick/git/artgen-backend-rust/.cache/evolution-rgba-20261024/train/output",
+        "--pairs",
+        "5",
+        "--batches",
+        "64",
+        "--seed",
+        "7",
+        "--case",
+        "all",
+        "--shader-stage",
+        "raster",
+        "--diagnostics",
+        "true",
+        "--finalize-overlap",
+        "false"
+      ],
+      "cwd": "/home/nick/git/artgen-backend-rust/.cache/evolution-rgba-20261024/train/cwd",
+      "process_wall_seconds": 41.15272340199954,
+      "returncode": 1,
+      "started_utc": "2026-10-24T15:25:41.263790+00:00",
+      "status": "failed"
+    },
+    "protocol": "normalized-rgba-cache-20261024-v1",
+    "reserved_started": false,
+    "spec_sha256": "1f883edf0435c11441a3faf9c514f060a8149db0aee1e93a0f8accebf505f573",
+    "started_utc": "2026-10-24T15:25:41.057563+00:00",
+    "status": "INCONCLUSIVE",
+    "validator_sha256": "4f73cbbe74204fa128239cbffd9f80bf967284260ab3a1a820e4deea3794839b",
+    "work": {
+      "category_counters": {
+        "diagnostic": {
+          "completed_batches": 128,
+          "completed_evaluations": 2097152,
+          "completed_iterations": 8192,
+          "submitted_batches": 128,
+          "submitted_evaluations": 2097152,
+          "submitted_iterations": 8192
+        },
+        "qualification": {
+          "completed_batches": 64,
+          "completed_evaluations": 1048576,
+          "completed_iterations": 4096,
+          "submitted_batches": 64,
+          "submitted_evaluations": 1048576,
+          "submitted_iterations": 4096
+        }
+      },
+      "interpretation": "partial counters and source-accounted warmups are lower bounds; resets excluded",
+      "logical_evaluations_lower_bound": 3407872,
+      "read_errors": [],
+      "successful_preparations_lower_bound": 2,
+      "warmup_evaluations_source_accounted_lower_bound": 262144
+    }
+  },
+  "native_summary": {
+    "schema": "engine-lab-prepared-v2",
+    "status": "failed",
+    "error_count": 9,
+    "errors": [
+      "diagnostic failed: [\"final parents differs from qualified reference\", \"final offspring differs from qualified reference\", \"final parent_total_errors differs from qualified reference\", \"final parent_framebuffers differs from qualified reference\", \"final chain_update_flags differs from qualified reference\", \"final fitness_packed differs from qualified reference\", \"chain 0: L1=2717585, cached=2717604, fitness=97.56322, expected=97.56322, packed=1120084062\", \"chain 1: L1=2717842, cached=2717851, fitness=97.562996, expected=97.562996, packed=1120084033\", \"chain 2: L1=2715788, cached=2715810, fitness=97.56475, expected=97.56476, packed=1120084263\"]"
+    ],
+    "config": {
+      "manifest": "/home/nick/git/artgen-backend-rust/.cache/evolution-bench/baseline-20261023T172054.919294Z-95742/fixtures/manifest.json",
+      "reference_shader": "/home/nick/git/artgen-backend-rust/.cache/evolution-profiling-20261024/build-finalize-v1/source/src/shaders/rasterize_error.wgsl",
+      "variants": [
+        [
+          "rgba",
+          "/home/nick/git/artgen-backend-rust/.cache/evolution-rgba-20261024/source-110/candidate.wgsl"
+        ]
+      ],
+      "pairs": 5,
+      "batches": 64,
+      "seed": 7,
+      "case": "all",
+      "output": "/home/nick/git/artgen-backend-rust/.cache/evolution-rgba-20261024/train/output",
+      "shader_stage": "raster",
+      "diagnostics": true,
+      "mutate_zero_initialize": null,
+      "finalize_overlap": false
+    },
+    "sources": [
+      {
+        "finalize_overlap": false,
+        "shader_stage": "raster",
+        "mutate_group_size": null,
+        "mutate_options": null,
+        "name": "reference",
+        "path": "/home/nick/git/artgen-backend-rust/.cache/evolution-profiling-20261024/build-finalize-v1/source/src/shaders/rasterize_error.wgsl",
+        "sha256": "ae1fd75fdc118debf2a50cbad699e513b5af0dcbfa3754b45966f7a8ee925af3"
+      },
+      {
+        "finalize_overlap": false,
+        "shader_stage": "raster",
+        "mutate_group_size": null,
+        "mutate_options": null,
+        "name": "rgba",
+        "path": "/home/nick/git/artgen-backend-rust/.cache/evolution-rgba-20261024/source-110/candidate.wgsl",
+        "sha256": "892c0019bbfa3f4a2e27388427c7fc7635308591f83b8a1f46dbff8a6856d6c9"
+      }
+    ],
+    "fixture_manifest_sha256": "82dfe207ecd20ae964edf4528f1a90fe4176b21f4ac0911b305da1e1edf1c5aa",
+    "warmup_batches": 8,
+    "setup_timing_boundaries": "Monotonic host elapsed seconds. Shared per-case device_initialization_seconds brackets only block_on(GpuEvolver::new); source_precompile_seconds brackets only precompile_sources, including its existing zero-warmup seeded setup, source installs and error-scope completion. Per-row source_install_seconds brackets only ShaderStage::install, including existing cache lookup/drain and finalize-mode selection; preparation_seconds brackets the whole prepare_seeded_benchmark, including seed/full fitness/reset, fixed warmups, existing drain and final seeded reset. None means the operation was not reached; a returned failure retains its elapsed duration. Execution checks, qualification and extra CPU verification/snapshots/hashes/serialization are harness work outside these startup brackets. Qualification TrialRecord.setup_seconds remains its inherited unmeasured placeholder, not application startup. These fields are separate from measured throughput and are not a whole-application startup total.",
+    "timestamp_mode": "stages",
+    "completed_trials": 0,
+    "expected_trials": 30,
+    "completed_diagnostics": 2,
+    "expected_diagnostics": 6,
+    "diagnostic_counters": {
+      "submitted_iterations": 8192,
+      "submitted_evaluations": 2097152,
+      "submitted_batches": 128,
+      "completed_iterations": 8192,
+      "completed_evaluations": 2097152,
+      "completed_batches": 128
+    },
+    "cases": [
+      {
+        "device_initialization_seconds": 15.246514116,
+        "source_precompile_seconds": 0.932937429,
+        "finalize_overlap": false,
+        "case_id": "ff",
+        "mutate_group_size": 1,
+        "mutate_zero_initialize_workgroup_memory": true,
+        "params": {
+          "addPolygonProb": 0.5,
+          "removePolygonProb": 0.000862,
+          "reorderPolygonProb": 0.002,
+          "offsetPolygonProb": 0.00565,
+          "movePointProb": 0.000294,
+          "removePointProb": 0.002,
+          "microAdjustProb": 0.002786,
+          "changeColorProb": 0.000473,
+          "adjustBrightnessProb": 0.000473,
+          "adjustSaturationProb": 0.001333,
+          "scalePolygonProb": 0.00565,
+          "rotatePolygonProb": 0.002,
+          "adjacentSwapProb": 0.002,
+          "mergePolygonProb": 0.000667,
+          "clonePolygonProb": 0.071429,
+          "mediumMoveProb": 0.004,
+          "swapColorsProb": 0.00565,
+          "movePointMaxDelta": 0.113,
+          "microAdjustDelta": 0.001,
+          "newPointMaxDistance": 0.005,
+          "offsetPolygonMagnitude": 0.01,
+          "mediumMoveDelta": 0.03,
+          "mergeCentroidThreshold": 0.15,
+          "mergeColorThreshold": 0.2,
+          "minAlpha": 10,
+          "maxAlpha": 65,
+          "minPolygons": 1,
+          "maxPolygons": 1000,
+          "crossoverProb": 0.2,
+          "spatialCrossoverWeight": 0.66,
+          "tournamentSize": 3,
+          "chainCount": 4,
+          "lambda": 64,
+          "singleMutationMode": true,
+          "adaptiveMutation": false,
+          "rasterizeWg": [
+            32,
+            16
+          ],
+          "gpuBatchIters": 64
+        },
+        "params_sha256": "755575d7c391eaa45ba8358724d0c66ae499c445a388badb5d465fb07a824f60",
+        "initial_state_sha256": "34b1674c05cb0eed4b94e17ea7d17249f07b8880a8feaa78faefdc461c0f4046",
+        "final_state_sha256": "3c571799af41f45827669f46919c1e0d453ae0b077b418e3debf487b47b80619",
+        "gpu": {
+          "name": "Microsoft Direct3D12 (NVIDIA GeForce RTX 5090)",
+          "vendor": 4318,
+          "device": 11141,
+          "device_type": "DiscreteGpu",
+          "backend": "Vulkan",
+          "driver": "Dozen",
+          "driver_info": "Mesa 25.3.6 - kisak-mesa PPA",
+          "timestamp_period_ns": 1.0,
+          "allocated_chains": 1024,
+          "offspring_capacity": 8371,
+          "max_storage_buffer_binding_size": 134217728,
+          "max_buffer_size": 134217728
+        }
+      }
+    ],
+    "rates": []
+  },
+  "diagnostics": [
+    {
+      "finalize_overlap": false,
+      "mutate_group_size": 1,
+      "mutate_zero_initialize_workgroup_memory": true,
+      "schema": "engine-lab-prepared-v2",
+      "case_id": "ff",
+      "variant": "reference",
+      "shader_stage": "raster",
+      "timing_eligible": false,
+      "initial_max_tile_occupancy": 63,
+      "validation_max_tile_occupancy": 74,
+      "candidate": "reference",
+      "pair": 0,
+      "order": 0,
+      "seed": 7,
+      "batches": 64,
+      "warmup_batches": 8,
+      "setup_timing_boundaries": "Monotonic host elapsed seconds. Shared per-case device_initialization_seconds brackets only block_on(GpuEvolver::new); source_precompile_seconds brackets only precompile_sources, including its existing zero-warmup seeded setup, source installs and error-scope completion. Per-row source_install_seconds brackets only ShaderStage::install, including existing cache lookup/drain and finalize-mode selection; preparation_seconds brackets the whole prepare_seeded_benchmark, including seed/full fitness/reset, fixed warmups, existing drain and final seeded reset. None means the operation was not reached; a returned failure retains its elapsed duration. Execution checks, qualification and extra CPU verification/snapshots/hashes/serialization are harness work outside these startup brackets. Qualification TrialRecord.setup_seconds remains its inherited unmeasured placeholder, not application startup. These fields are separate from measured throughput and are not a whole-application startup total.",
+      "timestamp_mode": "stages",
+      "source_install_seconds": 1.3636e-05,
+      "preparation_seconds": 0.864015718,
+      "elapsed_seconds": 0.0,
+      "drain_seconds": 0.0,
+      "counters": {
+        "submitted_iterations": 4096,
+        "submitted_evaluations": 1048576,
+        "submitted_batches": 64,
+        "completed_iterations": 4096,
+        "completed_evaluations": 1048576,
+        "completed_batches": 64
+      },
+      "timestamp_samples": 64,
+      "sampled_gpu_stage_totals_ns": [
+        5776640.0,
+        3195200.0,
+        27502592.0,
+        5229184.0
+      ],
+      "initial_state_sha256": "34b1674c05cb0eed4b94e17ea7d17249f07b8880a8feaa78faefdc461c0f4046",
+      "final_state_sha256": "3c571799af41f45827669f46919c1e0d453ae0b077b418e3debf487b47b80619",
+      "params_sha256": "755575d7c391eaa45ba8358724d0c66ae499c445a388badb5d465fb07a824f60",
+      "source_sha256": "ae1fd75fdc118debf2a50cbad699e513b5af0dcbfa3754b45966f7a8ee925af3",
+      "fixture_manifest_sha256": "82dfe207ecd20ae964edf4528f1a90fe4176b21f4ac0911b305da1e1edf1c5aa",
+      "gpu": {
+        "name": "Microsoft Direct3D12 (NVIDIA GeForce RTX 5090)",
+        "vendor": 4318,
+        "device": 11141,
+        "device_type": "DiscreteGpu",
+        "backend": "Vulkan",
+        "driver": "Dozen",
+        "driver_info": "Mesa 25.3.6 - kisak-mesa PPA",
+        "timestamp_period_ns": 1.0,
+        "allocated_chains": 1024,
+        "offspring_capacity": 8371,
+        "max_storage_buffer_binding_size": 134217728,
+        "max_buffer_size": 134217728
+      },
+      "control": {
+        "new_best_found": 1,
+        "best_chain_id": 1,
+        "best_fitness_bits": 1120085377
+      },
+      "correctness": true,
+      "error_count": 0,
+      "errors": [],
+      "evals_per_second": null
+    },
+    {
+      "finalize_overlap": false,
+      "mutate_group_size": 1,
+      "mutate_zero_initialize_workgroup_memory": true,
+      "schema": "engine-lab-prepared-v2",
+      "case_id": "ff",
+      "variant": "rgba",
+      "shader_stage": "raster",
+      "timing_eligible": false,
+      "initial_max_tile_occupancy": 63,
+      "validation_max_tile_occupancy": 72,
+      "candidate": "rgba",
+      "pair": 0,
+      "order": 0,
+      "seed": 7,
+      "batches": 64,
+      "warmup_batches": 8,
+      "setup_timing_boundaries": "Monotonic host elapsed seconds. Shared per-case device_initialization_seconds brackets only block_on(GpuEvolver::new); source_precompile_seconds brackets only precompile_sources, including its existing zero-warmup seeded setup, source installs and error-scope completion. Per-row source_install_seconds brackets only ShaderStage::install, including existing cache lookup/drain and finalize-mode selection; preparation_seconds brackets the whole prepare_seeded_benchmark, including seed/full fitness/reset, fixed warmups, existing drain and final seeded reset. None means the operation was not reached; a returned failure retains its elapsed duration. Execution checks, qualification and extra CPU verification/snapshots/hashes/serialization are harness work outside these startup brackets. Qualification TrialRecord.setup_seconds remains its inherited unmeasured placeholder, not application startup. These fields are separate from measured throughput and are not a whole-application startup total.",
+      "timestamp_mode": "stages",
+      "source_install_seconds": 1.2464e-05,
+      "preparation_seconds": 0.867553977,
+      "elapsed_seconds": 0.0,
+      "drain_seconds": 0.0,
+      "counters": {
+        "submitted_iterations": 4096,
+        "submitted_evaluations": 1048576,
+        "submitted_batches": 64,
+        "completed_iterations": 4096,
+        "completed_evaluations": 1048576,
+        "completed_batches": 64
+      },
+      "timestamp_samples": 64,
+      "sampled_gpu_stage_totals_ns": [
+        5730496.0,
+        3161120.0,
+        33266304.0,
+        5385632.0
+      ],
+      "initial_state_sha256": "34b1674c05cb0eed4b94e17ea7d17249f07b8880a8feaa78faefdc461c0f4046",
+      "final_state_sha256": "164c2f3e2b0146d18f07264fa399a269e4fddf0b7ee30bee3a467e4b48ea6f36",
+      "params_sha256": "755575d7c391eaa45ba8358724d0c66ae499c445a388badb5d465fb07a824f60",
+      "source_sha256": "892c0019bbfa3f4a2e27388427c7fc7635308591f83b8a1f46dbff8a6856d6c9",
+      "fixture_manifest_sha256": "82dfe207ecd20ae964edf4528f1a90fe4176b21f4ac0911b305da1e1edf1c5aa",
+      "gpu": {
+        "name": "Microsoft Direct3D12 (NVIDIA GeForce RTX 5090)",
+        "vendor": 4318,
+        "device": 11141,
+        "device_type": "DiscreteGpu",
+        "backend": "Vulkan",
+        "driver": "Dozen",
+        "driver_info": "Mesa 25.3.6 - kisak-mesa PPA",
+        "timestamp_period_ns": 1.0,
+        "allocated_chains": 1024,
+        "offspring_capacity": 8371,
+        "max_storage_buffer_binding_size": 134217728,
+        "max_buffer_size": 134217728
+      },
+      "control": {
+        "new_best_found": 1,
+        "best_chain_id": 2,
+        "best_fitness_bits": 1120084263
+      },
+      "correctness": false,
+      "error_count": 9,
+      "errors": [
+        "final parents differs from qualified reference",
+        "final offspring differs from qualified reference",
+        "final parent_total_errors differs from qualified reference",
+        "final parent_framebuffers differs from qualified reference",
+        "final chain_update_flags differs from qualified reference",
+        "final fitness_packed differs from qualified reference",
+        "chain 0: L1=2717585, cached=2717604, fitness=97.56322, expected=97.56322, packed=1120084062",
+        "chain 1: L1=2717842, cached=2717851, fitness=97.562996, expected=97.562996, packed=1120084033",
+        "chain 2: L1=2715788, cached=2715810, fitness=97.56475, expected=97.56476, packed=1120084263"
+      ],
+      "evals_per_second": null
+    }
+  ],
+  "audit": {
+    "adoption": false,
+    "binary_sha256": "97d176f3b5f97c818d19a5e25b2f75e9e587bf1925a948c330b78e2022512ab1",
+    "campaign_outcome": "INCONCLUSIVE",
+    "candidate_correctness": "INCORRECT",
+    "changed_protected_input_paths": [],
+    "check_counts": {
+      "expected_failures": 12,
+      "failed": 12,
+      "passed": 238,
+      "total": 250,
+      "unexpected_failures": 0
+    },
+    "distinct_protected_input_paths": 232,
+    "eligible_timing_rows": 0,
+    "measurement_audit": "PASS",
+    "operations": "Offline bounded reads, SHA256, strict JSON, AST inspection without module execution, RGB byte and f32 arithmetic, source-order inspection, git HEAD/status metadata. Writes only result-audit-111.",
+    "parent_RGB_L1_f32_checks": 24,
+    "prohibited_operations_performed": {
+      "Cargo": 0,
+      "GPU": 0,
+      "agents": 0,
+      "commits": 0,
+      "native": 0,
+      "new_tests": 0,
+      "process_stops": 0,
+      "raw_edits": 0,
+      "rerenders": 0,
+      "reruns": 0,
+      "root_edits": 0
+    },
+    "refined_work": {
+      "category_counters": {
+        "diagnostic": {
+          "completed_batches": 128,
+          "completed_evaluations": 2097152,
+          "completed_iterations": 8192,
+          "submitted_batches": 128,
+          "submitted_evaluations": 2097152,
+          "submitted_iterations": 8192
+        },
+        "qualification": {
+          "completed_batches": 64,
+          "completed_evaluations": 1048576,
+          "completed_iterations": 4096,
+          "submitted_batches": 64,
+          "submitted_evaluations": 1048576,
+          "submitted_iterations": 4096
+        }
+      },
+      "conservative_controller_lower_bound": {
+        "logical_evaluations_lower_bound": 3407872,
+        "successful_preparations_lower_bound": 2,
+        "warmup_evaluations_source_accounted_lower_bound": 262144
+      },
+      "explanation": "Each completed qualification/reference/candidate diagnostic passed its fixed eight-batch preparation, drain, seeded reset and initial snapshot before 64 recorded batches. Controller counts only correctness-true records and conservatively omits candidate preparation. Both counts retain all failed-candidate completed work. Constructor, seed/full-fitness, reset and other GPU operations are excluded; not all hardware operations.",
+      "refined_source_accounting": {
+        "logical_evaluations_lower_bound": 3538944,
+        "proved_successful_preparations": 3,
+        "warmup_batches": 24,
+        "warmup_evaluations": 393216,
+        "warmup_iterations": 1536
+      },
+      "retained_completed_batches": 192,
+      "retained_completed_evaluations": 3145728,
+      "retained_completed_iterations": 12288,
+      "scored_evaluations": 0
+    },
+    "saved_snapshots": 6,
+    "schema": "rgba-result-offline-audit-111-v1",
+    "scope": "One frozen RGBA train invocation only. Prior AA64 is calibration only. Closed cohort permits no correction, variant, retry, extra samples, reserved work or adoption.",
+    "source_sha256": "892c0019bbfa3f4a2e27388427c7fc7635308591f83b8a1f46dbff8a6856d6c9",
+    "spec_sha256": "1f883edf0435c11441a3faf9c514f060a8149db0aee1e93a0f8accebf505f573",
+    "statistics": null,
+    "audit_sha256": "96ce2100f2068a58cb897b428556f457471be250d95f21b5fadc1aec7ca2fbfd",
+    "artifacts_sha256": "ce23b0efb203278d5a8c2b5226901ee51112220ef347d98507e40d5c9b55d895"
+  },
+  "diagnosis": "pending",
+  "source_diagnosis": {
+    "changed_path": "error scoring caches normalized RGBA in shared f32",
+    "unchanged_paths": [
+      "initial framebuffer kernel",
+      "accepted framebuffer update kernel"
+    ],
+    "compiled_cause": "UNPROVEN; endpoints cannot identify rounding/reassociation/driver instructions or first faulty iteration",
+    "cache_minus_raw_RGB_L1": [
+      19,
+      9,
+      22,
+      0
+    ],
+    "cached_totals": [
+      2717604,
+      2717851,
+      2715810,
+      2716615
+    ],
+    "actual_RGB_L1": [
+      2717585,
+      2717842,
+      2715788,
+      2716615
+    ],
+    "chain2_fitness_difference_from_raw_L1": 2.288818359375e-05,
+    "fitness_tolerance": 2e-05,
+    "source_analysis_report_sha256": "796f6d4d67ef7dd773dd350e3a68c6db36addc1d45ad6aef47c60135ee1e602a",
+    "source_analysis_snapshot_proof_sha256": "a7543505c2275d69b336c5cabf79a748e2f3fdfb8fc86f73d382c3fbcecfe49d"
+  }
+}
