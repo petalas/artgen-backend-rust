@@ -40,4 +40,8 @@ The full-size integration gate has passed on the corrected reference release:
 4,194,304 completed evaluations, 128 received publications, exact parameters,
 zero errors and matching endpoint state/error checks. The report sets
 `timing_eligible: false`. See [the retained evidence and rerun command](acceptance-result.md#corrected-full-size-integration-passed).
-Fresh live A/A qualification is still pending.
+The operator subsequently completed ten valid A/A workers. Throughput
+equivalence passed; preview-latency equivalence was inconclusive at the unchanged
+1% bound, so A/B remained unrun. See the
+[separate latency diagnosis](live-latency-diagnosis.md). The protocol and failed
+qualification result remain unchanged.

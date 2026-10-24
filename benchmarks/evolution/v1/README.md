@@ -157,10 +157,12 @@ before A/B. Read `summary.json` for the decision; a completed valid run
 does not imply that its timing gates passed. Existing output paths are refused.
 
 The corrected protocol-2 full-size integration check passed with exact
-parameters, all 128 receipts and endpoint checks. For the next quiet-machine
-measurement, the [result notes](acceptance-result.md#next-measurement) provide
-a frozen-input script that starts fresh A/A pairs and a new package clock.
-The failed protocol-1 live package remains closed.
+parameters, all 128 receipts and endpoint checks. The operator then completed
+the [quiet-machine A/A package](acceptance-result.md#protocol-2-aa-completed-latency-equivalence-inconclusive).
+All ten workers passed correctness; throughput equivalence passed, but preview
+latency equivalence did not. The candidate comparison remained unrun.
+The separate [latency diagnosis](live-latency-diagnosis.md) retains that result
+and investigates pre-send variation without changing the frozen threshold.
 
 ## Numerical checks
 

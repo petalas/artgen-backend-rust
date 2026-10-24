@@ -577,9 +577,16 @@ fn stats_message(s: &WsState) -> serde_json::Value {
 fn send_ws_update(
     ws: &mut tungstenite::WebSocket<std::net::TcpStream>,
     message: String,
+    mut trace: Option<&mut live_acceptance::SenderTurn>,
 ) -> tungstenite::Result<()> {
     ws.get_ref().set_nonblocking(false)?;
+    if let Some(row) = trace.as_deref_mut() {
+        row.write_begin_ns = Some(row.now());
+    }
     let sent = ws.send(tungstenite::Message::Text(message.into()));
+    if let Some(row) = trace {
+        row.write_return_ns = Some(row.now());
+    }
     let restored = ws.get_ref().set_nonblocking(true);
     sent?;
     restored?;
@@ -596,6 +603,19 @@ fn ws_handle_client_mode(
     acceptance: Option<Arc<live_acceptance::Session>>,
 ) {
     let peer = stream.peer_addr().ok();
+    let mut sender_trace = match acceptance
+        .as_ref()
+        .map(live_acceptance::Session::sender_trace)
+        .transpose()
+    {
+        Ok(trace) => trace.flatten(),
+        Err(error) => {
+            if let Some(session) = &acceptance {
+                session.fail(error.to_string());
+            }
+            return;
+        }
+    };
 
     // Configure WebSocket to accept large frames (up to 20MB for image uploads)
     let mut config = tungstenite::protocol::WebSocketConfig::default();
@@ -696,9 +716,25 @@ fn ws_handle_client_mode(
         if let Some(session) = &acceptance {
             acceptance_turns += 1;
             if session.expired() || acceptance_turns > 8192 {
+                if acceptance_turns > 8192 && sender_trace.is_some() {
+                    session.fail("trace sender capacity exhausted");
+                }
                 break;
             }
         }
+        let mut turn_trace = match sender_trace
+            .as_mut()
+            .map(|trace| trace.begin_turn())
+            .transpose()
+        {
+            Ok(row) => row,
+            Err(error) => {
+                if let Some(session) = &acceptance {
+                    session.fail(error.to_string());
+                }
+                break;
+            }
+        };
         // 1. Drain incoming commands from client
         loop {
             match ws.read() {
@@ -708,7 +744,7 @@ fn ws_handle_client_mode(
                         if let Some(reply_msg) = reply {
                             // Send reply in blocking mode
                             let result = if acceptance.is_some() {
-                                send_ws_update(&mut ws, reply_msg.to_string())
+                                send_ws_update(&mut ws, reply_msg.to_string(), None)
                             } else {
                                 ws.get_ref().set_nonblocking(false).ok();
                                 let result = ws
@@ -765,23 +801,50 @@ fn ws_handle_client_mode(
 
         // 2. Throttle: sleep to cap at ~30 stats updates/sec
         let since_last_send = last_send_time.elapsed();
+        if let Some(row) = turn_trace.as_deref_mut() {
+            row.poll_target_ns = Some(row.at(last_send_time + stats_interval));
+            row.requested_sleep_ns = Some(
+                u64::try_from(stats_interval.saturating_sub(since_last_send).as_nanos())
+                    .expect("bounded live poll sleep"),
+            );
+            row.sleep_begin_ns = Some(row.now());
+        }
         if since_last_send < stats_interval {
             thread::sleep(stats_interval - since_last_send);
         }
         last_send_time = Instant::now();
+        if let Some(row) = turn_trace.as_deref_mut() {
+            row.wake_ns = Some(row.at(last_send_time));
+        }
 
         // 3. Read current state and send appropriate message
         let mut live_ticket = None;
         let msg_string = {
+            if let Some(row) = turn_trace.as_deref_mut() {
+                row.ws_lock_attempt_ns = Some(row.now());
+            }
             let mut s = lock.lock().unwrap();
+            if let Some(row) = turn_trace.as_deref_mut() {
+                row.ws_lock_acquired_ns = Some(row.now());
+            }
 
             if let Some(session) = &acceptance {
-                match session.message(&mut s, &mut last_image_send_time) {
+                match session.message(&mut s, &mut last_image_send_time, turn_trace.as_deref_mut()) {
                     Ok(Some((message, ticket))) => {
                         live_ticket = Some(ticket);
                         message
                     }
-                    Ok(None) => stats_message(&s).to_string(),
+                    Ok(None) => {
+                        let message = stats_message(&s);
+                        if let Some(row) = turn_trace.as_deref_mut() {
+                            row.message_value_done_ns = Some(row.now());
+                        }
+                        let message = message.to_string();
+                        if let Some(row) = turn_trace.as_deref_mut() {
+                            row.wire_json_done_ns = Some(row.now());
+                        }
+                        message
+                    }
                     Err(error) => {
                         session.fail(error.to_string());
                         break;
@@ -879,7 +942,7 @@ fn ws_handle_client_mode(
         };
 
         // Send in blocking mode to ensure delivery
-        let result = send_ws_update(&mut ws, msg_string);
+        let result = send_ws_update(&mut ws, msg_string, turn_trace);
         if let Err(error) = result {
             if let Some(session) = &acceptance {
                 session.fail_connection(error);

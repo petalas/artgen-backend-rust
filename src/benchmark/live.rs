@@ -36,6 +36,11 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
+#[path = "live_latency.rs"]
+mod latency;
+use latency::PublicationTrace;
+pub(crate) use latency::SenderTurn;
+
 const MAX_BATCHES: u32 = 1024;
 const MAX_PUBLICATIONS: usize = 512;
 const MAX_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
@@ -53,6 +58,8 @@ pub struct Spec {
     pub warmup_batches: u32,
     pub publish_every: u32,
     pub deadline_ms: u32,
+    #[serde(skip)]
+    latency_trace: bool,
     #[serde(skip)]
     manifest: PathBuf,
     #[serde(skip)]
@@ -73,6 +80,7 @@ impl Spec {
             warmup_batches: 2,
             publish_every: 2,
             deadline_ms: 300,
+            latency_trace: false,
             manifest: PathBuf::new(),
             output: PathBuf::new(),
         };
@@ -94,6 +102,10 @@ impl Spec {
                 "--warmup" => spec.warmup_batches = pair[1].parse()?,
                 "--publish-every" => spec.publish_every = pair[1].parse()?,
                 "--deadline-ms" => spec.deadline_ms = pair[1].parse()?,
+                "--latency-trace" => {
+                    ensure!(pair[1] == "v1", "latency trace version must be v1");
+                    spec.latency_trace = true;
+                }
                 flag => bail!("unknown live option {flag}"),
             }
         }
@@ -233,6 +245,7 @@ struct Payload {
 }
 
 struct Ledger {
+    trace: Option<latency::Trace>,
     start: Option<Instant>,
     records: Vec<Publication>,
     queue: VecDeque<(usize, Payload)>,
@@ -241,6 +254,41 @@ struct Ledger {
     received_bytes: usize,
     errors: Vec<String>,
     received_count: usize,
+}
+
+impl Ledger {
+    fn publication_slot(
+        &self,
+        spec: &Spec,
+        state: &crate::WsState,
+        counters: BenchmarkCounters,
+        due_at: Instant,
+    ) -> Result<(usize, usize, f64)> {
+        let sequence = self.records.len() + 1;
+        ensure!(
+            sequence <= spec.publication_count(),
+            "publication schedule exhausted"
+        );
+        let expected = sequence as u64 * u64::from(spec.publish_every);
+        ensure!(
+            counters.completed_batches == expected,
+            "publication completed-work origin skipped"
+        );
+        let bytes = state.drawing_json.len() + state.best_png.len();
+        ensure!(
+            bytes <= MAX_PAYLOAD_BYTES,
+            "publication payload exceeds byte limit"
+        );
+        ensure!(
+            self.queue_bytes + bytes <= MAX_RETAINED_BYTES,
+            "publication queue byte limit"
+        );
+        let due_ms = due_at
+            .duration_since(self.start.context("live clock is not started")?)
+            .as_secs_f64()
+            * 1000.0;
+        Ok((sequence, bytes, due_ms))
+    }
 }
 
 pub struct Session {
@@ -285,6 +333,7 @@ impl Session {
             wall_start: Instant::now(),
             stopped: AtomicBool::new(false),
             ledger: Mutex::new(Ledger {
+                trace: spec.latency_trace.then(|| latency::Trace::new(count)),
                 start: None,
                 records: Vec::with_capacity(count),
                 queue: VecDeque::with_capacity(count),
@@ -338,35 +387,21 @@ impl Session {
         counters: BenchmarkCounters,
         acquisition: &Acquisition,
         due_at: Instant,
+        mut trace: Option<&mut PublicationTrace>,
     ) -> Result<()> {
+        if let Some(row) = trace.as_deref_mut() {
+            row.ledger_lock_attempt_ns = self.trace_clock().map(latency::Clock::now);
+        }
         let mut log = self
             .ledger
             .lock()
             .map_err(|_| anyhow::anyhow!("live ledger poisoned"))?;
-        let sequence = log.records.len() + 1;
-        ensure!(
-            sequence <= self.spec.publication_count(),
-            "publication schedule exhausted"
-        );
-        let expected = sequence as u64 * u64::from(self.spec.publish_every);
-        ensure!(
-            counters.completed_batches == expected,
-            "publication completed-work origin skipped"
-        );
-        let bytes = state.drawing_json.len() + state.best_png.len();
-        ensure!(
-            bytes <= MAX_PAYLOAD_BYTES,
-            "publication payload exceeds byte limit"
-        );
-        ensure!(
-            log.queue_bytes + bytes <= MAX_RETAINED_BYTES,
-            "publication queue byte limit"
-        );
-        let due_ms = due_at
-            .duration_since(log.start.context("live clock is not started")?)
-            .as_secs_f64()
-            * 1000.0;
-        log.records.push(Publication {
+        if let Some(row) = trace.as_deref_mut() {
+            row.ledger_lock_acquired_ns = self.trace_clock().map(latency::Clock::now);
+        }
+        let (sequence, bytes, due_ms) =
+            log.publication_slot(&self.spec, state, counters, due_at)?;
+        let record = Publication {
             run_id: self.run_id.clone(),
             sequence,
             completed_batches: counters.completed_batches,
@@ -380,7 +415,11 @@ impl Session {
             polygons: state.polygons,
             payload_valid: false,
             acquisition: acquisition.clone(),
-        });
+        };
+        if let Some(row) = trace.as_deref_mut() {
+            row.hashes_done_ns = self.trace_clock().map(latency::Clock::now);
+        }
+        log.records.push(record);
         log.queue.push_back((
             sequence,
             Payload {
@@ -391,6 +430,15 @@ impl Session {
             },
         ));
         log.queue_bytes += bytes;
+        if let Some(row) = trace {
+            row.payload_bytes = Some(bytes);
+            row.queue_depth = Some(log.queue.len());
+            row.enqueue_commit_ns = self.trace_clock().map(latency::Clock::now);
+            log.trace
+                .as_mut()
+                .context("missing enabled trace")?
+                .retain(*row)?;
+        }
         Ok(())
     }
 
@@ -398,29 +446,65 @@ impl Session {
         &self,
         state: &mut crate::WsState,
         last_image: &mut Instant,
+        mut trace: Option<&mut SenderTurn>,
     ) -> Result<Option<(String, (usize, f64))>> {
-        if last_image.elapsed() < Duration::from_millis(200) {
+        let image_interval = Duration::from_millis(200);
+        let gated = if let Some(row) = trace.as_deref_mut() {
+            row.image_is_throttled(*last_image, image_interval)
+        } else {
+            last_image.elapsed() < image_interval
+        };
+        if gated {
             return Ok(None);
+        }
+        if let Some(row) = trace.as_deref_mut() {
+            row.ledger_lock_attempt_ns = Some(row.now());
         }
         let mut log = self
             .ledger
             .lock()
             .map_err(|_| anyhow::anyhow!("live ledger poisoned"))?;
+        if let Some(row) = trace.as_deref_mut() {
+            row.ledger_lock_acquired_ns = Some(row.now());
+            row.queue_depth = Some(log.queue.len());
+            row.queue_head_sequence = log.queue.front().map(|(sequence, _)| *sequence);
+        }
         let Some((sequence, payload)) = log.queue.pop_front() else {
             return Ok(None);
         };
+        if let Some(row) = trace.as_deref_mut() {
+            row.dequeue_ns = Some(row.now());
+            row.publication_sequence = Some(sequence);
+        }
         log.queue_bytes -= payload.drawing_json.len() + payload.png.len();
         state.drawing_json = payload.drawing_json;
         state.best_png = payload.png;
         state.fitness = payload.fitness;
         state.polygons = payload.polygons;
-        let send_ms = log
-            .start
-            .context("live clock is not started")?
-            .elapsed()
-            .as_secs_f64()
-            * 1000.0;
-        let record = &log.records[sequence - 1];
+        let start = log.start.context("live clock is not started")?;
+        Ok(Some(self.publication_message(
+            state,
+            last_image,
+            &log.records[sequence - 1],
+            start,
+            trace,
+        )))
+    }
+
+    fn publication_message(
+        &self,
+        state: &mut crate::WsState,
+        last_image: &mut Instant,
+        record: &Publication,
+        start: Instant,
+        mut trace: Option<&mut SenderTurn>,
+    ) -> (String, (usize, f64)) {
+        let sequence = record.sequence;
+        let send_at = Instant::now();
+        let send_ms = send_at.duration_since(start).as_secs_f64() * 1000.0;
+        if let Some(row) = trace.as_deref_mut() {
+            row.legacy_sendmarker_ns = Some(row.at(send_at));
+        }
         state.total_evals = record.completed_evaluations;
         state.elapsed_secs = send_ms / 1000.0;
         let mut message = crate::drawing_update_message(state);
@@ -429,8 +513,18 @@ impl Session {
             "completed_evaluations": record.completed_evaluations, "due_ms": record.due_ms,
             "send_ms": send_ms, "drawing_sha256": record.drawing_sha256,
             "png_sha256": record.png_sha256 });
+        if let Some(row) = trace.as_deref_mut() {
+            row.message_value_done_ns = Some(row.now());
+        }
         *last_image = Instant::now();
-        Ok(Some((message.to_string(), (sequence, send_ms))))
+        if let Some(row) = trace.as_deref_mut() {
+            row.image_cadence_reset_ns = Some(row.at(*last_image));
+        }
+        let message = message.to_string();
+        if let Some(row) = trace {
+            row.wire_json_done_ns = Some(row.now());
+        }
+        (message, (sequence, send_ms))
     }
 
     pub fn sent(&self, (sequence, send_ms): (usize, f64)) -> Result<()> {
@@ -498,6 +592,13 @@ impl Session {
             "wrong completed-work origin"
         );
         record.receive_ms = Some(received_at.duration_since(start).as_secs_f64() * 1000.0);
+        if let Some(trace) = &mut log.trace {
+            let row = trace
+                .publications
+                .get_mut(sequence - 1)
+                .context("missing trace receipt identity")?;
+            row.receive_ns = self.trace_clock().map(|clock| clock.at(received_at));
+        }
         log.received_bytes += text.len();
         log.received[sequence - 1] = Some(text);
         log.received_count += 1;
@@ -1080,14 +1181,68 @@ impl Run {
             return Ok(());
         }
         let due_at = Instant::now();
+        let mut trace = self.session.trace_clock().map(|clock| PublicationTrace {
+            sequence: usize::try_from(
+                counters.completed_batches / u64::from(self.spec.publish_every),
+            )
+            .expect("bounded live publication count"),
+            completed_batches: counters.completed_batches,
+            completed_evaluations: counters.completed_evaluations,
+            due_ns: Some(clock.at(due_at)),
+            ..PublicationTrace::default()
+        });
+        let result = self.prepare_publication(
+            (counters, due_at),
+            state,
+            latest,
+            render_buf,
+            input,
+            trace.as_mut(),
+        );
+        if result.is_err() {
+            if let Some(row) = trace {
+                if let Err(error) = self.session.retain_partial_trace(row) {
+                    self.session
+                        .fail(format!("retain partial trace: {error:#}"));
+                }
+            }
+        }
+        result
+    }
+
+    // This preparation stays on the production render/encode path. Optional
+    // marks observe each operation once; the existing ledger owns committed rows.
+    fn prepare_publication(
+        &self,
+        origin: (BenchmarkCounters, Instant),
+        state: &crate::SharedWsState,
+        latest: &Latest,
+        render_buf: &mut [u8],
+        input: &LoadedFixture,
+        mut trace: Option<&mut PublicationTrace>,
+    ) -> Result<()> {
+        let (counters, due_at) = origin;
         let (w, h) = (input.fixture.width as usize, input.fixture.height as usize);
         latest.drawing.draw(render_buf, w, h, Rasterizer::HalfSpace);
+        if let Some(row) = trace.as_deref_mut() {
+            row.render_done_ns = self.session.trace_clock().map(latency::Clock::now);
+        }
         let png = crate::encode_rgba_as_png(render_buf, w, h);
+        if let Some(row) = trace.as_deref_mut() {
+            row.png_done_ns = self.session.trace_clock().map(latency::Clock::now);
+        }
         let drawing_json = serde_json::to_string(&latest.drawing)?;
+        if let Some(row) = trace.as_deref_mut() {
+            row.drawing_json_done_ns = self.session.trace_clock().map(latency::Clock::now);
+            row.ws_lock_attempt_ns = self.session.trace_clock().map(latency::Clock::now);
+        }
         let mut state = state
             .0
             .lock()
             .map_err(|_| anyhow::anyhow!("WS state poisoned"))?;
+        if let Some(row) = trace.as_deref_mut() {
+            row.ws_lock_acquired_ns = self.session.trace_clock().map(latency::Clock::now);
+        }
         state.best_png = png;
         state.drawing_json = drawing_json;
         state.fitness = latest.drawing.fitness;
@@ -1096,7 +1251,7 @@ impl Run {
         state.generation += 1;
         state.image_generation += 1;
         self.session
-            .publish(&state, counters, &latest.acquisition, due_at)
+            .publish(&state, counters, &latest.acquisition, due_at, trace)
     }
 }
 
@@ -1261,9 +1416,337 @@ mod tests {
             warmup_batches: 2,
             publish_every: 2,
             deadline_ms: 300,
+            latency_trace: false,
             manifest: "manifest.json".into(),
             output: "new".into(),
         }
+    }
+
+    fn cpu_input() -> LoadedFixture {
+        let drawing = Drawing {
+            polygons: Vec::new(),
+            is_dirty: false,
+            fitness: 99.0,
+        };
+        let fixture = fixtures::Fixture {
+            id: "mona".into(),
+            width: 2,
+            height: 2,
+            drawing_file: String::new(),
+            reference_file: String::new(),
+            drawing_sha256: String::new(),
+            reference_sha256: String::new(),
+            source_image_sha256: String::new(),
+            stored_fitness_percent: 99.0,
+            scalar_fitness_percent: 99.0,
+            complexity: artgen_backend_rust::benchmark::reference::complexity(&[], 2, 2, [8, 8])
+                .unwrap(),
+        };
+        LoadedFixture {
+            manifest: fixtures::Manifest {
+                protocol_version: 1,
+                start_mode: "mature_drawing_restart".into(),
+                resolution: 2,
+                minimum_similarity_percent: 97.0,
+                params: MutationParams::default(),
+                cases: vec![fixture.clone()],
+            },
+            fixture,
+            drawing,
+            rgba: vec![255; 16],
+            manifest_sha256: String::new(),
+        }
+    }
+
+    fn cpu_run(traced: bool) -> Run {
+        let mut spec = spec();
+        spec.latency_trace = traced;
+        spec.output =
+            std::env::temp_dir().join(format!("artgen-live-latency-{}", uuid::Uuid::new_v4()));
+        Run {
+            session: Arc::new(Session::new(&spec)),
+            spec,
+            engine: None,
+            errors: Vec::new(),
+            elapsed_seconds: 0.0,
+            drain_seconds: 0.0,
+            terminal_matches_maximum: false,
+            cache_seed: serde_json::Map::new(),
+            receipt_artifacts: serde_json::Map::new(),
+        }
+    }
+
+    fn cpu_publish(
+        run: &Run,
+        input: &LoadedFixture,
+        state: &crate::SharedWsState,
+        sequence: u32,
+    ) -> Result<()> {
+        let latest = Latest {
+            drawing: input.drawing.clone(),
+            acquisition: publication(1).acquisition,
+        };
+        run.publish_if_due(
+            BenchmarkCounters {
+                completed_batches: u64::from(sequence) * 2,
+                completed_evaluations: u64::from(sequence) * 32768,
+                ..Default::default()
+            },
+            state,
+            &latest,
+            &mut [0; 16],
+            input,
+        )
+    }
+
+    #[test]
+    fn latency_trace_parser_rejects_versions_types_and_duplicates_before_startup() {
+        let flags = ["--manifest", "manifest.json", "--output", "new"]
+            .map(String::from)
+            .to_vec();
+        for version in ["v0", "v2", "1", "true", "", "{}"] {
+            let mut args = flags.clone();
+            args.extend(["--latency-trace".into(), version.into()]);
+            assert!(Spec::parse(&args).is_err());
+        }
+        let mut args = flags;
+        args.extend(["--latency-trace".into(), "v1".into()]);
+        let parsed = Spec::parse(&args).unwrap();
+        assert!(parsed.latency_trace);
+        assert!(!parsed.trial().diagnostic);
+        assert_eq!(parsed.trial().timestamp_mode, TimestampMode::Stages);
+        args.extend(["--latency-trace".into(), "v1".into()]);
+        assert!(Spec::parse(&args).is_err());
+        args.pop();
+        assert!(Spec::parse(&args).is_err());
+    }
+
+    #[test]
+    fn disabled_latency_trace_keeps_default_allocations_wire_keys_and_counters() {
+        let mut run = cpu_run(false);
+        let input = cpu_input();
+        let state = initial_ws_state(&input, &input.drawing).unwrap();
+        assert!(run.session.trace_clock().is_none());
+        assert!(run.session.sender_trace().unwrap().is_none());
+        assert!(run.session.ledger.lock().unwrap().trace.is_none());
+        run.session.start().unwrap();
+        cpu_publish(&run, &input, &state, 1).unwrap();
+        let mut last_image = Instant::now()
+            .checked_sub(Duration::from_millis(201))
+            .unwrap();
+        let (message, ticket) = run
+            .session
+            .message(&mut state.0.lock().unwrap(), &mut last_image, None)
+            .unwrap()
+            .unwrap();
+        run.session.sent(ticket).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&message).unwrap();
+        assert_eq!(value["liveAcceptance"]["completed_batches"], 2);
+        assert_eq!(value["liveAcceptance"]["completed_evaluations"], 32768);
+        assert_eq!(value["liveAcceptance"].as_object().unwrap().len(), 8);
+        assert!(!message.contains("_ns"));
+        assert!(!message.contains("latency_trace"));
+        let result = run.finish().unwrap();
+        assert_eq!(result["mode"], "live_acceptance");
+        assert_eq!(result["live_protocol_version"], 2);
+        assert!(result.get("score_eligible").is_none());
+        assert!(result.get("latency_trace").is_none());
+        assert!(!run.spec.output.exists());
+    }
+
+    #[test]
+    fn latency_trace_real_loopback_covers_producer_handler_receipts_and_artifacts() {
+        let mut run = cpu_run(true);
+        fs::create_dir(&run.spec.output).unwrap();
+        let result = (|| -> Result<()> {
+            let input = cpu_input();
+            let state = initial_ws_state(&input, &input.drawing)?;
+            let mut connection = Connection::start(state.clone(), run.session.clone())?;
+            run.session.start()?;
+            for sequence in 1..=2 {
+                cpu_publish(&run, &input, &state, sequence)?;
+                wait_for_receipt(&run.session, sequence as usize);
+            }
+            connection.close()?;
+            run.session.validate_payloads(2, 2)?;
+            run.receipt_artifacts = run.session.save_receipts(&run.spec.output)?;
+            run.engine = Some(wire_trial_record());
+            run.elapsed_seconds = run.session.elapsed_seconds()?;
+            run.terminal_matches_maximum = true;
+            let record = run.finish()?;
+            ensure!(record["correctness"] == true, "{record}");
+            ensure!(
+                record["mode"] == "live_latency_diagnostic" && record["score_eligible"] == false,
+                "diagnostic was score eligible"
+            );
+            let bytes = fs::read(run.spec.output.join(latency::FILE))?;
+            ensure!(
+                record["latency_trace"]["sha256"] == fixtures::sha256(&bytes),
+                "sidecar hash mismatch"
+            );
+            ensure!(
+                record["latency_trace"]["bytes"] == bytes.len(),
+                "sidecar byte count mismatch"
+            );
+            let trace: serde_json::Value = serde_json::from_slice(&bytes)?;
+            ensure!(
+                trace["complete"] == true && trace["errors"] == serde_json::json!([]),
+                "{trace}"
+            );
+            ensure!(
+                trace["measurement_start_ns"].is_u64(),
+                "missing measurement origin"
+            );
+            check_latency_trace_publications(&trace)?;
+            let receipts = fs::read_to_string(run.spec.output.join("receipt-000.jsonl"))?;
+            ensure!(
+                receipts.lines().count() == 2 && !receipts.contains("_ns"),
+                "wire receipt changed"
+            );
+            Ok(())
+        })();
+        let cleanup = fs::remove_dir_all(&run.spec.output);
+        assert!(result.is_ok(), "{result:?}");
+        assert!(cleanup.is_ok(), "{cleanup:?}");
+    }
+
+    fn check_latency_trace_publications(trace: &serde_json::Value) -> Result<()> {
+        ensure!(
+            trace["publications"].as_array().context("rows")?.len() == 2,
+            "wrong publication count"
+        );
+        ensure!(
+            trace["sender_turns"]
+                .as_array()
+                .context("turns")?
+                .iter()
+                .any(|turn| turn["publication_sequence"].is_null()
+                    && turn["write_return_ns"].is_u64()),
+            "stats send missing"
+        );
+        for sequence in 1..=2 {
+            let row = &trace["publications"][sequence - 1];
+            ensure!(
+                row["sequence"] == sequence && row["completed_batches"] == sequence * 2,
+                "trace origin mismatch"
+            );
+            ensure!(
+                row["completed_evaluations"] == sequence * 32768,
+                "trace work mismatch"
+            );
+            ensure!(
+                row["receive_ns"].is_u64() && row["render_done_ns"].is_u64(),
+                "real hook missing"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn latency_trace_throttling_retains_queue_without_another_ledger_lock() {
+        let run = cpu_run(true);
+        let input = cpu_input();
+        let state = initial_ws_state(&input, &input.drawing).unwrap();
+        let mut sender = run.session.sender_trace().unwrap().unwrap();
+        run.session.start().unwrap();
+        cpu_publish(&run, &input, &state, 1).unwrap();
+        let mut last_image = Instant::now() + RUN_TIMEOUT;
+        // Holding the ledger proves the throttled branch does not lock it.
+        let log = run.session.ledger.lock().unwrap();
+        let row = sender.begin_turn().unwrap();
+        assert!(run
+            .session
+            .message(&mut state.0.lock().unwrap(), &mut last_image, Some(row))
+            .unwrap()
+            .is_none());
+        assert_eq!(row.image_gate_passed, Some(false));
+        assert!(row.ledger_lock_attempt_ns.is_none());
+        assert_eq!(log.queue.len(), 1);
+        assert_eq!(log.queue.front().unwrap().0, 1);
+        drop(log);
+        drop(sender);
+    }
+
+    #[test]
+    fn latency_trace_producer_failure_retains_the_completed_preparation_stages() {
+        let run = cpu_run(true);
+        fs::create_dir(&run.spec.output).unwrap();
+        let result = (|| -> Result<()> {
+            let input = cpu_input();
+            let state = initial_ws_state(&input, &input.drawing)?;
+            // No measurement clock: the actual producer must reject enqueue,
+            // retaining render/PNG/JSON/lock evidence completed before failure.
+            let error = cpu_publish(&run, &input, &state, 1).expect_err("unstarted clock");
+            run.session.fail(error.to_string());
+            let artifact = run
+                .session
+                .save_trace(&[])?
+                .context("missing partial trace")?;
+            ensure!(artifact["complete"] == false, "partial trace passed");
+            let trace: serde_json::Value =
+                serde_json::from_slice(&fs::read(run.spec.output.join(latency::FILE))?)?;
+            let row = &trace["publications"][0];
+            ensure!(
+                row["sequence"] == 1
+                    && row["render_done_ns"].is_u64()
+                    && row["png_done_ns"].is_u64()
+                    && row["drawing_json_done_ns"].is_u64()
+                    && row["ledger_lock_acquired_ns"].is_u64(),
+                "partial stages disappeared"
+            );
+            ensure!(
+                row["enqueue_commit_ns"].is_null() && row["receive_ns"].is_null(),
+                "failure fabricated completion"
+            );
+            ensure!(
+                run.session.ledger.lock().unwrap().queue.is_empty(),
+                "failed publication enqueued"
+            );
+            Ok(())
+        })();
+        let cleanup = fs::remove_dir_all(&run.spec.output);
+        assert!(result.is_ok(), "{result:?}");
+        assert!(cleanup.is_ok(), "{cleanup:?}");
+    }
+
+    #[test]
+    fn latency_trace_early_handler_error_retains_partial_turns_and_producer_rows() {
+        let run = cpu_run(true);
+        fs::create_dir(&run.spec.output).unwrap();
+        let result = (|| -> Result<()> {
+            let input = cpu_input();
+            let state = initial_ws_state(&input, &input.drawing)?;
+            let mut connection = Connection::start(state.clone(), run.session.clone())?;
+            run.session.start()?;
+            cpu_publish(&run, &input, &state, 1)?;
+            wait_for_receipt(&run.session, 1);
+            connection.sockets[1].write_all(&[0x81, 0x81, 0, 0, 0, 0, b'{'])?;
+            wait_for_server_exit(&connection);
+            connection.close()?;
+            let artifact = run.session.save_trace(&[])?.context("trace missing")?;
+            ensure!(artifact["complete"] == false, "partial trace passed");
+            let trace: serde_json::Value =
+                serde_json::from_slice(&fs::read(run.spec.output.join(latency::FILE))?)?;
+            ensure!(
+                trace["publications"].as_array().context("rows")?.len() == 1,
+                "partial publication disappeared"
+            );
+            ensure!(
+                !trace["sender_turns"]
+                    .as_array()
+                    .context("turns")?
+                    .is_empty(),
+                "sender evidence disappeared on error"
+            );
+            ensure!(
+                !trace["errors"].as_array().context("errors")?.is_empty(),
+                "protocol error lost"
+            );
+            Ok(())
+        })();
+        let cleanup = fs::remove_dir_all(&run.spec.output);
+        assert!(result.is_ok(), "{result:?}");
+        assert!(cleanup.is_ok(), "{cleanup:?}");
     }
 
     fn counters() -> BenchmarkCounters {
@@ -1349,6 +1832,7 @@ mod tests {
                     work,
                     &record.acquisition,
                     Instant::now(),
+                    None,
                 )
                 .unwrap();
             wait_for_receipt(&session, sequence);
@@ -1569,7 +2053,7 @@ mod tests {
             // The owned shutdown wakes this blocked turn before the stats send.
             let mut byte = [0];
             assert_eq!(socket.get_ref().peek(&mut byte).unwrap(), 0);
-            let error = crate::send_ws_update(&mut socket, "{\"type\":\"stats\"}".into())
+            let error = crate::send_ws_update(&mut socket, "{\"type\":\"stats\"}".into(), None)
                 .expect_err("a send on the shut-down socket must fail");
             sender_session.fail_connection(error);
         }));
@@ -1999,7 +2483,7 @@ impl Run {
             .map_or_else(BenchmarkCounters::default, |engine| engine.counters);
         let (metrics, errors) = assess(&self.spec, counters, &log.records, self.elapsed_seconds);
         self.errors.extend(errors);
-        let mut value = if let Some(engine) = &mut self.engine {
+        let value = if let Some(engine) = &mut self.engine {
             engine.errors.extend(self.errors.iter().cloned());
             trial::finish_record(engine);
             trial_record_value(engine)?
@@ -2013,6 +2497,13 @@ impl Run {
         if !self.terminal_matches_maximum && !errors.iter().any(|e| e.contains("terminal")) {
             errors.push("terminal maximum publication is unverified".into());
         }
+        drop(log);
+        let trace_artifact = self.finish_latency_trace(&mut errors);
+        let log = self
+            .session
+            .ledger
+            .lock()
+            .map_err(|_| anyhow::anyhow!("live ledger poisoned"))?;
         let valid = errors.is_empty();
         let extras = serde_json::json!({ "protocol_version": 1, "live_protocol_version": 2, "mode": "live_acceptance",
             "status": if valid { "completed" } else { "invalid" }, "correctness": valid,
@@ -2026,6 +2517,39 @@ impl Run {
             "cache_seed": self.cache_seed, "receipt_artifacts": self.receipt_artifacts,
             "historical_score_policy": "ordinary_mapped_header_and_acquisition_membership",
             "historical_physical_fitness_independently_verified": false });
+        self.finish_record_metadata(value, &extras, metrics, trace_artifact)
+    }
+
+    fn finish_latency_trace(&self, errors: &mut Vec<String>) -> Option<serde_json::Value> {
+        if self.spec.latency_trace {
+            match self.session.save_trace(errors) {
+                Ok(Some(artifact)) => {
+                    if let Some(error) = artifact["error"].as_str() {
+                        errors.push(format!("latency trace: {error}"));
+                    }
+                    Some(artifact)
+                }
+                Ok(None) => {
+                    errors.push("enabled latency trace missing".into());
+                    None
+                }
+                Err(error) => {
+                    errors.push(format!("save latency trace: {error:#}"));
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    }
+
+    fn finish_record_metadata(
+        &self,
+        mut value: serde_json::Value,
+        extras: &serde_json::Value,
+        metrics: Metrics,
+        trace_artifact: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value> {
         let object = value
             .as_object_mut()
             .context("trial record is not an object")?;
@@ -2041,6 +2565,11 @@ impl Run {
                 .context("metrics not an object")?
                 .clone(),
         );
+        if self.spec.latency_trace {
+            object.insert("mode".into(), "live_latency_diagnostic".into());
+            object.insert("score_eligible".into(), false.into());
+            object.insert("latency_trace".into(), trace_artifact.into());
+        }
         Ok(value)
     }
 }

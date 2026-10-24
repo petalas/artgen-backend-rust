@@ -180,9 +180,9 @@ Candidate SHA-256:
 The candidate retains experiment 5's automatic workgroup initialization.
 The normal executable and shader were restored to the original binner.
 
-## Next measurement
+## Command used for protocol-2 A/A
 
-When the machine is otherwise quiet, run from the repository root:
+The operator used this command from the repository root on a quiet machine:
 
 ```sh
 bash .cache/evolution-qualification/acceptance-07/rerun-live-protocol2.sh
@@ -195,3 +195,21 @@ intervals fit the unchanged 0.99 to 1.01 bounds. A failure or inconclusive gate
 ends that package without retries or extra samples. The output is
 `.cache/evolution-qualification/live-protocol2-<UTC timestamp>-<PID>/summary.json`.
 Quiet-machine operation does not itself prove the equivalence bounds.
+
+## Protocol-2 A/A completed, latency equivalence inconclusive
+
+The operator's package completed ten valid original-reference workers with
+zero errors, 41,943,040 completed evaluations and 1,280 delivered images.
+The throughput equivalence interval was 0.99953152 to 1.00073972 and passed.
+The preview-latency interval was 0.96454406 to 1.00060706 and did not fit the
+frozen 0.99 to 1.01 band. The collector stopped before all ten planned A/B
+workers. Rows labelled `candidate` during A/A still used the reference binary.
+
+The parent verified all 60 artifact hashes, 20 canonical endpoints, 80
+framebuffer byte-L1 totals, raw receipts and exact bootstrap reproduction.
+The result is a valid INCONCLUSIVE qualification, with no candidate live
+comparison. Its bundle is
+`.cache/evolution-qualification/live-protocol2-20261023T232627Z-210491/`.
+The frozen result and gate are retained. Do not repeat the same package to
+search for a passing result. The [latency diagnosis](live-latency-diagnosis.md)
+describes the separate, unscored investigation before another qualification.

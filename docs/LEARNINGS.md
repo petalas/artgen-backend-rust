@@ -133,3 +133,23 @@ A/A measurements. Preserve the old invalid records; do not add a parameter
 tolerance or reuse their timings. Short two-publication smokes cannot pass the
 full 128-publication collector contract, so verify that boundary with a full
 unscored worker before a new measurement package.
+
+## Preview latency includes the sender's polling phase
+
+The quiet-machine live A/A package passed throughput repeatability but could
+not qualify p95 preview latency inside the frozen 1% band. A separate traced
+reference worker showed all 128 previews enqueued while the sender slept and
+sent at the first eligible check. Queue residence ranged from 0.06 to 32.48ms
+with no backlog or queued image-throttle blocks. The 33ms sender cadence is
+therefore material to preview latency even on an otherwise quiet machine.
+
+The legacy `send_ms` is recorded before message construction and serialization.
+It cannot isolate socket or client time. The opt-in `--latency-trace v1` records
+preparation, enqueue, poll, message and write boundaries off the wire, then
+writes a bounded sidecar after shutdown. A receiver timestamp may precede the
+sender's return from `ws.send`; require it after write start, not write return.
+
+Inspect individual previews around the end-to-end p95. Component p95 values do
+not add. Keep the inconclusive result and original gate intact while qualifying
+trial scheduling and sample budgets. Removing the sender cadence would change
+the workload. See [the captured diagnosis](../benchmarks/evolution/v1/live-latency-diagnosis.md).
