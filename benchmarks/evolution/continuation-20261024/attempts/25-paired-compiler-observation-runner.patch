@@ -1,0 +1,104 @@
+--- /dev/null
++++ b/run-observation.py
+@@ -0,0 +1,101 @@
++"""One unscored reference compiler capture. No candidate or performance comparison."""
++import hashlib
++import importlib.util
++import sys
++import time
++from pathlib import Path
++
++HERE = Path(__file__).resolve().parent
++CONTRACT = HERE.parent / 'evolution-mechanism-20261024/contract/run-campaign.py'
++CONTRACT_SHA = '1d0f7b4dd4b3fe901e238eb794cd53a525446d5eca2c15c907a7a8138abcc307'
++SPEC_SHA = '46fae8c1b9ba77765569048d88255b50b6648136ec62c61a1075be4b973cf4ea'
++
++
++def sha(path):
++    with path.open('rb') as stream:
++        return hashlib.file_digest(stream, 'sha256').hexdigest()
++
++
++def helpers():
++    if sha(CONTRACT) != CONTRACT_SHA:
++        raise ValueError('helper contract changed')
++    spec = importlib.util.spec_from_file_location('capture_contract', CONTRACT)
++    module = importlib.util.module_from_spec(spec)
++    spec.loader.exec_module(module)
++    compare, b = module.load_helpers()
++    return module, compare, b
++
++
++def command(spec):
++    return ['/usr/bin/env', *(f'{key}={value}' for key, value in spec['environment'].items()),
++            spec['binary'], 'trial', '--manifest', spec['manifest'], '--case', 'mona',
++            '--seed', '7', '--batches', '64', '--warmup', '2', '--diagnostic', 'false',
++            '--profile-mode', 'stages', '--output', spec['output']]
++
++
++def inventory():
++    files = {}
++    total = 0
++    for directory in (HERE / 'worker', HERE / 'mesa-cache'):
++        for index, path in enumerate(directory.rglob('*')):
++            if index >= 1024:
++                raise ValueError('artifact entry cap')
++            if path.is_file():
++                if path.is_symlink() or not path.resolve().is_relative_to(HERE):
++                    raise ValueError('artifact escaped namespace')
++                total += path.stat().st_size
++                if len(files) >= 512 or total > 268435456 or path.stat().st_size > 67108864:
++                    raise ValueError('artifact byte/file cap')
++                files[str(path)] = {'bytes': path.stat().st_size, 'sha256': sha(path)}
++    return files, total
++
++
++def run(c, b, spec, result, deadline):
++    c.require(sha(Path(spec['binary'])) == spec['binary_sha256'], 'binary changed')
++    c.require(sha(Path(spec['manifest'])) == spec['manifest_sha256'], 'manifest changed')
++    c.require(sha(Path(spec['installed_driver']['path'])) == spec['installed_driver']['sha256'],
++              'installed compiler changed')
++    (HERE / 'worker').mkdir()
++    Path(spec['fresh_cwd']).mkdir()
++    (HERE / 'mesa-cache').mkdir()
++    result['process'] = c.admitted_call(deadline, time.monotonic(), True,
++        lambda timeout: b.run_process(command(spec), Path(spec['fresh_cwd']),
++                                     HERE / 'worker/evidence', min(timeout, 300)))
++    result['files'], result['captured_bytes'] = inventory()
++    blobs = [name for name in result['files'] if name.endswith('.blob')]
++    c.require(result['process']['status'] == 'completed' and result['process']['returncode'] == 0,
++              'reference process failed')
++    c.require(0 < len(blobs) <= 32, 'compiler blobs missing or excessive; no retry')
++    result['blob_files'] = blobs
++    result['status'] = 'CAPTURED_PENDING_VALIDATION'
++
++
++def main():
++    if sys.argv[1:] or sha(HERE / 'spec.json') != SPEC_SHA:
++        raise ValueError('frozen invocation/specification required')
++    c, compare, b = helpers()
++    spec = b.read_json(HERE / 'spec.json')
++    started = time.monotonic()
++    deadline = started + 600
++    result = {'protocol': spec['protocol'], 'mode': 'compiler_observation', 'score_eligible': False,
++              'status': 'INCONCLUSIVE', 'errors': [], 'monotonic_start': started,
++              'deadline': deadline, 'started_utc': b.utc_now(), 'spec_sha256': SPEC_SHA}
++    b.write_json(HERE / 'clock.json', result)
++    try:
++        with compare.cancellation_signals(), b.benchmark_lock(b.DEFAULT_ROOT / 'benchmark.lock'):
++            print('unscored reference compiler capture starting', flush=True)
++            run(c, b, spec, result, deadline)
++    except (c.Invalid, b.BenchError, OSError, ValueError, KeyError, KeyboardInterrupt) as exc:
++        result['status'] = 'INCONCLUSIVE'
++        result['errors'].append(f'{type(exc).__name__}: {exc}')
++    result['controller_wall_seconds'] = time.monotonic() - started
++    if time.monotonic() >= deadline:
++        result['status'] = 'INCONCLUSIVE'
++        result['errors'].append('observation budget exhausted')
++    b.write_json(HERE / 'capture-result.json', result)
++    print(result['status'], flush=True)
++    return 0 if result['status'] == 'CAPTURED_PENDING_VALIDATION' else 2
++
++
++if __name__ == '__main__':
++    raise SystemExit(main())

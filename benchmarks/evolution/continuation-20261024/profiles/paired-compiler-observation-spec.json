@@ -1,0 +1,112 @@
+{
+  "protocol": "paired-raster-compiler-observation-20261024-v1",
+  "mode": "compiler_observation",
+  "score_eligible": false,
+  "frozen_utc": "2026-10-24T20:04:23.140173+00:00",
+  "revision": "0c6d6f34b3910bf3bdd353213d533c91a90da4e2",
+  "binary": "/home/nick/git/artgen-backend-rust/.cache/evolution-pixel-pair-safe-20261024/delivery/binaries/evolution-bench",
+  "binary_sha256": "1cf30fea6f7cb91f645b192c9b6a148fa500196eef1d463ebd17701e884a2fa2",
+  "binary_release_profile": {
+    "opt_level": "3",
+    "debuginfo": 2,
+    "debug_assertions": false,
+    "overflow_checks": false,
+    "test": false
+  },
+  "manifest": "/home/nick/git/artgen-backend-rust/.cache/evolution-bench/baseline-20261023T172054.919294Z-95742/fixtures/manifest.json",
+  "manifest_sha256": "82dfe207ecd20ae964edf4528f1a90fe4176b21f4ac0911b305da1e1edf1c5aa",
+  "case": "mona",
+  "seed": 7,
+  "batches": 64,
+  "warmup_batches": 2,
+  "diagnostic": false,
+  "profile_mode": "stages",
+  "environment": {
+    "DXIL_DEBUG": "verbose,dump_module,dump_blob",
+    "MESA_SHADER_CACHE_DIR": "/home/nick/git/artgen-backend-rust/.cache/evolution-paired-observation-20261024/mesa-cache"
+  },
+  "fresh_cwd": "/home/nick/git/artgen-backend-rust/.cache/evolution-paired-observation-20261024/worker/cwd",
+  "output": "/home/nick/git/artgen-backend-rust/.cache/evolution-paired-observation-20261024/worker/output",
+  "bounds": {
+    "native_workload_runs": 1,
+    "retries": 0,
+    "seconds": 600,
+    "child_max_seconds": 300,
+    "cleanup_reserve_seconds": 30,
+    "artifact_file_bytes": 67108864,
+    "post_run_total_bytes_max": 268435456,
+    "post_run_files_max": 512,
+    "post_run_blobs_max": 32
+  },
+  "expected_work": {
+    "submitted_batches": 64,
+    "completed_batches": 64,
+    "submitted_iterations": 4096,
+    "completed_iterations": 4096,
+    "submitted_evaluations": 1048576,
+    "completed_evaluations": 1048576,
+    "timestamp_samples": 64,
+    "warmup_evaluations_source_accounted": 32768
+  },
+  "installed_driver": {
+    "path": "/usr/lib/x86_64-linux-gnu/libvulkan_dzn.so",
+    "sha256": "0d2dec85f7a7884df5523b77d88c76dbf11d0ddb233886ad4c33d3b608a1ab81",
+    "diagnostic_string_offsets": {
+      "DXIL_DEBUG": 3286719,
+      "verbose": 3287088,
+      "dump_module": 3287160,
+      "dump_blob": 3287096,
+      "shader_%s_%d.blob": 3286996
+    },
+    "upstream_version": "Mesa25.3.6",
+    "kisak_patch_parity": "unverified"
+  },
+  "embedded_shaders": {
+    "mutate": {
+      "offset": 498711,
+      "bytes": 47345,
+      "sha256": "3a36417746ab19b0c800c718e8c87795c17d9bff78114fd65bc8369b016578d8"
+    },
+    "bin_polygons": {
+      "offset": 492821,
+      "bytes": 5828,
+      "sha256": "598b32eab7ae998f2d644b36a5d71d17997772ed06dbd5c0b726130ef51d13d9"
+    },
+    "rasterize_error": {
+      "offset": 568264,
+      "bytes": 17344,
+      "sha256": "83c505bcc9220f39c11354692cdec3828e4d76681df8468ea93d597b4f4ceb7b"
+    },
+    "select": {
+      "offset": 546792,
+      "bytes": 10786,
+      "sha256": "bfd33b7bb029ded82387dfa9ad0ed8159c0a8b0977cb13509c18821dc6dbb279"
+    },
+    "init_framebuffers": {
+      "offset": 588331,
+      "bytes": 8617,
+      "sha256": "d5a753f5e28c301ef6214304ed61636142cf92fe7b9c0150da8e0ad6ae497bad"
+    },
+    "update_framebuffers": {
+      "offset": 597026,
+      "bytes": 8510,
+      "sha256": "baf1eb544fd0461b0a3d93fe030b37d4123001b8e4527c4c376e39490f17a243"
+    }
+  },
+  "protected_source_files": 83,
+  "limits": [
+    "One diagnostic reference run, no performance comparison or adoption claim.",
+    "Raw ordinary TrialRecord may contain a rate; the bundle excludes all timing/rates from scoring. Raw files remain unchanged.",
+    "NIR/DXIL module output is compiler evidence, not final NVIDIA ISA, dynamic instructions, occupancy, bandwidth or utilization.",
+    "Compilation cache hits or unavailable diagnostics are retained and stop this route without retry.",
+    "No source, parameter, pass, feature or ordinary executable changes. Observe the already-kept paired source 83c505bc only.",
+    "Selection/update midpoint feature capability remains unqueried and observation build is deferred."
+  ],
+  "question": "Does emitted Mesa NIR/DXIL retain one polygon traversal and one set of shared geometry/bbox/color loads per valid pixel pair, and which per-pixel work remains? Compare with frozen AE1 compiler text, without attributing dynamic hardware cost.",
+  "previous_capture": {
+    "spec_sha256": "4207a4fba33cc781ea01218386c8a6798aa7fc1d0394416d0498576deec35b11",
+    "stderr_log_sha256": "7694fc1ad00b813a7f628f0cf90e6af2078ccd09c877b586fd35bb69a286c1e3",
+    "raster_sha256": "ae1fd75fdc118debf2a50cbad699e513b5af0dcbfa3754b45966f7a8ee925af3",
+    "purpose": "Static emitted-code comparison only; no old timing samples or scores."
+  }
+}
