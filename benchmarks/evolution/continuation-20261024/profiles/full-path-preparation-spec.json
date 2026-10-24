@@ -1,0 +1,46 @@
+{
+  "schema": "full-path-preparation-diagnostic-v1",
+  "frozen_utc": "2026-10-24T13:27:11.607620+00:00",
+  "classification": "NEW_UNSCORED_PREPARATION_DIAGNOSTIC",
+  "original_overlap_disposition": "REJECT_UNCHANGED",
+  "instrumented_two_warmup_observation": "first-use-20261024/runtime-output",
+  "measured_motivation": {
+    "nonspiking_first_guard_batch": 4,
+    "large_finish_batches": [
+      5,
+      7,
+      8
+    ],
+    "source_lifecycle": "shared LIFO reuse exists; actual native identities not observed"
+  },
+  "hypothesis": "Eight warmups traverse the later command-buffer paths implicated by the observed stalls, making the first measured candidate less sensitive to preparation.",
+  "prediction": "If this preparation is sufficient, the first candidate loses the retrospective >1.5 first/later elapsed signature and the >100ms finish spans; measured work/state must remain identical.",
+  "limitations": [
+    "disappearance supports preparation sensitivity only",
+    "native pool identity and driver/JIT cause remain unproved",
+    "not a new performance gate or promotion",
+    "no universal startup or steady-state speedup claim"
+  ],
+  "workload": {
+    "case": "mona",
+    "seed": 7,
+    "pairs": 2,
+    "batches": 8,
+    "warmup_batches": 8,
+    "diagnostics": true,
+    "same_sources_both_arms": true,
+    "same_MutationParams": true,
+    "expected_measured_evaluations_per_row": 131072
+  },
+  "maximum_invocations": 1,
+  "no_further_warmup_sweep": true,
+  "source_preimage": ".cache/evolution-profiling-20261024/first-use-observer-93/source",
+  "private_target": "first-use-prepared-engine-lab",
+  "outer_timeout_seconds": 120,
+  "all_samples_retained": true,
+  "score_eligible": false,
+  "existing_sidecar_format_unchanged": true,
+  "warmup_count_must_be_coupled_to_metadata_and_validator": true,
+  "reported_preparation_work": "actual requested eight warmup batches per each preparation; count and report separately from timed work; check actual lifetime snapshots",
+  "root_runtime_changes_allowed": false
+}
