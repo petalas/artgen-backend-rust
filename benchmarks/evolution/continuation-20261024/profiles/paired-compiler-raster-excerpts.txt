@@ -1,0 +1,209 @@
+Exact excerpts from worker/evidence/stderr.log.
+Source SHA256 e6dff343669bb82abb7083421aef9d72266c98265aeb2bd5e03abc15c849933d
+These are static Mesa compiler texts, not final device ISA or performance samples.
+
+Original lines 55641-55649
+L55641 | decl_var shared INTERP_MODE_NONE none float[512] {unnamed struct}_field0
+L55642 | decl_var shared INTERP_MODE_NONE none float[512] {unnamed struct}_field1
+L55643 | decl_var shared INTERP_MODE_NONE none float[512] {unnamed struct}_field2
+L55644 | decl_var shared INTERP_MODE_NONE none float[256] {unnamed struct}_field3
+L55645 | decl_var shared INTERP_MODE_NONE none float[256] {unnamed struct}_field4
+L55646 | decl_var shared INTERP_MODE_NONE none float[256] {unnamed struct}_field5
+L55647 | decl_var shared INTERP_MODE_NONE none float[256] {unnamed struct}_field6
+L55648 | decl_var shared INTERP_MODE_NONE none uint[256] {unnamed struct}_field7
+L55649 | decl_function main () (entrypoint)
+
+Original lines 56208-56227
+L56208 |             loop {
+L56209 |                 block b23:   // preds: b22 b41
+L56210 |                 32    %476 = phi b22: %474 (0xffffffff), b41: %488
+L56211 |                 32    %477 = phi b22: %475 (0xffffffff), b41: %490
+L56212 |                 32    %478 = phi b22: %379, b41: %618
+L56213 |                 32    %479 = phi b22: %469, b41: %711
+L56214 |                 32    %480 = phi b22: %379, b41: %619
+L56215 |                 32    %481 = phi b22: %469, b41: %712
+L56216 |                 32    %482 = phi b22: %473 (0x0), b41: %715
+L56217 |                 32    %483 = phi b22: %379, b41: %620
+L56218 |                 32    %484 = phi b22: %469, b41: %713
+L56219 |                 32    %485 = load_const (0x00000000)
+L56220 |                 1     %486 = ieq %477, %485 (0x0)
+L56221 |                 32    %487 = b2i32 %486
+L56222 |                 32    %488 = isub %476, %487
+L56223 |                 32    %489 = load_const (0xffffffff = -1 = 4294967295)
+L56224 |                 32    %490 = iadd %477, %489 (0xffffffff)
+L56225 |                 1     %491 = uge %482, %146
+L56226 |                              // succs: b24 b25
+L56227 |                 if %491 {
+
+Original lines 56250-56284
+L56250 |                 32    %507 = load_const (0x00000001)
+L56251 |                 32    %508 = ishl %493, %507 (0x1)
+L56252 |                 32    %509 = deref_array &(*%501)[%508] (shared float)  // &{unnamed struct}_field0[%508]
+L56253 |                 32    %510 = @load_deref (%509) (access=none)
+L56254 |                 32    %511 = load_const (0x00000001)
+L56255 |                 32    %512 = iadd %508, %511 (0x1)
+L56256 |                 32    %513 = deref_array &(*%501)[%512] (shared float)  // &{unnamed struct}_field0[%512]
+L56257 |                 32    %514 = @load_deref (%513) (access=none)
+L56258 |                 32    %515 = deref_array &(*%500)[%508] (shared float)  // &{unnamed struct}_field1[%508]
+L56259 |                 32    %516 = @load_deref (%515) (access=none)
+L56260 |                 32    %517 = deref_array &(*%500)[%512] (shared float)  // &{unnamed struct}_field1[%512]
+L56261 |                 32    %518 = @load_deref (%517) (access=none)
+L56262 |                 32    %519 = deref_array &(*%499)[%508] (shared float)  // &{unnamed struct}_field2[%508]
+L56263 |                 32    %520 = @load_deref (%519) (access=none)
+L56264 |                 32    %521 = deref_array &(*%499)[%512] (shared float)  // &{unnamed struct}_field2[%512]
+L56265 |                 32    %522 = @load_deref (%521) (access=none)
+L56266 |                 32    %523 = @load_deref (%506) (access=none)
+L56267 |                 32    %524 = @load_deref (%505) (access=none)
+L56268 |                 32    %525 = @load_deref (%504) (access=none)
+L56269 |                 32    %526 = @load_deref (%503) (access=none)
+L56270 |                 32    %527 = @load_deref (%502) (access=none)
+L56271 |                 1     %528 = flt! %381, %523
+L56272 |                 1     %529 = flt! %524, %381
+L56273 |                 1     %530 = ior %528, %529
+L56274 |                 1     %531 = flt! %380, %525
+L56275 |                 1     %532 = ior %530, %531
+L56276 |                 1     %533 = flt! %526, %380
+L56277 |                 1     %534 = ior %532, %533
+L56278 |                 1     %535 = inot %534
+L56279 |                 1     %536 = iand %535, %281
+L56280 |                              // succs: b27 b31
+L56281 |                 if %536 {
+L56282 |                     block b27:   // preds: b26
+L56283 |                     32    %537 = fsub %516, %510
+L56284 |                     32    %538 = fsub %380, %514
+
+Original lines 56325-56339
+L56325 |                         32    %576 = iand %527, %575 (0xff)
+L56326 |                         32    %577 = load_const (0x00000008)
+L56327 |                         32    %578 = load_const (0x00000008)
+L56328 |                         32    %579 = ubfe %527, %577 (0x8), %578 (0x8)
+L56329 |                         32    %580 = load_const (0x00000010 = 16)
+L56330 |                         32    %581 = load_const (0x00000008)
+L56331 |                         32    %582 = ubfe %527, %580 (0x10), %581 (0x8)
+L56332 |                         32    %583 = load_const (0x00000018 = 24)
+L56333 |                         32    %584 = load_const (0x00000008)
+L56334 |                         32    %585 = ubfe %527, %583 (0x18), %584 (0x8)
+L56335 |                         32    %586 = u2f32 %576
+L56336 |                         32    %587 = u2f32 %579
+L56337 |                         32    %588 = u2f32 %582
+L56338 |                         32    %589 = u2f32 %585
+L56339 |                         32    %590 = load_const (0x437f0000 = 255.000000)
+
+Original lines 56384-56396
+L56384 |                 1     %625 = ior %623, %624
+L56385 |                 1     %626 = flt! %526, %470
+L56386 |                 1     %627 = ior %625, %626
+L56387 |                 1     %628 = inot %627
+L56388 |                 1     %629 = iand %628, %288
+L56389 |                              // succs: b33 b37
+L56390 |                 if %629 {
+L56391 |                     block b33:   // preds: b32
+L56392 |                     32    %630 = fsub %516, %510
+L56393 |                     32    %631 = fsub %470, %514
+L56394 |                     32    %632 = fmul %630, %631
+L56395 |                     32    %633 = fsub %518, %514
+L56396 |                     32    %634 = fsub %471, %510
+
+Original lines 56434-56448
+L56434 |                         32    %669 = iand %527, %668 (0xff)
+L56435 |                         32    %670 = load_const (0x00000008)
+L56436 |                         32    %671 = load_const (0x00000008)
+L56437 |                         32    %672 = ubfe %527, %670 (0x8), %671 (0x8)
+L56438 |                         32    %673 = load_const (0x00000010 = 16)
+L56439 |                         32    %674 = load_const (0x00000008)
+L56440 |                         32    %675 = ubfe %527, %673 (0x10), %674 (0x8)
+L56441 |                         32    %676 = load_const (0x00000018 = 24)
+L56442 |                         32    %677 = load_const (0x00000008)
+L56443 |                         32    %678 = ubfe %527, %676 (0x18), %677 (0x8)
+L56444 |                         32    %679 = u2f32 %669
+L56445 |                         32    %680 = u2f32 %672
+L56446 |                         32    %681 = u2f32 %675
+L56447 |                         32    %682 = u2f32 %678
+L56448 |                         32    %683 = load_const (0x437f0000 = 255.000000)
+
+Original lines 56488-56493
+L56488 |                 32    %713 = phi b36: %710, b37: %484
+L56489 |                 32    %714 = load_const (0x00000001)
+L56490 |                 32    %715 = iadd %482, %714 (0x1)
+L56491 |                 32    %716 = umax %490, %488
+L56492 |                 32    %717 = load_const (0x00000000)
+L56493 |                 1     %718 = ieq %716, %717 (0x0)
+
+Original lines 57375-57413
+L57375 |    branch  (uncond) 26 -1
+L57376 |   %476int32 = dx.op.binary.i32(int32  %74int32, int32 %468int32, int32  %57int32)
+L57377 |   %477int32 = shl %476int32,  %31int32
+L57378 |   %478float32* = getelementptr inbounds float32[512],   %3float32[512]*,  %30int32, %477int32
+L57379 |   %479float32 = load float32, %478float32*, 3
+L57380 |   %480int32 = add %477int32,  %31int32
+L57381 |   %481float32* = getelementptr inbounds float32[512],   %3float32[512]*,  %30int32, %480int32
+L57382 |   %482float32 = load float32, %481float32*, 3
+L57383 |   %483float32* = getelementptr inbounds float32[512],   %4float32[512]*,  %30int32, %477int32
+L57384 |   %484float32 = load float32, %483float32*, 3
+L57385 |   %485float32* = getelementptr inbounds float32[512],   %4float32[512]*,  %30int32, %480int32
+L57386 |   %486float32 = load float32, %485float32*, 3
+L57387 |   %487float32* = getelementptr inbounds float32[512],   %5float32[512]*,  %30int32, %477int32
+L57388 |   %488float32 = load float32, %487float32*, 3
+L57389 |   %489float32* = getelementptr inbounds float32[512],   %5float32[512]*,  %30int32, %480int32
+L57390 |   %490float32 = load float32, %489float32*, 3
+L57391 |   %491float32* = getelementptr inbounds float32[256],   %6float32[256]*,  %30int32, %476int32
+L57392 |   %492float32 = load float32, %491float32*, 3
+L57393 |   %493float32* = getelementptr inbounds float32[256],   %7float32[256]*,  %30int32, %476int32
+L57394 |   %494float32 = load float32, %493float32*, 3
+L57395 |   %495float32* = getelementptr inbounds float32[256],   %8float32[256]*,  %30int32, %476int32
+L57396 |   %496float32 = load float32, %495float32*, 3
+L57397 |   %497float32* = getelementptr inbounds float32[256],   %9float32[256]*,  %30int32, %476int32
+L57398 |   %498float32 = load float32, %497float32*, 3
+L57399 |   %499int32* = getelementptr inbounds int32[256],  %10int32[256]*,  %30int32, %476int32
+L57400 |   %500int32 = load int32, %499int32*, 3
+L57401 |   %501int1 = ord-fLT %391float32, %492float32
+L57402 |   %502int1 = ord-fLT %494float32, %391float32
+L57403 |   %503int1 = or %501int1, %502int1
+L57404 |   %504int1 = ord-fLT %390float32, %496float32
+L57405 |   %505int1 = or %503int1, %504int1
+L57406 |   %506int1 = ord-fLT %498float32, %390float32
+L57407 |   %507int1 = or %505int1, %506int1
+L57408 |   %508int1 = xor %507int1, %102int1
+L57409 |   %509int1 = and %508int1, %314int1
+L57410 |    branch %509int1 27 31
+L57411 |   %510float32 = sub %484float32, %479float32
+L57412 |   %511float32 = sub %390float32, %482float32
+L57413 |   %512float32 = mul %510float32, %511float32
+
+Original lines 57483-57491
+L57483 |   %577int1 = or %575int1, %576int1
+L57484 |   %578int1 = ord-fLT %498float32, %459float32
+L57485 |   %579int1 = or %577int1, %578int1
+L57486 |   %580int1 = xor %579int1, %102int1
+L57487 |   %581int1 = and %580int1, %320int1
+L57488 |    branch %581int1 33 37
+L57489 |   %582float32 = sub %484float32, %479float32
+L57490 |   %583float32 = sub %459float32, %482float32
+L57491 |   %584float32 = mul %582float32, %583float32
+
+Original lines 56603-56607
+L56603 |         32    %793 = phi b48: %789, b49: %791 (0x0)
+L56604 |         32    %794 = phi b48: %790, b49: %792 (0x0)
+L56605 |         32    %795 = @reduce (%793) (reduction_op=iadd, cluster_size=0)
+L56606 |         32    %796 = load_const (0x00000000)
+L56607 |         1     %797 = ieq %13, %796 (0x0)
+
+Original lines 56619-56623
+L56619 |         }
+L56620 |         block b53:   // preds: b51 b52
+L56621 |         32    %802 = @reduce (%794) (reduction_op=iadd, cluster_size=0)
+L56622 |                      // succs: b54 b55
+L56623 |         if %797 {
+
+Original lines 56710-56720
+L56710 |             32    %855 = ishl %853, %854 (0x2)
+L56711 |             32    %856 = iadd %22.y, %855
+L56712 |             32    %857 = @ssbo_atomic (%843, %856, %839) (access=coherent, atomic_op=iadd, offset_shift=0)
+L56713 |             32    %858 = load_const (0x00000001)
+L56714 |             32    %859 = iadd %842, %858 (0x1)
+L56715 |             32    %860 = umin %859, %852
+L56716 |             32    %861 = load_const (0x00000002)
+L56717 |             32    %862 = ishl %860, %861 (0x2)
+L56718 |             32    %863 = iadd %22.y, %862
+L56719 |             32    %864 = @ssbo_atomic (%843, %863, %840) (access=coherent, atomic_op=iadd, offset_shift=0)
+L56720 |                          // succs: b67

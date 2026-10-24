@@ -1,0 +1,340 @@
+{
+  "status": "OBSERVATION_COMPLETE",
+  "mode": "compiler_observation",
+  "score_eligible": false,
+  "timing_comparison": false,
+  "production_changed": false,
+  "new_mechanism": null,
+  "protocol_commit": "143b6f6",
+  "protocol_sha256": "46fae8c1b9ba77765569048d88255b50b6648136ec62c61a1075be4b973cf4ea",
+  "native_runs": 1,
+  "retries": 0,
+  "process_status": "completed",
+  "returncode": 0,
+  "errors": [],
+  "work": {
+    "submitted_batches": 64,
+    "completed_batches": 64,
+    "submitted_iterations": 4096,
+    "completed_iterations": 4096,
+    "submitted_evaluations": 1048576,
+    "completed_evaluations": 1048576,
+    "timestamp_samples": 64,
+    "warmup_evaluations_source_accounted": 32768
+  },
+  "data_validation": {
+    "status": "DATA_VALIDITY_PASS",
+    "predicates": 594,
+    "snapshots": 2,
+    "parents_checked": 8,
+    "scalar_rerenders": 0,
+    "max_f32_fitness_abs_difference": 0.0
+  },
+  "parent_critical_review_predicates": 82,
+  "capture": {
+    "files": 32,
+    "blobs": 24,
+    "bytes": 26687094,
+    "stderr_bytes": 5400641,
+    "controller_seconds": 23.630971120997856
+  },
+  "compiler_findings": {
+    "status": "COMPILER_TEXT_COMPLETE",
+    "score_eligible": false,
+    "native_jobs_by_analyst": 0,
+    "source_edits": false,
+    "new_mechanism": null,
+    "identity": {
+      "source_head_supplied": "0c6d6f3; capture protocol frozen in 143b6f6",
+      "paired_wgsl_sha256": "83c505bcc9220f39c11354692cdec3828e4d76681df8468ea93d597b4f4ceb7b",
+      "ae1_wgsl_sha256": "ae1fd75fdc118debf2a50cbad699e513b5af0dcbfa3754b45966f7a8ee925af3",
+      "normal_binary_sha256_supplied_not_queried": "1cf30fea6f7cb91f645b192c9b6a148fa500196eef1d463ebd17701e884a2fa2",
+      "capture_result_sha256": "65c686c192c21f9a9107a808c28fe27412fad59b4e3d325331f4433f55d552ce",
+      "stderr_sha256": "e6dff343669bb82abb7083421aef9d72266c98265aeb2bd5e03abc15c849933d",
+      "parent_validation": {
+        "path": "../data-validation.json",
+        "sha256": "797ef8ec3f6129c04a48d7a4de9606164841769896ec1eea8525f2cf048abf20",
+        "status": "DATA_VALIDITY_PASS",
+        "predicates": 594,
+        "audit_repeated": false
+      }
+    },
+    "raster_mapping": {
+      "basis": "Unique physical workgroup + resource spaces/bindings + texture/UAV properties; dual integer error sums and atomics confirm raster/error semantics.",
+      "section": 19,
+      "original_lines": [
+        55616,
+        58352
+      ],
+      "original_bytes_half_open": [
+        3215305,
+        3338247
+      ],
+      "workgroup": [
+        256,
+        1,
+        1
+      ],
+      "logical_tile": [
+        32,
+        16
+      ],
+      "storage_bindings": [
+        0,
+        2,
+        3,
+        4,
+        6
+      ],
+      "texture_binding": 1,
+      "uniform_spaces": [
+        1,
+        8
+      ],
+      "blob": "../worker/cwd/shader_cs_19.blob",
+      "blob_sha256": "8204dcc88a37aa8e64914daa26945bc5b4d48e31145aef7c8e81ad6409537ec1",
+      "blob_workgroup_bytes_half_open": [
+        148,
+        160
+      ],
+      "blob_resource_bytes_half_open": [
+        172,
+        364
+      ],
+      "blob_dxil_chunk_bytes_half_open": [
+        380,
+        7912
+      ]
+    },
+    "observed": {
+      "one_polygon_traversal_for_pair": {
+        "value": true,
+        "nir_loop_line": 56208,
+        "nir_bound_line": 56225,
+        "nir_step_line": 56490,
+        "ordinal_loop_removed": true,
+        "remaining_512_constants": "pixel-validity guards"
+      },
+      "polygon_shared_loads": {
+        "static_sites": 11,
+        "vertex": 6,
+        "bbox": 4,
+        "packed_color": 1,
+        "duplicated_for_second_pixel": false,
+        "nir_lines": [
+          56253,
+          56270
+        ],
+        "dxil_lines": [
+          57379,
+          57400
+        ],
+        "both_paths_use_same_loaded_values": true
+      },
+      "per_pixel_state": {
+        "coordinate_divisions_static_sites": 4,
+        "reference_fetch_static_sites": 2,
+        "old_framebuffer_read_static_sites": 2,
+        "nir_ranges": [
+          [
+            56005,
+            56055
+          ],
+          [
+            56104,
+            56154
+          ]
+        ],
+        "equal_x_coordinate_still_separately_computed": true
+      },
+      "hit_color_math": {
+        "per_hit_branch_normalization_divisions": 4,
+        "per_hit_branch_rgb_rescalings": 3,
+        "two_separate_branches": true,
+        "nir_ranges": [
+          [
+            56325,
+            56363
+          ],
+          [
+            56434,
+            56472
+          ]
+        ],
+        "dxil_ranges": [
+          [
+            57444,
+            57468
+          ],
+          [
+            57522,
+            57546
+          ]
+        ]
+      },
+      "expression_reuse": {
+        "retained": [
+          "Shared polygon load values",
+          "Tile-origin shifts: NIR %260/%265, DXIL %299/%302",
+          "Cache field indices"
+        ],
+        "not_shared_across_pixels": [
+          "Coordinate divisions",
+          "Six polygon-only edge differences",
+          "Color extraction, normalization and RGB rescaling"
+        ],
+        "duplicate_edge_example": {
+          "nir_lines": [
+            56283,
+            56392
+          ],
+          "nir_values": [
+            "%537",
+            "%630"
+          ],
+          "expression": "fsub %516, %510",
+          "dxil_lines": [
+            57411,
+            57489
+          ]
+        },
+        "compiler_pass_responsible": "unknown"
+      },
+      "shared_and_reduction": {
+        "cache_declarations": [
+          "3 x float[512]",
+          "4 x float[256]",
+          "1 x uint[256]"
+        ],
+        "declared_cache_element_bytes": 11264,
+        "same_declarations_as_ae1": true,
+        "other_shared": [
+          "2 x uint[128]",
+          "skip uint"
+        ],
+        "cooperative_loader_exact_text_same_as_ae1_lines": [
+          55808,
+          55966
+        ],
+        "barrier_lines": [
+          55759,
+          55966,
+          56635
+        ],
+        "subgroup_iadd_lines": [
+          56605,
+          56621
+        ],
+        "atomic_iadd_lines": [
+          56712,
+          56719
+        ],
+        "reduction_structure_retained": true
+      },
+      "other_application_blob_hashes": "Five unchanged versus prior inventory; comparison.json. No new auxiliary-stage investigation."
+    },
+    "inferred": [
+      "Source-expressed polygon-load reuse survives Mesa NIR/DXIL lowering."
+    ],
+    "unknown": [
+      "Final NVIDIA ISA",
+      "Dynamic instruction counts",
+      "Register allocation/spills",
+      "Utilization/occupancy/bandwidth",
+      "Hardware cause of prior throughput result"
+    ],
+    "recommendation": "None. Repeated arithmetic does not establish benefit from moving work across guards. Scalar44/RGBA/deferred-load/bbox-guard families remain closed; math and settings fixed.",
+    "artifacts": {
+      "raw_and_anchored_excerpts": "excerpt-index.json",
+      "section_mapping": "section-index.json",
+      "blob_mapping": "blob-inventory.json",
+      "bounded_comparison": "comparison.json",
+      "input_inventory": "input-hashes.json",
+      "deterministic_helper": "extract.py",
+      "inventory_count": 44
+    }
+  },
+  "artifacts": {
+    ".cache/evolution-paired-observation-20261024/spec.json": {
+      "sha256": "46fae8c1b9ba77765569048d88255b50b6648136ec62c61a1075be4b973cf4ea",
+      "bytes": 4760
+    },
+    ".cache/evolution-paired-observation-20261024/run-observation.py": {
+      "sha256": "13b5d02a0e7fe3e63c64c9dce2b2003113c096d86b375ae46b5a8dce4177cfb9",
+      "bytes": 4616
+    },
+    ".cache/evolution-paired-observation-20261024/before.json": {
+      "sha256": "871a95cfb677970285fde5ee6783b983efd37a35bfed2a3e213bd3883754bd56",
+      "bytes": 10708
+    },
+    ".cache/evolution-paired-observation-20261024/preflight.json": {
+      "sha256": "421d84c5cb07acfe611310c3e92df27c35491030f128b26db16bebf1b0df1d5a",
+      "bytes": 539
+    },
+    ".cache/evolution-paired-observation-20261024/clock.json": {
+      "sha256": "ad84f1232662229a8a27b3c322cde41012f17296de51206396f95581d3978501",
+      "bytes": 379
+    },
+    ".cache/evolution-paired-observation-20261024/capture-result.json": {
+      "sha256": "65c686c192c21f9a9107a808c28fe27412fad59b4e3d325331f4433f55d552ce",
+      "bytes": 11785
+    },
+    ".cache/evolution-paired-observation-20261024/validate-data.py": {
+      "sha256": "4cd4f805e561655ed2b0e9d52ee28e766d8e03bdf599e72ab4f40d3099d1ed2a",
+      "bytes": 6273
+    },
+    ".cache/evolution-paired-observation-20261024/data-validation.json": {
+      "sha256": "797ef8ec3f6129c04a48d7a4de9606164841769896ec1eea8525f2cf048abf20",
+      "bytes": 120496
+    },
+    ".cache/evolution-paired-observation-20261024/parent-review.json": {
+      "sha256": "b2d6b0715fd81c49d2b692453ad8a5e81a139861e7459f9b707a6f1691089ceb",
+      "bytes": 10545
+    },
+    ".cache/evolution-paired-observation-20261024/analysis-124/report.md": {
+      "sha256": "c6e6cdc22d82582b2e15a5f4b74fc0f0681becb287e3a342740082bd6114e7ee",
+      "bytes": 4007
+    },
+    ".cache/evolution-paired-observation-20261024/analysis-124/findings.json": {
+      "sha256": "644232b1f632cb88113013d59f68b8839d54c88bee3d939e0138b5470484965b",
+      "bytes": 5638
+    },
+    ".cache/evolution-paired-observation-20261024/analysis-124/comparison.json": {
+      "sha256": "49c52391e5c208b162c87d3a54817f51066f71ec6d703f3283366996c9bbfc86",
+      "bytes": 3588
+    },
+    ".cache/evolution-paired-observation-20261024/analysis-124/extract.py": {
+      "sha256": "ebd758bd0e353607a5b88552b8327386d9562f7b47533881141a764a827494a0",
+      "bytes": 10676
+    },
+    ".cache/evolution-paired-observation-20261024/analysis-124/excerpt-index.json": {
+      "sha256": "f4e7fc39c874ad3dabe719d1e1343c66239c1f19fc251788f13c75040ea86aa6",
+      "bytes": 828
+    },
+    ".cache/evolution-paired-observation-20261024/analysis-124/input-hashes.json": {
+      "sha256": "67b3df121168d20c5e6622aca3c2a0de8f67a3fb5a0defab74665df1e4d964a6",
+      "bytes": 9754
+    },
+    ".cache/evolution-paired-observation-20261024/analysis-124/output-hashes.json": {
+      "sha256": "cc4bc1911251451f0aa0d991bde15d2b069643000cb74cc3a7e594f12f41fdf3",
+      "bytes": 2125
+    },
+    ".cache/evolution-paired-observation-20261024/worker/output/result.json": {
+      "sha256": "0400b5f6753f3783d6a76e08e34ccbe8453e22d0460338dde83010dc055f9786",
+      "bytes": 9763
+    },
+    ".cache/evolution-paired-observation-20261024/worker/evidence/stderr.log": {
+      "sha256": "e6dff343669bb82abb7083421aef9d72266c98265aeb2bd5e03abc15c849933d",
+      "bytes": 5400641
+    },
+    "benchmarks/evolution/continuation-20261024/profiles/paired-compiler-raster-excerpts.txt": {
+      "sha256": "5ddc66ea5e32dff5f482ba567b143d256c218a442dc4bbe610fdc5e80121d929",
+      "bytes": 12322
+    }
+  },
+  "limits": [
+    "All rate/elapsed values in raw TrialRecord are excluded from performance comparison.",
+    "Compiler text does not establish dynamic hardware costs or the cause of the kept throughput gain.",
+    "No candidate, Rust build, extra GPU correctness suite, feature/pass/parameter change or rescore."
+  ]
+}

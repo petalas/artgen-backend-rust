@@ -1,0 +1,130 @@
+--- /dev/null
++++ b/validate-data.py
+@@ -0,0 +1,127 @@
++"""Offline identity and numerical validation of the single unscored capture."""
++import hashlib
++import importlib.util
++import json
++import struct
++from pathlib import Path
++
++HERE = Path(__file__).resolve().parent
++ROOT = HERE.parents[1]
++CHECKS = []
++
++
++def sha(path):
++    with path.open('rb') as stream:
++        return hashlib.file_digest(stream, 'sha256').hexdigest()
++
++
++def read(path):
++    if path.stat().st_size > 32 * 1024 * 1024:
++        raise ValueError('JSON cap')
++    return json.loads(path.read_text())
++
++
++def check(name, valid, evidence=None):
++    CHECKS.append({'name': name, 'pass': bool(valid), 'evidence': evidence})
++    if not valid:
++        raise ValueError(name)
++
++
++def module(path, name, digest):
++    check(name + ' source', sha(path) == digest)
++    loader = importlib.util.spec_from_file_location(name, path)
++    loaded = importlib.util.module_from_spec(loader)
++    loader.loader.exec_module(loaded)
++    return loaded
++
++
++def identity(spec, capture):
++    before = read(HERE / 'before.json')
++    for name, digest in before['source_hashes'].items():
++        check('root source ' + name, sha(ROOT / name) == digest)
++        check('frozen source ' + name, sha(HERE / 'source' / name) == digest)
++    for group in ('normal_binary_hashes', 'helper_hashes', 'prior_evidence_sha256'):
++        for name, digest in before[group].items():
++            path = Path(name)
++            path = path if path.is_absolute() else ROOT / path
++            check(group + ' ' + name, sha(path) == digest)
++    check('kept executable', sha(Path(spec['binary'])) == spec['binary_sha256'])
++    driver = spec['installed_driver']
++    check('installed compiler', sha(Path(driver['path'])) == driver['sha256'])
++    for name, metadata in capture['files'].items():
++        path = Path(name)
++        check('raw file ' + name, path.stat().st_size == metadata['bytes']
++              and sha(path) == metadata['sha256'])
++    raw = Path(spec['binary']).read_bytes()
++    for stage, metadata in spec['embedded_shaders'].items():
++        offset, size = metadata['offset'], metadata['bytes']
++        check('embedded shader ' + stage,
++              hashlib.sha256(raw[offset:offset + size]).hexdigest() == metadata['sha256'])
++
++
++def containers(capture):
++    rows = []
++    for name in capture['blob_files']:
++        raw = Path(name).read_bytes()
++        check('DXBC header ' + name, len(raw) >= 32 and raw[:4] == b'DXBC')
++        total, count = struct.unpack_from('<II', raw, 24)
++        check('DXBC bounds ' + name, total == len(raw) and 1 <= count <= 32
++              and 32 + 4 * count <= len(raw))
++        chunks = []
++        for index in range(count):
++            offset = struct.unpack_from('<I', raw, 32 + 4 * index)[0]
++            check('chunk header ' + name + '/' + str(index),
++                  32 + 4 * count <= offset <= len(raw) - 8)
++            size = struct.unpack_from('<I', raw, offset + 4)[0]
++            check('chunk extent ' + name + '/' + str(index), offset + 8 + size <= len(raw))
++            chunks.append({'fourcc': raw[offset:offset + 4].decode('ascii'),
++                           'offset': offset, 'bytes': size})
++        check('DXIL chunk ' + name, any(row['fourcc'] == 'DXIL' for row in chunks))
++        rows.append({'path': name, 'bytes': len(raw), 'sha256': sha(Path(name)), 'chunks': chunks})
++    return rows
++
++
++def main():
++    obs = module(HERE / 'run-observation.py', 'observer',
++                 '13b5d02a0e7fe3e63c64c9dce2b2003113c096d86b375ae46b5a8dce4177cfb9')
++    previous = module(ROOT / '.cache/evolution-observation-20261024/validate-data.py',
++                      'accepted_numerical',
++                      'a7d93212a70bb0f41ce6a5f4042713165fcde01cc56c7ff7619cba412c6cfbdb')
++    c, compare, b = obs.helpers()
++    spec = read(HERE / 'spec.json')
++    capture = read(HERE / 'capture-result.json')
++    check('frozen specification', sha(HERE / 'spec.json') == obs.SPEC_SHA)
++    check('unscored captured bundle', capture['score_eligible'] is False
++          and capture['mode'] == 'compiler_observation' and capture['errors'] == []
++          and capture['status'] == 'CAPTURED_PENDING_VALIDATION')
++    check('actual command', capture['process']['command'] == obs.command(spec)
++          and capture['process']['returncode'] == 0 and capture['process']['status'] == 'completed')
++    clock = read(HERE / 'clock.json')
++    check('one bounded clock', clock['deadline'] == clock['monotonic_start'] + 600
++          and capture['controller_wall_seconds'] < 600)
++    check('capture bounds', 0 < len(capture['blob_files']) <= 32
++          and len(capture['files']) <= 512 and capture['captured_bytes'] <= 268435456
++          and sum(row['bytes'] for row in capture['files'].values()) == capture['captured_bytes'])
++    identity(spec, capture)
++    blobs = containers(capture)
++    result = read(Path(spec['output']) / 'result.json')
++    snapshots, math_checks = previous.numerical(c, compare, b, spec, result)
++    for key in ('submitted_batches', 'completed_batches', 'submitted_iterations',
++                'completed_iterations', 'submitted_evaluations', 'completed_evaluations'):
++        check('expected work ' + key, result['counters'][key] == spec['expected_work'][key])
++    report = {'status': 'DATA_VALIDITY_PASS', 'mode': 'compiler_observation',
++              'score_eligible': False, 'checks_passed': len(CHECKS) + len(previous.CHECKS) + len(math_checks),
++              'checks': CHECKS, 'reused_numerical_checks': previous.CHECKS,
++              'numerical_checks': math_checks, 'snapshots': snapshots, 'parents_checked': 8,
++              'scalar_rerenders': 0, 'timing_comparison': False, 'artifact_file_count': len(capture['files']),
++              'blobs': blobs, 'captured_bytes': capture['captured_bytes'],
++              'compiler_stage_association': 'analyst124 independently maps actual raster',
++              'warmup_evaluations_source_accounted': 32768, 'measured_evaluations': 1048576,
++              'total_logical_evaluations_lower_bound': 1081344,
++              'max_f32_fitness_abs_difference': max(abs(p['fitness_delta']) for s in snapshots for p in s['parents'])}
++    b.write_json(HERE / 'data-validation.json', report)
++    print('PASS', report['checks_passed'], 'checks, two snapshots, eight parents; no performance score')
++
++
++if __name__ == '__main__':
++    main()
