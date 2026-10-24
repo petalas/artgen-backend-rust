@@ -1,0 +1,238 @@
+--- controller-102/run-campaign.py
++++ qualification-contract-fix-106/run-campaign.py
+@@ -14,9 +14,9 @@
+ import sys
+ import time
+ 
+-D = Path(__file__).resolve().parent
+-ROOT = D.parents[2]
+-BASE = D.parent
++# Keep the consumed original namespace, including its exclusive one-shot clock.
++ROOT = Path("/home/nick/git/artgen-backend-rust")
++BASE = ROOT / ".cache/evolution-qualification-prepared-20261024"
+ TARGET = BASE / "campaign"
+ BUILD = BASE / "build-100"
+ SPEC_SHA = "60ecdd6427bb6932f911d6ae96a711e6224f556b8be46866bf7f28c41f780d84"
+@@ -253,6 +253,52 @@
+     check_work(summary["diagnostic_counters"], batches * 2 * len(cases))
+ 
+ 
++def validate_qualification(b, record, case, args, manifest_hash):
++    """Apply the TrialRecord checks to an explicitly unscored qualification."""
++    b.object_value(record, "result")
++    b.require(record.get("timestamp_mode", "stages") == "stages"
++              and record.get("batch_compute_envelope") is None,
++              "profiling records cannot enter the reference timing score")
++    b.require(type(record.get("protocol_version")) is int and record["protocol_version"] == 1,
++              "unsupported result protocol")
++    b.require(record.get("status") == "completed", "trial did not complete validly")
++    b.require(type(record.get("correctness")) is bool and record["correctness"], "numerical correctness failed")
++    b.require(record.get("errors") == [] and type(record.get("errors")) is list, "trial reported errors")
++    b.require(type(record.get("error_count")) is int and record["error_count"] == 0, "trial error_count is not zero")
++    for key, expected in (("case_id", case["case_id"]), ("seed", args.seed),
++                          ("batches", args.batches), ("diagnostic", False)):
++        b.require(type(record.get(key)) is type(expected) and record[key] == expected,
++                  f"result {key} differs from requested trial")
++    b.require(record.get("fixture_manifest_sha256") == manifest_hash, "fixture manifest hash mismatch")
++    for key in ("initial_state_sha256", "final_state_sha256"):
++        b.digest_value(record.get(key), key)
++    b.require(record["initial_state_sha256"] != record["final_state_sha256"],
++              "no evolution state changed despite reported completed work")
++    params = b.object_value(record.get("params"), "result.params")
++    b.require(params == case["params"], "effective parameters differ from frozen case")
++    require(json.dumps(params, sort_keys=True) == json.dumps(case["params"], sort_keys=True),
++            "typed params differ")
++    counters = b.object_value(record.get("counters"), "result.counters")
++    for key, expected in b.expected_work(params, args.batches).items():
++        for side in ("submitted", "completed"):
++            field = f"{side}_{key}"
++            b.require(type(counters.get(field)) is int and counters[field] == expected,
++                      f"wrong completed work: {field}, expected {expected}, got {counters.get(field)}")
++    elapsed = b.finite(record.get("elapsed_seconds"), 1e-9, args.timeout, "elapsed_seconds")
++    b.finite(record.get("drain_seconds"), 0, elapsed, "drain_seconds")
++    # qualify_inner never assigns a rate; finish_record does not create one.
++    b.require("evals_per_second" in record and record["evals_per_second"] is None,
++              "qualification evals_per_second must be null (unscored)")
++    b.finite(record.get("initial_similarity_percent"), 97.000000001, 100, "initial_similarity_percent")
++    fitness = record.get("final_fitness_percent")
++    b.require(isinstance(fitness, list) and len(fitness) == params["chainCount"], "missing final per-chain fitness")
++    for value in fitness:
++        b.finite(value, 0, 100, "final_fitness_percent")
++    b.validate_quality_record(record, case)
++    b.object_value(record.get("gpu"), "gpu provenance")
++    return record
++
++
+ def validate_phase(compare, b, folder, phase, spec, fixtures, gpu_identities):
+     output = folder / "output"
+     summary = b.object_value(b.read_json(output / "summary.json", 2 * 1024 * 1024), "native summary")
+@@ -268,9 +314,7 @@
+         qualification = output / f"qualification-{case}"
+         record = b.read_json(qualification / "result.json", 2 * 1024 * 1024)
+         args = b.argparse.Namespace(seed=seed, batches=batches, timeout=600)
+-        b.validate_result(record, fixtures[case], args, False, MANIFEST)
+-        require(json.dumps(record["params"], sort_keys=True) ==
+-                json.dumps(fixtures[case]["params"], sort_keys=True), "typed params differ")
++        validate_qualification(b, record, fixtures[case], args, MANIFEST)
+         check_work(record["counters"], batches)
+         require(record.get("schema") == spec["schema"] and record.get("warmup_batches") == 8
+                 and record.get("finalize_overlap") is False and record.get("timestamp_samples") == batches,
+--- /dev/null
++++ qualification-contract-fix-106/test-qualification.py
+@@ -0,0 +1,156 @@
++"""Read-only CPU regression against the completed, immutable AA artifacts."""
++import copy
++import importlib.util
++from pathlib import Path
++import unittest
++from unittest.mock import patch
++
++HERE = Path(__file__).resolve().parent
++SPEC = importlib.util.spec_from_file_location("qualification_controller", HERE / "run-campaign.py")
++C = importlib.util.module_from_spec(SPEC)
++SPEC.loader.exec_module(C)
++
++
++class ActualQualificationContract(unittest.TestCase):
++    @classmethod
++    def setUpClass(cls):
++        cls.compare, cls.b = C.load_helpers()
++        cls.spec = cls.b.read_json(C.TARGET / "spec.json")
++        cls.fixtures = {case["case_id"]: case for case in
++                        cls.b.load_manifest(Path(cls.spec["identities"]["manifest"]))["cases"]}
++        cls.args = cls.b.argparse.Namespace(seed=7, batches=8, timeout=600)
++        cls.output = C.TARGET / "aa/output"
++        cls.records = {case: cls.b.read_json(cls.output / f"qualification-{case}/result.json",
++                                            2 * 1024 * 1024) for case in C.CASES}
++
++    def setUp(self):
++        for module, name in ((C, "main"), (C, "run_phases"),
++                             (self.b, "run_process"), (self.b, "write_json")):
++            guard = patch.object(module, name, side_effect=AssertionError(f"forbidden call: {name}"))
++            guard.start()
++            self.addCleanup(guard.stop)
++
++    def assert_rejected_mutation(self, path, value):
++        self.assertTrue(1 <= len(path) <= 4)
++        for case in C.CASES:
++            with self.subTest(case=case, path=path, value=value):
++                record = copy.deepcopy(self.records[case])
++                owner = record
++                for part in path[:-1]:
++                    owner = owner[part]
++                owner[path[-1]] = value
++                with self.assertRaises((C.Invalid, self.b.BenchError)):
++                    C.validate_qualification(self.b, record, self.fixtures[case], self.args, C.MANIFEST)
++
++    def test_old_actual_validator_rejects_each_nullable_qualification(self):
++        for case in C.CASES:
++            with self.subTest(case=case):
++                record = self.records[case]
++                self.assertIs(record["diagnostic"], False)
++                self.assertIn("evals_per_second", record)
++                self.assertIsNone(record["evals_per_second"])
++                with self.assertRaisesRegex(self.b.BenchError, "evals_per_second must be finite"):
++                    self.b.validate_result(record, self.fixtures[case], self.args, False, C.MANIFEST)
++
++    def test_corrected_validator_accepts_all_three_raw_records_without_mutation(self):
++        for case in C.CASES:
++            with self.subTest(case=case):
++                record = self.records[case]
++                before = copy.deepcopy(record)
++                checked = C.validate_qualification(self.b, record, self.fixtures[case], self.args, C.MANIFEST)
++                self.assertIs(checked, record)
++                self.assertEqual(record, before)
++                self.assertIs(record["diagnostic"], False)
++                self.assertIsNone(record["evals_per_second"])
++
++    def test_invalid_protocol_status_errors_and_trial_identity_rejected(self):
++        changes = (("protocol_version", True), ("protocol_version", 2), ("status", "pending"),
++                   ("correctness", False), ("correctness", 1), ("errors", ["device failure"]),
++                   ("error_count", 1), ("error_count", False), ("case_id", "wrong-case"),
++                   ("seed", 8), ("batches", 7), ("diagnostic", True), ("diagnostic", 0),
++                   ("fixture_manifest_sha256", "0" * 64), ("initial_state_sha256", "invalid"),
++                   ("timestamp_mode", "batch-envelope"), ("batch_compute_envelope", {}))
++        for key, value in changes:
++            self.assert_rejected_mutation((key,), value)
++        for case in C.CASES:
++            record = dict(self.records[case], final_state_sha256=self.records[case]["initial_state_sha256"])
++            with self.assertRaisesRegex(self.b.BenchError, "no evolution state changed"):
++                C.validate_qualification(self.b, record, self.fixtures[case], self.args, C.MANIFEST)
++
++    def test_invalid_work_in_each_submitted_completed_counter_rejected(self):
++        for key in C.COUNTERS:
++            for value in (0, True):
++                self.assert_rejected_mutation(("counters", key), value)
++
++    def test_changed_or_differently_typed_frozen_parameters_rejected(self):
++        for key, value in (("chainCount", 5), ("adaptiveMutation", 0), ("rasterizeWg", [32, 16.0]),
++                           ("gpuBatchIters", 63), ("lambda", 63), ("changeColorProb", 0.0)):
++            self.assert_rejected_mutation(("params", key), value)
++
++    def test_invalid_quality_scalar_fitness_and_stages_rejected(self):
++        changes = ((("initial_complexity", "overflowed_tiles"), 1),
++                   (("initial_quality", 0, "pixel_audit", "unexplained_pixels"), 1),
++                   (("final_quality", 0, "scalar_error"), 0),
++                   (("final_quality", 0, "framebuffer_error"), 0),
++                   (("final_quality", 0, "stored_fitness"), 0),
++                   (("final_complexity", 0, "vertices"), 0),
++                   (("final_fitness_percent", 0), float("nan")),
++                   (("final_fitness_percent",), []), (("initial_similarity_percent",), 97),
++                   (("start_mode",), "wrong"), (("timestamp_samples",), 0),
++                   (("sampled_gpu_stage_totals_ns",), [0, 0, 0]),
++                   (("sampled_gpu_stage_totals_ns", 0), float("inf")), (("gpu",), []))
++        for path, value in changes:
++            self.assert_rejected_mutation(path, value)
++
++    def test_qualification_requires_explicit_null_and_finite_elapsed_drain(self):
++        for value in (1.0, 0, False, float("inf"), float("nan")):
++            self.assert_rejected_mutation(("evals_per_second",), value)
++        for key, value in (("elapsed_seconds", 0), ("elapsed_seconds", float("nan")),
++                           ("elapsed_seconds", 601), ("drain_seconds", -1), ("drain_seconds", 601)):
++            self.assert_rejected_mutation((key,), value)
++        for case in C.CASES:
++            record = dict(self.records[case])
++            del record["evals_per_second"]
++            with self.assertRaisesRegex(self.b.BenchError, "qualification evals_per_second must be null"):
++                C.validate_qualification(self.b, record, self.fixtures[case], self.args, C.MANIFEST)
++
++    def test_actual_normal_rows_keep_finite_correct_rate_contract_and_both_flags_false(self):
++        normal = C.read_lines(self.b, self.output / "trials.jsonl", 30)
++        self.assertEqual(len(normal), 30)
++        self.assertEqual({row["variant"] for row in normal}, {"reference", "control"})
++        for row in normal:
++            self.assertIs(row["finalize_overlap"], False)
++            C.validate_row(row, C.PHASES[0], self.records[row["case_id"]])
++        row = normal[0]
++        for value in (None, 0, 1.0, False, float("nan"), float("inf")):
++            with self.subTest(rate=value), self.assertRaises(C.Invalid):
++                C.validate_row(dict(row, evals_per_second=value), C.PHASES[0], self.records["ff"])
++
++    def test_original_consumed_namespace_and_historical_stop_are_retained(self):
++        root = Path("/home/nick/git/artgen-backend-rust")
++        self.assertEqual(C.ROOT, root)
++        self.assertEqual(C.BASE, root / ".cache/evolution-qualification-prepared-20261024")
++        self.assertEqual(C.TARGET, C.BASE / "campaign")
++        self.assertTrue((C.TARGET / "clock.json").is_file())
++        historical = self.b.read_json(C.TARGET / "result.json")
++        self.assertEqual(historical["state"], "INCONCLUSIVE")
++        self.assertEqual([phase["phase"] for phase in historical["phases"]], ["aa"])
++        self.assertEqual(historical["errors"],
++                         ["BenchError: evals_per_second must be finite in 1e-09..1e+18"])
++
++    def test_actual_phase_validates_but_frozen_aa_gate_still_fails(self):
++        process = self.b.read_json(C.TARGET / "aa/evidence/process.json")
++        self.assertEqual((process["status"], process["returncode"]), ("completed", 0))
++        result = C.validate_phase(self.compare, self.b, C.TARGET / "aa", C.PHASES[0],
++                                  self.spec, self.fixtures, {})
++        self.assertIs(result["valid"], True)
++        decision = C.gate(self.compare, result["ratios"], aa=True)
++        self.assertIs(decision["pass"], False)
++        darwin = decision["statistics"]["cases"]["darwin"]["paired_ratios"]["median"]
++        self.assertAlmostEqual(darwin, 0.98732098719558, places=14)
++        self.assertLess(darwin, 0.99)
++        self.assertEqual(C.transition("NEW", "aa", "fail"), "INCONCLUSIVE")
++
++
++if __name__ == "__main__":
++    unittest.main(verbosity=2)
