@@ -1,0 +1,80 @@
+--- a/src/shaders/rasterize_error.wgsl
++++ b/src/shaders/rasterize_error.wgsl
+@@ -1,2 +1,4 @@
++// SOURCE-ONLY PROTOTYPE: conservative 8x8 cluster mask in existing decoded padding.
++// Base: SELECTED 256-lane source, full confirmation pending; not adopted.
+ // SOURCE-ONLY PROTOTYPE: serial pixels per physical lane, same logical raster tile.
+ // Dispatch and binning remain (ceil(W/WG_X), ceil(H/WG_Y), K*lambda).
+@@ -29,5 +31,6 @@
+     bb_min_y: f32,   // offset 32
+     bb_max_y: f32,   // offset 36
+-    color_packed: u32, // offset 40; trailing padding 44..47; stride 48
++    color_packed: u32, // offset 40
++    mask: u32,         // offset 44; uses old padding; stride remains 48
+ }
+ 
+@@ -186,4 +189,39 @@
+ }
+ 
++// Conservative pixel bbox from packed u16 extrema; no new floating-point work.
++fn polygon_subtile_mask(poly: Polygon, tile_origin: vec2<u32>, image_size: vec2<u32>) -> u32 {
++    // Preserve the full image contract when the small-integer proof does not apply.
++    if any(image_size == vec2<u32>(0u)) || any(image_size > vec2<u32>(512u)) {
++        return 0xFFFFFFFFu;
++    }
++    let q0 = vec2<u32>(poly.data.y & 0xFFFFu, poly.data.y >> 16u);
++    let q1 = vec2<u32>(poly.data.z & 0xFFFFu, poly.data.z >> 16u);
++    let q2 = vec2<u32>(poly.data.w & 0xFFFFu, poly.data.w >> 16u);
++    let q_min = min(q0, min(q1, q2));
++    let q_max = max(q0, max(q1, q2));
++    let floor_min = (q_min * image_size) / vec2<u32>(65535u);
++    let pixel_min = floor_min - min(floor_min, vec2<u32>(1u));
++    let ceil_max = (q_max * image_size + vec2<u32>(65534u)) / vec2<u32>(65535u);
++    let pixel_max = min(ceil_max + vec2<u32>(1u), image_size);
++
++    let start = max(pixel_min, tile_origin);
++    let end = min(pixel_max, min(tile_origin + vec2<u32>(WG_X, WG_Y), image_size));
++    if any(end <= start) {
++        return 0u;
++    }
++    // Guard above precedes every unsigned subtraction of a clipped endpoint.
++    let first = (start - tile_origin) / vec2<u32>(8u);
++    let last = (end - vec2<u32>(1u) - tile_origin) / vec2<u32>(8u);
++    let columns = WG_X / 8u;
++    let row_mask = ((1u << (last.x - first.x + 1u)) - 1u) << first.x;
++    var mask = 0u;
++    for (var row = 0u; row < 2u; row++) {
++        if row >= first.y && row <= last.y {
++            mask |= row_mask << (row * columns);
++        }
++    }
++    return mask;
++}
++
+ // No barriers or cross-pixel floating-point state are permitted in this helper.
+ fn pixel_errors(
+@@ -194,4 +232,6 @@
+         return vec2<u32>(0u, 0u);
+     }
++    let cluster_bit = 1u << (
++        (py % WG_Y) / 8u * (WG_X / 8u) + (px % WG_X) / 8u);
+     var pixel_error = 0u;
+     var pixel_error_old = 0u;
+@@ -225,4 +265,7 @@
+ 
+     for (var i = 0u; i < tile_poly_count; i++) {
++        if (shared_polys[i].mask & cluster_bit) == 0u {
++            continue;
++        }
+         rasterize_blend(shared_polys[i], fx, fy, &r, &g, &b);
+     }
+@@ -310,6 +353,8 @@
+         let bb_min_y = min(pv0.y, min(pv1.y, pv2.y));
+         let bb_max_y = max(pv0.y, max(pv1.y, pv2.y));
++        let mask = polygon_subtile_mask(
++            poly, wid.xy * vec2<u32>(WG_X, WG_Y), vec2<u32>(w, h));
+         shared_polys[slot] = DecodedPolygon(
+-            pv0, pv1, pv2, bb_min_x, bb_max_x, bb_min_y, bb_max_y, poly.data.x);
++            pv0, pv1, pv2, bb_min_x, bb_max_x, bb_min_y, bb_max_y, poly.data.x, mask);
+     }
+     workgroupBarrier();

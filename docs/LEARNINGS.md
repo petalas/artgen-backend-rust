@@ -42,6 +42,14 @@ Project-specific gotchas and hard-won knowledge. Search here when you hit unexpe
 **Gotcha**: Loading a pipeline cache does not skip all compilation. On the WSL Dozen driver, automatic initialization of the large shared polygon arrays dominates compilation of the rasterize/error and framebuffer pipelines.
 **Fix**: These three shaders explicitly initialize every shared value they consume before a barrier. Their Vulkan pipelines disable redundant automatic zeroing. The reductions use `subgroup_id` and `num_subgroups`, since WGSL does not guarantee a mapping from local invocation indices to subgroup IDs. Keep automatic zeroing for mutation, whose empty-parent crossover reads polygon slot zero, and for DX12, where Naga emulates subgroup IDs using local indices.
 
+**Benchmark trap**: Matching WGSL bytes does not match compilation policy. The
+rejected compact-raster prototypes compiled their raster with default zeroing
+TRUE, while the ordinary Vulkan raster used this helper and FALSE. Their losing
+filters therefore do not isolate scheduling cost. Experimental raster factories
+and instrumented checkers must use and record the same effective policy before
+attributing a difference. The historical records stay rejected; see
+[the compact-raster disposition](../benchmarks/evolution/overnight-20261024/09-compact-raster-prototype.md).
+
 ### Run Dozen GPU checks on the application's main-thread path
 
 **Context**: Checking rasterization across workgroup sizes and offspring counts.

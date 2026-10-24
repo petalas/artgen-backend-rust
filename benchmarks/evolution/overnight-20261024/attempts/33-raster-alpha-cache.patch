@@ -1,0 +1,40 @@
+--- a/src/shaders/rasterize_error.wgsl
++++ b/src/shaders/rasterize_error.wgsl
+@@ -29,5 +29,6 @@
+     bb_min_y: f32,   // offset 32
+     bb_max_y: f32,   // offset 36
+-    color_packed: u32, // offset 40; trailing padding 44..47; stride 48
++    color_packed: u32, // offset 40
++    alpha: f32,        // offset 44; stride 48
+ }
+ 
+@@ -146,4 +147,13 @@
+ }
+ 
++// Cache the original alpha expression once per cooperatively loaded polygon.
++fn with_cached_alpha(poly: DecodedPolygon) -> DecodedPolygon {
++    let pcolor = unpack_color(Polygon(vec4<u32>(poly.color_packed, 0u, 0u, 0u)));
++    let alpha = pcolor.w;
++    var decoded = poly;
++    decoded.alpha = alpha;
++    return decoded;
++}
++
+ /// Rasterize a polygon and alpha-blend if pixel is inside.
+ fn rasterize_blend(poly: DecodedPolygon, fx: f32, fy: f32, r: ptr<function, f32>, g: ptr<function, f32>, b: ptr<function, f32>) {
+@@ -175,5 +185,5 @@
+         // Unpack color and alpha blend: out = src * alpha + dst * (1 - alpha)
+         let pcolor = unpack_color(Polygon(vec4<u32>(poly.color_packed, 0u, 0u, 0u)));
+-        let alpha = pcolor.w;
++        let alpha = poly.alpha;
+         let inv_alpha = 1.0 - alpha;
+         let src_r = pcolor.x * 255.0;
+@@ -310,6 +320,6 @@
+         let bb_min_y = min(pv0.y, min(pv1.y, pv2.y));
+         let bb_max_y = max(pv0.y, max(pv1.y, pv2.y));
+-        shared_polys[slot] = DecodedPolygon(
+-            pv0, pv1, pv2, bb_min_x, bb_max_x, bb_min_y, bb_max_y, poly.data.x);
++        shared_polys[slot] = with_cached_alpha(DecodedPolygon(
++            pv0, pv1, pv2, bb_min_x, bb_max_x, bb_min_y, bb_max_y, poly.data.x, 0.0));
+     }
+     workgroupBarrier();
