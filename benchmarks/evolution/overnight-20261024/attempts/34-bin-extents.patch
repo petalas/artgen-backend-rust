@@ -1,0 +1,33 @@
+--- a/src/shaders/bin_polygons.wgsl
++++ b/src/shaders/bin_polygons.wgsl
+@@ -1,4 +1,4 @@
+ // Polygon binning compute shader — assigns each polygon to the spatial tiles it overlaps.
+-// Dispatch: (offspring_count, 1, 1). Each workgroup computes bounds cooperatively.
++// Dispatch: (offspring_count, 1, 1). Each workgroup computes bounds in 32 lanes.
+ // Each tile has one lane scanning polygons in order, as required for alpha blending.
+ //
+@@ -101,5 +101,5 @@
+ @group(1) @binding(0) var<uniform>             params:         Params;
+ 
+-// [min_x, max_x, min_y, max_y], 16,000 bytes per workgroup.
++// [min_x, extent_x, min_y, extent_y], 16,000 bytes per workgroup.
+ // The validated drawing contract bounds polygon_count by the 1000 polygon slots.
+ var<workgroup> polygon_bounds: array<vec4<u32>, 1000>;
+@@ -150,5 +150,9 @@
+     for (var pi = local_idx; pi < poly_count; pi += 512u) {
+         let poly = working_states[offspring_id].polygons[pi];
+-        polygon_bounds[pi] = polygon_tile_bounds(poly, w, h, num_tiles_x, num_tiles_y);
++        let bounds = polygon_tile_bounds(poly, w, h, num_tiles_x, num_tiles_y);
++        polygon_bounds[pi] = vec4<u32>(
++            bounds.x, max(bounds.y, bounds.x) - bounds.x,
++            bounds.z, max(bounds.w, bounds.z) - bounds.z,
++        );
+     }
+     workgroupBarrier();
+@@ -163,5 +167,5 @@
+         for (var pi = 0u; pi < poly_count; pi++) {
+             let bounds = polygon_bounds[pi];
+-            if tx >= bounds.x && tx < bounds.y && ty >= bounds.z && ty < bounds.w {
++            if (tx - bounds.x) < bounds.y && (ty - bounds.z) < bounds.w {
+                 let slot = raw_count;
+                 raw_count += 1u;

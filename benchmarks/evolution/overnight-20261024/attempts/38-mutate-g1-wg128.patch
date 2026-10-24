@@ -1,0 +1,11 @@
+--- a/src/shaders/mutate.wgsl
++++ b/src/shaders/mutate.wgsl
+@@ -554,6 +554,6 @@
+ // Source metadata must match the host's offspring dispatch group size.
+ const OFFSPRING_GROUP_SIZE: u32 = 1u;
+-const PHYSICAL_WG_SIZE: u32 = 64u;
+-const COPY_LANES: u32 = 64u;
++const PHYSICAL_WG_SIZE: u32 = 128u;
++const COPY_LANES: u32 = 128u;
+ 
+ // Copy roles are independent of the compact mutation leaders.

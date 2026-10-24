@@ -1,0 +1,21 @@
+--- a/src/shaders/bin_polygons.wgsl
++++ b/src/shaders/bin_polygons.wgsl
+@@ -1,4 +1,4 @@
+ // Polygon binning compute shader — assigns each polygon to the spatial tiles it overlaps.
+-// Dispatch: (offspring_count, 1, 1). Each workgroup computes bounds cooperatively.
++// Dispatch: (offspring_count, 1, 1). Each workgroup computes bounds in 32 lanes.
+ // Each tile has one lane scanning polygons in order, as required for alpha blending.
+ //
+@@ -160,4 +160,5 @@
+         let tx = tile_id % num_tiles_x;
+         let ty = tile_id / num_tiles_x;
++        let tile_data_base = offspring_id * num_tiles * TILE_MAX_POLYS + tile_id * TILE_MAX_POLYS;
+ 
+         for (var pi = 0u; pi < poly_count; pi++) {
+@@ -167,5 +168,5 @@
+                 raw_count += 1u;
+                 if slot < TILE_MAX_POLYS {
+-                    let data_offset = offspring_id * num_tiles * TILE_MAX_POLYS + tile_id * TILE_MAX_POLYS + slot;
++                    let data_offset = tile_data_base + slot;
+                     tile_data[data_offset] = pi;
+                 }
