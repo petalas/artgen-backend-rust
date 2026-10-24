@@ -1,0 +1,153 @@
+--- a/src/shaders/rasterize_error.wgsl
++++ b/src/shaders/rasterize_error.wgsl
+@@ -1,4 +1,4 @@
+-// SOURCE-ONLY PROTOTYPE: serial pixels per physical lane, same logical raster tile.
++// SOURCE-ONLY PROTOTYPE: paired pixels per physical lane, same logical raster tile.
+ // Dispatch and binning remain (ceil(W/WG_X), ceil(H/WG_Y), K*lambda).
+ // 1D workgroup layout is retained for subgroup intrinsics.
+ // Each lane owns ordinal local_idx + k*PHYSICAL_LANES, within WG_X*WG_Y.
+@@ -237,6 +237,116 @@
+     return vec2<u32>(pixel_error, pixel_error_old);
+ }
+ 
++// Private state for one pixel. No color decoding or edge arithmetic moves here.
++struct RasterPixelState {
++    valid_pixel: bool,
++    fx: f32,
++    fy: f32,
++    r: f32,
++    g: f32,
++    b: f32,
++    refr: f32,
++    refg: f32,
++    refb: f32,
++    pixel_error_old: u32,
++}
++
++fn paired_pixel_state(
++    px: u32, py: u32, w: u32, h: u32,
++    parent_chain: u32, valid_pixel: bool,
++) -> RasterPixelState {
++    if !valid_pixel {
++        var invalid: RasterPixelState;
++        return invalid;
++    }
++    var pixel_error_old = 0u;
++
++    var fx = 0.0;
++    var fy = 0.0;
++    var r = 255.0;
++    var g = 255.0;
++    var b = 255.0;
++    var refr = 0.0;
++    var refg = 0.0;
++    var refb = 0.0;
++
++    fx = (f32(px) + 0.5) / f32(w);
++    fy = (f32(py) + 0.5) / f32(h);
++
++    let ref_color = textureLoad(reference_image, vec2<i32>(i32(px), i32(py)), 0);
++    // Match init_framebuffers: L1 compares exact reference bytes, not the
++    // approximate UNORM reconstruction whose error would be truncated.
++    refr = round(ref_color.x * 255.0);
++    refg = round(ref_color.y * 255.0);
++    refb = round(ref_color.z * 255.0);
++
++    // Read cached parent pixel from chain_framebuffers (O(1) per pixel).
++    let fb_idx = parent_chain * w * h + py * w + px;
++    let packed = chain_framebuffers[fb_idx];
++    let old_ri = f32(packed & 0xFFu);
++    let old_gi = f32((packed >> 8u) & 0xFFu);
++    let old_bi = f32((packed >> 16u) & 0xFFu);
++    pixel_error_old = u32(abs(old_ri - refr) + abs(old_gi - refg) + abs(old_bi - refb));
++
++    return RasterPixelState(valid_pixel, fx, fy, r, g, b, refr, refg, refb, pixel_error_old);
++}
++
++fn paired_pixel_errors(pixel: RasterPixelState) -> vec2<u32> {
++    if !pixel.valid_pixel {
++        return vec2<u32>(0u, 0u);
++    }
++    var pixel_error = 0u;
++    let r = pixel.r;
++    let g = pixel.g;
++    let b = pixel.b;
++    let refr = pixel.refr;
++    let refg = pixel.refg;
++    let refb = pixel.refb;
++    let pixel_error_old = pixel.pixel_error_old;
++
++    // L1 error: quantize to u8 integers (floor) so error matches
++    // framebuffer precision (pack_fb_pixel truncates to u8).
++    let qr = floor(clamp(r, 0.0, 255.0));
++    let qg = floor(clamp(g, 0.0, 255.0));
++    let qb = floor(clamp(b, 0.0, 255.0));
++    pixel_error = u32(abs(qr - refr) + abs(qg - refg) + abs(qb - refb));
++
++    return vec2<u32>(pixel_error, pixel_error_old);
++}
++
++// Used only when the supported logical tile has two ordinals per physical lane.
++fn pixel_pair_errors(
++    wid: vec3<u32>, local_idx: u32, w: u32, h: u32,
++    parent_chain: u32, tile_poly_count: u32, valid_chain: bool,
++) -> vec2<u32> {
++    let ordinal0 = local_idx;
++    let ordinal1 = local_idx + PHYSICAL_LANES;
++    let px0 = wid.x * WG_X + ordinal0 % WG_X;
++    let py0 = wid.y * WG_Y + ordinal0 / WG_X;
++    let px1 = wid.x * WG_X + ordinal1 % WG_X;
++    let py1 = wid.y * WG_Y + ordinal1 / WG_X;
++    let valid0 = ordinal0 < THREAD_COUNT && px0 < w && py0 < h && valid_chain;
++    let valid1 = ordinal1 < THREAD_COUNT && px1 < w && py1 < h && valid_chain;
++    var pixel0 = paired_pixel_state(px0, py0, w, h, parent_chain, valid0);
++    var pixel1 = paired_pixel_state(px1, py1, w, h, parent_chain, valid1);
++    if !valid0 && !valid1 {
++        return vec2<u32>(0u, 0u);
++    }
++
++    for (var i = 0u; i < tile_poly_count; i++) {
++        let poly = shared_polys[i];
++        if valid0 {
++            rasterize_blend(poly, pixel0.fx, pixel0.fy, &pixel0.r, &pixel0.g, &pixel0.b);
++        }
++        if valid1 {
++            rasterize_blend(poly, pixel1.fx, pixel1.fy, &pixel1.r, &pixel1.g, &pixel1.b);
++        }
++    }
++
++    // Only the already-integer errors cross pixels; each component is at most 1530.
++    return paired_pixel_errors(pixel0) + paired_pixel_errors(pixel1);
++}
++
+ @compute @workgroup_size(PHYSICAL_LANES, 1, 1)
+ fn main(
+     @builtin(workgroup_id) wid: vec3<u32>,
+@@ -317,13 +427,20 @@
+     // Each ordinal belongs to one physical lane; only integer L1 crosses pixels.
+     var pixel_error = 0u;
+     var pixel_error_old = 0u;
+-    for (var ordinal = local_idx; ordinal < THREAD_COUNT; ordinal += PHYSICAL_LANES) {
+-        let px = wid.x * WG_X + ordinal % WG_X;
+-        let py = wid.y * WG_Y + ordinal / WG_X;
+-        let valid_pixel = px < w && py < h && chain_id < chain_count;
+-        let errors = pixel_errors(px, py, w, h, parent_chain, tile_poly_count, valid_pixel);
+-        pixel_error += errors.x;
+-        pixel_error_old += errors.y;
++    if THREAD_COUNT == PHYSICAL_LANES {
++        for (var ordinal = local_idx; ordinal < THREAD_COUNT; ordinal += PHYSICAL_LANES) {
++            let px = wid.x * WG_X + ordinal % WG_X;
++            let py = wid.y * WG_Y + ordinal / WG_X;
++            let valid_pixel = px < w && py < h && chain_id < chain_count;
++            let errors = pixel_errors(px, py, w, h, parent_chain, tile_poly_count, valid_pixel);
++            pixel_error += errors.x;
++            pixel_error_old += errors.y;
++        }
++    } else {
++        let errors = pixel_pair_errors(
++            wid, local_idx, w, h, parent_chain, tile_poly_count, chain_id < chain_count);
++        pixel_error = errors.x;
++        pixel_error_old = errors.y;
+     }
+ 
+     // Subgroup leaders write distinct, dense slots before thread 0 sums them.

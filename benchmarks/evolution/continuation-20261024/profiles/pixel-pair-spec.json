@@ -1,0 +1,135 @@
+{
+  "protocol": "raster-pixel-pair-20261024-v1",
+  "claim": "Test whether traversing the ordered polygon prefix once for the two pixels owned by a lane improves completed fixed-parameter engine throughput. Shared-load savings and hardware cost are unmeasured.",
+  "schema": "engine-lab-prepared-v2",
+  "control": {
+    "result": "/home/nick/git/artgen-backend-rust/.cache/evolution-next-20261024/control-64/result.json",
+    "sha256": "1ae16db79f7d6737cbec90720e6a1042b1cf5750cec995bf0edf0e03a61c68f9",
+    "status": "PASS_CONTROL_ONLY",
+    "samples_reused_in_AB": false,
+    "scope": "Earlier same-session calibration only, not a fresh noise measurement and not A/B statistics. Same immutable executable/source/defaults/backend required. No correction or sample reuse.",
+    "observation_started_utc": "2026-10-24T14:46:27.448460+00:00"
+  },
+  "identities": {
+    "binary_json": "/home/nick/git/artgen-backend-rust/.cache/evolution-qualification-prepared-20261024/build-100/binary.json",
+    "binary_sha256": "97d176f3b5f97c818d19a5e25b2f75e9e587bf1925a948c330b78e2022512ab1",
+    "source_freeze_sha256": "9cc71d312fe5c2358c4b32eef4b00681f5e2884242169b6c26777ea3baae6fc5",
+    "manifest": "/home/nick/git/artgen-backend-rust/.cache/evolution-bench/baseline-20261023T172054.919294Z-95742/fixtures/manifest.json",
+    "shader": "/home/nick/git/artgen-backend-rust/.cache/evolution-pixel-pair-20261024/source-119/reference.wgsl",
+    "helpers": {
+      "scripts/compare-evolution.py": "33b5b3c655e8a5378291f4916dc1ca0aa6d5d4b25229a032398f8c30491c4486",
+      "scripts/evolution-bench.py": "6de8a7450e89e9734019cc279c8c9a2f9e0bb5b36bbffe617d65cc9243ae0c73"
+    }
+  },
+  "candidate": {
+    "label": "pixelpair",
+    "source": "/home/nick/git/artgen-backend-rust/.cache/evolution-pixel-pair-20261024/source-119/candidate.wgsl",
+    "sha256": "9996fe7ceb50a9b3bc70d0289a2c291b50689937146be0f4a61466089ebd8142",
+    "reference_sha256": "ae1fd75fdc118debf2a50cbad699e513b5af0dcbfa3754b45966f7a8ee925af3"
+  },
+  "phases": [
+    {
+      "name": "train",
+      "manifest": "/home/nick/git/artgen-backend-rust/.cache/evolution-bench/baseline-20261023T172054.919294Z-95742/fixtures/manifest.json",
+      "manifest_sha256": "82dfe207ecd20ae964edf4528f1a90fe4176b21f4ac0911b305da1e1edf1c5aa",
+      "cases": [
+        "ff",
+        "mona",
+        "darwin"
+      ],
+      "seed": 7
+    },
+    {
+      "name": "reserved-ff",
+      "manifest": "/home/nick/git/artgen-backend-rust/.cache/evolution-qualification/acceptance-07/reserved-v1/manifest.json",
+      "manifest_sha256": "880115ff3e75703abf23370fe67b21052c7be302196683532efc959207f9f841",
+      "cases": [
+        "ff"
+      ],
+      "seed": 11
+    },
+    {
+      "name": "reserved-mona",
+      "manifest": "/home/nick/git/artgen-backend-rust/.cache/evolution-qualification/acceptance-07/reserved-v1/manifest.json",
+      "manifest_sha256": "880115ff3e75703abf23370fe67b21052c7be302196683532efc959207f9f841",
+      "cases": [
+        "mona"
+      ],
+      "seed": 13
+    },
+    {
+      "name": "reserved-darwin",
+      "manifest": "/home/nick/git/artgen-backend-rust/.cache/evolution-qualification/acceptance-07/reserved-v1/manifest.json",
+      "manifest_sha256": "880115ff3e75703abf23370fe67b21052c7be302196683532efc959207f9f841",
+      "cases": [
+        "darwin"
+      ],
+      "seed": 17
+    }
+  ],
+  "fixed": {
+    "pairs_per_case": 5,
+    "order": [
+      "AB",
+      "BA",
+      "AB",
+      "BA",
+      "AB"
+    ],
+    "batches": 64,
+    "warmup_batches": 8,
+    "diagnostics": true,
+    "timestamp_mode": "stages",
+    "finalize_overlap": false,
+    "mutate_group": 1,
+    "mutate_zero_initialize": true,
+    "params_sha256": "755575d7c391eaa45ba8358724d0c66ae499c445a388badb5d465fb07a824f60",
+    "fitness_tolerance": 2e-05,
+    "all_evolution_parameters": "frozen unchanged"
+  },
+  "gate_each_complete_phase": {
+    "aggregate_ratio_strictly_greater": 1.005,
+    "aggregate_CI_lower_strictly_greater": 1.0,
+    "each_case_paired_median_at_least": 0.995,
+    "each_case_CI_lower_at_least": 0.99,
+    "bootstrap_draws": 10000,
+    "bootstrap_seed": 20261024,
+    "math": "same compare.statistics paired log means, equal cases, stratified resampling"
+  },
+  "bounds": {
+    "max_lab_workers": 4,
+    "max_correctness_checker_workers": 1,
+    "max_native_workload_processes": 5,
+    "seconds": 1800,
+    "child_seconds_max": 600,
+    "cleanup_reserve_seconds": 30,
+    "child_timeout": "min(600,remaining-30)",
+    "retries": 0,
+    "extra_samples": 0,
+    "exclusions": 0,
+    "serial_benchmark_lock": true,
+    "scope": "One training lab; only a pass permits one all-five-workgroup numerical checker and three reserved lab workers. All serial and one total deadline."
+  },
+  "stopping": {
+    "invalid": "INCONCLUSIVE, no further GPU work",
+    "valid_train_fail": "REJECT, no reserved work",
+    "valid_train_pass": "Candidate-specific actual raster fixtures at all five public workgroups required before reserved timing; no extra training samples",
+    "valid_reserved_fail": "REJECT, no adoption",
+    "all_pass": "conditional performance candidate; independent audit and final exact source review before keeping shader"
+  },
+  "numerical_fixtures": "Only after training passes: actual reference/candidate raster coverage, raw new/old RGB-byte-L1 and framebuffer-consistency fixtures across all five public workgroups, counts 0/1/194/255/256, partial tiles and edge cases. Use exact candidate/options; no oracle/comparison/tolerance changes. Existing T2/T4 hash-pinned checker does not qualify this source.",
+  "reserved_policy": "Distinct mature drawings and fixed seeds, own reference qualification endpoints. Collect all three valid reserved matrices before statistical gate.",
+  "startup": "Native setup timers retained separately, never added to completed-engine throughput; no application startup or isolation claim.",
+  "formal_policy1_KEEP": false,
+  "old_experiments": "All previous cohorts remain closed and excluded. One-tile two-pixel loop fusion is independent of rejected tile grouping, layout, normalized-color, deferred-load and host prototypes. No composition or sample reuse.",
+  "frozen_utc": "2026-10-24T17:10:26.525463+00:00",
+  "revision": "bdf5fe383a43716085131ed8e6e61fe2d1dd303a",
+  "shader_stage": "raster",
+  "hypothesis_evidence": {
+    "compiler_report": "/home/nick/git/artgen-backend-rust/.cache/evolution-observation-20261024/compiler-analysis-118/report.md",
+    "sha256": "6d38f72d3ec47784953b52076f2a0747a4bb76b16c8be45a697eaddf97e91190",
+    "mechanism": "Keep shared cache and rasterize_blend text; one shared polygon fetch per pair before two independent ascending per-pixel blends. Only original integer errors are combined. No grid, host, resources, RNG or options changes.",
+    "limits": "Mesa IR is not final NVIDIA ISA or dynamic memory cost; additional live per-pixel state may regress. Source FP preservation is not compiled FP equality."
+  },
+  "review": "Parent direct source diff review: paired state retains original scalar expressions; rasterize_blend/pixel_errors byte-identical; invalid pixels guard resource reads; one-pixel shapes retain old path. Compiled FP equality remains required."
+}
