@@ -21,7 +21,10 @@ use artgen_backend_rust::{
         trial::{self, TimestampMode, TrialSpec},
     },
     gpu_evolver::{
-        benchmark::{BenchmarkCounters, BenchmarkProvenance, BenchmarkSnapshot},
+        benchmark::{
+            BenchmarkCounters, BenchmarkProvenance, BenchmarkSnapshot,
+            COMPACT_RASTER_ACCEPTED_C_SHA256,
+        },
         GpuEvolver,
     },
     mutation_params::MutationParams,
@@ -33,7 +36,7 @@ const SCHEMA: &str = "engine-lab-v1";
 const MAX_SOURCE_BYTES: u64 = 256 * 1024;
 const MAX_ROW_BYTES: usize = 64 * 1024;
 const MAX_TRIALS: usize = 3 * 16 * 10 * 2;
-const FLAGS: [&str; 9] = [
+const FLAGS: [&str; 10] = [
     "manifest",
     "reference-shader",
     "pairs",
@@ -43,8 +46,9 @@ const FLAGS: [&str; 9] = [
     "output",
     "shader-stage",
     "diagnostics",
+    "compact-raster",
 ];
-const USAGE: &str = "engine-lab --reference-shader PATH --variant NAME=PATH [--variant NAME=PATH ...]\n  --output NEWDIR [--manifest PATH] [--pairs 1..10] [--batches 1..64] [--seed U64] [--case ff|mona|darwin|all]\n  [--shader-stage bin|raster|mutate] [--diagnostics true|false]\nDefaults: fixtures .cache/evolution-bench/fixtures/v1/manifest.json, pairs 2, batches 8, shader-stage bin, diagnostics false.\nFixed manifest parameters: 4 chains, lambda 64, 64 iterations, raster WG 32x16, resolution 384.\nTwo Stages warmups, default seed 7 and all cases; use a parent process timeout. No GPU work for --help.";
+const USAGE: &str = "engine-lab --reference-shader PATH --variant NAME=PATH [--variant NAME=PATH ...]\n  --output NEWDIR [--manifest PATH] [--pairs 1..10] [--batches 1..64] [--seed U64] [--case ff|mona|darwin|all]\n  [--shader-stage bin|raster|mutate] [--diagnostics true|false] [--compact-raster true|false]\nDefaults: fixtures .cache/evolution-bench/fixtures/v1/manifest.json, pairs 2, batches 8, shader-stage bin, diagnostics false, compact-raster false.\nCompaction requires raster stage and accepted C sources; reference is ordinary, each candidate compact.\nFixed manifest parameters: 4 chains, lambda 64, 64 iterations, raster WG 32x16, resolution 384.\nTwo Stages warmups, default seed 7 and all cases; use a parent process timeout. No GPU work for --help.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -86,13 +90,14 @@ struct Config {
     output: PathBuf,
     shader_stage: ShaderStage,
     diagnostics: bool,
+    compact_raster: bool,
 }
 
 impl Config {
     fn parse(args: &[String]) -> Result<Self> {
         ensure!(
-            args.len() <= 50 && args.len() % 2 == 0,
-            "expected at most 25 --flag value pairs"
+            args.len() <= 52 && args.len() % 2 == 0,
+            "expected at most 26 --flag value pairs"
         );
         let mut values = BTreeMap::new();
         let mut variants = Vec::with_capacity(16);
@@ -125,6 +130,10 @@ impl Config {
             case == "all" || PROJECTS.contains(&case),
             "case must be ff, mona, darwin or all"
         );
+        let shader_stage = ShaderStage::parse(values.get("shader-stage").unwrap_or(&"bin"))?;
+        let compact_raster = values.get("compact-raster").unwrap_or(&"false").parse()?;
+        ensure!(!compact_raster || shader_stage == ShaderStage::Raster,
+            "compact-raster requires shader-stage raster");
         Ok(Self {
             manifest: PathBuf::from(
                 values
@@ -142,8 +151,9 @@ impl Config {
             batches,
             seed,
             case: case.into(),
-            shader_stage: ShaderStage::parse(values.get("shader-stage").unwrap_or(&"bin"))?,
+            shader_stage,
             diagnostics: values.get("diagnostics").unwrap_or(&"false").parse()?,
+            compact_raster,
         })
     }
 
@@ -180,6 +190,7 @@ fn valid_name(name: &str) -> bool {
 #[derive(Serialize)]
 struct Source {
     shader_stage: ShaderStage,
+    compact_raster: bool,
     name: String,
     path: PathBuf,
     sha256: String,
@@ -197,6 +208,11 @@ fn read_sources(config: &Config) -> Result<Vec<Source>> {
     ) {
         let bytes = fixtures::read_bounded(path, MAX_SOURCE_BYTES)?;
         let wgsl = String::from_utf8(bytes).context("shader must be UTF-8")?;
+        let sha256 = fixtures::sha256(wgsl.as_bytes());
+        ensure!(
+            !config.compact_raster || sha256 == COMPACT_RASTER_ACCEPTED_C_SHA256,
+            "{name}: compact raster requires the exact accepted a292 C source"
+        );
         let module = wgpu::naga::front::wgsl::parse_str(&wgsl)
             .map_err(|error| anyhow::anyhow!("{name}: {}", error.emit_to_string(&wgsl)))?;
         wgpu::naga::valid::Validator::new(
@@ -207,9 +223,10 @@ fn read_sources(config: &Config) -> Result<Vec<Source>> {
         .with_context(|| format!("invalid shader {name}"))?;
         sources.push(Source {
             shader_stage: config.shader_stage,
+            compact_raster: config.compact_raster && name != "reference",
             name: name.into(),
             path: path.clone(),
-            sha256: fixtures::sha256(wgsl.as_bytes()),
+            sha256,
             wgsl,
         });
     }
@@ -222,6 +239,7 @@ struct TrialRow {
     case_id: String,
     variant: String,
     shader_stage: ShaderStage,
+    compact_raster: bool,
     timing_eligible: bool,
     initial_max_tile_occupancy: Option<u32>,
     validation_max_tile_occupancy: Option<u32>,
@@ -264,6 +282,7 @@ impl TrialRow {
             case_id: case.into(),
             variant: source.name.clone(),
             shader_stage: config.shader_stage,
+            compact_raster: false,
             timing_eligible,
             initial_max_tile_occupancy: None,
             validation_max_tile_occupancy: None,
@@ -301,6 +320,7 @@ impl TrialRow {
 #[derive(Serialize)]
 struct QualifiedCase {
     case_id: String,
+    compact_raster: bool,
     params: MutationParams,
     params_sha256: String,
     initial_state_sha256: String,
@@ -313,6 +333,7 @@ struct Rates {
     case_id: String,
     candidate: String,
     side: String,
+    compact_raster: bool,
     samples: Vec<f64>,
 }
 
@@ -337,7 +358,7 @@ struct Summary<'a> {
 }
 
 fn main() -> Result<()> {
-    let args: Vec<_> = std::env::args().skip(1).take(51).collect();
+    let args: Vec<_> = std::env::args().skip(1).take(53).collect();
     if args == ["--help"] {
         println!("{USAGE}");
         return Ok(());
@@ -451,6 +472,7 @@ fn run_cases(summary: &mut Summary<'_>, rows: &mut File) -> Result<()> {
         let params_sha256 = fixtures::sha256(&serde_json::to_vec(&input.manifest.params)?);
         summary.cases.push(QualifiedCase {
             case_id: case.into(),
+            compact_raster: evolver.benchmark_compact_raster(),
             params: input.manifest.params.clone(),
             params_sha256,
             initial_state_sha256: state_hash(&initial)?,
@@ -493,7 +515,7 @@ fn precompile_sources(
             )
             .map_err(anyhow::Error::msg)?;
         for source in summary.sources {
-            summary.config.shader_stage.install(evolver, &source.wgsl)?;
+            install_source(evolver, summary.config, source)?;
         }
         Ok(())
     })();
@@ -504,6 +526,14 @@ fn precompile_sources(
         "source precompile device errors: {errors:?}"
     );
     Ok(())
+}
+
+fn install_source(evolver: &mut GpuEvolver, config: &Config, source: &Source) -> Result<()> {
+    // Install ordinary source first, then explicitly enable the candidate's mode.
+    // All toggles drain and compile outside the measured and warmup batch loops.
+    evolver.benchmark_set_compact_raster(false).map_err(anyhow::Error::msg)?;
+    config.shader_stage.install(evolver, &source.wgsl)?;
+    evolver.benchmark_set_compact_raster(source.compact_raster).map_err(anyhow::Error::msg)
 }
 
 fn spec(config: &Config, case: &str) -> TrialSpec {
@@ -555,10 +585,7 @@ fn qualify_inner(
     summary: &Summary<'_>,
     output: &Path,
 ) -> Result<(trial::TrialRecord, BenchmarkSnapshot, BenchmarkSnapshot)> {
-    summary
-        .config
-        .shader_stage
-        .install(evolver, &summary.sources[0].wgsl)?;
+    install_source(evolver, summary.config, &summary.sources[0])?;
     let spec = spec(summary.config, &input.fixture.id);
     let mut record = trial::prepare(evolver, input, &spec, output)?;
     let params = &input.manifest.params;
@@ -780,6 +807,10 @@ fn run_trial(
         row.timestamp_samples = evolver.pass_timings().sample_count;
         row.errors.push(format!("{error:#}"));
     }
+    row.compact_raster = evolver.benchmark_compact_raster();
+    if row.compact_raster != source.compact_raster {
+        row.errors.push("actual compact raster mode differs from requested source mode".into());
+    }
     row
 }
 
@@ -793,10 +824,13 @@ fn execute_trial(
 ) -> Result<()> {
     let params = &input.manifest.params;
     row.params_sha256 = fixtures::sha256(&serde_json::to_vec(params)?);
-    config.shader_stage.install(evolver, &source.wgsl)?;
+    install_source(evolver, config, source)?;
+    row.compact_raster = evolver.benchmark_compact_raster();
     evolver
         .prepare_seeded_benchmark(&input.drawing, params, config.seed, 2, true)
         .map_err(anyhow::Error::msg)?;
+    ensure!(evolver.benchmark_compact_raster() == source.compact_raster,
+        "preparation changed compact raster mode");
     let initial = evolver
         .benchmark_snapshot(params.chain_count, params.lambda)
         .map_err(anyhow::Error::msg)?;
@@ -1000,6 +1034,7 @@ fn add_rate(summary: &mut Summary<'_>, case: &str, candidate: usize, source: usi
             case_id: case.into(),
             candidate: candidate_name.clone(),
             side: side.clone(),
+            compact_raster: summary.sources[source].compact_raster,
             samples: Vec::with_capacity(10),
         });
         summary.rates.len() - 1
@@ -1102,6 +1137,7 @@ mod tests {
         let config = Config::parse(&args())?;
         assert_eq!(config.shader_stage, ShaderStage::Bin);
         assert!(!config.diagnostics);
+        assert!(!config.compact_raster);
         for stage in ["bin", "raster", "mutate"] {
             for diagnostics in ["true", "false"] {
                 let mut selected = args();
@@ -1136,6 +1172,34 @@ mod tests {
     }
 
     #[test]
+    fn compact_raster_cli_requires_raster_and_strict_boolean() -> Result<()> {
+        for stage in ["bin", "raster", "mutate"] {
+            for enabled in ["true", "false"] {
+                let mut selected = args();
+                selected.extend(["--shader-stage".into(), stage.into(),
+                    "--compact-raster".into(), enabled.into()]);
+                let parsed = Config::parse(&selected);
+                if stage != "raster" && enabled == "true" {
+                    assert!(parsed.is_err());
+                } else {
+                    assert_eq!(parsed?.compact_raster, enabled == "true");
+                }
+            }
+        }
+        for value in ["1", "TRUE", "yes"] {
+            let mut invalid = args();
+            invalid.extend(["--shader-stage".into(), "raster".into(),
+                "--compact-raster".into(), value.into()]);
+            assert!(Config::parse(&invalid).is_err());
+        }
+        let mut duplicate = args();
+        duplicate.extend(["--compact-raster".into(), "false".into(),
+            "--compact-raster".into(), "false".into()]);
+        assert!(Config::parse(&duplicate).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn diagnostic_evidence_requires_occupancy_and_excludes_rates() -> Result<()> {
         let mut config = Config::parse(&args())?;
         config.output =
@@ -1144,6 +1208,7 @@ mod tests {
         fs::create_dir_all(&output)?;
         let source = Source {
             shader_stage: ShaderStage::Bin,
+            compact_raster: false,
             name: "candidate".into(),
             path: "candidate.wgsl".into(),
             sha256: "abc".into(),
@@ -1326,6 +1391,105 @@ mod tests {
     }
 
     #[test]
+    fn compact_raster_source_preflight_requires_exact_c_on_both_sides() -> Result<()> {
+        let directory = std::env::temp_dir()
+            .join(format!("engine-lab-compact-source-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&directory)?;
+        let result = (|| -> Result<()> {
+            let mut selected = args();
+            selected.extend([
+                "--shader-stage".into(),
+                "raster".into(),
+                "--compact-raster".into(),
+                "true".into(),
+            ]);
+            let mut config = Config::parse(&selected)?;
+            config.reference_shader = directory.join("reference.wgsl");
+            config.variants[0].1 = directory.join("candidate.wgsl");
+            let accepted = include_str!("../src/shaders/rasterize_error.wgsl");
+            let unsupported = format!("{accepted}\n// equivalent but unsupported source\n");
+            let mut wrongly_accepted = Vec::with_capacity(2);
+            for (name, reference, candidate) in [
+                ("reference", unsupported.as_str(), accepted),
+                ("candidate", accepted, unsupported.as_str()),
+            ] {
+                fs::write(&config.reference_shader, reference)?;
+                fs::write(&config.variants[0].1, candidate)?;
+                match read_sources(&config) {
+                    Ok(_) => wrongly_accepted.push(name),
+                    Err(error) => {
+                        let message = error.to_string();
+                        ensure!(message.contains(name), "{message}");
+                        ensure!(message.contains("exact accepted"), "{message}");
+                    }
+                }
+            }
+            fs::write(&config.reference_shader, accepted)?;
+            fs::write(&config.variants[0].1, accepted)?;
+            let sources = read_sources(&config)?;
+            ensure!(sources.len() == 2, "expected both accepted sources");
+            ensure!(
+                sources.iter().all(|source| source.wgsl == accepted),
+                "accepted source bytes changed"
+            );
+            ensure!(
+                !sources[0].compact_raster && sources[1].compact_raster,
+                "expected ordinary reference and compact candidate"
+            );
+            ensure!(
+                wrongly_accepted.is_empty(),
+                "unsupported sources passed compact preflight: {wrongly_accepted:?}"
+            );
+            Ok(())
+        })();
+        fs::remove_dir_all(directory)?;
+        result
+    }
+
+    #[test]
+    fn source_preflight_allows_arbitrary_valid_sources_when_compact_is_false() -> Result<()> {
+        let directory = std::env::temp_dir()
+            .join(format!("engine-lab-ordinary-source-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&directory)?;
+        let result = (|| -> Result<()> {
+            let reference = "@compute @workgroup_size(1) fn main() {}";
+            let candidate = format!("{reference}\n// arbitrary valid candidate\n");
+            for stage in ["bin", "raster", "mutate"] {
+                for explicit_false in [false, true] {
+                    let mut selected = args();
+                    selected.extend(["--shader-stage".into(), stage.into()]);
+                    if explicit_false {
+                        selected.extend(["--compact-raster".into(), "false".into()]);
+                    }
+                    let mut config = Config::parse(&selected)?;
+                    ensure!(!config.compact_raster, "compaction must default to false");
+                    config.reference_shader = directory.join("reference.wgsl");
+                    config.variants[0].1 = directory.join("candidate.wgsl");
+                    fs::write(&config.reference_shader, reference)?;
+                    fs::write(&config.variants[0].1, &candidate)?;
+                    let sources = read_sources(&config)?;
+                    ensure!(sources.len() == 2, "expected both arbitrary sources");
+                    ensure!(
+                        sources[0].wgsl == reference && sources[1].wgsl == candidate,
+                        "arbitrary source bytes changed"
+                    );
+                    ensure!(
+                        sources[0].sha256 != sources[1].sha256,
+                        "distinct sources must retain distinct hashes"
+                    );
+                    ensure!(
+                        sources.iter().all(|source| !source.compact_raster),
+                        "ordinary sources must leave compaction disabled"
+                    );
+                }
+            }
+            Ok(())
+        })();
+        fs::remove_dir_all(directory)?;
+        result
+    }
+
+    #[test]
     fn source_preflight_rejects_bad_wgsl_utf8_and_oversized_files() -> Result<()> {
         let path = std::env::temp_dir().join(format!("engine-lab-source-{}", uuid::Uuid::new_v4()));
         let mut config = Config::parse(&args())?;
@@ -1401,6 +1565,7 @@ mod tests {
         let sources = vec![
             Source {
                 shader_stage: config.shader_stage,
+                compact_raster: false,
                 name: "reference".into(),
                 path: "reference.wgsl".into(),
                 sha256: "abc".into(),
@@ -1408,6 +1573,7 @@ mod tests {
             },
             Source {
                 shader_stage: config.shader_stage,
+                compact_raster: false,
                 name: "candidate".into(),
                 path: "candidate.wgsl".into(),
                 sha256: "def".into(),

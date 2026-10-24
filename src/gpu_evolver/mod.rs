@@ -1,5 +1,6 @@
 pub mod benchmark;
 pub mod buffers;
+pub mod compact_raster;
 pub mod pipeline;
 
 use std::time::Instant;
@@ -336,25 +337,26 @@ impl GpuEvolver {
         let wg_x = p.image_width.div_ceil(rwg[0]);
         let wg_y = p.image_height.div_ceil(rwg[1]);
         let lambda = mutation_params.lambda;
+        let compact = p.benchmark_compact_raster().then(|| {
+            p.benchmark_compact_raster_resources().expect("enabled compact resources")
+        });
 
         // Runtime check: active * lambda must fit in offspring_capacity
         assert!(active * lambda <= p.offspring_capacity,
             "active({}) * lambda({}) = {} exceeds offspring_capacity({})",
             active, lambda, active * lambda, p.offspring_capacity);
 
-        // All non-timestamped iterations are consolidated into a single compute pass
-        // to minimize Vulkan command buffer objects (avoids driver crashes on Dozen/D3D12
-        // with thousands of separate passes).
-        //
-        // The last iteration uses 3 separate passes when collect_timestamps is true,
-        // so we can get per-stage timing via ComputePassDescriptor::timestamp_writes.
+        // Ordinary bulk iterations use two passes; compact iterations use three:
+        // mutate/bin/prefix, indirect raster, select/update. The sampled final
+        // iteration keeps the four original timestamp pairs and adds an untimed
+        // prefix pass. Prefix overhead remains in wall time and the batch envelope.
         //
         // SAFETY: wgpu's resource tracker inserts vkCmdPipelineBarrier between dispatches
         // within a single compute pass when buffer usage changes (e.g. STORAGE_READ_WRITE
         // -> STORAGE_READ). See flush_states() in wgpu-core/src/command/compute.rs which
         // calls drain_barriers() before every dispatch.
 
-        // Bulk iterations: split into two passes per iteration.
+        // Bulk iterations retain the ordinary two-pass path when compaction is off.
         // Pass A: mutate → bin → rasterize_error (internal barriers OK via usage changes)
         // Pass B: select → update_framebuffers (internal barriers OK via usage changes)
         //
@@ -375,7 +377,7 @@ impl GpuEvolver {
         for _ in 0..bulk_count {
             {
                 let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                    label: Some("mutate_bin_rasterize"),
+                    label: Some(if compact.is_some() { "mutate_bin_prefix" } else { "mutate_bin_rasterize" }),
                     timestamp_writes: bulk_timestamp_writes.take(),
                 });
                 pass.set_pipeline(&p.mutate_pipeline);
@@ -388,10 +390,26 @@ impl GpuEvolver {
                 pass.set_bind_group(1, &p.params_bind_group, &[]);
                 pass.dispatch_workgroups(active * lambda, 1, 1);
 
-                pass.set_pipeline(&p.rasterize_error_pipeline);
-                pass.set_bind_group(0, &p.rasterize_error_bind_group, &[]);
+                if let Some(c) = compact {
+                    pass.set_pipeline(&c.prefix_pipeline);
+                    pass.set_bind_group(0, &c.prefix_bind_group, &[]);
+                    pass.set_bind_group(1, &p.params_bind_group, &[]);
+                    pass.dispatch_workgroups(1, 1, 1);
+                } else {
+                    pass.set_pipeline(&p.rasterize_error_pipeline);
+                    pass.set_bind_group(0, &p.rasterize_error_bind_group, &[]);
+                    pass.set_bind_group(1, &p.params_bind_group, &[]);
+                    pass.dispatch_workgroups(wg_x, wg_y, active * lambda);
+                }
+            }
+            if let Some(c) = compact {
+                let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                    label: Some("compact_rasterize"), timestamp_writes: None,
+                });
+                pass.set_pipeline(&c.raster_pipeline);
+                pass.set_bind_group(0, &c.raster_bind_group, &[]);
                 pass.set_bind_group(1, &p.params_bind_group, &[]);
-                pass.dispatch_workgroups(wg_x, wg_y, active * lambda);
+                pass.dispatch_workgroups_indirect(&c.indirect_args_buf, 0);
             }
             {
                 let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
@@ -410,7 +428,7 @@ impl GpuEvolver {
             }
         }
 
-        // Last iteration with timestamps: separate passes for per-stage profiling
+        // Last iteration: prefix is outside q2/3 and q4/5; q6/7 meaning is unchanged.
         if collect_timestamps {
             let qs = &p.timestamp_query_set;
 
@@ -444,6 +462,16 @@ impl GpuEvolver {
                 pass.dispatch_workgroups(active * lambda, 1, 1);
             }
 
+            if let Some(c) = compact {
+                let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                    label: Some("compact_prefix"), timestamp_writes: None,
+                });
+                pass.set_pipeline(&c.prefix_pipeline);
+                pass.set_bind_group(0, &c.prefix_bind_group, &[]);
+                pass.set_bind_group(1, &p.params_bind_group, &[]);
+                pass.dispatch_workgroups(1, 1, 1);
+            }
+
             {
                 let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
                     label: Some("rasterize_error"),
@@ -453,10 +481,17 @@ impl GpuEvolver {
                         end_of_pass_write_index: Some(5),
                     }),
                 });
-                pass.set_pipeline(&p.rasterize_error_pipeline);
-                pass.set_bind_group(0, &p.rasterize_error_bind_group, &[]);
-                pass.set_bind_group(1, &p.params_bind_group, &[]);
-                pass.dispatch_workgroups(wg_x, wg_y, active * lambda);
+                if let Some(c) = compact {
+                    pass.set_pipeline(&c.raster_pipeline);
+                    pass.set_bind_group(0, &c.raster_bind_group, &[]);
+                    pass.set_bind_group(1, &p.params_bind_group, &[]);
+                    pass.dispatch_workgroups_indirect(&c.indirect_args_buf, 0);
+                } else {
+                    pass.set_pipeline(&p.rasterize_error_pipeline);
+                    pass.set_bind_group(0, &p.rasterize_error_bind_group, &[]);
+                    pass.set_bind_group(1, &p.params_bind_group, &[]);
+                    pass.dispatch_workgroups(wg_x, wg_y, active * lambda);
+                }
             }
 
             {

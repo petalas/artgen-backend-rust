@@ -21,6 +21,9 @@ use crate::settings::{
 const MAX_WARMUP_BATCHES: u32 = 1024;
 const READBACK_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// Exact accepted C source identity for compact-raster benchmark preflight.
+pub const COMPACT_RASTER_ACCEPTED_C_SHA256: &str = super::compact_raster::ACCEPTED_C_SHA256;
+
 /// Sum of full-batch GPU compute spans, excluding copies and host work.
 /// Available only in the opt-in diagnostic mode; selection timing is unavailable.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
@@ -268,6 +271,22 @@ impl GpuEvolver {
     pub fn benchmark_set_raster_shader(&mut self, source: &str) -> Result<(), String> {
         self.benchmark_drain()?;
         self.pipeline.set_benchmark_raster_shader(source)
+    }
+
+    /// Opt into exact dirty-tile dispatch compaction for benchmark batches only.
+    /// Full-fitness evaluation/reset retains the ordinary raster pipeline. Setup
+    /// is drained and untimed; capacity buffers and compiled variants persist.
+    ///
+    /// # Errors
+    /// Rejects failed drain, unsupported source/capacity or GPU setup errors.
+    pub fn benchmark_set_compact_raster(&mut self, enabled: bool) -> Result<(), String> {
+        self.benchmark_drain()?;
+        self.pipeline.benchmark_set_compact_raster(enabled)
+    }
+
+    #[must_use]
+    pub fn benchmark_compact_raster(&self) -> bool {
+        self.pipeline.benchmark_compact_raster()
     }
 
     /// Replace binning only for an untimed replay. Prepare resets the persistent
