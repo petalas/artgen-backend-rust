@@ -1,0 +1,122 @@
+--- /dev/null
++++ b/run-training.py
+@@ -0,0 +1,119 @@
++#!/usr/bin/env python3
++"""One training invocation. A pass waits for separate numerical proof."""
++import hashlib
++import importlib.util
++import sys
++import time
++from pathlib import Path
++
++HERE = Path(__file__).resolve().parent
++MODULE = Path("/home/nick/git/artgen-backend-rust/.cache/evolution-mechanism-20261024/contract/run-campaign.py")
++MODULE_SHA = "1d0f7b4dd4b3fe901e238eb794cd53a525446d5eca2c15c907a7a8138abcc307"
++SPEC_SHA = "5b3f835986d350981f23ce35b282a4d4cefc933293d05dbedc8a68c555810ca7"
++
++
++def load_contract():
++    with MODULE.open("rb") as stream:
++        actual = hashlib.file_digest(stream, "sha256").hexdigest()
++    if actual != MODULE_SHA:
++        raise ValueError("kernel validation implementation changed")
++    spec = importlib.util.spec_from_file_location("pixel_pair_contract", MODULE)
++    if spec is None or spec.loader is None:
++        raise ValueError("contract loader unavailable")
++    c = importlib.util.module_from_spec(spec)
++    spec.loader.exec_module(c)
++    return c
++
++
++def phase_spec(spec, plan):
++    return {"schema": spec["schema"], "shader_stage": spec["shader_stage"], "identities": {
++        "manifest": plan["manifest"], "manifest_sha256": plan["manifest_sha256"],
++        "reference_shader": spec["identities"]["shader"],
++        "reference_sha256": spec["candidate"]["reference_sha256"],
++        "candidate_shader": spec["candidate"]["source"],
++        "candidate_sha256": spec["candidate"]["sha256"]}}
++
++
++def gate(compare, ratios):
++    if set(ratios) != {"ff", "mona", "darwin"} or any(len(v) != 5 for v in ratios.values()):
++        raise ValueError("complete three-case five-pair matrix required")
++    stats = compare.statistics(ratios)
++    aggregate = stats["aggregate"]
++    passed = aggregate["ratio"] > 1.005 and aggregate["interval95"][0] > 1.0
++    passed = passed and all(case["paired_ratios"]["median"] >= 0.995
++                            and case["interval95"][0] >= 0.99 for case in stats["cases"].values())
++    return {"pass": passed, "statistics": stats}
++
++
++def run(c, compare, b, spec, result, deadline):
++    control = b.read_json(Path(spec["control"]["result"]))
++    c.require(control["status"] == "PASS_CONTROL_ONLY" and control["errors"] == [], "control did not pass")
++    c.require(c.sha(Path(spec["control"]["result"])) == spec["control"]["sha256"], "control changed")
++    binary = Path(spec["identities"]["binary_json"]).parent / "build/engine-qualification-lab"
++    c.require(c.sha(binary) == spec["identities"]["binary_sha256"], "release binary changed")
++    plan = spec["phases"][0]
++    native = phase_spec(spec, plan)
++    c.phase_identities(native, ("train", tuple(plan["cases"]), plan["seed"], 64, False, "pixelpair"))
++    for path, digest in ((plan["manifest"], plan["manifest_sha256"]),
++                         (native["identities"]["reference_shader"], spec["candidate"]["reference_sha256"]),
++                         (spec["candidate"]["source"], spec["candidate"]["sha256"])):
++        c.require(c.sha(Path(path)) == digest, "frozen input changed")
++    fixtures = {case["case_id"]: case for case in b.load_manifest(Path(plan["manifest"]))["cases"]}
++    phase = ("train", tuple(plan["cases"]), plan["seed"], 64, False, "pixelpair")
++    folder = HERE / "train"
++    folder.mkdir()
++    (folder / "cwd").mkdir()
++    command = c.command_for(binary, Path(plan["manifest"]), Path(spec["identities"]["shader"]),
++                            folder, phase, candidate_shader=Path(spec["candidate"]["source"]),
++                            shader_stage=spec["shader_stage"])
++    print("pixel-pair-safe training starting", flush=True)
++    result["process"] = c.admitted_call(deadline, time.monotonic(), True, lambda timeout: b.run_process(
++        command, folder / "cwd", folder / "evidence", timeout))
++    result["work"] = c.partial_work(b, folder / "output")
++    c.require(result["process"]["status"] == "completed" and result["process"]["returncode"] == 0,
++              "training process failed")
++    gpu = {case["case_id"]: case["gpu"] for case in b.read_json(
++        Path(spec["control"]["result"]).parent / "worker/output/summary.json")["cases"]}
++    result["validated"] = c.validate_phase(compare, b, folder, phase, native, fixtures, gpu)
++    result["gate"] = gate(compare, result["validated"]["ratios"])
++    result["status"] = "TRAIN_PASSED_WAIT_NUMERICAL" if result["gate"]["pass"] else "REJECT"
++
++
++def main():
++    started = time.monotonic()
++    deadline = started + 1800
++    if sys.argv[1:]:
++        raise ValueError("frozen training accepts no arguments")
++    c = load_contract()
++    compare, b = c.load_helpers()
++    c.require(c.sha(HERE / "spec.json") == SPEC_SHA, "training specification changed")
++    spec = b.read_json(HERE / "spec.json")
++    result = {"protocol": spec["protocol"], "status": "INCONCLUSIVE", "errors": [],
++              "started_utc": b.utc_now(), "monotonic_start": started, "deadline": deadline,
++              "spec_sha256": SPEC_SHA, "validator_sha256": MODULE_SHA,
++              "reserved_started": False, "adoption": False}
++    b.write_json(HERE / "clock.json", result)
++    try:
++        with compare.cancellation_signals(), b.benchmark_lock(b.DEFAULT_ROOT / "benchmark.lock"):
++            run(c, compare, b, spec, result, deadline)
++    except (c.Invalid, b.BenchError, OSError, ValueError, KeyError, TypeError, AttributeError,
++            IndexError, OverflowError, RecursionError, KeyboardInterrupt) as exc:
++        result["status"] = "INCONCLUSIVE"
++        result["errors"].append(f"{type(exc).__name__}: {exc}")
++        output = HERE / "train/output"
++        if output.exists():
++            try:
++                result["partial_work"] = c.partial_work(b, output)
++            except (c.Invalid, b.BenchError, OSError, ValueError, TypeError) as partial:
++                result["errors"].append(f"partial accounting: {partial}")
++    result["controller_wall_seconds"] = time.monotonic() - started
++    if time.monotonic() >= deadline:
++        result["status"] = "INCONCLUSIVE"
++        result["errors"].append("package budget exhausted")
++    b.write_json(HERE / "train-result.json", result)
++    print("pixel-pair-safe " + result["status"], flush=True)
++    return 0 if result["status"] == "TRAIN_PASSED_WAIT_NUMERICAL" else 2
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
