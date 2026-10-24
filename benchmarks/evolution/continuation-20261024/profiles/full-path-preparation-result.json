@@ -1,0 +1,1120 @@
+{
+  "classification": "ONE_UNSCORED_INSTRUMENTED_OBSERVATION",
+  "score_eligible": false,
+  "original_screen": "REJECT_UNCHANGED",
+  "new_optimization_claim": false,
+  "rows": [
+    {
+      "sidecar": "first-use-000.json",
+      "sha256": "cbcde7558232a21a11b1a67b5f9bd8b99763553a11aab17164831c197ee7497e",
+      "identity": {
+        "invocation_id": "6cef0e6018c1bd18ec42dde6aaea157f12b1045a5341c3d5eaffb3d2c603790a",
+        "row_index": 0,
+        "case": "mona",
+        "variant": "reference",
+        "candidate": "overlap",
+        "pair": 0,
+        "order": 0,
+        "seed": 7,
+        "warmup_batches": 8,
+        "timestamp_mode": "stages",
+        "finalize_overlap": false
+      },
+      "elapsed_seconds": 0.475833975,
+      "direct_ns": {
+        "previous_collection": 99464744,
+        "parameter_upload": 1218684,
+        "compute_recording": 512992,
+        "tail_recording": 3297,
+        "final_finish": 115827127,
+        "queue_submit": 4492779,
+        "postsubmit_collection": 202724909,
+        "map_registration": 39916
+      },
+      "batches": [
+        {
+          "batch": 1,
+          "split": false,
+          "whole_ns": 22036270,
+          "direct_ns": {
+            "previous_collection": 231,
+            "parameter_upload": 166512,
+            "compute_recording": 84128,
+            "tail_recording": 511,
+            "final_finish": 21153627,
+            "queue_submit": 624650,
+            "postsubmit_collection": 50,
+            "map_registration": 4609
+          }
+        },
+        {
+          "batch": 2,
+          "split": false,
+          "whole_ns": 53451965,
+          "direct_ns": {
+            "previous_collection": 50,
+            "parameter_upload": 105899,
+            "compute_recording": 57177,
+            "tail_recording": 371,
+            "final_finish": 10718334,
+            "queue_submit": 617567,
+            "postsubmit_collection": 41946146,
+            "map_registration": 4659
+          }
+        },
+        {
+          "batch": 3,
+          "split": false,
+          "whole_ns": 51399782,
+          "direct_ns": {
+            "previous_collection": 70,
+            "parameter_upload": 151273,
+            "compute_recording": 59722,
+            "tail_recording": 471,
+            "final_finish": 10540341,
+            "queue_submit": 536045,
+            "postsubmit_collection": 40106561,
+            "map_registration": 3997
+          }
+        },
+        {
+          "batch": 4,
+          "split": false,
+          "whole_ns": 72882536,
+          "direct_ns": {
+            "previous_collection": 49952329,
+            "parameter_upload": 174928,
+            "compute_recording": 48642,
+            "tail_recording": 300,
+            "final_finish": 22128445,
+            "queue_submit": 558517,
+            "postsubmit_collection": 50,
+            "map_registration": 4609
+          }
+        },
+        {
+          "batch": 5,
+          "split": false,
+          "whole_ns": 50950329,
+          "direct_ns": {
+            "previous_collection": 60,
+            "parameter_upload": 115837,
+            "compute_recording": 51306,
+            "tail_recording": 201,
+            "final_finish": 10357968,
+            "queue_submit": 567464,
+            "postsubmit_collection": 39846263,
+            "map_registration": 4068
+          }
+        },
+        {
+          "batch": 6,
+          "split": false,
+          "whole_ns": 51701977,
+          "direct_ns": {
+            "previous_collection": 70,
+            "parameter_upload": 176731,
+            "compute_recording": 53069,
+            "tail_recording": 361,
+            "final_finish": 10061022,
+            "queue_submit": 501670,
+            "postsubmit_collection": 40896761,
+            "map_registration": 10209
+          }
+        },
+        {
+          "batch": 7,
+          "split": false,
+          "whole_ns": 71034894,
+          "direct_ns": {
+            "previous_collection": 49511884,
+            "parameter_upload": 210745,
+            "compute_recording": 114705,
+            "tail_recording": 661,
+            "final_finish": 20601524,
+            "queue_submit": 573725,
+            "postsubmit_collection": 50,
+            "map_registration": 4349
+          }
+        },
+        {
+          "batch": 8,
+          "split": false,
+          "whole_ns": 50885176,
+          "direct_ns": {
+            "previous_collection": 50,
+            "parameter_upload": 116759,
+            "compute_recording": 44243,
+            "tail_recording": 421,
+            "final_finish": 10265866,
+            "queue_submit": 513141,
+            "postsubmit_collection": 39929028,
+            "map_registration": 3416
+          }
+        }
+      ],
+      "drain_ns": 51489901,
+      "within_batch_gaps_ns": 58481,
+      "outside_batch_drain_gaps_ns": 1386,
+      "end_marker_offset_ns": 241,
+      "sidecar_wall_ns": 475834216,
+      "readback_inclusive_ns": 353659806,
+      "nested_ns": {
+        "poll_wait": 352759719,
+        "control_receive": 2026,
+        "timestamp_receive": 552,
+        "fitness_receive": 380,
+        "control_decode_drop": 12473,
+        "timestamp_decode_drop_unmap": 263415,
+        "fitness_decode_drop": 3348,
+        "remaining_unmaps_best_state": 1150,
+        "drawing_receive": 280,
+        "drawing_decode_drop_unmap": 206527,
+        "front_end_copy_recording": 34965,
+        "final_finish": 137919,
+        "queue_submit": 227095,
+        "map_registration": 2645
+      },
+      "preparation_before": {
+        "guard_evaluations": 48,
+        "true_executions": 4,
+        "two_buffer_submits": 4
+      },
+      "preparation_after": {
+        "guard_evaluations": 56,
+        "true_executions": 4,
+        "two_buffer_submits": 4
+      },
+      "warmup_delta": {
+        "guard_evaluations": 8,
+        "true_executions": 0,
+        "two_buffer_submits": 0
+      },
+      "lifetime_before": {
+        "guard_evaluations": 56,
+        "true_executions": 4,
+        "two_buffer_submits": 4
+      },
+      "lifetime_after": {
+        "guard_evaluations": 64,
+        "true_executions": 4,
+        "two_buffer_submits": 4
+      },
+      "top_direct_spans": [
+        {
+          "batch": 4,
+          "phase": "previous_collection",
+          "ns": 49952329
+        },
+        {
+          "batch": 7,
+          "phase": "previous_collection",
+          "ns": 49511884
+        },
+        {
+          "batch": 2,
+          "phase": "postsubmit_collection",
+          "ns": 41946146
+        },
+        {
+          "batch": 6,
+          "phase": "postsubmit_collection",
+          "ns": 40896761
+        },
+        {
+          "batch": 3,
+          "phase": "postsubmit_collection",
+          "ns": 40106561
+        },
+        {
+          "batch": 8,
+          "phase": "postsubmit_collection",
+          "ns": 39929028
+        },
+        {
+          "batch": 5,
+          "phase": "postsubmit_collection",
+          "ns": 39846263
+        },
+        {
+          "batch": 4,
+          "phase": "final_finish",
+          "ns": 22128445
+        },
+        {
+          "batch": 1,
+          "phase": "final_finish",
+          "ns": 21153627
+        },
+        {
+          "batch": 7,
+          "phase": "final_finish",
+          "ns": 20601524
+        }
+      ]
+    },
+    {
+      "sidecar": "first-use-001.json",
+      "sha256": "a2721afd5ada0902d623ccc2dbbcb9c142b384e382e5627bf44076c903adf6cc",
+      "identity": {
+        "invocation_id": "6cef0e6018c1bd18ec42dde6aaea157f12b1045a5341c3d5eaffb3d2c603790a",
+        "row_index": 1,
+        "case": "mona",
+        "variant": "overlap",
+        "candidate": "overlap",
+        "pair": 0,
+        "order": 1,
+        "seed": 7,
+        "warmup_batches": 8,
+        "timestamp_mode": "stages",
+        "finalize_overlap": true
+      },
+      "elapsed_seconds": 0.433303391,
+      "direct_ns": {
+        "previous_collection": 78682974,
+        "parameter_upload": 1053423,
+        "compute_recording": 523261,
+        "tail_recording": 4105,
+        "final_finish": 74383009,
+        "queue_submit": 4606700,
+        "postsubmit_collection": 200381143,
+        "map_registration": 29366,
+        "prefix_finish": 21521038,
+        "tail_encoder_acquisition": 1784
+      },
+      "batches": [
+        {
+          "batch": 1,
+          "split": false,
+          "whole_ns": 20979952,
+          "direct_ns": {
+            "previous_collection": 391,
+            "parameter_upload": 163487,
+            "compute_recording": 73047,
+            "tail_recording": 741,
+            "final_finish": 20104601,
+            "queue_submit": 630251,
+            "postsubmit_collection": 40,
+            "map_registration": 4559
+          }
+        },
+        {
+          "batch": 2,
+          "split": false,
+          "whole_ns": 53264274,
+          "direct_ns": {
+            "previous_collection": 50,
+            "parameter_upload": 104816,
+            "compute_recording": 58400,
+            "tail_recording": 390,
+            "final_finish": 10166740,
+            "queue_submit": 534471,
+            "postsubmit_collection": 42394296,
+            "map_registration": 3607
+          }
+        },
+        {
+          "batch": 3,
+          "split": false,
+          "whole_ns": 51083228,
+          "direct_ns": {
+            "previous_collection": 70,
+            "parameter_upload": 139561,
+            "compute_recording": 62567,
+            "tail_recording": 451,
+            "final_finish": 10163695,
+            "queue_submit": 527939,
+            "postsubmit_collection": 40183193,
+            "map_registration": 4329
+          }
+        },
+        {
+          "batch": 4,
+          "split": true,
+          "whole_ns": 50607557,
+          "direct_ns": {
+            "compute_recording": 69260,
+            "prefix_finish": 11011444,
+            "previous_collection": 38655882,
+            "parameter_upload": 122289,
+            "tail_encoder_acquisition": 1112,
+            "tail_recording": 911,
+            "final_finish": 63289,
+            "queue_submit": 654727,
+            "postsubmit_collection": 100,
+            "map_registration": 3697
+          }
+        },
+        {
+          "batch": 5,
+          "split": false,
+          "whole_ns": 51353505,
+          "direct_ns": {
+            "previous_collection": 50,
+            "parameter_upload": 108253,
+            "compute_recording": 74851,
+            "tail_recording": 250,
+            "final_finish": 10446555,
+            "queue_submit": 523791,
+            "postsubmit_collection": 40180479,
+            "map_registration": 2976
+          }
+        },
+        {
+          "batch": 6,
+          "split": false,
+          "whole_ns": 51360988,
+          "direct_ns": {
+            "previous_collection": 70,
+            "parameter_upload": 181751,
+            "compute_recording": 66334,
+            "tail_recording": 290,
+            "final_finish": 10514022,
+            "queue_submit": 577081,
+            "postsubmit_collection": 40015949,
+            "map_registration": 3967
+          }
+        },
+        {
+          "batch": 7,
+          "split": true,
+          "whole_ns": 51462130,
+          "direct_ns": {
+            "compute_recording": 71664,
+            "prefix_finish": 10509594,
+            "previous_collection": 40026411,
+            "parameter_upload": 122439,
+            "tail_encoder_acquisition": 672,
+            "tail_recording": 761,
+            "final_finish": 61536,
+            "queue_submit": 642884,
+            "postsubmit_collection": 40,
+            "map_registration": 3997
+          }
+        },
+        {
+          "batch": 8,
+          "split": false,
+          "whole_ns": 51158939,
+          "direct_ns": {
+            "previous_collection": 50,
+            "parameter_upload": 110827,
+            "compute_recording": 47138,
+            "tail_recording": 311,
+            "final_finish": 12862571,
+            "queue_submit": 515556,
+            "postsubmit_collection": 37607046,
+            "map_registration": 2234
+          }
+        }
+      ],
+      "drain_ns": 52031355,
+      "within_batch_gaps_ns": 83770,
+      "outside_batch_drain_gaps_ns": 1703,
+      "end_marker_offset_ns": 240,
+      "sidecar_wall_ns": 433303631,
+      "readback_inclusive_ns": 331076988,
+      "nested_ns": {
+        "poll_wait": 330168255,
+        "control_receive": 2374,
+        "timestamp_receive": 490,
+        "fitness_receive": 380,
+        "control_decode_drop": 6933,
+        "timestamp_decode_drop_unmap": 262360,
+        "fitness_decode_drop": 2548,
+        "remaining_unmaps_best_state": 1060,
+        "drawing_receive": 331,
+        "drawing_decode_drop_unmap": 190247,
+        "front_end_copy_recording": 12834,
+        "final_finish": 167885,
+        "queue_submit": 252794,
+        "map_registration": 1433
+      },
+      "preparation_before": {
+        "guard_evaluations": 64,
+        "true_executions": 4,
+        "two_buffer_submits": 4
+      },
+      "preparation_after": {
+        "guard_evaluations": 72,
+        "true_executions": 6,
+        "two_buffer_submits": 6
+      },
+      "warmup_delta": {
+        "guard_evaluations": 8,
+        "true_executions": 2,
+        "two_buffer_submits": 2
+      },
+      "lifetime_before": {
+        "guard_evaluations": 72,
+        "true_executions": 6,
+        "two_buffer_submits": 6
+      },
+      "lifetime_after": {
+        "guard_evaluations": 80,
+        "true_executions": 8,
+        "two_buffer_submits": 8
+      },
+      "top_direct_spans": [
+        {
+          "batch": 2,
+          "phase": "postsubmit_collection",
+          "ns": 42394296
+        },
+        {
+          "batch": 3,
+          "phase": "postsubmit_collection",
+          "ns": 40183193
+        },
+        {
+          "batch": 5,
+          "phase": "postsubmit_collection",
+          "ns": 40180479
+        },
+        {
+          "batch": 7,
+          "phase": "previous_collection",
+          "ns": 40026411
+        },
+        {
+          "batch": 6,
+          "phase": "postsubmit_collection",
+          "ns": 40015949
+        },
+        {
+          "batch": 4,
+          "phase": "previous_collection",
+          "ns": 38655882
+        },
+        {
+          "batch": 8,
+          "phase": "postsubmit_collection",
+          "ns": 37607046
+        },
+        {
+          "batch": 1,
+          "phase": "final_finish",
+          "ns": 20104601
+        },
+        {
+          "batch": 8,
+          "phase": "final_finish",
+          "ns": 12862571
+        },
+        {
+          "batch": 4,
+          "phase": "prefix_finish",
+          "ns": 11011444
+        }
+      ]
+    },
+    {
+      "sidecar": "first-use-002.json",
+      "sha256": "0e7fc69ed888da09216bef00c89bfc0a7155223ed8b50d6adbd7a581dd49c2f9",
+      "identity": {
+        "invocation_id": "6cef0e6018c1bd18ec42dde6aaea157f12b1045a5341c3d5eaffb3d2c603790a",
+        "row_index": 2,
+        "case": "mona",
+        "variant": "overlap",
+        "candidate": "overlap",
+        "pair": 1,
+        "order": 0,
+        "seed": 7,
+        "warmup_batches": 8,
+        "timestamp_mode": "stages",
+        "finalize_overlap": true
+      },
+      "elapsed_seconds": 0.434639607,
+      "direct_ns": {
+        "previous_collection": 79607957,
+        "parameter_upload": 1192844,
+        "compute_recording": 486141,
+        "tail_recording": 4677,
+        "final_finish": 74634689,
+        "queue_submit": 4675190,
+        "postsubmit_collection": 201238123,
+        "map_registration": 31971,
+        "prefix_finish": 20951128,
+        "tail_encoder_acquisition": 1452
+      },
+      "batches": [
+        {
+          "batch": 1,
+          "split": false,
+          "whole_ns": 22739689,
+          "direct_ns": {
+            "previous_collection": 381,
+            "parameter_upload": 171571,
+            "compute_recording": 73607,
+            "tail_recording": 982,
+            "final_finish": 21885598,
+            "queue_submit": 600566,
+            "postsubmit_collection": 60,
+            "map_registration": 4759
+          }
+        },
+        {
+          "batch": 2,
+          "split": false,
+          "whole_ns": 53070892,
+          "direct_ns": {
+            "previous_collection": 50,
+            "parameter_upload": 142166,
+            "compute_recording": 60222,
+            "tail_recording": 370,
+            "final_finish": 10755735,
+            "queue_submit": 526506,
+            "postsubmit_collection": 41579920,
+            "map_registration": 3978
+          }
+        },
+        {
+          "batch": 3,
+          "split": false,
+          "whole_ns": 51166826,
+          "direct_ns": {
+            "previous_collection": 70,
+            "parameter_upload": 149841,
+            "compute_recording": 68088,
+            "tail_recording": 451,
+            "final_finish": 10270786,
+            "queue_submit": 501319,
+            "postsubmit_collection": 40168267,
+            "map_registration": 6021
+          }
+        },
+        {
+          "batch": 4,
+          "split": true,
+          "whole_ns": 50720989,
+          "direct_ns": {
+            "compute_recording": 72436,
+            "prefix_finish": 10548175,
+            "previous_collection": 39197748,
+            "parameter_upload": 115436,
+            "tail_encoder_acquisition": 631,
+            "tail_recording": 1022,
+            "final_finish": 59421,
+            "queue_submit": 698439,
+            "postsubmit_collection": 30,
+            "map_registration": 3838
+          }
+        },
+        {
+          "batch": 5,
+          "split": false,
+          "whole_ns": 50896960,
+          "direct_ns": {
+            "previous_collection": 50,
+            "parameter_upload": 107381,
+            "compute_recording": 46518,
+            "tail_recording": 200,
+            "final_finish": 10551571,
+            "queue_submit": 603761,
+            "postsubmit_collection": 39570316,
+            "map_registration": 2835
+          }
+        },
+        {
+          "batch": 6,
+          "split": false,
+          "whole_ns": 50919021,
+          "direct_ns": {
+            "previous_collection": 60,
+            "parameter_upload": 174026,
+            "compute_recording": 46047,
+            "tail_recording": 350,
+            "final_finish": 10193591,
+            "queue_submit": 504255,
+            "postsubmit_collection": 39995262,
+            "map_registration": 4098
+          }
+        },
+        {
+          "batch": 7,
+          "split": true,
+          "whole_ns": 51862038,
+          "direct_ns": {
+            "compute_recording": 73127,
+            "prefix_finish": 10402953,
+            "previous_collection": 40409548,
+            "parameter_upload": 147116,
+            "tail_encoder_acquisition": 821,
+            "tail_recording": 1031,
+            "final_finish": 77795,
+            "queue_submit": 721492,
+            "postsubmit_collection": 50,
+            "map_registration": 3827
+          }
+        },
+        {
+          "batch": 8,
+          "split": false,
+          "whole_ns": 51532119,
+          "direct_ns": {
+            "previous_collection": 50,
+            "parameter_upload": 185307,
+            "compute_recording": 46096,
+            "tail_recording": 271,
+            "final_finish": 10840192,
+            "queue_submit": 518852,
+            "postsubmit_collection": 39924218,
+            "map_registration": 2615
+          }
+        }
+      ],
+      "drain_ns": 51728808,
+      "within_batch_gaps_ns": 84362,
+      "outside_batch_drain_gaps_ns": 2876,
+      "end_marker_offset_ns": 611,
+      "sidecar_wall_ns": 434640218,
+      "readback_inclusive_ns": 332552331,
+      "nested_ns": {
+        "poll_wait": 331601335,
+        "control_receive": 1914,
+        "timestamp_receive": 532,
+        "fitness_receive": 371,
+        "control_decode_drop": 7244,
+        "timestamp_decode_drop_unmap": 299792,
+        "fitness_decode_drop": 4777,
+        "remaining_unmaps_best_state": 1133,
+        "drawing_receive": 310,
+        "drawing_decode_drop_unmap": 197450,
+        "front_end_copy_recording": 38342,
+        "final_finish": 148188,
+        "queue_submit": 240831,
+        "map_registration": 2665
+      },
+      "preparation_before": {
+        "guard_evaluations": 80,
+        "true_executions": 8,
+        "two_buffer_submits": 8
+      },
+      "preparation_after": {
+        "guard_evaluations": 88,
+        "true_executions": 10,
+        "two_buffer_submits": 10
+      },
+      "warmup_delta": {
+        "guard_evaluations": 8,
+        "true_executions": 2,
+        "two_buffer_submits": 2
+      },
+      "lifetime_before": {
+        "guard_evaluations": 88,
+        "true_executions": 10,
+        "two_buffer_submits": 10
+      },
+      "lifetime_after": {
+        "guard_evaluations": 96,
+        "true_executions": 12,
+        "two_buffer_submits": 12
+      },
+      "top_direct_spans": [
+        {
+          "batch": 2,
+          "phase": "postsubmit_collection",
+          "ns": 41579920
+        },
+        {
+          "batch": 7,
+          "phase": "previous_collection",
+          "ns": 40409548
+        },
+        {
+          "batch": 3,
+          "phase": "postsubmit_collection",
+          "ns": 40168267
+        },
+        {
+          "batch": 6,
+          "phase": "postsubmit_collection",
+          "ns": 39995262
+        },
+        {
+          "batch": 8,
+          "phase": "postsubmit_collection",
+          "ns": 39924218
+        },
+        {
+          "batch": 5,
+          "phase": "postsubmit_collection",
+          "ns": 39570316
+        },
+        {
+          "batch": 4,
+          "phase": "previous_collection",
+          "ns": 39197748
+        },
+        {
+          "batch": 1,
+          "phase": "final_finish",
+          "ns": 21885598
+        },
+        {
+          "batch": 8,
+          "phase": "final_finish",
+          "ns": 10840192
+        },
+        {
+          "batch": 2,
+          "phase": "final_finish",
+          "ns": 10755735
+        }
+      ]
+    },
+    {
+      "sidecar": "first-use-003.json",
+      "sha256": "9198aa7142179e8640353a94482a87a1d0c98988c3e733c3489dd5c445743f6a",
+      "identity": {
+        "invocation_id": "6cef0e6018c1bd18ec42dde6aaea157f12b1045a5341c3d5eaffb3d2c603790a",
+        "row_index": 3,
+        "case": "mona",
+        "variant": "reference",
+        "candidate": "overlap",
+        "pair": 1,
+        "order": 1,
+        "seed": 7,
+        "warmup_batches": 8,
+        "timestamp_mode": "stages",
+        "finalize_overlap": false
+      },
+      "elapsed_seconds": 0.47939077,
+      "direct_ns": {
+        "previous_collection": 100965907,
+        "parameter_upload": 1225255,
+        "compute_recording": 432030,
+        "tail_recording": 2965,
+        "final_finish": 121167932,
+        "queue_submit": 5451594,
+        "postsubmit_collection": 198434089,
+        "map_registration": 53260
+      },
+      "batches": [
+        {
+          "batch": 1,
+          "split": false,
+          "whole_ns": 23681623,
+          "direct_ns": {
+            "previous_collection": 211,
+            "parameter_upload": 183674,
+            "compute_recording": 68008,
+            "tail_recording": 571,
+            "final_finish": 22752553,
+            "queue_submit": 670126,
+            "postsubmit_collection": 70,
+            "map_registration": 4409
+          }
+        },
+        {
+          "batch": 2,
+          "split": false,
+          "whole_ns": 53112131,
+          "direct_ns": {
+            "previous_collection": 50,
+            "parameter_upload": 105077,
+            "compute_recording": 57899,
+            "tail_recording": 380,
+            "final_finish": 10719938,
+            "queue_submit": 570259,
+            "postsubmit_collection": 41653268,
+            "map_registration": 3967
+          }
+        },
+        {
+          "batch": 3,
+          "split": false,
+          "whole_ns": 51322186,
+          "direct_ns": {
+            "previous_collection": 50,
+            "parameter_upload": 183714,
+            "compute_recording": 60253,
+            "tail_recording": 622,
+            "final_finish": 10327270,
+            "queue_submit": 564277,
+            "postsubmit_collection": 40179798,
+            "map_registration": 4769
+          }
+        },
+        {
+          "batch": 4,
+          "split": false,
+          "whole_ns": 73559343,
+          "direct_ns": {
+            "previous_collection": 50279011,
+            "parameter_upload": 202759,
+            "compute_recording": 57277,
+            "tail_recording": 371,
+            "final_finish": 22386548,
+            "queue_submit": 609732,
+            "postsubmit_collection": 40,
+            "map_registration": 3737
+          }
+        },
+        {
+          "batch": 5,
+          "split": false,
+          "whole_ns": 51045068,
+          "direct_ns": {
+            "previous_collection": 50,
+            "parameter_upload": 138510,
+            "compute_recording": 47810,
+            "tail_recording": 190,
+            "final_finish": 12155657,
+            "queue_submit": 1421493,
+            "postsubmit_collection": 37257633,
+            "map_registration": 3306
+          }
+        },
+        {
+          "batch": 6,
+          "split": false,
+          "whole_ns": 50266047,
+          "direct_ns": {
+            "previous_collection": 70,
+            "parameter_upload": 124113,
+            "compute_recording": 47879,
+            "tail_recording": 300,
+            "final_finish": 10196727,
+            "queue_submit": 513071,
+            "postsubmit_collection": 39379106,
+            "map_registration": 3476
+          }
+        },
+        {
+          "batch": 7,
+          "split": false,
+          "whole_ns": 73662226,
+          "direct_ns": {
+            "previous_collection": 50686415,
+            "parameter_upload": 164758,
+            "compute_recording": 46978,
+            "tail_recording": 280,
+            "final_finish": 22157107,
+            "queue_submit": 562053,
+            "postsubmit_collection": 50,
+            "map_registration": 26390
+          }
+        },
+        {
+          "batch": 8,
+          "split": false,
+          "whole_ns": 51163630,
+          "direct_ns": {
+            "previous_collection": 50,
+            "parameter_upload": 122650,
+            "compute_recording": 45926,
+            "tail_recording": 251,
+            "final_finish": 10472132,
+            "queue_submit": 540583,
+            "postsubmit_collection": 39964124,
+            "map_registration": 3206
+          }
+        }
+      ],
+      "drain_ns": 51577314,
+      "within_batch_gaps_ns": 79222,
+      "outside_batch_drain_gaps_ns": 1552,
+      "end_marker_offset_ns": 350,
+      "sidecar_wall_ns": 479391120,
+      "readback_inclusive_ns": 350957227,
+      "nested_ns": {
+        "poll_wait": 349971388,
+        "control_receive": 1835,
+        "timestamp_receive": 530,
+        "fitness_receive": 380,
+        "control_decode_drop": 6633,
+        "timestamp_decode_drop_unmap": 156783,
+        "fitness_decode_drop": 3027,
+        "remaining_unmaps_best_state": 1052,
+        "drawing_receive": 271,
+        "drawing_decode_drop_unmap": 227778,
+        "front_end_copy_recording": 39083,
+        "final_finish": 239028,
+        "queue_submit": 298910,
+        "map_registration": 1984
+      },
+      "preparation_before": {
+        "guard_evaluations": 96,
+        "true_executions": 12,
+        "two_buffer_submits": 12
+      },
+      "preparation_after": {
+        "guard_evaluations": 104,
+        "true_executions": 12,
+        "two_buffer_submits": 12
+      },
+      "warmup_delta": {
+        "guard_evaluations": 8,
+        "true_executions": 0,
+        "two_buffer_submits": 0
+      },
+      "lifetime_before": {
+        "guard_evaluations": 104,
+        "true_executions": 12,
+        "two_buffer_submits": 12
+      },
+      "lifetime_after": {
+        "guard_evaluations": 112,
+        "true_executions": 12,
+        "two_buffer_submits": 12
+      },
+      "top_direct_spans": [
+        {
+          "batch": 7,
+          "phase": "previous_collection",
+          "ns": 50686415
+        },
+        {
+          "batch": 4,
+          "phase": "previous_collection",
+          "ns": 50279011
+        },
+        {
+          "batch": 2,
+          "phase": "postsubmit_collection",
+          "ns": 41653268
+        },
+        {
+          "batch": 3,
+          "phase": "postsubmit_collection",
+          "ns": 40179798
+        },
+        {
+          "batch": 8,
+          "phase": "postsubmit_collection",
+          "ns": 39964124
+        },
+        {
+          "batch": 6,
+          "phase": "postsubmit_collection",
+          "ns": 39379106
+        },
+        {
+          "batch": 5,
+          "phase": "postsubmit_collection",
+          "ns": 37257633
+        },
+        {
+          "batch": 1,
+          "phase": "final_finish",
+          "ns": 22752553
+        },
+        {
+          "batch": 4,
+          "phase": "final_finish",
+          "ns": 22386548
+        },
+        {
+          "batch": 7,
+          "phase": "final_finish",
+          "ns": 22157107
+        }
+      ]
+    }
+  ],
+  "candidate_finish_delta_ns": 318230,
+  "finish_spans_over_100ms": [],
+  "candidate_wall_delta_ns": -1336216,
+  "limiter_status": "first-trial signature absent under eight warmups in this invocation; preparation sensitivity only, lower-level cause unproven",
+  "audit": {
+    "findings": [],
+    "work": {
+      "preparations": {
+        "qualification": 1,
+        "diagnostic": 2,
+        "normal": 4,
+        "total": 7
+      },
+      "warmup_batches_each": 8,
+      "warmup_batches": 56,
+      "warmup_logical_evaluations": 917504,
+      "measured_batches": 32,
+      "diagnostic_batches": 16,
+      "qualification_batches": 8,
+      "last_lifetime_guard_evaluations": 112,
+      "original_last_lifetime_guard_evaluations": 70,
+      "precompile_warmup_batches": 0,
+      "preparation_guard_deltas": [
+        8,
+        8,
+        8,
+        8
+      ],
+      "preparation_split_deltas": [
+        0,
+        2,
+        2,
+        0
+      ],
+      "timed_logical_evaluations": 524288,
+      "diagnostic_logical_evaluations": 262144,
+      "qualification_logical_evaluations": 131072,
+      "original_warmup_batches": 14,
+      "additional_warmup_batches": 42,
+      "additional_warmup_logical_evaluations": 688128,
+      "setup_GPU_full_fitness_and_reset_work": "exists separately; excluded from logical evolution evaluation counts",
+      "source_work_proof": [
+        "example run_cases constructs one evolver, precompiles, qualifies once, runs two diagnostics, then four normal rows",
+        "example precompile_sources passes warmup=0; no run_batch call in constructor, precompile or seeded reset",
+        "qualification trial::prepare forwards spec.warmup_batches=8; execute_trial forwards shared constant8 for diagnostics/normal",
+        "benchmark prepare has one run_batch loop of warmup_batches; seeded reset runs full fitness/setup without logical batches",
+        "only reachable non-preparation batch loops are measured and diagnostic8 loops; legacy prepare_for_benchmark is not called",
+        "one lifetime guard increment per logical batch; lifetime is initialized once and survives seeded resets"
+      ]
+    },
+    "observation": {
+      "original2_first_later_candidate_wall_ratio": 2.1103788598417714,
+      "new8_first_later_candidate_wall_ratio": 0.9969256920481249,
+      "new8_finish_span_count": 36,
+      "new8_finish_spans_over100ms": [],
+      "new8_max_finish_span_ns": 22752553,
+      "new8_all32_batch_finish_windows_below100ms": true,
+      "new8_first_minus_later_ns": {
+        "wall": -1336216,
+        "prefix_finish": 569910,
+        "final_finish": -251680
+      },
+      "conditional_unmodified_control_necessary_for_original": false,
+      "conditional_control_run": false,
+      "inference": "Preparation sensitivity only; native pool identity or cause, universal repeatability and background isolation unproved."
+    },
+    "maximum_cpu_fitness_abs_difference": 7.62939453125e-06,
+    "fitness_tolerance": 2e-05,
+    "checked": {
+      "checks": 535,
+      "failed": 0,
+      "pinned_inputs": 847,
+      "new_timed_rows": 4,
+      "new_batch_records": 32,
+      "new_readback_records": 36,
+      "used_direct": 264,
+      "unused_null_slots": 236,
+      "used_nested": 316,
+      "old_batch_records_recomputed": 32,
+      "old_readback_records_recomputed": 36,
+      "saved_snapshots": 6,
+      "byte_L1_fitness_checks": 24,
+      "seven_field_original2_and_accepted_comparisons": 12
+    }
+  },
+  "identities": {
+    "source_freeze_sha256": "0e1d7ecab839908e25d1fd45070abc89f927516ea61e84887d992d87b85a22bd",
+    "binary_sha256": "d2bd612a640987323647a127597d7b24b5052e504814a27328a9e2c134aa70e9",
+    "fixture_manifest_sha256": "82dfe207ecd20ae964edf4528f1a90fe4176b21f4ac0911b305da1e1edf1c5aa",
+    "params_sha256": "755575d7c391eaa45ba8358724d0c66ae499c445a388badb5d465fb07a824f60",
+    "shader_sha256": "ae1fd75fdc118debf2a50cbad699e513b5af0dcbfa3754b45966f7a8ee925af3",
+    "initial_state_sha256": "6dfd329079356ef91501d99e5fde594e7c1c7a9caeed707f66a4daa8672a9823",
+    "final_state_sha256": "4fcdfdfdaae8e8136162abca8e403e8a72a034d56e06f027768a58edff68ed11"
+  },
+  "native_analysis_is_not_an_adoption_gate": true,
+  "evidence_sha256": {
+    ".cache/evolution-profiling-20261024/first-use-prepared-97/invocation.json": "d219b959b54e0af635adbb9674e6d96d341808d5abd04bc13f82869ca14c85e5",
+    ".cache/evolution-profiling-20261024/first-use-prepared-97/analysis-v2.json": "fdfdf43505cd8c2b9c7ae4cf0f4163cb22948db2ed588ebdd0a89d5594bba68d",
+    ".cache/evolution-profiling-20261024/first-use-prepared-97/analysis-version-note.json": "a139f0a6c1cb5fca9193b65f67d626a71f382199ac60bbe0d859dff5a7ecbbe2",
+    ".cache/evolution-profiling-20261024/first-use-prepared-97/runtime-process-record.json": "cf2a625819a8cbbe3c1938ca3ed1670d5742f1ae8e55b8743d4a47cf8d4b05fe",
+    ".cache/evolution-profiling-20261024/first-use-prepared-review-98/report.md": "48af38f09e01c31f127acb2bbb2acfb30ed4376d6df2d09150ea3f5c215de4b9",
+    ".cache/evolution-profiling-20261024/first-use-prepared-audit-99/audit.json": "648401f5341f927d5bc00ce349ad942408130c0fbe326c871d3a1b6c2b0f7487",
+    ".cache/evolution-profiling-20261024/first-use-20261024/prepared-patch-proof.json": "0ee0d62c5a947282379ff5eb8d7a8f85ab6e10b518a9799ddb1b767e58b62ae8"
+  }
+}

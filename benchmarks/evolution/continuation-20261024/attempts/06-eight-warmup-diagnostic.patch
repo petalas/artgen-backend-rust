@@ -1,0 +1,172 @@
+diff --git a/examples/first-use-engine-lab.rs b/examples/first-use-prepared-engine-lab.rs
+rename from examples/first-use-engine-lab.rs
+rename to examples/first-use-prepared-engine-lab.rs
+--- a/examples/first-use-engine-lab.rs
++++ b/examples/first-use-prepared-engine-lab.rs
+@@ -50,7 +50,7 @@
+     "finalize-overlap",
+ ];
+ const MAX_ARGS: usize = 2 * (16 + FLAGS.len());
+-const USAGE: &str = "engine-lab --reference-shader PATH --variant NAME=PATH [--variant NAME=PATH ...]\n  --output NEWDIR [--manifest PATH] [--pairs 1..10] [--batches 1..64] [--seed U64] [--case ff|mona|darwin|all]\n  [--shader-stage bin|raster|mutate] [--diagnostics true|false] [--mutate-zero-initialize true|false] [--finalize-overlap true|false]\nFinalize overlap inherits the constructor default when absent. An explicit flag pins reference false and candidate to the requested mode. True requires identical reference/candidate shader bytes and mutation options.\nMutation zeroing defaults to true; the flag requires stage mutate and applies only to candidates. Reference always uses true.\nDefaults: fixtures .cache/evolution-bench/fixtures/v1/manifest.json, pairs 2, batches 8, shader-stage bin, diagnostics false.\nFixed manifest parameters: 4 chains, lambda 64, 64 iterations, raster WG 32x16, resolution 384.\nTwo Stages warmups, default seed 7 and all cases; use a parent process timeout. No GPU work for --help.";
++const USAGE: &str = "engine-lab --reference-shader PATH --variant NAME=PATH [--variant NAME=PATH ...]\n  --output NEWDIR [--manifest PATH] [--pairs 1..10] [--batches 1..64] [--seed U64] [--case ff|mona|darwin|all]\n  [--shader-stage bin|raster|mutate] [--diagnostics true|false] [--mutate-zero-initialize true|false] [--finalize-overlap true|false]\nFinalize overlap inherits the constructor default when absent. An explicit flag pins reference false and candidate to the requested mode. True requires identical reference/candidate shader bytes and mutation options.\nMutation zeroing defaults to true; the flag requires stage mutate and applies only to candidates. Reference always uses true.\nDefaults: fixtures .cache/evolution-bench/fixtures/v1/manifest.json, pairs 2, batches 8, shader-stage bin, diagnostics false.\nFixed manifest parameters: 4 chains, lambda 64, 64 iterations, raster WG 32x16, resolution 384.\nEight Stages warmups, default seed 7 and all cases; use a parent process timeout. No GPU work for --help.";
+ 
+ #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+ #[serde(rename_all = "lowercase")]
+@@ -381,7 +381,7 @@
+             order: 0,
+             seed: config.seed,
+             batches: config.batches,
+-            warmup_batches: 2,
++            warmup_batches: first_use::WARMUP_BATCHES,
+             timestamp_mode: "stages",
+             elapsed_seconds: 0.0,
+             drain_seconds: 0.0,
+@@ -510,7 +510,7 @@
+         config: &config,
+         sources: &sources,
+         fixture_manifest_sha256: fixtures::sha256(&manifest),
+-        warmup_batches: 2,
++        warmup_batches: first_use::WARMUP_BATCHES,
+         timestamp_mode: "stages",
+         completed_trials: 0,
+         expected_trials: config.cases().count()
+@@ -626,7 +626,7 @@
+ ) -> Result<()> {
+     let scopes = evolver.benchmark_error_scopes();
+     // Establish the fixed workgroup before compiling every source. Qualification
+-    // still owns the single numerical oracle and the existing two warmups.
++    // still owns the single numerical oracle and the existing eight warmups.
+     let result = (|| -> Result<()> {
+         evolver
+             .prepare_seeded_benchmark(
+@@ -657,7 +657,7 @@
+         case_id: case.into(),
+         seed: config.seed,
+         batches: config.batches,
+-        warmup_batches: 2,
++        warmup_batches: first_use::WARMUP_BATCHES,
+         diagnostic: false,
+         timestamp_mode: TimestampMode::Stages,
+     }
+@@ -984,7 +984,13 @@
+     check_execution(evolver, source)?;
+     row.execution = EngineExecution::installed(evolver);
+     let preparation_before = first_use::lifetime(evolver);
+-    let prepared = evolver.prepare_seeded_benchmark(&input.drawing, params, config.seed, 2, true);
++    let prepared = evolver.prepare_seeded_benchmark(
++        &input.drawing,
++        params,
++        config.seed,
++        first_use::WARMUP_BATCHES,
++        true,
++    );
+     let preparation_after = first_use::lifetime(evolver);
+     prepared.map_err(anyhow::Error::msg)?;
+     check_execution(evolver, source)?;
+@@ -2014,7 +2020,7 @@
+             config: &config,
+             sources: &sources,
+             fixture_manifest_sha256: "manifest".into(),
+-            warmup_batches: 2,
++            warmup_batches: first_use::WARMUP_BATCHES,
+             timestamp_mode: "stages",
+             completed_trials: 0,
+             expected_trials: 12,
+--- a/src/gpu_evolver/first_use.rs
++++ b/src/gpu_evolver/first_use.rs
+@@ -12,6 +12,8 @@
+ use super::{benchmark::BenchmarkCounters, GpuEvolver};
+ use anyhow::{ensure, Result};
+ use serde::Serialize;
++
++pub const WARMUP_BATCHES: u32 = 8;
+ 
+ const BATCHES: usize = 64;
+ const READBACKS: usize = 65;
+@@ -751,7 +753,7 @@
+         && Some(i.pair) == u32::try_from(row / 2).ok()
+         && Some(i.order) == u32::try_from(row % 2).ok()
+         && i.seed == 7
+-        && i.warmup_batches == 2
++        && i.warmup_batches == WARMUP_BATCHES
+         && i.timestamp_mode == "stages"
+         && i.finalize_overlap == (i.variant == "overlap")
+         && e.timestamp_samples == n
+@@ -800,7 +802,7 @@
+         || d.preparation_after
+             .guard_evaluations
+             .checked_sub(d.preparation_before.guard_evaluations)
+-            != Some(2)
++            != Some(u64::from(WARMUP_BATCHES))
+         || !valid_preparation(d, prior)
+         || advance(d.lifetime_before, n as u64, d.split_count) != Some(after)
+     {
+@@ -865,7 +867,9 @@
+     let Some(splits) = b.true_executions.checked_sub(a.true_executions) else {
+         return false;
+     };
+-    splits <= 2 && advance(a, 2, splits) == Some(b) && prior.is_none_or(|p| p == a)
++    splits <= u64::from(WARMUP_BATCHES)
++        && advance(a, u64::from(WARMUP_BATCHES), splits) == Some(b)
++        && prior.is_none_or(|p| p == a)
+ }
+ 
+ /// Streaming cap applies to actual bytes written. Short writes are handled by `Write::write_all`.
+@@ -1018,7 +1022,7 @@
+                 pair: (row / 2) as u32,
+                 order: (row % 2) as u32,
+                 seed: 7,
+-                warmup_batches: 2,
++                warmup_batches: WARMUP_BATCHES,
+                 timestamp_mode: "stages".into(),
+                 finalize_overlap: row == 1 || row == 2,
+             },
+@@ -1037,7 +1041,8 @@
+ 
+     fn fixture(n: usize, row: usize, before: Lifetime) -> Data {
+         assert!((1..=BATCHES).contains(&n));
+-        let initial = advance(before, 2, 0).unwrap();
++        let warmup_splits = if row == 1 || row == 2 { 2 } else { 0 };
++        let initial = advance(before, u64::from(WARMUP_BATCHES), warmup_splits).unwrap();
+         let mut d = new_data(n, before, initial);
+         d.evidence = Some(evidence(n, row));
+         d.checked_counters = Some(work(n as u64));
+@@ -1301,13 +1306,32 @@
+                 serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap();
+             assert_eq!(
+                 j["preparation_after"]["guard_evaluations"],
+-                prior.guard_evaluations + 2
++                prior.guard_evaluations + 8
+             );
+             assert_eq!(j["lifetime_before"], j["preparation_after"]);
+             assert_eq!(j["checked_counters"]["completed_iterations"], 512);
+             assert_eq!(j["checked_counters"]["completed_evaluations"], 131072);
+             fp = Some(fingerprint(d.evidence.as_ref().unwrap()));
+             prior = d.lifetime_after.unwrap();
++        }
++    }
++
++    #[test]
++    fn eight_warmup_policy_rejects_old_metadata_and_counters_retaining_evidence() {
++        for case in 0..3 {
++            let mut d = fixture(8, 1, Lifetime::default());
++            if case != 1 {
++                d.evidence.as_mut().unwrap().identity.warmup_batches = 2;
++            }
++            if case != 0 {
++                // Preserve the measured evidence while supplying an old two-batch delta.
++                d.preparation_before.guard_evaluations += 6;
++            }
++            let json = exported(d, &format!("old-two-warmup-policy-{case}"), false);
++            assert_eq!(json["batches"].as_array().unwrap().len(), 8);
++            assert_eq!(json["readbacks"].as_array().unwrap().len(), 8);
++            assert_eq!(json["preparation_after"]["true_executions"], 2);
++            assert_eq!(json["checked_counters"]["completed_evaluations"], 131072);
+         }
+     }
+ 
+--- a/first-use-provenance.sha256
++++ b/first-use-provenance.sha256
+@@ -1 +1 @@
+-d5ce6ff2d93746cce53d868655c3d52c13c7f57cd655cf100f40162c407c2a74
++0e1d7ecab839908e25d1fd45070abc89f927516ea61e84887d992d87b85a22bd
