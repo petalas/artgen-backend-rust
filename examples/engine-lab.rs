@@ -44,13 +44,14 @@ const FLAGS: [&str; 9] = [
     "shader-stage",
     "diagnostics",
 ];
-const USAGE: &str = "engine-lab --reference-shader PATH --variant NAME=PATH [--variant NAME=PATH ...]\n  --output NEWDIR [--manifest PATH] [--pairs 1..10] [--batches 1..64] [--seed U64] [--case ff|mona|darwin|all]\n  [--shader-stage bin|raster] [--diagnostics true|false]\nDefaults: fixtures .cache/evolution-bench/fixtures/v1/manifest.json, pairs 2, batches 8, shader-stage bin, diagnostics false.\nFixed manifest parameters: 4 chains, lambda 64, 64 iterations, raster WG 32x16, resolution 384.\nTwo Stages warmups, default seed 7 and all cases; use a parent process timeout. No GPU work for --help.";
+const USAGE: &str = "engine-lab --reference-shader PATH --variant NAME=PATH [--variant NAME=PATH ...]\n  --output NEWDIR [--manifest PATH] [--pairs 1..10] [--batches 1..64] [--seed U64] [--case ff|mona|darwin|all]\n  [--shader-stage bin|raster|mutate] [--diagnostics true|false]\nDefaults: fixtures .cache/evolution-bench/fixtures/v1/manifest.json, pairs 2, batches 8, shader-stage bin, diagnostics false.\nFixed manifest parameters: 4 chains, lambda 64, 64 iterations, raster WG 32x16, resolution 384.\nTwo Stages warmups, default seed 7 and all cases; use a parent process timeout. No GPU work for --help.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 enum ShaderStage {
     Bin,
     Raster,
+    Mutate,
 }
 
 impl ShaderStage {
@@ -58,7 +59,8 @@ impl ShaderStage {
         match value {
             "bin" => Ok(Self::Bin),
             "raster" => Ok(Self::Raster),
-            _ => anyhow::bail!("shader-stage must be bin or raster"),
+            "mutate" => Ok(Self::Mutate),
+            _ => anyhow::bail!("shader-stage must be bin, raster or mutate"),
         }
     }
 
@@ -66,6 +68,7 @@ impl ShaderStage {
         match self {
             Self::Bin => evolver.benchmark_set_bin_shader(source),
             Self::Raster => evolver.benchmark_set_raster_shader(source),
+            Self::Mutate => evolver.benchmark_set_mutate_shader(source),
         }
         .map_err(anyhow::Error::msg)
     }
@@ -1099,7 +1102,7 @@ mod tests {
         let config = Config::parse(&args())?;
         assert_eq!(config.shader_stage, ShaderStage::Bin);
         assert!(!config.diagnostics);
-        for stage in ["bin", "raster"] {
+        for stage in ["bin", "raster", "mutate"] {
             for diagnostics in ["true", "false"] {
                 let mut selected = args();
                 selected.extend([
@@ -1115,6 +1118,7 @@ mod tests {
         }
         for (flag, value) in [
             ("--shader-stage", "Raster"),
+            ("--shader-stage", "Mutate"),
             ("--shader-stage", "select"),
             ("--diagnostics", "1"),
             ("--diagnostics", "TRUE"),
@@ -1328,17 +1332,66 @@ mod tests {
         config.reference_shader = path.clone();
         config.variants[0].1 = path.clone();
         let result = (|| -> Result<()> {
-            for bytes in [
-                b"invalid wgsl".to_vec(),
-                vec![0xff],
-                vec![b' '; usize::try_from(MAX_SOURCE_BYTES)? + 1],
-            ] {
-                fs::write(&path, bytes)?;
-                assert!(read_sources(&config).is_err());
+            for stage in [ShaderStage::Bin, ShaderStage::Raster, ShaderStage::Mutate] {
+                config.shader_stage = stage;
+                for bytes in [
+                    b"invalid wgsl".to_vec(),
+                    b"@compute @workgroup_size(1) fn main() { let x: u32 = true; }".to_vec(),
+                    vec![0xff],
+                    vec![b' '; usize::try_from(MAX_SOURCE_BYTES)? + 1],
+                ] {
+                    fs::write(&path, bytes)?;
+                    assert!(read_sources(&config).is_err());
+                }
             }
             Ok(())
         })();
         fs::remove_file(path)?;
+        result
+    }
+
+    #[test]
+    fn mutate_sources_and_rows_preserve_stage_and_exact_source_provenance() -> Result<()> {
+        let directory =
+            std::env::temp_dir().join(format!("engine-lab-mutate-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&directory)?;
+        let result = (|| -> Result<()> {
+            let mut config = Config::parse(&args())?;
+            config.shader_stage = ShaderStage::Mutate;
+            config.reference_shader = directory.join("reference.wgsl");
+            config.variants[0].1 = directory.join("candidate.wgsl");
+            let original = include_str!("../src/shaders/mutate.wgsl");
+            let candidate = format!("{original}\n// candidate λ\n");
+            fs::write(&config.reference_shader, original)?;
+            fs::write(&config.variants[0].1, &candidate)?;
+            let sources = read_sources(&config)?;
+            assert_eq!(sources.len(), 2);
+            for (source, expected) in sources.iter().zip([original, candidate.as_str()]) {
+                assert_eq!(source.shader_stage, ShaderStage::Mutate);
+                assert_eq!(source.wgsl, expected);
+                assert_eq!(source.sha256, fixtures::sha256(expected.as_bytes()));
+                let serialized = serde_json::to_value(source)?;
+                assert_eq!(serialized["shader_stage"], "mutate");
+                assert!(serialized.get("wgsl").is_none());
+                for timing_eligible in [true, false] {
+                    let row = TrialRow::new(
+                        &config,
+                        source,
+                        "ff",
+                        "manifest",
+                        provenance(),
+                        timing_eligible,
+                    );
+                    let value = serde_json::to_value(row)?;
+                    assert_eq!(value["shader_stage"], "mutate");
+                    assert_eq!(value["source_sha256"], source.sha256);
+                    assert_eq!(value["timing_eligible"], timing_eligible);
+                }
+            }
+            assert_ne!(sources[0].sha256, sources[1].sha256);
+            Ok(())
+        })();
+        fs::remove_dir_all(directory)?;
         result
     }
 

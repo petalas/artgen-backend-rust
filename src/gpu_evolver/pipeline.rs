@@ -13,6 +13,17 @@ use super::buffers::{
 const MAX_BENCHMARK_BIN_PIPELINES: usize = 17 * 5 * 2;
 const MAX_BENCHMARK_SOURCE_BYTES: usize = 256 * 1024;
 const MAX_BENCHMARK_RASTER_PIPELINES: usize = 17 * 5;
+const MAX_BENCHMARK_MUTATE_PIPELINES: usize = 17;
+
+#[derive(Debug, PartialEq, Eq)]
+struct BenchmarkMutateKey {
+    source: Arc<str>,
+}
+
+struct BenchmarkMutatePipeline {
+    key: BenchmarkMutateKey,
+    pipeline: ComputePipeline,
+}
 
 #[derive(Debug, PartialEq, Eq)]
 struct BenchmarkRasterKey {
@@ -67,6 +78,10 @@ pub struct GpuPipeline {
     pub bin_polygons_pipeline: ComputePipeline,
     pub init_framebuffers_pipeline: ComputePipeline,
     pub update_framebuffers_pipeline: ComputePipeline,
+
+    // Empty in production. Mutation has no raster-workgroup or diagnostic variants.
+    mutate_pipeline_layout: PipelineLayout,
+    benchmark_mutate_pipelines: Vec<BenchmarkMutatePipeline>,
 
     // Rasterize pipeline recreation support — stored for creating new pipeline variants
     rasterize_error_shader: ShaderModule,
@@ -490,11 +505,6 @@ impl GpuPipeline {
         let timestamp_period = queue.get_timestamp_period();
 
         // --- Shader modules ---
-        let mutate_shader = device.create_shader_module(ShaderModuleDescriptor {
-            label: Some("mutate_shader"),
-            source: ShaderSource::Wgsl(include_str!("../shaders/mutate.wgsl").into()),
-        });
-
         let select_shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("select_shader"),
             source: ShaderSource::Wgsl(include_str!("../shaders/select.wgsl").into()),
@@ -759,14 +769,12 @@ impl GpuPipeline {
             bind_group_layouts: &[Some(&mutate_bgl), Some(&params_bgl)],
             immediate_size: 0,
         });
-        let mutate_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
-            label: Some("mutate_pipeline"),
-            layout: Some(&mutate_pipeline_layout),
-            module: &mutate_shader,
-            entry_point: Some("main"),
-            compilation_options: Default::default(),
-            cache: Some(&pipeline_cache),
-        });
+        let mutate_pipeline = create_mutate_pipeline_from_source(
+            &device,
+            &mutate_pipeline_layout,
+            include_str!("../shaders/mutate.wgsl"),
+            &pipeline_cache,
+        );
 
         let rasterize_error_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: Some("rasterize_error_layout"),
@@ -1007,6 +1015,8 @@ impl GpuPipeline {
             bin_polygons_pipeline,
             init_framebuffers_pipeline,
             update_framebuffers_pipeline,
+            mutate_pipeline_layout,
+            benchmark_mutate_pipelines: Vec::new(),
             rasterize_error_shader,
             rasterize_error_pipeline_layout,
             benchmark_raster_source: None,
@@ -1109,6 +1119,63 @@ impl GpuPipeline {
         self.rasterize_wg = wg;
         self.num_tiles = self.image_width.div_ceil(wg[0]) * self.image_height.div_ceil(wg[1]);
         Ok(())
+    }
+
+    pub(super) fn set_benchmark_mutate_shader(&mut self, source: &str) -> Result<(), String> {
+        validate_benchmark_mutate_source(source)?;
+        if let Some(entry) = self
+            .benchmark_mutate_pipelines
+            .iter()
+            .find(|entry| entry.key.source.as_ref() == source)
+        {
+            self.mutate_pipeline = entry.pipeline.clone();
+            return Ok(());
+        }
+        if self.benchmark_mutate_pipelines.len() == MAX_BENCHMARK_MUTATE_PIPELINES {
+            return Err("benchmark mutate pipeline cache is full".into());
+        }
+        let pipeline = if self.benchmark_mutate_pipelines.is_empty()
+            && source == include_str!("../shaders/mutate.wgsl")
+        {
+            self.mutate_pipeline.clone()
+        } else {
+            self.compile_benchmark_mutate(source)?
+        };
+        self.benchmark_mutate_pipelines
+            .push(BenchmarkMutatePipeline {
+                key: BenchmarkMutateKey {
+                    source: Arc::from(source),
+                },
+                pipeline: pipeline.clone(),
+            });
+        // Prepares, raster workgroup changes and diagnostics leave this handle intact.
+        // Dispatch remains (active, 1, 1); source never supplies dispatch metadata.
+        self.mutate_pipeline = pipeline;
+        Ok(())
+    }
+
+    fn compile_benchmark_mutate(&self, source: &str) -> Result<ComputePipeline, String> {
+        let scopes = [
+            self.device.push_error_scope(ErrorFilter::Validation),
+            self.device.push_error_scope(ErrorFilter::OutOfMemory),
+            self.device.push_error_scope(ErrorFilter::Internal),
+        ];
+        let pipeline = create_mutate_pipeline_from_source(
+            &self.device,
+            &self.mutate_pipeline_layout,
+            source,
+            &self.pipeline_cache,
+        );
+        let mut errors = Vec::with_capacity(3);
+        for scope in scopes.into_iter().rev() {
+            if let Some(error) = futures_lite::future::block_on(scope.pop()) {
+                errors.push(error.to_string());
+            }
+        }
+        if !errors.is_empty() {
+            return Err(errors.join("; "));
+        }
+        Ok(pipeline)
     }
 
     pub(super) fn set_benchmark_raster_shader(&mut self, source: &str) -> Result<(), String> {
@@ -1316,6 +1383,33 @@ impl GpuPipeline {
         }
         println!("Saved pipeline cache ({} bytes)", data.len());
     }
+}
+
+fn create_mutate_pipeline_from_source(
+    device: &Device,
+    layout: &PipelineLayout,
+    source: &str,
+    cache: &PipelineCache,
+) -> ComputePipeline {
+    let shader = device.create_shader_module(ShaderModuleDescriptor {
+        label: Some("mutate_shader"),
+        source: ShaderSource::Wgsl(source.into()),
+    });
+    device.create_compute_pipeline(&ComputePipelineDescriptor {
+        label: Some("mutate_pipeline"),
+        layout: Some(layout),
+        module: &shader,
+        entry_point: Some("main"),
+        compilation_options: PipelineCompilationOptions::default(),
+        cache: Some(cache),
+    })
+}
+
+fn validate_benchmark_mutate_source(source: &str) -> Result<(), String> {
+    if source.is_empty() || source.len() > MAX_BENCHMARK_SOURCE_BYTES {
+        return Err("mutate shader must contain 1..262144 bytes".into());
+    }
+    Ok(())
 }
 
 /// Create a rasterize_error compute pipeline with the given workgroup size.
@@ -1532,8 +1626,47 @@ mod benchmark_tests {
     use super::{
         benchmark_bin_source, bin_polygons_source, specialize_bin_source,
         specialize_raster_source, validate_benchmark_bin_source,
-        validate_benchmark_raster_source, BenchmarkRasterKey, MAX_BENCHMARK_SOURCE_BYTES,
+        validate_benchmark_mutate_source, validate_benchmark_raster_source,
+        BenchmarkMutateKey, BenchmarkRasterKey, MAX_BENCHMARK_SOURCE_BYTES,
     };
+
+    #[test]
+    fn mutate_source_boundaries_need_no_specialization_markers() {
+        let original = include_str!("../shaders/mutate.wgsl");
+        assert!(!original.contains("const TILE_"));
+        assert!(!original.contains("const WG_X"));
+        assert!(!original.contains("const WG_Y"));
+        validate_benchmark_mutate_source(original).unwrap();
+        assert!(validate_benchmark_mutate_source("").is_err());
+        let maximum = format!("//{}", " ".repeat(MAX_BENCHMARK_SOURCE_BYTES - 2));
+        validate_benchmark_mutate_source(&maximum).unwrap();
+        assert!(validate_benchmark_mutate_source(&format!("{maximum} ")).is_err());
+        let multibyte = "λ".repeat(MAX_BENCHMARK_SOURCE_BYTES / 2 + 1);
+        assert!(validate_benchmark_mutate_source(&multibyte).is_err());
+    }
+
+    #[test]
+    fn mutate_cache_keys_preserve_exact_source_without_dispatch_metadata() {
+        let original = include_str!("../shaders/mutate.wgsl");
+        let key = BenchmarkMutateKey {
+            source: original.into(),
+        };
+        assert_eq!(
+            key,
+            BenchmarkMutateKey {
+                source: original.to_owned().into()
+            }
+        );
+        for suffix in ["\n", "\n// candidate λ"] {
+            assert_ne!(
+                key,
+                BenchmarkMutateKey {
+                    source: format!("{original}{suffix}").into()
+                }
+            );
+        }
+        assert!(wgpu::PipelineCompilationOptions::default().zero_initialize_workgroup_memory);
+    }
 
     #[test]
     fn raster_source_specialization_preserves_candidate_and_cache_identity() {

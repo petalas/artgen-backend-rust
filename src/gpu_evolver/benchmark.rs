@@ -237,6 +237,18 @@ impl GpuEvolver {
         validate_resources(p, params)
     }
 
+    /// Install and cache a lab mutation source using the original layout and
+    /// production options, including workgroup-memory zeroing. Retains the handle
+    /// across prepares, raster workgroup changes and diagnostic toggles. Dispatch
+    /// remains one workgroup per active chain; physical lanes do not change lambda.
+    ///
+    /// # Errors
+    /// Rejects a failed drain, invalid source, exhausted cache or GPU errors.
+    pub fn benchmark_set_mutate_shader(&mut self, source: &str) -> Result<(), String> {
+        self.benchmark_drain()?;
+        self.pipeline.set_benchmark_mutate_shader(source)
+    }
+
     /// Install a lab bin shader while drained, retaining device, layouts and buffers.
     /// Repeated sources reuse compiled handles. Preparation and validation retain
     /// the override; compilation uses the production bin options and pipeline cache.

@@ -29,7 +29,7 @@ and separate reference qualification artifacts. A failed check stops the job;
 invalid rows have no throughput score. It accepts up to sixteen variants. Each
 comparison alternates reference/candidate order across pairs.
 
-`--shader-stage bin|raster` selects which pipeline the supplied sources replace;
+`--shader-stage bin|raster|mutate` selects which pipeline the supplied sources replace;
 the default is `bin`. `--diagnostics true` adds one untimed overflow replay per
 source and case. Those rows have null throughput, separate counters and saved
 snapshots. They must match the same qualified trajectory and remain below the
@@ -76,3 +76,21 @@ splitting that constructor belongs to a separate validated refactor. The lab's
 64-line main and 66-line schema test are mostly typed data declarations and one
 cohesive result path. Other new operations stay within a page. Wgpu allocation
 inside ordinary engine work remains included in elapsed time.
+
+## Mutation source comparisons
+
+Mutation installation retains the original layout, dispatch and default pipeline
+options, including shared-memory zeroing. A drained setter caches at most seventeen
+exact sources. Preparation, raster-workgroup changes and diagnostic toggles retain
+the installed handle. It supplies no dispatch metadata and does not change lambda
+or any mutation probability. The normal production cache remains empty.
+
+The actual source installer rejected a deliberately corrupted final RNG update:
+the qualified initial state matched, but the final canonical state failed in six
+fields and the candidate rate was null. The reference completed normally. This
+negative proof is retained in `mutate-negative-source-gate-run/`, using the archived
+`build-v4/` executable and complete source inventory. It proves the new stage is
+installed and checked, without treating invalid work as a performance result.
+Focused pipeline and lab CPU tests passed (18 total), and all/pedantic Clippy
+reported no new diagnostics on the changed code. A separate source review found
+no material installation or measurement defect.
