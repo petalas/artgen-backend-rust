@@ -32,7 +32,12 @@ Both compact-raster prefix experiments failed their short filters and their
 runtime path was removed. One logical offspring per mutation workgroup also passed full confirmation,
 measuring 1.10181 and 1.10980 times the preceding engine throughput. It is now
 the default; see [13-one-offspring-workgroups.md](13-one-offspring-workgroups.md).
-Every evolution setting remains pinned. Conservative raster masks, cached alpha
-and small binning operations are the next isolated filters.
+Every evolution setting remains pinned. Conservative masks, cached alpha, small
+binning operations, packed bounds and alternate G1 lane widths failed their short
+filters. Matched compilation options did not rescue indirect raster compaction.
+Direct adjacent-tile grouping also failed and was removed in `fe5e829`; its fresh
+coverage, fault and host-edge proofs remain archived in
+[report 20](20-direct-raster-coarsening.md). Two independent triangle-edge
+microexperiments are now in their short screen; no new adoption is implied.
 Earlier live-preview results retain their original dispositions and are outside
 this engine-only score. Work continues until the morning cutoff.
