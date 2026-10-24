@@ -22,3 +22,7 @@ from the number of physical lanes in that workgroup.
 **Mature drawing restart**:
 A new seeded search starting from an existing drawing, without its previous search
 history.
+
+**Shader variant**:
+An alternative program for an evolution stage that preserves the search's fixed
+evolutionary rules.

@@ -2,6 +2,7 @@ pub mod benchmark;
 pub mod buffers;
 pub mod pipeline;
 mod execution;
+mod programs;
 
 use std::time::Instant;
 
@@ -146,7 +147,7 @@ impl GpuEvolver {
         // Initialize offspring RNG states in working_states buffer
         init_offspring_rng(&pipeline, 0);
 
-        let rwg = pipeline.rasterize_wg;
+        let rwg = pipeline.rasterize_wg();
         let grid = pipeline.raster_grid(rwg);
         let (wg_x, wg_y) = (grid.x, grid.y);
         println!(
@@ -189,7 +190,7 @@ impl GpuEvolver {
     /// Blocks until the GPU work completes.
     fn dispatch_init_framebuffers(&mut self, active_chains: u32) {
         let p = &self.pipeline;
-        let rwg = p.rasterize_wg;
+        let rwg = p.rasterize_wg();
         let grid = p.raster_grid(rwg);
         let (wg_x, wg_y) = (grid.x, grid.y);
 
@@ -209,7 +210,7 @@ impl GpuEvolver {
                 label: Some("init_framebuffers"),
                 timestamp_writes: None,
             });
-            pass.set_pipeline(&p.init_framebuffers_pipeline);
+            pass.set_pipeline(p.init_framebuffers_pipeline());
             pass.set_bind_group(0, &p.init_framebuffers_bind_group, &[]);
             pass.set_bind_group(1, &p.params_bind_group, &[]);
             pass.dispatch_workgroups(wg_x, wg_y, active_chains);
@@ -370,17 +371,17 @@ impl GpuEvolver {
                     label: Some("mutate_bin_rasterize"),
                     timestamp_writes: bulk_timestamp_writes.take(),
                 });
-                pass.set_pipeline(&p.mutate_pipeline);
+                pass.set_pipeline(p.mutate_pipeline());
                 pass.set_bind_group(0, &p.mutate_bind_group, &[]);
                 pass.set_bind_group(1, &p.params_bind_group, &[]);
                 pass.dispatch_workgroups(active, mutate_dispatch_y, 1);
 
-                pass.set_pipeline(&p.bin_polygons_pipeline);
+                pass.set_pipeline(p.bin_polygons_pipeline());
                 pass.set_bind_group(0, &p.bin_polygons_bind_group, &[]);
                 pass.set_bind_group(1, &p.params_bind_group, &[]);
                 pass.dispatch_workgroups(offspring, 1, 1);
 
-                pass.set_pipeline(&p.rasterize_error_pipeline);
+                pass.set_pipeline(p.rasterize_error_pipeline());
                 pass.set_bind_group(0, &p.rasterize_error_bind_group, &[]);
                 pass.set_bind_group(1, &p.params_bind_group, &[]);
                 pass.dispatch_workgroups(wg_x, wg_y, offspring);
@@ -390,12 +391,12 @@ impl GpuEvolver {
                     label: Some("select_update"),
                     timestamp_writes: None,
                 });
-                pass.set_pipeline(&p.select_pipeline);
+                pass.set_pipeline(p.select_pipeline());
                 pass.set_bind_group(0, &p.select_bind_group, &[]);
                 pass.set_bind_group(1, &p.params_bind_group, &[]);
                 pass.dispatch_workgroups(active, 1, 1);
 
-                pass.set_pipeline(&p.update_framebuffers_pipeline);
+                pass.set_pipeline(p.update_framebuffers_pipeline());
                 pass.set_bind_group(0, &p.update_framebuffers_bind_group, &[]);
                 pass.set_bind_group(1, &p.params_bind_group, &[]);
                 pass.dispatch_workgroups(wg_x, wg_y, active);
@@ -415,7 +416,7 @@ impl GpuEvolver {
                         end_of_pass_write_index: Some(1),
                     }),
                 });
-                pass.set_pipeline(&p.mutate_pipeline);
+                pass.set_pipeline(p.mutate_pipeline());
                 pass.set_bind_group(0, &p.mutate_bind_group, &[]);
                 pass.set_bind_group(1, &p.params_bind_group, &[]);
                 pass.dispatch_workgroups(active, mutate_dispatch_y, 1);
@@ -430,7 +431,7 @@ impl GpuEvolver {
                         end_of_pass_write_index: Some(3),
                     }),
                 });
-                pass.set_pipeline(&p.bin_polygons_pipeline);
+                pass.set_pipeline(p.bin_polygons_pipeline());
                 pass.set_bind_group(0, &p.bin_polygons_bind_group, &[]);
                 pass.set_bind_group(1, &p.params_bind_group, &[]);
                 pass.dispatch_workgroups(offspring, 1, 1);
@@ -445,7 +446,7 @@ impl GpuEvolver {
                         end_of_pass_write_index: Some(5),
                     }),
                 });
-                pass.set_pipeline(&p.rasterize_error_pipeline);
+                pass.set_pipeline(p.rasterize_error_pipeline());
                 pass.set_bind_group(0, &p.rasterize_error_bind_group, &[]);
                 pass.set_bind_group(1, &p.params_bind_group, &[]);
                 pass.dispatch_workgroups(wg_x, wg_y, offspring);
@@ -460,13 +461,13 @@ impl GpuEvolver {
                         end_of_pass_write_index: Some(7),
                     }),
                 });
-                pass.set_pipeline(&p.select_pipeline);
+                pass.set_pipeline(p.select_pipeline());
                 pass.set_bind_group(0, &p.select_bind_group, &[]);
                 pass.set_bind_group(1, &p.params_bind_group, &[]);
                 pass.dispatch_workgroups(active, 1, 1);
 
                 // Update framebuffers in same pass (timestamps cover both)
-                pass.set_pipeline(&p.update_framebuffers_pipeline);
+                pass.set_pipeline(p.update_framebuffers_pipeline());
                 pass.set_bind_group(0, &p.update_framebuffers_bind_group, &[]);
                 pass.set_bind_group(1, &p.params_bind_group, &[]);
                 pass.dispatch_workgroups(wg_x, wg_y, active);
@@ -926,7 +927,7 @@ impl GpuEvolver {
         }
 
         // Submit 2: bin polygons + rasterize_error
-        let rwg = p.rasterize_wg;
+        let rwg = p.rasterize_wg();
         let grid = p.raster_grid(rwg);
         let (wg_x, wg_y) = (grid.x, grid.y);
 
@@ -944,12 +945,12 @@ impl GpuEvolver {
             });
 
             // Bin polygons first (tile culling is always on)
-            pass.set_pipeline(&p.bin_polygons_pipeline);
+            pass.set_pipeline(p.bin_polygons_pipeline());
             pass.set_bind_group(0, &p.bin_polygons_bind_group, &[]);
             pass.set_bind_group(1, &p.params_bind_group, &[]);
             pass.dispatch_workgroups(active, 1, 1);
 
-            pass.set_pipeline(&p.rasterize_error_pipeline);
+            pass.set_pipeline(p.rasterize_error_pipeline());
             pass.set_bind_group(0, &p.rasterize_error_bind_group, &[]);
             pass.set_bind_group(1, &p.params_bind_group, &[]);
             pass.dispatch_workgroups(wg_x, wg_y, active);
@@ -1077,7 +1078,7 @@ impl GpuEvolver {
     }
 
     pub fn rasterize_wg(&self) -> [u32; 2] {
-        self.pipeline.rasterize_wg
+        self.pipeline.rasterize_wg()
     }
 
     /// Save the pipeline cache to disk for faster startup next time.

@@ -361,19 +361,19 @@ fn reference_pipeline(p: &GpuPipeline) -> wgpu::ComputePipeline {
     let source = include_str!("../benchmarks/evolution/v1/experiments/reference-bin-dd52d50.wgsl")
         .replace(
             "const TILE_W: u32 = 16;",
-            &format!("const TILE_W: u32 = {};", p.rasterize_wg[0]),
+            &format!("const TILE_W: u32 = {};", p.rasterize_wg()[0]),
         )
         .replace(
             "const TILE_H: u32 = 16;",
-            &format!("const TILE_H: u32 = {};", p.rasterize_wg[1]),
+            &format!("const TILE_H: u32 = {};", p.rasterize_wg()[1]),
         );
     let shader = p.device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("checker frozen full binner"),
         source: wgpu::ShaderSource::Wgsl(source.into()),
     });
     let layouts = [
-        p.bin_polygons_pipeline.get_bind_group_layout(0),
-        p.bin_polygons_pipeline.get_bind_group_layout(1),
+        p.bin_polygons_pipeline().get_bind_group_layout(0),
+        p.bin_polygons_pipeline().get_bind_group_layout(1),
     ];
     let layout = p
         .device
@@ -400,11 +400,11 @@ fn new_bins(
     scope: Scope,
 ) -> Bins {
     let stripe_grid =
-        [STRIPE_SIZE, WIDE_STRIPE_SIZE].contains(&image_size) && p.rasterize_wg == STRIPE_RASTER_WG;
+        [STRIPE_SIZE, WIDE_STRIPE_SIZE].contains(&image_size) && p.rasterize_wg() == STRIPE_RASTER_WG;
     assert!(IMAGE_SIZES.contains(&image_size) || GUARD_SIZES.contains(&image_size) || stripe_grid);
-    assert!(WORKGROUPS.contains(&p.rasterize_wg));
+    assert!(WORKGROUPS.contains(&p.rasterize_wg()));
     let tiles =
-        image_size[0].div_ceil(p.rasterize_wg[0]) * image_size[1].div_ceil(p.rasterize_wg[1]);
+        image_size[0].div_ceil(p.rasterize_wg()[0]) * image_size[1].div_ceil(p.rasterize_wg()[1]);
     assert!(tiles <= 195 || (stripe_grid && [288, 528].contains(&tiles)));
     let slots = usize::try_from(tiles).expect("at most 528 tiles") * OFFSPRING;
     let expected: Vec<u32> = (0..slots * (BIN_CAPACITY + 1))
@@ -465,7 +465,7 @@ fn new_bin_buffers(p: &GpuPipeline, poison: &[u32], slots: usize) -> BinBuffers 
         });
     let bind_group = p.device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("checker bin bindings"),
-        layout: &p.bin_polygons_pipeline.get_bind_group_layout(0),
+        layout: &p.bin_polygons_pipeline().get_bind_group_layout(0),
         entries: &entries,
     });
     BinBuffers {
@@ -559,7 +559,7 @@ fn check_dispatch(
         p,
         bins.image_size,
         &bins.buffers,
-        &p.bin_polygons_pipeline,
+        p.bin_polygons_pipeline(),
         states,
     )?;
     if let Some(reference) = &bins.reference {
@@ -580,10 +580,10 @@ fn check_dispatch(
     let slots = usize::try_from(bins.buffers.counts.size() / 4)?;
     let tiles = slots / OFFSPRING;
     for (offspring, state) in states.iter().enumerate() {
-        let full_bins = scalar_full_bins(state, bins.image_size, p.rasterize_wg);
+        let full_bins = scalar_full_bins(state, bins.image_size, p.rasterize_wg());
         ensure!(full_bins.len() == tiles);
         for (tile, layers) in full_bins.iter().enumerate() {
-            if !consumed(state, tile, bins.image_size, p.rasterize_wg) {
+            if !consumed(state, tile, bins.image_size, p.rasterize_wg()) {
                 continue;
             }
             let global = offspring * tiles + tile;
@@ -599,7 +599,7 @@ fn check_dispatch(
             bail!(
                 "size={:?}, wg={:?}, {label}, word={word}: got {value}, expected {expected}",
                 bins.image_size,
-                p.rasterize_wg
+                p.rasterize_wg()
             );
         }
     }
@@ -620,7 +620,7 @@ fn check_full_buffers(
             value == reference,
             "size={:?}, wg={:?}, {label}, word={word}: got {value}, reference {reference}",
             bins.image_size,
-            p.rasterize_wg
+            p.rasterize_wg()
         );
     }
     Ok(())
@@ -639,14 +639,14 @@ fn check_consumed_gpu(
     let tiles = slots / OFFSPRING;
     for (offspring, state) in states.iter().enumerate() {
         for tile in 0..tiles {
-            if !consumed(state, tile, bins.image_size, p.rasterize_wg) {
+            if !consumed(state, tile, bins.image_size, p.rasterize_wg()) {
                 continue;
             }
             let global = offspring * tiles + tile;
             ensure!(
                 actual[global] == expected[global],
                 "size={:?}, wg={:?}, {label}, offspring={offspring}, tile={tile}: count {}, reference {}",
-                bins.image_size, p.rasterize_wg, actual[global], expected[global]
+                bins.image_size, p.rasterize_wg(), actual[global], expected[global]
             );
             ensure!(
                 expected[global] <= state.polygon_count,
@@ -657,7 +657,7 @@ fn check_consumed_gpu(
             ensure!(
                 actual[start..start + count] == expected[start..start + count],
                 "size={:?}, wg={:?}, {label}, offspring={offspring}, tile={tile}: ordered prefix differs",
-                bins.image_size, p.rasterize_wg
+                bins.image_size, p.rasterize_wg()
             );
             // The 500/999/1000-layer fixtures contain only full-image triangles.
             // Check their reference truth as well as agreement between binners.
@@ -793,7 +793,7 @@ fn check_fixture(
     check_overflow_and_empty(p, &mut bins)?;
     println!(
         "size={size:?}, wg={:?}: {} dispatches passed",
-        p.rasterize_wg, bins.dispatches
+        p.rasterize_wg(), bins.dispatches
     );
     Ok(bins.dispatches)
 }
@@ -803,7 +803,7 @@ fn check_stripe_grid(
     reference: &wgpu::ComputePipeline,
     scope: Scope,
 ) -> Result<usize> {
-    assert!(p.rasterize_wg == STRIPE_RASTER_WG && scope != Scope::Strict);
+    assert!(p.rasterize_wg() == STRIPE_RASTER_WG && scope != Scope::Strict);
     let mut checks = check_fixture(p, STRIPE_SIZE, Some(reference), scope)?;
     checks += check_packed_edges(p, STRIPE_SIZE, reference, scope)?;
     let mut bins = new_bins(p, STRIPE_SIZE, Some(reference), scope);
@@ -835,7 +835,7 @@ fn check_wide_stripe_grid(
     reference: &wgpu::ComputePipeline,
     scope: Scope,
 ) -> Result<usize> {
-    assert!(p.rasterize_wg == STRIPE_RASTER_WG && scope != Scope::Strict);
+    assert!(p.rasterize_wg() == STRIPE_RASTER_WG && scope != Scope::Strict);
     let mut bins = new_bins(p, WIDE_STRIPE_SIZE, Some(reference), scope);
     let full = [0, 0, WIDE_STRIPE_SIZE[0], WIDE_STRIPE_SIZE[1]];
     let polygons = [polygon([[0, 0], [65535, 0], [0, 65535]]); 1000];
@@ -873,7 +873,7 @@ fn check_regions(p: &GpuPipeline, bins: &mut Bins, states: &mut [GpuDrawingState
         }
         check_dispatch(p, bins, states, name)?;
     }
-    let boxes = dirty_boxes(bins.image_size, p.rasterize_wg);
+    let boxes = dirty_boxes(bins.image_size, p.rasterize_wg());
     let (groups, remainder) = boxes.as_chunks::<OFFSPRING>();
     assert_eq!(remainder, &[] as &[DirtyBox]);
     for (batch, boxes) in groups.iter().enumerate() {
@@ -970,13 +970,13 @@ fn check_packed_edges(
     scope: Scope,
 ) -> Result<usize> {
     let mut bins = new_bins(p, size, Some(reference), scope);
-    let polygons = packed_edge_polygons(size, p.rasterize_wg);
+    let polygons = packed_edge_polygons(size, p.rasterize_wg());
     let full = [0, 0, size[0], size[1]];
     let mut states: Vec<_> = (0..OFFSPRING).map(|_| drawing(&polygons, full)).collect();
     states[1].polygons[..polygons.len()].reverse();
     check_dispatch(p, &mut bins, &states, "packed edges, full image bypass")?;
-    let starts_x = tile_probe_starts(size[0], p.rasterize_wg[0]);
-    let starts_y = tile_probe_starts(size[1], p.rasterize_wg[1]);
+    let starts_x = tile_probe_starts(size[0], p.rasterize_wg()[0]);
+    let starts_y = tile_probe_starts(size[1], p.rasterize_wg()[1]);
     for (state, (x, y)) in states.iter_mut().zip(starts_x.into_iter().zip(starts_y)) {
         let x = (x + 1).min(size[0] - 1);
         let y = (y + 1).min(size[1] - 1);
@@ -1003,7 +1003,7 @@ fn check_packed_edges(
     check_packed_overlap(p, &mut bins, &mut states)?;
     println!(
         "size={size:?}, wg={:?}: {} packed-edge paired checks passed",
-        p.rasterize_wg, bins.dispatches
+        p.rasterize_wg(), bins.dispatches
     );
     Ok(bins.dispatches)
 }

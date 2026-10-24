@@ -264,14 +264,14 @@ impl GpuEvolver {
         options: BenchmarkMutateOptions,
     ) -> Result<(), String> {
         self.benchmark_drain()?;
-        self.pipeline.set_benchmark_mutate_shader(source, options)
+        self.pipeline.programs.set_benchmark_mutate_shader(source, options)
     }
 
     /// Actual zero-initialization policy retained with the mutation pipeline.
     #[must_use]
     pub fn benchmark_mutate_zero_initialize_workgroup_memory(&self) -> bool {
         self.pipeline
-            .mutate_options
+            .programs.mutation().options()
             .zero_initialize_workgroup_memory
     }
 
@@ -282,13 +282,13 @@ impl GpuEvolver {
         source: &str,
         options: BenchmarkMutateOptions,
     ) -> bool {
-        self.pipeline.mutate_source.as_ref() == source && self.pipeline.mutate_options == options
+        self.pipeline.programs.mutation().matches(source, options)
     }
 
     /// Actual logical offspring width retained with the selected mutation pipeline.
     #[must_use]
     pub fn benchmark_mutate_group_size(&self) -> u32 {
-        self.pipeline.mutate_group_size
+        self.pipeline.programs.mutation().group_size()
     }
 
     /// Install a lab bin shader while drained, retaining device, layouts and buffers.
@@ -309,7 +309,7 @@ impl GpuEvolver {
     /// Rejects a failed drain, invalid source, exhausted cache or GPU errors.
     pub fn benchmark_set_raster_shader(&mut self, source: &str) -> Result<(), String> {
         self.benchmark_drain()?;
-        self.pipeline.set_benchmark_raster_shader(source)
+        self.pipeline.programs.set_benchmark_raster_shader(source)
     }
 
     /// Replace binning only for an untimed replay. Prepare resets the persistent
@@ -319,7 +319,7 @@ impl GpuEvolver {
     /// Returns an error if the preceding GPU work cannot be fully drained.
     pub fn benchmark_set_validation(&mut self, enabled: bool) -> Result<(), String> {
         self.benchmark_drain()?;
-        self.pipeline.set_benchmark_validation(enabled)?;
+        self.pipeline.programs.set_benchmark_validation(enabled)?;
         let p = &self.pipeline;
         p.queue
             .write_buffer(&p.tile_counts_buf, p.tile_counts_buf.size() - 4, &[0; 4]);
@@ -407,7 +407,7 @@ impl GpuEvolver {
         let params = MutationParams {
             chain_count: active,
             lambda,
-            rasterize_wg: self.pipeline.rasterize_wg,
+            rasterize_wg: self.pipeline.rasterize_wg(),
             ..MutationParams::default()
         };
         self.benchmark_validate_capacity(&params)?;
@@ -441,7 +441,7 @@ impl GpuEvolver {
             usize::try_from(offspring).map_err(|error| error.to_string())?,
             usize::try_from(pixels).map_err(|error| error.to_string())?,
             counters,
-            p.benchmark_validation,
+            p.programs.tiles().bin.validation,
         )
     }
 

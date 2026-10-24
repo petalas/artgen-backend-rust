@@ -497,8 +497,8 @@ fn run(options: &Options, evidence: &mut Evidence, deadline: Instant) -> Result<
         "device cannot bind all 1024 parents; tournament ABI must not be shortened"
     );
     let layouts = [
-        p.mutate_pipeline.get_bind_group_layout(0),
-        p.mutate_pipeline.get_bind_group_layout(1),
+        p.mutate_pipeline().get_bind_group_layout(0),
+        p.mutate_pipeline().get_bind_group_layout(1),
     ];
     let scopes = error_scopes(&p.device);
     let buffers = new_buffers(&p.device, &layouts);

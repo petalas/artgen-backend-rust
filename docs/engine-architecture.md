@@ -21,11 +21,31 @@ behavior issue, not silently changed by this refactor.
 storage. Allocation preserves the existing worst-case tile-count allocation;
 that word must fit inside it for a requested workload to qualify.
 
+## Shader installation
+
+`gpu_evolver::programs` owns shader variant identity, source specialization,
+compilation policy and compiled handles. Mutation's logical group width and
+initialization policy stay attached to its selected program. The raster, binning,
+initial framebuffer and framebuffer-update programs form one installed tile
+group. A failed change must preserve the entire preceding group.
+
+`GpuPipeline` owns storage, binding and the concrete device. Its program accessors
+borrow the installed handles; ordinary batches do not look up caches or allocate
+program state. Stage-specific policies remain explicit. In particular, historical
+mutation programs retain their initialization default, and raster initialization
+continues to depend on the backend.
+
+Bundled programs, historical programs and diagnostic binners are existing reasons
+for the installation seam. A generic cache abstraction or another GPU adapter
+would add no needed variation.
+
 ## Verification
 
 Run `cargo test --lib --locked` and the relevant example tests. Real GPU checks
 must run serially under `.cache/evolution-bench/benchmark.lock`, with a parent
-process timeout. Compare complete canonical state, cached framebuffer byte-L1,
+process timeout. Use the standalone `check-gpu-programs` and
+`check-gpu-rasterization` examples; Dozen teardown crashes in threaded Rust GPU
+tests, as recorded in `docs/LEARNINGS.md`. Compare complete canonical state, cached framebuffer byte-L1,
 fitness and completed work before interpreting throughput. Compilation and
 snapshots stay outside engine timing; ordinary readback and final drain stay
 inside it.
