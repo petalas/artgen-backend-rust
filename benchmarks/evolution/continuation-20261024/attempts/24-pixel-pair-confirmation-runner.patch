@@ -1,0 +1,127 @@
+--- /dev/null
++++ b/run-confirmation.py
+@@ -0,0 +1,124 @@
++"""Continue the same frozen clock: one checker, then all three reserved matrices."""
++import importlib.util
++import sys
++import time
++from pathlib import Path
++
++HERE = Path(__file__).resolve().parent
++TRAINER_SHA = '1151632fec2699076e14109577852779984bae55f3cb7c1c98829ef63a1623bb'
++
++
++def load_trainer():
++    import hashlib
++    path = HERE / 'run-training.py'
++    with path.open('rb') as stream:
++        if hashlib.file_digest(stream, 'sha256').hexdigest() != TRAINER_SHA:
++            raise ValueError('training runner changed')
++    spec = importlib.util.spec_from_file_location('safe_training', path)
++    if spec is None or spec.loader is None:
++        raise ValueError('training loader unavailable')
++    module = importlib.util.module_from_spec(spec)
++    spec.loader.exec_module(module)
++    return module
++
++
++def admitted(c, b, deadline, command, folder):
++    return c.admitted_call(deadline, time.monotonic(), True,
++        lambda timeout: b.run_process(command, folder / 'cwd', folder / 'evidence', timeout))
++
++
++def numerical(c, b, spec, result, deadline):
++    plan = b.read_json(HERE / 'checker-contract.json')
++    binary = Path(plan['binary'])
++    c.require(c.sha(binary) == plan['binary_sha256'], 'checker binary changed')
++    c.require(plan['candidate_sha256'] == spec['candidate']['sha256'], 'checker source mismatch')
++    c.require(plan['reference_sha256'] == spec['candidate']['reference_sha256'], 'checker reference mismatch')
++    folder = HERE / 'checker-run'
++    folder.mkdir()
++    (folder / 'cwd').mkdir()
++    command = [str(binary), '--output', str(folder / 'output')]
++    result['checker'] = {'contract': plan}
++    result['checker']['process'] = admitted(c, b, deadline, command, folder)
++    process = result['checker']['process']
++    c.require(process['status'] == 'completed' and process['returncode'] == 0, 'checker process failed')
++    proof = b.read_json(folder / 'output/result.json')
++    result['checker']['result'] = proof
++    c.require(proof['status'] == 'PASS' and proof['error_count'] == 0 and proof['errors'] == [], 'checker errors')
++    for key in ('candidate_sha256', 'reference_sha256', 'fixture_count', 'expected_fixture_count'):
++        c.require(proof[key] == plan[key], f'checker identity/count mismatch: {key}')
++    expected = {(32, 16), (16, 16), (32, 8), (16, 8), (8, 8)}
++    c.require({tuple(x) for x in proof['workgroups']} == expected, 'checker workgroups differ')
++    for key in ('raw_error_comparisons', 'coverage_comparisons', 'independent_old_l1_checks'):
++        c.require(type(proof[key]) is int and proof[key] == plan[key], f'checker incomplete: {key}')
++
++
++def reserved(c, compare, b, trainer, spec, result, deadline):
++    gpu = {case['case_id']: case['gpu'] for case in b.read_json(HERE / 'train/output/summary.json')['cases']}
++    binary = Path(spec['identities']['binary_json']).parent / 'build/engine-qualification-lab'
++    c.require(c.sha(binary) == spec['identities']['binary_sha256'], 'lab binary changed')
++    ratios = {}
++    plans = spec['phases'][1:]
++    c.require(len(plans) == 3, 'three reserved matrices required')
++    result['reserved_started'] = True
++    for plan in plans:
++        phase = (plan['name'], tuple(plan['cases']), plan['seed'], 64, False, 'pixelpair')
++        native = trainer.phase_spec(spec, plan)
++        c.phase_identities(native, phase)
++        c.require(c.sha(Path(plan['manifest'])) == plan['manifest_sha256'], 'reserved manifest changed')
++        fixtures = {x['case_id']: x for x in b.load_manifest(Path(plan['manifest']))['cases']}
++        folder = HERE / plan['name']
++        folder.mkdir()
++        (folder / 'cwd').mkdir()
++        command = c.command_for(binary, Path(plan['manifest']), Path(spec['identities']['shader']),
++            folder, phase, candidate_shader=Path(spec['candidate']['source']), shader_stage='raster')
++        row = {'name': plan['name']}
++        result['reserved'].append(row)
++        print('starting ' + plan['name'], flush=True)
++        row['process'] = admitted(c, b, deadline, command, folder)
++        row['partial_work'] = c.partial_work(b, folder / 'output')
++        c.require(row['process']['status'] == 'completed' and row['process']['returncode'] == 0,
++                  'reserved process failed')
++        row['validated'] = c.validate_phase(compare, b, folder, phase, native, fixtures, gpu)
++        for case, pairs in row['validated']['ratios'].items():
++            c.require(case not in ratios, 'duplicate reserved case')
++            ratios[case] = pairs
++    result['gate'] = trainer.gate(compare, ratios)
++    result['status'] = 'CONFIRMED_WAIT_FINAL_REVIEW' if result['gate']['pass'] else 'REJECT'
++
++
++def main():
++    if sys.argv[1:]:
++        raise ValueError('confirmation accepts no arguments')
++    trainer = load_trainer()
++    c = trainer.load_contract()
++    compare, b = c.load_helpers()
++    c.require(c.sha(HERE / 'spec.json') == trainer.SPEC_SHA, 'frozen specification changed')
++    spec = b.read_json(HERE / 'spec.json')
++    training = b.read_json(HERE / 'train-result.json')
++    c.require(training['status'] == 'TRAIN_PASSED_WAIT_NUMERICAL' and training['gate']['pass'], 'training not passed')
++    clock = b.read_json(HERE / 'clock.json')
++    deadline = clock['deadline']
++    c.require(clock['monotonic_start'] <= time.monotonic() < deadline - 30, 'clock invalid or exhausted')
++    result = {'protocol': spec['protocol'], 'status': 'INCONCLUSIVE', 'adoption': False,
++              'errors': [], 'reserved': [], 'reserved_started': False,
++              'original_deadline': deadline, 'started_utc': b.utc_now()}
++    b.write_json(HERE / 'confirmation-start.json', result)
++    try:
++        with compare.cancellation_signals(), b.benchmark_lock(b.DEFAULT_ROOT / 'benchmark.lock'):
++            numerical(c, b, spec, result, deadline)
++            reserved(c, compare, b, trainer, spec, result, deadline)
++    except (c.Invalid, b.BenchError, OSError, ValueError, KeyError, TypeError, AttributeError,
++            IndexError, OverflowError, RecursionError, KeyboardInterrupt) as exc:
++        result['status'] = 'INCONCLUSIVE'
++        result['errors'].append(f'{type(exc).__name__}: {exc}')
++    if time.monotonic() >= deadline:
++        result['status'] = 'INCONCLUSIVE'
++        result['errors'].append('original package deadline exhausted')
++    result['finished_utc'] = b.utc_now()
++    b.write_json(HERE / 'confirmation-result.json', result)
++    print(result['status'], flush=True)
++    return 0 if result['status'] == 'CONFIRMED_WAIT_FINAL_REVIEW' else 2
++
++
++if __name__ == '__main__':
++    raise SystemExit(main())

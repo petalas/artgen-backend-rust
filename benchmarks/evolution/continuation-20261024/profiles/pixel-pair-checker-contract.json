@@ -1,0 +1,35 @@
+{
+  "binary_sha256": "e4b2b5b807f8c875258d2537cafc9fea3b11c4324b8d4d672ac3b9b77f1669b9",
+  "candidate_sha256": "83c505bcc9220f39c11354692cdec3828e4d76681df8468ea93d597b4f4ceb7b",
+  "reference_sha256": "ae1fd75fdc118debf2a50cbad699e513b5af0dcbfa3754b45966f7a8ee925af3",
+  "expected_fixture_count": 91,
+  "raw_error_comparisons": 130,
+  "coverage_comparisons": 65,
+  "independent_old_l1_checks": 130,
+  "workgroups": [
+    [
+      8,
+      8
+    ],
+    [
+      16,
+      8
+    ],
+    [
+      16,
+      16
+    ],
+    [
+      32,
+      8
+    ],
+    [
+      32,
+      16
+    ]
+  ],
+  "binary": "/home/nick/git/artgen-backend-rust/.cache/evolution-pixel-pair-safe-20261024/checker-122/check-gpu-raster-pixelpair",
+  "fixture_count": 91,
+  "checker_source_freeze_sha256": "77979496669c8dd3ee9b991cbbe39f0b68f8bddfc80e7cb3a5e40cc1cb24a183",
+  "fixture_plan_sha256": "5d6ff3c07e89eb935850406f004d40b3e0fcc038134a9593900068c1857ba85c"
+}

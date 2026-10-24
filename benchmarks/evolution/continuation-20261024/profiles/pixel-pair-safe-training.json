@@ -1,0 +1,298 @@
+{
+  "protocol": "raster-pixel-pair-safe-20261024-v2",
+  "status": "TRAIN_PASSED_WAIT_NUMERICAL",
+  "adoption": false,
+  "errors": [],
+  "statistics": {
+    "aggregate": {
+      "interval95": [
+        1.0483523374147679,
+        1.0536300593507109
+      ],
+      "ratio": 1.0508424722492393
+    },
+    "bootstrap_seed": 20261024,
+    "cases": {
+      "darwin": {
+        "geomean_ratio": 1.051484997713154,
+        "interval95": [
+          1.049084230555918,
+          1.054738158080671
+        ],
+        "interval_statistic": "exp(mean(log(paired ratio)))",
+        "paired_ratios": {
+          "cv": 0.0030929387947886775,
+          "max": 1.0575988016266067,
+          "mean": 1.0514900164658505,
+          "median": 1.0507550178719007,
+          "min": 1.0478718038477741,
+          "n": 5,
+          "range": 0.009726997778832569,
+          "raw": [
+            1.0507550178719007,
+            1.0575988016266067,
+            1.0501684524671169,
+            1.0478718038477741,
+            1.0510560065158538
+          ]
+        }
+      },
+      "ff": {
+        "geomean_ratio": 1.0483899173789217,
+        "interval95": [
+          1.0419017335610132,
+          1.0560364881477013
+        ],
+        "interval_statistic": "exp(mean(log(paired ratio)))",
+        "paired_ratios": {
+          "cv": 0.007622138237967316,
+          "max": 1.0616938719637652,
+          "mean": 1.0484202743996849,
+          "median": 1.0446372572205027,
+          "min": 1.0405253547501254,
+          "n": 5,
+          "range": 0.02116851721363977,
+          "raw": [
+            1.0405253547501254,
+            1.0616938719637652,
+            1.0419130529205827,
+            1.0533318351434482,
+            1.0446372572205027
+          ]
+        }
+      },
+      "mona": {
+        "geomean_ratio": 1.0526571294978753,
+        "interval95": [
+          1.0496138754591904,
+          1.054916129092432
+        ],
+        "interval_statistic": "exp(mean(log(paired ratio)))",
+        "paired_ratios": {
+          "cv": 0.0029549912837326087,
+          "max": 1.0554460536135508,
+          "mean": 1.052661735063903,
+          "median": 1.054226165502459,
+          "min": 1.0468739926078474,
+          "n": 5,
+          "range": 0.008572061005703402,
+          "raw": [
+            1.054226165502459,
+            1.0520310151395067,
+            1.0468739926078474,
+            1.0554460536135508,
+            1.054731448456151
+          ]
+        }
+      }
+    },
+    "resamples": 10000,
+    "uncertainty": "conditional on same-seed timing repeats; exploratory, not independent search seeds"
+  },
+  "work": {
+    "category_counters": {
+      "diagnostic": {
+        "completed_batches": 384,
+        "completed_evaluations": 6291456,
+        "completed_iterations": 24576,
+        "submitted_batches": 384,
+        "submitted_evaluations": 6291456,
+        "submitted_iterations": 24576
+      },
+      "normal": {
+        "completed_batches": 1920,
+        "completed_evaluations": 31457280,
+        "completed_iterations": 122880,
+        "submitted_batches": 1920,
+        "submitted_evaluations": 31457280,
+        "submitted_iterations": 122880
+      },
+      "qualification": {
+        "completed_batches": 192,
+        "completed_evaluations": 3145728,
+        "completed_iterations": 12288,
+        "submitted_batches": 192,
+        "submitted_evaluations": 3145728,
+        "submitted_iterations": 12288
+      }
+    },
+    "interpretation": "partial counters and source-accounted warmups are lower bounds; resets excluded",
+    "logical_evaluations_lower_bound": 46006272,
+    "read_errors": [],
+    "successful_preparations_lower_bound": 39,
+    "warmup_evaluations_source_accounted_lower_bound": 5111808
+  },
+  "case_analysis": {
+    "darwin": {
+      "pixelpair": {
+        "rates": {
+          "cv": 0.006896911230926668,
+          "max": 269153.2330495093,
+          "mean": 266562.0968562592,
+          "median": 267364.52625219343,
+          "min": 264319.09438283334,
+          "n": 5,
+          "range": 4834.13866667595,
+          "raw": [
+            267364.52625219343,
+            269153.2330495093,
+            267374.0334838238,
+            264319.09438283334,
+            264599.5971129362
+          ]
+        },
+        "sampled_stage_median_trial_average_ns": [
+          99387.0,
+          55824.5,
+          505565.5,
+          93648.5
+        ]
+      },
+      "reference": {
+        "rates": {
+          "cv": 0.004913289437059982,
+          "max": 254601.09076376574,
+          "mean": 253507.16300985301,
+          "median": 254449.91620757434,
+          "min": 251746.42975502092,
+          "n": 5,
+          "range": 2854.6610087448207,
+          "raw": [
+            254449.91620757434,
+            254494.64639667384,
+            254601.09076376574,
+            252243.7319262303,
+            251746.42975502092
+          ]
+        },
+        "sampled_stage_median_trial_average_ns": [
+          99427.0,
+          55674.5,
+          555833.0,
+          92816.5
+        ]
+      }
+    },
+    "ff": {
+      "pixelpair": {
+        "rates": {
+          "cv": 0.022817917019381587,
+          "max": 338728.55375758593,
+          "mean": 329878.06883638445,
+          "median": 328604.35377829225,
+          "min": 318892.0388647933,
+          "n": 5,
+          "range": 19836.51489279262,
+          "raw": [
+            338728.55375758593,
+            337780.7084588283,
+            328604.35377829225,
+            325384.6893224224,
+            318892.0388647933
+          ]
+        },
+        "sampled_stage_median_trial_average_ns": [
+          90449.0,
+          50389.0,
+          394190.0,
+          82740.5
+        ]
+      },
+      "reference": {
+        "rates": {
+          "cv": 0.02257717710135931,
+          "max": 325536.0882954449,
+          "mean": 314650.01492906787,
+          "median": 315385.58122214,
+          "min": 305265.8103668242,
+          "n": 5,
+          "range": 20270.277928620693,
+          "raw": [
+            325536.0882954449,
+            318152.6402088496,
+            315385.58122214,
+            308909.9545520807,
+            305265.8103668242
+          ]
+        },
+        "sampled_stage_median_trial_average_ns": [
+          90522.0,
+          50465.0,
+          435827.5,
+          81754.5
+        ]
+      }
+    },
+    "mona": {
+      "pixelpair": {
+        "rates": {
+          "cv": 0.0049439807952736895,
+          "max": 270199.64633226255,
+          "mean": 268393.3514578276,
+          "median": 268481.55551165296,
+          "min": 266534.7611880354,
+          "n": 5,
+          "range": 3664.885144227126,
+          "raw": [
+            269394.7727685744,
+            270199.64633226255,
+            266534.7611880354,
+            267356.02148861275,
+            268481.55551165296
+          ]
+        },
+        "sampled_stage_median_trial_average_ns": [
+          108728.5,
+          60934.5,
+          506758.0,
+          82264.5
+        ]
+      },
+      "reference": {
+        "rates": {
+          "cv": 0.0045976436811754826,
+          "max": 256836.1982145861,
+          "mean": 254967.07110228206,
+          "median": 254600.61389439608,
+          "min": 253310.9300785775,
+          "n": 5,
+          "range": 3525.2681360085844,
+          "raw": [
+            255537.93064904353,
+            256836.1982145861,
+            254600.61389439608,
+            253310.9300785775,
+            254549.68267480715
+          ]
+        },
+        "sampled_stage_median_trial_average_ns": [
+          108793.5,
+          61653.0,
+          559998.0,
+          82049.5
+        ]
+      }
+    }
+  },
+  "checks_passed": 522,
+  "snapshots": 18,
+  "parent_associations": 72,
+  "audit_scope": "Parent offline audit using unchanged, hash-pinned previously independently audited numerical/bootstrapping functions. No native, compiler, GPU or scalar rerender.",
+  "audit_limitations": "Same-seed training endpoints; no candidate-specific raster fixture or reserved qualification, no dynamic load or hardware cause measurement.",
+  "artifact_sha256": {
+    "spec.json": "5b3f835986d350981f23ce35b282a4d4cefc933293d05dbedc8a68c555810ca7",
+    "run-training.py": "1151632fec2699076e14109577852779984bae55f3cb7c1c98829ef63a1623bb",
+    "train-result.json": "6e59e77c01b0b81bb7d28615a5c9c7f01a36a075c6959f84e0dafba890cad9e7",
+    "audit-training.py": "5ae2c453d9c3f6eb3e8843f5582ebc591ea877095ac7d19f9d86098a7c0b8e84",
+    "audit-training.json": "f99931c8f4b6847afeb867c4eb826ea8b2e049220b4789cf610e7b39a98a8337",
+    "compiler-preflight.json": "4bdc8633f211ff1daf370feb7175f4c309a767cfe8244a15f6076bd042e9c476"
+  },
+  "native_process_wall_seconds": 256.2057714399998,
+  "controller_wall_seconds": 258.6612485459991,
+  "pending": [
+    "direct raster fixtures all5 shapes",
+    "reserved ff/mona/darwin matrices",
+    "final source and evidence review"
+  ],
+  "same_seed_conditional": true
+}
