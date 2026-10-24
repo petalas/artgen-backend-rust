@@ -27,9 +27,9 @@ another staging buffer. Collect the same pending readback after encoding compute
 passes but before current drawing-copy selection and queue submission. The control
 reset must move with it: finish can update best_fitness_bits, so constructing reset
 bytes before finish changes the ordinary readback threshold and cadence. The
-source proposal adds no buffer, dispatch, parameter or skipped readback, but remains
-uncompiled and unmeasured. It needs ordinary Some/None/content/flush qualification
-as well as exact population replay. A bare finish-call move is rejected.
+source proposal adds no buffer, dispatch, parameter or skipped readback. At this
+observation stage it was uncompiled and unmeasured. It required ordinary
+Some/None/content/flush qualification as well as exact population replay. A bare finish-call move is rejected.
 
 Evidence is in `.cache/evolution-continuation-20261024/readback-observer-58/` and
 `readback-order-audit-60/`. The historical incomplete observer57 remains unchanged.
@@ -37,3 +37,7 @@ This result selects a question for further work; it establishes no speedup or GP
 utilization. Explain the Number prevented treating the full finish-call duration
 as available headroom. Prove It Works required actual completed-work counters
 and exact saved-state replay.
+
+The subsequent [bounded prototype](04-late-readback.md) passes ordinary API
+qualification but fails its throughput advancement gate. Its runtime code is
+removed; the observer does not justify another pacing change by itself.

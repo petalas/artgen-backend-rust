@@ -2,3 +2,4 @@
 # Preserve archived experiment bytes while checking other whitespace rules.
 benchmarks/evolution/v1/experiments/*.patch whitespace=-blank-at-eol
 benchmarks/evolution/overnight-20261024/attempts/*.patch whitespace=-blank-at-eol
+benchmarks/evolution/continuation-20261024/attempts/*.patch whitespace=-blank-at-eol
