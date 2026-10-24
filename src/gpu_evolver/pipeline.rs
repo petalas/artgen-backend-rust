@@ -1333,12 +1333,7 @@ impl GpuPipeline {
         wg: [u32; 2],
         validation: bool,
     ) -> Result<ComputePipeline, String> {
-        let specialized = specialize_bin_source(source, wg);
-        let specialized = if validation {
-            benchmark_bin_source(&specialized)?
-        } else {
-            specialized
-        };
+        let specialized = specialize_benchmark_bin_source(source, wg, validation)?;
         let scopes = [
             self.device.push_error_scope(ErrorFilter::Validation),
             self.device.push_error_scope(ErrorFilter::OutOfMemory),
@@ -1550,14 +1545,43 @@ fn validate_benchmark_bin_source(source: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn specialize_benchmark_bin_source(
+    source: &str,
+    wg: [u32; 2],
+    validation: bool,
+) -> Result<String, String> {
+    let specialized = specialize_bin_source(source, wg);
+    if validation {
+        benchmark_bin_source(&specialized)
+    } else {
+        Ok(specialized)
+    }
+}
+
 fn benchmark_bin_source(source: &str) -> Result<String, String> {
     let add = "let slot = atomicAdd(&tile_counts[tile_global], 1u);";
     let store = "atomicStore(&tile_counts[tile_global], raw_count);";
+    let plain_store = "tile_counts[tile_global] = raw_count;";
     // The reserved last word records uncapped occupancy over ALL iterations.
     // Recognize exactly one known counting mechanism in the installed source.
-    match (source.matches(add).count(), source.matches(store).count()) {
-        (1, 0) => Ok(source.replace(add, &format!("{add}\n                atomicMax(&tile_counts[arrayLength(&tile_counts) - 1u], slot + 1u);"))),
-        (0, 1) => Ok(source.replace(store, &format!("atomicMax(&tile_counts[arrayLength(&tile_counts) - 1u], raw_count);\n        {store}"))),
+    match (
+        source.matches(add).count(),
+        source.matches(store).count(),
+        source.matches(plain_store).count(),
+    ) {
+        (1, 0, 0) => Ok(source.replace(add, &format!("{add}\n                atomicMax(&tile_counts[arrayLength(&tile_counts) - 1u], slot + 1u);"))),
+        (0, 1, 0) => Ok(source.replace(store, &format!("atomicMax(&tile_counts[arrayLength(&tile_counts) - 1u], raw_count);\n        {store}"))),
+        (0, 0, 1) => {
+            let plain_binding = "@group(0) @binding(2) var<storage, read_write> tile_counts:    array<u32>;";
+            if source.matches(plain_binding).count() != 1
+                || source.matches("tile_counts:").count() != 1
+            {
+                return Err("plain-count instrumentation requires exactly one binding-2 array<u32> declaration".into());
+            }
+            Ok(source.replace(plain_binding,
+                "@group(0) @binding(2) var<storage, read_write> tile_counts:    array<atomic<u32>>;"
+            ).replace(plain_store, &format!("atomicMax(&tile_counts[arrayLength(&tile_counts) - 1u], raw_count);\n        {store}")))
+        }
         _ => Err("benchmark bin instrumentation requires exactly one recognized count marker".into()),
     }
 }
@@ -1625,7 +1649,7 @@ fn pipeline_cache_path(adapter_info: &AdapterInfo) -> Option<PathBuf> {
 mod benchmark_tests {
     use super::{
         benchmark_bin_source, bin_polygons_source, specialize_bin_source,
-        specialize_raster_source, validate_benchmark_bin_source,
+        specialize_benchmark_bin_source, specialize_raster_source, validate_benchmark_bin_source,
         validate_benchmark_mutate_source, validate_benchmark_raster_source,
         BenchmarkMutateKey, BenchmarkRasterKey, MAX_BENCHMARK_SOURCE_BYTES,
     };
@@ -1826,5 +1850,168 @@ fn main() {
         let mixed = format!("{source}\nlet slot = atomicAdd(&tile_counts[tile_global], 1u);");
         assert!(benchmark_bin_source(&mixed).is_err());
         assert!(benchmark_bin_source(&format!("{source}\n{source}")).is_err());
+    }
+
+    const PLAIN_COUNT_BINDING: &str =
+        "@group(0) @binding(2) var<storage, read_write> tile_counts:    array<u32>;";
+    const ATOMIC_COUNT_BINDING: &str =
+        "@group(0) @binding(2) var<storage, read_write> tile_counts:    array<atomic<u32>>;";
+    const PLAIN_COUNT_STORE: &str = "tile_counts[tile_global] = raw_count;";
+    const DIAGNOSTIC_COUNT_STORE: &str = "atomicMax(&tile_counts[arrayLength(&tile_counts) - 1u], raw_count);\n        atomicStore(&tile_counts[tile_global], raw_count);";
+
+    fn plain_count_candidate() -> String {
+        use sha2::Digest;
+
+        // Keep historical instrumentation input independent of future shader tuning.
+        let source = include_str!(
+            "../../benchmarks/evolution/overnight-20261024/fixtures/bin-plain-count-reference.wgsl"
+        )
+        .to_owned();
+        assert_eq!(
+            format!("{:x}", sha2::Sha256::digest(source.as_bytes())),
+            "dc8ac3971a96e0ad90bc4ce113675c11ac3352323e586bc806a5a0f3f3a3e105",
+            "must match bin-micros/manifest.json candidate C"
+        );
+        source
+    }
+
+    fn validated_bin_module(source: &str) -> wgpu::naga::Module {
+        let module = wgpu::naga::front::wgsl::parse_str(source).unwrap();
+        wgpu::naga::valid::Validator::new(
+            wgpu::naga::valid::ValidationFlags::all(),
+            wgpu::naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap();
+        module
+    }
+
+    #[test]
+    fn plain_count_candidate_preserves_normal_source_and_validates_all_tile_shapes() {
+        let candidate = plain_count_candidate();
+        validate_benchmark_bin_source(&candidate).unwrap();
+        for wg in [[32, 16], [16, 16], [32, 8], [16, 8], [8, 8]] {
+            let normal = specialize_benchmark_bin_source(&candidate, wg, false).unwrap();
+            for (axis, size) in [("W", wg[0]), ("H", wg[1])] {
+                assert_eq!(
+                    normal
+                        .matches(&format!("const TILE_{axis}: u32 = {size};"))
+                        .count(),
+                    1
+                );
+            }
+            // Only the requested tile dimensions may differ in normal mode.
+            assert_eq!(
+                normal
+                    .replace(
+                        &format!("const TILE_W: u32 = {};", wg[0]),
+                        "const TILE_W: u32 = 16;"
+                    )
+                    .replace(
+                        &format!("const TILE_H: u32 = {};", wg[1]),
+                        "const TILE_H: u32 = 16;"
+                    ),
+                candidate
+            );
+            if wg == [16, 16] {
+                assert_eq!(normal.as_bytes(), candidate.as_bytes());
+            }
+            validated_bin_module(&normal);
+            let diagnostic = specialize_benchmark_bin_source(&candidate, wg, true).unwrap();
+            assert_eq!(
+                diagnostic,
+                normal
+                    .replace(PLAIN_COUNT_BINDING, ATOMIC_COUNT_BINDING)
+                    .replace(PLAIN_COUNT_STORE, DIAGNOSTIC_COUNT_STORE)
+            );
+            assert_eq!(diagnostic.matches(ATOMIC_COUNT_BINDING).count(), 1);
+            assert_eq!(diagnostic.matches("atomicMax(").count(), 1);
+            validated_bin_module(&diagnostic);
+        }
+    }
+
+    #[test]
+    fn plain_count_diagnostic_tail_is_uncapped_and_never_reset() {
+        use wgpu::naga::{AtomicFunction, Expression, Literal, Statement};
+
+        for raw_count in [257u32, 1000, 0] {
+            let source = format!(
+                "{PLAIN_COUNT_BINDING}
+@compute @workgroup_size(1)
+fn main() {{
+    let tile_global = 0u;
+    let raw_count = {raw_count}u;
+    {PLAIN_COUNT_STORE}
+}}"
+            );
+            let diagnostic = benchmark_bin_source(&source).unwrap();
+            assert_eq!(diagnostic.matches(DIAGNOSTIC_COUNT_STORE).count(), 1);
+            let module = validated_bin_module(&diagnostic);
+            let function = &module.entry_points[0].function;
+            let mut maxima = 0;
+            let mut stores = 0;
+            // Inspect parsed effects too: no cap and no assignment can clear the tail.
+            for statement in function.body.iter() {
+                match *statement {
+                    Statement::Atomic { fun, value, .. } => {
+                        assert_eq!(fun, AtomicFunction::Max);
+                        assert!(matches!(function.expressions[value],
+                            Expression::Literal(Literal::U32(value)) if value == raw_count));
+                        maxima += 1;
+                    }
+                    Statement::Store { value, .. } => {
+                        assert!(matches!(function.expressions[value],
+                            Expression::Literal(Literal::U32(value)) if value == raw_count));
+                        stores += 1;
+                    }
+                    Statement::Emit(_) | Statement::Return { .. } => {}
+                    _ => panic!("unexpected diagnostic effect: {statement:?}"),
+                }
+            }
+            assert_eq!((maxima, stores), (1, 1));
+        }
+    }
+
+    #[test]
+    fn count_instrumentation_rejects_missing_duplicate_and_mixed_markers() {
+        let candidate = plain_count_candidate();
+        let markers = [
+            "let slot = atomicAdd(&tile_counts[tile_global], 1u);",
+            "atomicStore(&tile_counts[tile_global], raw_count);",
+            PLAIN_COUNT_STORE,
+        ];
+        assert!(benchmark_bin_source(&candidate.replace(PLAIN_COUNT_STORE, "")).is_err());
+        for marker in markers {
+            let source = candidate.replace(PLAIN_COUNT_STORE, marker);
+            for extra in markers {
+                assert!(
+                    benchmark_bin_source(&format!("{source}\n{extra}")).is_err(),
+                    "accepted duplicate or mixed markers: {marker}, {extra}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn plain_count_instrumentation_rejects_binding_mismatches() {
+        let candidate = plain_count_candidate();
+        for binding in [
+            String::new(),
+            ATOMIC_COUNT_BINDING.to_owned(),
+            PLAIN_COUNT_BINDING.replace("@group(0)", "@group(1)"),
+            PLAIN_COUNT_BINDING.replace("@binding(2)", "@binding(3)"),
+            PLAIN_COUNT_BINDING.replace("read_write", "read"),
+            format!("{PLAIN_COUNT_BINDING}\n{PLAIN_COUNT_BINDING}"),
+            format!("{PLAIN_COUNT_BINDING}\n{ATOMIC_COUNT_BINDING}"),
+            format!(
+                "{PLAIN_COUNT_BINDING}\n{}",
+                PLAIN_COUNT_BINDING.replace("@binding(2)", "@binding(3)")
+            ),
+        ] {
+            assert!(
+                benchmark_bin_source(&candidate.replace(PLAIN_COUNT_BINDING, &binding)).is_err(),
+                "accepted count binding mismatch: {binding}"
+            );
+        }
     }
 }

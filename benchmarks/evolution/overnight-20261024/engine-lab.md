@@ -94,3 +94,13 @@ installed and checked, without treating invalid work as a performance result.
 Focused pipeline and lab CPU tests passed (18 total), and all/pedantic Clippy
 reported no new diagnostics on the changed code. A separate source review found
 no material installation or measurement defect.
+
+Plain-count binner experiments have a third exclusive diagnostic marker. Normal
+source remains unchanged; only the untimed specialization changes its count
+binding to atomics and records the uncapped final count in the reserved tail.
+Missing, mixed, duplicate or mismatched bindings fail closed. Historical atomic
+forms retain their original transformations. Twelve focused factory tests pass,
+including production Naga normal/diagnostic validation for all five workgroups
+and persistent maxima through 257/1000/0 counts. A pinned plain-count fixture keeps
+those tests independent of later production tuning. Physical candidate throughput
+and replay remain required before any such shader can be kept.
