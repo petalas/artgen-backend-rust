@@ -8,7 +8,6 @@ use wgpu::util::DeviceExt;
 use super::buffers::{
     ControlFlags, GpuDrawingState, GpuParams, GPU_DRAWING_STATE_SIZE,
 };
-use super::compact_raster::{self, CompactRasterResources};
 
 // Capacity for 17 lab sources, five supported raster workgroups, and two modes.
 const MAX_BENCHMARK_BIN_PIPELINES: usize = 17 * 5 * 2;
@@ -101,8 +100,6 @@ pub struct GpuPipeline {
     rasterize_error_pipeline_layout: PipelineLayout,
     benchmark_raster_source: Option<Arc<str>>,
     benchmark_raster_pipelines: Vec<BenchmarkRasterPipeline>,
-    benchmark_compact_enabled: bool,
-    compact_raster: Option<CompactRasterResources>,
 
     // Bin polygons pipeline recreation support (tile size must match rasterize WG)
     bin_polygons_pipeline_layout: PipelineLayout,
@@ -1041,8 +1038,6 @@ impl GpuPipeline {
             rasterize_error_pipeline_layout,
             benchmark_raster_source: None,
             benchmark_raster_pipelines: Vec::new(),
-            benchmark_compact_enabled: compact_raster::DEFAULT_ENABLED,
-            compact_raster: None,
             bin_polygons_pipeline_layout,
             benchmark_bin_source: None,
             benchmark_bin_pipelines: Vec::new(),
@@ -1119,9 +1114,6 @@ impl GpuPipeline {
                 &self.pipeline_cache,
             )
         };
-        if self.benchmark_compact_enabled {
-            self.prepare_compact_raster(wg)?;
-        }
         self.rasterize_error_pipeline = pipeline;
         self.rasterize_error_shader = shader;
 
@@ -1205,9 +1197,6 @@ impl GpuPipeline {
 
     pub(super) fn set_benchmark_raster_shader(&mut self, source: &str) -> Result<(), String> {
         validate_benchmark_raster_source(source)?;
-        if self.benchmark_compact_enabled {
-            compact_raster::validate_source(source)?;
-        }
         let source = self
             .benchmark_raster_pipelines
             .iter()
@@ -1218,52 +1207,6 @@ impl GpuPipeline {
         self.rasterize_error_pipeline = pipeline;
         self.rasterize_error_shader = shader;
         self.benchmark_raster_source = Some(source);
-        Ok(())
-    }
-
-    /// Benchmark/checker setup only. The caller must drain all queue work first.
-    /// Allocates and compiles lazily, preserving resources when disabled.
-    /// Failed validation/compilation leaves the active mode unchanged.
-    ///
-    /// # Errors
-    /// Rejects an unsupported source/capacity or a GPU resource/compilation error.
-    pub fn benchmark_set_compact_raster(&mut self, enabled: bool) -> Result<(), String> {
-        if enabled {
-            self.prepare_compact_raster(self.rasterize_wg)?;
-        }
-        self.benchmark_compact_enabled = enabled;
-        Ok(())
-    }
-
-    #[must_use]
-    pub fn benchmark_compact_raster(&self) -> bool {
-        self.benchmark_compact_enabled
-    }
-
-    /// Actual layouts, generated sources and compiled handles. Resources persist
-    /// after disabling; use `benchmark_compact_raster` to query the active mode.
-    #[must_use]
-    pub fn benchmark_compact_raster_resources(&self) -> Option<&CompactRasterResources> {
-        self.compact_raster.as_ref()
-    }
-
-    fn prepare_compact_raster(&mut self, wg: [u32; 2]) -> Result<(), String> {
-        let source = self.benchmark_raster_source.as_deref()
-            .unwrap_or(include_str!("../shaders/rasterize_error.wgsl"));
-        compact_raster::validate_source(source)?;
-        let limits = self.device.limits();
-        let bytes = compact_raster::prefix_bytes(self.offspring_capacity,
-            [self.image_width, self.image_height], wg,
-            limits.max_buffer_size.min(limits.max_storage_buffer_binding_size),
-            limits.max_compute_workgroups_per_dimension)?;
-        if let Some(resources) = self.compact_raster.as_mut() {
-            debug_assert_eq!(resources.prefix_buf.size(), bytes);
-            let params = self.rasterize_error_pipeline.get_bind_group_layout(1);
-            resources.set_wg(&self.device, &params, &self.pipeline_cache, source, wg)?;
-        } else {
-            self.compact_raster = Some(CompactRasterResources::new(
-                self, source, &self.pipeline_cache, wg, bytes)?);
-        }
         Ok(())
     }
 
@@ -1612,7 +1555,7 @@ fn create_rasterize_pipeline_from_source(
     (pipeline, shader)
 }
 
-pub(super) fn specialize_raster_source(source: &str, wg: [u32; 2]) -> String {
+fn specialize_raster_source(source: &str, wg: [u32; 2]) -> String {
     source
         .replace(
             "const WG_X: u32 = 16;",
