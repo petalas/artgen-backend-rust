@@ -1,0 +1,91 @@
+{
+  "protocol": "kernel-control64-20261024-v1",
+  "scope": "new GPU-kernel investigation control only; never resume prior overlap campaign",
+  "reason": "Test stability with a longer fixed measured window before any new kernel candidate. Prior AA8, its samples, verdict and clock remain untouched. No warmup or engine parameter change.",
+  "schema": "engine-lab-prepared-v2",
+  "identities": {
+    "binary_json": "/home/nick/git/artgen-backend-rust/.cache/evolution-qualification-prepared-20261024/build-100/binary.json",
+    "binary_sha256": "97d176f3b5f97c818d19a5e25b2f75e9e587bf1925a948c330b78e2022512ab1",
+    "source_freeze_sha256": "9cc71d312fe5c2358c4b32eef4b00681f5e2884242169b6c26777ea3baae6fc5",
+    "manifest": "/home/nick/git/artgen-backend-rust/.cache/evolution-bench/baseline-20261023T172054.919294Z-95742/fixtures/manifest.json",
+    "shader": "/home/nick/git/artgen-backend-rust/.cache/evolution-profiling-20261024/build-finalize-v1/source/src/shaders/rasterize_error.wgsl",
+    "helpers": {
+      "scripts/compare-evolution.py": "33b5b3c655e8a5378291f4916dc1ca0aa6d5d4b25229a032398f8c30491c4486",
+      "scripts/evolution-bench.py": "6de8a7450e89e9734019cc279c8c9a2f9e0bb5b36bbffe617d65cc9243ae0c73"
+    }
+  },
+  "native_validation_implementation": {
+    "path": "/home/nick/git/artgen-backend-rust/.cache/evolution-qualification-prepared-20261024/qualification-contract-fix-106/run-campaign.py",
+    "sha256": "652a4599517eadc3ee4c07b74847d39b69a20c8c6f44dd3b0401b4cfbb5bee09"
+  },
+  "invocations": 1,
+  "cases": [
+    "ff",
+    "mona",
+    "darwin"
+  ],
+  "seed": 7,
+  "pairs": 5,
+  "order": [
+    "AB",
+    "BA",
+    "AB",
+    "BA",
+    "AB"
+  ],
+  "batches": 64,
+  "warmup_batches": 8,
+  "diagnostics": true,
+  "timestamp_mode": "stages",
+  "reference_finalize_overlap": false,
+  "control_finalize_overlap": false,
+  "all_engine_params": "unchanged frozen manifest",
+  "AA": {
+    "aggregate_CI_contained": [
+      0.99,
+      1.01
+    ],
+    "each_case_CI_contained": [
+      0.98,
+      1.02
+    ],
+    "each_case_paired_median_contained": [
+      0.99,
+      1.01
+    ],
+    "require_CI_contains_one": false
+  },
+  "statistics": {
+    "helper_math": "compare.statistics",
+    "bootstrap_seed": 20261024,
+    "resamples": 10000,
+    "interval95": [
+      0.025,
+      0.975
+    ],
+    "resampling_unit": "paired run log ratio within case",
+    "weighting": "equal case log means",
+    "evaluate": "complete AA, complete train, complete reconstructed reserved matrix separately"
+  },
+  "bounds": {
+    "seconds": 900,
+    "child_seconds": 600,
+    "cleanup_reserve_seconds": 30,
+    "serial": true,
+    "lock": ".cache/evolution-bench/benchmark.lock",
+    "retries": 0,
+    "extra_samples": 0
+  },
+  "stopping": {
+    "invalid_or_AA_fail": "INCONCLUSIVE; no kernel candidate timing",
+    "pass": "PASS_CONTROL_ONLY; independent source/protocol required for any candidate"
+  },
+  "expected_evaluations": {
+    "normal": 31457280,
+    "diagnostic": 6291456,
+    "qualification": 3145728,
+    "source_accounted_warmup": 5111808,
+    "logical_lower_bound": 46006272
+  },
+  "frozen_utc": "2026-10-24T14:44:50.994395+00:00"
+}

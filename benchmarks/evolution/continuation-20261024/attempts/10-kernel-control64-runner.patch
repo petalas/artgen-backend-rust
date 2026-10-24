@@ -1,0 +1,92 @@
+--- /dev/null
++++ b/.cache/evolution-next-20261024/control-64/run-control.py
+@@ -0,0 +1,89 @@
++#!/usr/bin/env python3
++"""Run one frozen control process. Prior campaign helpers supply validation only."""
++import hashlib
++import importlib.util
++from pathlib import Path
++import sys
++import time
++
++HERE = Path(__file__).resolve().parent
++ROOT = HERE.parents[2]
++VALIDATOR = ROOT / ".cache/evolution-qualification-prepared-20261024/qualification-contract-fix-106/run-campaign.py"
++VALIDATOR_SHA = "652a4599517eadc3ee4c07b74847d39b69a20c8c6f44dd3b0401b4cfbb5bee09"
++SPEC_SHA = "6f0d0ff3acd5b73be5a9b76cfbe3a65e7b6dae0f3e607817669b59960084629a"
++PHASE = ("control64", ("ff", "mona", "darwin"), 7, 64, False, "control")
++
++
++def load_validator():
++    with VALIDATOR.open("rb") as stream:
++        actual = hashlib.file_digest(stream, "sha256").hexdigest()
++    if actual != VALIDATOR_SHA:
++        raise ValueError("frozen validation implementation changed")
++    spec = importlib.util.spec_from_file_location("kernel_control_contract", VALIDATOR)
++    if spec is None or spec.loader is None:
++        raise ValueError("validator loader unavailable")
++    module = importlib.util.module_from_spec(spec)
++    spec.loader.exec_module(module)
++    return module
++
++
++def run_one(c, compare, b, spec, deadline, result):
++    # Existing preflight reads only immutable identity metadata, never old samples.
++    _, binary, manifest, shader, fixtures = c.preflight(b)
++    c.require(spec["AA"] == b.read_json(c.TARGET / "spec.json")["AA"], "control bands changed")
++    folder = HERE / "worker"
++    folder.mkdir()
++    (folder / "cwd").mkdir()
++    command = c.command_for(binary, manifest, shader, folder, PHASE)
++    print("fresh control64 starting", flush=True)
++    process = c.admitted_call(deadline, time.monotonic(), True, lambda timeout: b.run_process(
++        command, folder / "cwd", folder / "evidence", timeout))
++    result["process"] = process
++    result["work"] = c.partial_work(b, folder / "output")
++    c.require(process["status"] == "completed" and process["returncode"] == 0, "control process failed")
++    result["validated"] = c.validate_phase(compare, b, folder, PHASE, spec, fixtures, {})
++    result["gate"] = c.gate(compare, result["validated"]["ratios"], aa=True)
++    result["status"] = "PASS_CONTROL_ONLY" if result["gate"]["pass"] else "INCONCLUSIVE"
++    c.require(result["work"]["logical_evaluations_lower_bound"] ==
++              spec["expected_evaluations"]["logical_lower_bound"], "completed work differs")
++    c.require(time.monotonic() < deadline, "control budget exhausted during validation")
++
++
++def main():
++    started = time.monotonic()
++    deadline = started + 900
++    if sys.argv[1:]:
++        raise ValueError("frozen control accepts no arguments")
++    c = load_validator()
++    compare, b = c.load_helpers()
++    c.require(c.sha(HERE / "spec.json") == SPEC_SHA, "frozen control specification changed")
++    spec = b.read_json(HERE / "spec.json")
++    result = {"protocol": spec["protocol"], "status": "INCONCLUSIVE", "errors": [],
++              "started_utc": b.utc_now(), "monotonic_start": started, "deadline": deadline,
++              "spec_sha256": SPEC_SHA, "validator_sha256": VALIDATOR_SHA,
++              "scope": "new AA64 control only; no old samples, no candidate, no adoption"}
++    b.write_json(HERE / "clock.json", result)
++    try:
++        with compare.cancellation_signals(), b.benchmark_lock(b.DEFAULT_ROOT / "benchmark.lock"):
++            run_one(c, compare, b, spec, deadline, result)
++    except (c.Invalid, b.BenchError, OSError, ValueError, KeyError, TypeError,
++            AttributeError, IndexError, OverflowError, RecursionError, KeyboardInterrupt) as exc:
++        result["status"] = "INCONCLUSIVE"
++        result["errors"].append(f"{type(exc).__name__}: {exc}")
++        output = HERE / "worker/output"
++        if output.exists():
++            try:
++                result["partial_work"] = c.partial_work(b, output)
++            except (c.Invalid, b.BenchError, OSError, ValueError, TypeError) as partial:
++                result["errors"].append(f"partial accounting: {partial}")
++    result["controller_wall_seconds"] = time.monotonic() - started
++    if time.monotonic() >= deadline:
++        result["status"] = "INCONCLUSIVE"
++        result["errors"].append("control budget exhausted")
++    b.write_json(HERE / "result.json", result)
++    print("control64 " + result["status"], flush=True)
++    return 0 if result["status"] == "PASS_CONTROL_ONLY" else 2
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
