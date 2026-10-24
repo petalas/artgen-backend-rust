@@ -79,11 +79,24 @@ inside ordinary engine work remains included in elapsed time.
 
 ## Mutation source comparisons
 
-Mutation installation retains the original layout, dispatch and default pipeline
-options, including shared-memory zeroing. A drained setter caches at most seventeen
+Mutation installation retains the original layout and default pipeline options,
+including shared-memory zeroing. A drained setter caches at most seventeen
 exact sources. Preparation, raster-workgroup changes and diagnostic toggles retain
-the installed handle. It supplies no dispatch metadata and does not change lambda
-or any mutation probability. The normal production cache remains empty.
+the installed handle and its checked logical group width. Marker-free historical
+sources use width 64. An exact `OFFSPRING_GROUP_SIZE` literal in 1/2/4/8/16/32/64
+changes physical dispatch Y to `ceil(lambda / group_width)` at both batch sites.
+The source and width form one cache identity, and construction derives the width
+from the bundled shader. Actual width is recorded separately from GPU identity
+and MutationParams; lambda and all probabilities remain unchanged. Commented,
+malformed, nonliteral and duplicate declarations fail before installation. The
+normal production cache remains empty.
+
+Pinned historical and grouped sources keep CPU tests independent of the current
+production winner. The checker covers every integer lambda 1–64, including partial
+groups. A grouped RNG-corruption integration test also failed canonical replay
+and withheld its candidate rate; see `mutation-group-negative-gate/` and immutable
+`build-v8/`. Grouped performance remains an experiment until the frozen short,
+full-training, reserved and direct-GPU gates pass.
 
 The actual source installer rejected a deliberately corrupted final RNG update:
 the qualified initial state matched, but the final canonical state failed in six
