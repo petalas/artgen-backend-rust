@@ -1611,7 +1611,11 @@ mod benchmark_tests {
 
     #[test]
     fn candidate_sources_keep_workgroup_and_validation_specialization() {
-        let original = include_str!("../shaders/bin_polygons.wgsl");
+        // Keep the legacy atomic-add fixture independent of the production winner.
+        // The variants test validates the currently installed source separately.
+        let original = include_str!(
+            "../../benchmarks/evolution/overnight-20261024/fixtures/bin-tile32-reference.wgsl"
+        );
         let annotation = original
             .lines()
             .find(|line| line.starts_with("@compute @workgroup_size("))
