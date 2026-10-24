@@ -1,0 +1,232 @@
+{
+  "batches": 64,
+  "binary_origin": "/home/nick/git/artgen-backend-rust/.cache/evolution-continuation-20261024/build-v12/evolution-bench",
+  "binary_sha256": "0cdf0caa4cb361f997fd42902e042ab3463a40049727047eecd4c0ddf74be732",
+  "binary_source_inventory": "/home/nick/git/artgen-backend-rust/.cache/evolution-continuation-20261024/build-v12/source/hashes.json",
+  "cache_policy": {
+    "files": {
+      "pipeline_cache_wgpu_pipeline_cache_vulkan_4318_11141.bin": {
+        "bytes": 593052,
+        "sha256": "f019a39bcf1498d23c274372f01aa8f9eca02336e7d82b43220e0d0e3ef4fe8d"
+      }
+    },
+    "kind": "one shared immutable warm current-engine cache, copied per worker",
+    "origin": "unscored pilot cwd after normal exit"
+  },
+  "expected_completed_evaluations": 31457280,
+  "fixed_parameters": {
+    "adaptiveMutation": false,
+    "addPolygonProb": 0.5,
+    "adjacentSwapProb": 0.002,
+    "adjustBrightnessProb": 0.000473,
+    "adjustSaturationProb": 0.001333,
+    "chainCount": 4,
+    "changeColorProb": 0.000473,
+    "clonePolygonProb": 0.071429,
+    "crossoverProb": 0.2,
+    "gpuBatchIters": 64,
+    "lambda": 64,
+    "maxAlpha": 65,
+    "maxPolygons": 1000,
+    "mediumMoveDelta": 0.03,
+    "mediumMoveProb": 0.004,
+    "mergeCentroidThreshold": 0.15,
+    "mergeColorThreshold": 0.2,
+    "mergePolygonProb": 0.000667,
+    "microAdjustDelta": 0.001,
+    "microAdjustProb": 0.002786,
+    "minAlpha": 10,
+    "minPolygons": 1,
+    "movePointMaxDelta": 0.113,
+    "movePointProb": 0.000294,
+    "newPointMaxDistance": 0.005,
+    "offsetPolygonMagnitude": 0.01,
+    "offsetPolygonProb": 0.00565,
+    "rasterizeWg": [
+      32,
+      16
+    ],
+    "removePointProb": 0.002,
+    "removePolygonProb": 0.000862,
+    "reorderPolygonProb": 0.002,
+    "rotatePolygonProb": 0.002,
+    "scalePolygonProb": 0.00565,
+    "singleMutationMode": true,
+    "spatialCrossoverWeight": 0.66,
+    "swapColorsProb": 0.00565,
+    "tournamentSize": 3
+  },
+  "frozen_utc": "2026-10-24T11:42:54.811545+00:00",
+  "hypothesis": "full-batch queue compute span may leave material uncovered wall time after engine optimization; residual is not CPU time or recoverable stall",
+  "invalid_policy": "any work/replay/device/artifact error ends package; no reruns or sample extensions",
+  "isolation": "unverified; other processes left untouched",
+  "manifest_sha256": "82dfe207ecd20ae964edf4528f1a90fe4176b21f4ac0911b305da1e1edf1c5aa",
+  "metrics": [
+    "GPU span / wall for envelope runs",
+    "wall minus GPU span",
+    "paired wall Stages/Envelope distributions",
+    "sampled final-iteration stage averages, not whole-run shares"
+  ],
+  "optimization_claim": false,
+  "package_timeout_seconds": 1800,
+  "pilot_excluded": true,
+  "primary_score_eligible": false,
+  "protocol_version": 1,
+  "purpose": "full-batch GPU queue span versus engine completion wall, plus separate unscored host observation",
+  "schedule": [
+    {
+      "case_id": "ff",
+      "mode": "stages",
+      "repeat": 1
+    },
+    {
+      "case_id": "ff",
+      "mode": "batch_envelope",
+      "repeat": 1
+    },
+    {
+      "case_id": "ff",
+      "mode": "batch_envelope",
+      "repeat": 2
+    },
+    {
+      "case_id": "ff",
+      "mode": "stages",
+      "repeat": 2
+    },
+    {
+      "case_id": "ff",
+      "mode": "stages",
+      "repeat": 3
+    },
+    {
+      "case_id": "ff",
+      "mode": "batch_envelope",
+      "repeat": 3
+    },
+    {
+      "case_id": "ff",
+      "mode": "batch_envelope",
+      "repeat": 4
+    },
+    {
+      "case_id": "ff",
+      "mode": "stages",
+      "repeat": 4
+    },
+    {
+      "case_id": "ff",
+      "mode": "stages",
+      "repeat": 5
+    },
+    {
+      "case_id": "ff",
+      "mode": "batch_envelope",
+      "repeat": 5
+    },
+    {
+      "case_id": "mona",
+      "mode": "stages",
+      "repeat": 1
+    },
+    {
+      "case_id": "mona",
+      "mode": "batch_envelope",
+      "repeat": 1
+    },
+    {
+      "case_id": "mona",
+      "mode": "batch_envelope",
+      "repeat": 2
+    },
+    {
+      "case_id": "mona",
+      "mode": "stages",
+      "repeat": 2
+    },
+    {
+      "case_id": "mona",
+      "mode": "stages",
+      "repeat": 3
+    },
+    {
+      "case_id": "mona",
+      "mode": "batch_envelope",
+      "repeat": 3
+    },
+    {
+      "case_id": "mona",
+      "mode": "batch_envelope",
+      "repeat": 4
+    },
+    {
+      "case_id": "mona",
+      "mode": "stages",
+      "repeat": 4
+    },
+    {
+      "case_id": "mona",
+      "mode": "stages",
+      "repeat": 5
+    },
+    {
+      "case_id": "mona",
+      "mode": "batch_envelope",
+      "repeat": 5
+    },
+    {
+      "case_id": "darwin",
+      "mode": "stages",
+      "repeat": 1
+    },
+    {
+      "case_id": "darwin",
+      "mode": "batch_envelope",
+      "repeat": 1
+    },
+    {
+      "case_id": "darwin",
+      "mode": "batch_envelope",
+      "repeat": 2
+    },
+    {
+      "case_id": "darwin",
+      "mode": "stages",
+      "repeat": 2
+    },
+    {
+      "case_id": "darwin",
+      "mode": "stages",
+      "repeat": 3
+    },
+    {
+      "case_id": "darwin",
+      "mode": "batch_envelope",
+      "repeat": 3
+    },
+    {
+      "case_id": "darwin",
+      "mode": "batch_envelope",
+      "repeat": 4
+    },
+    {
+      "case_id": "darwin",
+      "mode": "stages",
+      "repeat": 4
+    },
+    {
+      "case_id": "darwin",
+      "mode": "stages",
+      "repeat": 5
+    },
+    {
+      "case_id": "darwin",
+      "mode": "batch_envelope",
+      "repeat": 5
+    }
+  ],
+  "seed": 7,
+  "warmup": 2,
+  "worker_timeout_seconds": 120,
+  "workers": 30
+}
