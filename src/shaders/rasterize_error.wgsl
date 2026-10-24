@@ -11,16 +11,26 @@
 // Workgroup size is configurable. pipeline.rs uses string replacement on the
 // WG_X/WG_Y constants below when creating non-default pipeline variants.
 // Supported configurations: 16x16 (256 threads), 16x8 (128 threads), 8x8 (64 threads).
-// Tile capacity and shared memory arrays scale with WG_X * WG_Y.
+// Shared polygon capacity is fixed at the clamped tile polygon limit.
 const WG_X: u32 = 16;
 const WG_Y: u32 = 16;
 const THREAD_COUNT: u32 = WG_X * WG_Y;
-const TILE_CAP: u32 = THREAD_COUNT * 3u;
-const LOADS_PER_THREAD: u32 = 3u;
 const TILE_MAX_POLYS: u32 = 256u;
 
 struct Polygon {
     data: vec4<u32>,   // [color_packed, v0_packed, v1_packed, v2_packed] — 16 bytes
+}
+
+// Decoded cache layout: vec2<f32> alignment 8, scalar alignment 4.
+struct DecodedPolygon {
+    pv0: vec2<f32>,  // offset 0
+    pv1: vec2<f32>,  // offset 8
+    pv2: vec2<f32>,  // offset 16
+    bb_min_x: f32,   // offset 24
+    bb_max_x: f32,   // offset 28
+    bb_min_y: f32,   // offset 32
+    bb_max_y: f32,   // offset 36
+    color_packed: u32, // offset 40; trailing padding 44..47; stride 48
 }
 
 struct DrawingState {
@@ -119,10 +129,10 @@ struct Params {
 @group(0) @binding(6) var<storage, read>       chain_framebuffers: array<u32>;
 @group(1) @binding(0) var<uniform>             params:             Params;
 
-// Shared memory arrays sized to thread count.
-// shared_polys: TILE_CAP polygons (THREAD_COUNT * 3 * 16 bytes)
+// Shared polygon capacity follows the tile polygon clamp.
+// shared_polys: 256 decoded polygons, stride 48, 12288 bytes
 // shared_errors: one u32 per subgroup for cross-subgroup reduction (max 256/4 = 64 subgroups)
-var<workgroup> shared_polys: array<Polygon, TILE_CAP>;
+var<workgroup> shared_polys: array<DecodedPolygon, TILE_MAX_POLYS>;
 var<workgroup> shared_errors: array<u32, 128>;      // only num_subgroups entries are used
 var<workgroup> shared_errors_old: array<u32, 128>;  // old errors for incremental eval
 var<workgroup> shared_skip_tile: u32;               // set by thread 0 if tile is outside dirty bbox
@@ -138,17 +148,17 @@ fn edge_fn(ax: f32, ay: f32, bx: f32, by: f32, px: f32, py: f32) -> f32 {
 }
 
 /// Rasterize a polygon and alpha-blend if pixel is inside.
-fn rasterize_blend(poly: Polygon, fx: f32, fy: f32, r: ptr<function, f32>, g: ptr<function, f32>, b: ptr<function, f32>) {
-    // Unpack vertices
-    let pv0 = unpack_vertex(poly.data.y);
-    let pv1 = unpack_vertex(poly.data.z);
-    let pv2 = unpack_vertex(poly.data.w);
+fn rasterize_blend(poly: DecodedPolygon, fx: f32, fy: f32, r: ptr<function, f32>, g: ptr<function, f32>, b: ptr<function, f32>) {
+    // Read vertices decoded by the cooperative loader
+    let pv0 = poly.pv0;
+    let pv1 = poly.pv1;
+    let pv2 = poly.pv2;
 
     // AABB culling: skip polygons whose bounding box doesn't contain this pixel
-    let bb_min_x = min(pv0.x, min(pv1.x, pv2.x));
-    let bb_max_x = max(pv0.x, max(pv1.x, pv2.x));
-    let bb_min_y = min(pv0.y, min(pv1.y, pv2.y));
-    let bb_max_y = max(pv0.y, max(pv1.y, pv2.y));
+    let bb_min_x = poly.bb_min_x;
+    let bb_max_x = poly.bb_max_x;
+    let bb_min_y = poly.bb_min_y;
+    let bb_max_y = poly.bb_max_y;
 
     if fx < bb_min_x || fx > bb_max_x || fy < bb_min_y || fy > bb_max_y {
         return;
@@ -165,7 +175,7 @@ fn rasterize_blend(poly: Polygon, fx: f32, fy: f32, r: ptr<function, f32>, g: pt
 
     if all_pos || all_neg {
         // Unpack color and alpha blend: out = src * alpha + dst * (1 - alpha)
-        let pcolor = unpack_color(poly);
+        let pcolor = unpack_color(Polygon(vec4<u32>(poly.color_packed, 0u, 0u, 0u)));
         let alpha = pcolor.w;
         let inv_alpha = 1.0 - alpha;
         let src_r = pcolor.x * 255.0;
@@ -242,7 +252,6 @@ fn main(
         tile_poly_count = min(tile_counts_buf[tile_global], TILE_MAX_POLYS);
         tile_data_base = chain_id * num_tiles * TILE_MAX_POLYS + tile_id * TILE_MAX_POLYS;
     }
-    let sm_tile_count = (tile_poly_count + TILE_CAP - 1u) / TILE_CAP;
 
     // Per-pixel setup — only valid pixels read reference/framebuffer
     let valid_pixel = px < w && py < h && chain_id < chain_count;
@@ -278,26 +287,28 @@ fn main(
     // Tile-culled rasterization: ALL threads participate in shared memory loads
     // (critical for partial tiles where out-of-bounds threads are responsible
     // for loading polygon slots that in-bounds threads need for rasterization).
-    for (var sm_tile = 0u; sm_tile < sm_tile_count; sm_tile++) {
-        let sm_tile_base = sm_tile * TILE_CAP;
-        let sm_tile_end = min(TILE_CAP, tile_poly_count - sm_tile_base);
+    for (var slot = local_idx; slot < tile_poly_count; slot += THREAD_COUNT) {
+        let poly_idx = tile_data[tile_data_base + slot];
+        let poly = working_states[chain_id].polygons[poly_idx];
+        let pv0 = unpack_vertex(poly.data.y);
+        let pv1 = unpack_vertex(poly.data.z);
+        let pv2 = unpack_vertex(poly.data.w);
 
-        for (var load_pass = 0u; load_pass < LOADS_PER_THREAD; load_pass++) {
-            let slot = local_idx + load_pass * THREAD_COUNT;
-            if slot < sm_tile_end {
-                let poly_idx = tile_data[tile_data_base + sm_tile_base + slot];
-                shared_polys[slot] = working_states[chain_id].polygons[poly_idx];
-            }
-        }
-        workgroupBarrier();
-
-        if valid_pixel {
-            for (var i = 0u; i < sm_tile_end; i++) {
-                rasterize_blend(shared_polys[i], fx, fy, &r, &g, &b);
-            }
-        }
-        workgroupBarrier();
+        let bb_min_x = min(pv0.x, min(pv1.x, pv2.x));
+        let bb_max_x = max(pv0.x, max(pv1.x, pv2.x));
+        let bb_min_y = min(pv0.y, min(pv1.y, pv2.y));
+        let bb_max_y = max(pv0.y, max(pv1.y, pv2.y));
+        shared_polys[slot] = DecodedPolygon(
+            pv0, pv1, pv2, bb_min_x, bb_max_x, bb_min_y, bb_max_y, poly.data.x);
     }
+    workgroupBarrier();
+
+    if valid_pixel {
+        for (var i = 0u; i < tile_poly_count; i++) {
+            rasterize_blend(shared_polys[i], fx, fy, &r, &g, &b);
+        }
+    }
+    // The polygon cache is never overwritten; no post-blend barrier is needed.
 
     // L1 error: quantize to u8 integers (floor) so error matches
     // framebuffer precision (pack_fb_pixel truncates to u8).

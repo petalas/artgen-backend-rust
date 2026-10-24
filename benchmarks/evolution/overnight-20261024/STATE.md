@@ -19,6 +19,10 @@ implementation passed full original and reserved confirmations, measuring
 1.36266 and 1.38601 times the starting fast baseline's throughput. See
 [03-512-lane-local-count.md](03-512-lane-local-count.md).
 
-The next family is raster cache capacity, loading and decoded vertex reuse.
+The decoded tile geometry cache also passed full training and reserved confirmation,
+measuring 1.23597 and 1.23817 times its preceding engine throughput. See
+[05-decoded-raster-cache.md](05-decoded-raster-cache.md).
+
+The next families are mutation parent copying and isolated raster reductions.
 Earlier live-preview results retain their original dispositions and are outside
 this engine-only score. Work continues until the morning cutoff.
