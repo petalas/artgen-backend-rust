@@ -1,6 +1,6 @@
 // Polygon binning compute shader — assigns each polygon to the spatial tiles it overlaps.
-// Dispatch: (offspring_count, 1, 1) — one workgroup per offspring, one thread does the serial iteration.
-// Serial fill ensures polygon indices appear in original order (required for alpha blending).
+// Dispatch: (offspring_count, 1, 1). Each workgroup computes bounds in 32 lanes.
+// Each tile has one lane scanning polygons in order, as required for alpha blending.
 //
 // This shader runs between mutate and rasterize_error.
 
@@ -100,8 +100,38 @@ const TILE_MAX_POLYS: u32 = 256u;
 @group(0) @binding(2) var<storage, read_write> tile_counts:    array<atomic<u32>>;
 @group(1) @binding(0) var<uniform>             params:         Params;
 
-@compute @workgroup_size(1, 1, 1)
-fn main(@builtin(workgroup_id) wid: vec3<u32>) {
+// [min_x, max_x, min_y, max_y], 16,000 bytes per workgroup.
+// The validated drawing contract bounds polygon_count by the 1000 polygon slots.
+var<workgroup> polygon_bounds: array<vec4<u32>, 1000>;
+
+fn polygon_tile_bounds(poly: Polygon, w: u32, h: u32, num_tiles_x: u32, num_tiles_y: u32) -> vec4<u32> {
+    // Unpack vertices
+    let v0 = unpack_vertex(poly.data.y);
+    let v1 = unpack_vertex(poly.data.z);
+    let v2 = unpack_vertex(poly.data.w);
+
+    // AABB in normalized coords
+    let bb_min_x = min(v0.x, min(v1.x, v2.x));
+    let bb_max_x = max(v0.x, max(v1.x, v2.x));
+    let bb_min_y = min(v0.y, min(v1.y, v2.y));
+    let bb_max_y = max(v0.y, max(v1.y, v2.y));
+
+    // Convert to pixel coords
+    let px_min_x = u32(bb_min_x * f32(w));
+    let px_max_x = min(u32(ceil(bb_max_x * f32(w))), w);
+    let px_min_y = u32(bb_min_y * f32(h));
+    let px_max_y = min(u32(ceil(bb_max_y * f32(h))), h);
+
+    // Convert to tile coords
+    let tile_min_x = px_min_x / TILE_W;
+    let tile_max_x = min((px_max_x + TILE_W - 1u) / TILE_W, num_tiles_x);
+    let tile_min_y = px_min_y / TILE_H;
+    let tile_max_y = min((px_max_y + TILE_H - 1u) / TILE_H, num_tiles_y);
+    return vec4<u32>(tile_min_x, tile_max_x, tile_min_y, tile_max_y);
+}
+
+@compute @workgroup_size(32, 1, 1)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) local_idx: u32) {
     let offspring_id = wid.x;
     let offspring_count = arrayLength(&working_states);
     if offspring_id >= offspring_count {
@@ -114,45 +144,25 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>) {
     let num_tiles_y = (h + TILE_H - 1u) / TILE_H;
     let num_tiles = num_tiles_x * num_tiles_y;
 
-    // Reset tile counts for this offspring
-    for (var t = 0u; t < num_tiles; t++) {
-        atomicStore(&tile_counts[offspring_id * num_tiles + t], 0u);
-    }
-
     let poly_count = working_states[offspring_id].polygon_count;
 
-    // Serial iteration: process polygons in order to preserve alpha blending order
-    for (var pi = 0u; pi < poly_count; pi++) {
+    // Each consumed slot has exactly one writer, including partial lane batches.
+    for (var pi = local_idx; pi < poly_count; pi += 32u) {
         let poly = working_states[offspring_id].polygons[pi];
+        polygon_bounds[pi] = polygon_tile_bounds(poly, w, h, num_tiles_x, num_tiles_y);
+    }
+    workgroupBarrier();
 
-        // Unpack vertices
-        let v0 = unpack_vertex(poly.data.y);
-        let v1 = unpack_vertex(poly.data.z);
-        let v2 = unpack_vertex(poly.data.w);
+    // One lane owns each tile, including its count reset for an empty drawing.
+    for (var tile_id = local_idx; tile_id < num_tiles; tile_id += 32u) {
+        let tile_global = offspring_id * num_tiles + tile_id;
+        atomicStore(&tile_counts[tile_global], 0u);
+        let tx = tile_id % num_tiles_x;
+        let ty = tile_id / num_tiles_x;
 
-        // AABB in normalized coords
-        let bb_min_x = min(v0.x, min(v1.x, v2.x));
-        let bb_max_x = max(v0.x, max(v1.x, v2.x));
-        let bb_min_y = min(v0.y, min(v1.y, v2.y));
-        let bb_max_y = max(v0.y, max(v1.y, v2.y));
-
-        // Convert to pixel coords
-        let px_min_x = u32(bb_min_x * f32(w));
-        let px_max_x = min(u32(ceil(bb_max_x * f32(w))), w);
-        let px_min_y = u32(bb_min_y * f32(h));
-        let px_max_y = min(u32(ceil(bb_max_y * f32(h))), h);
-
-        // Convert to tile coords
-        let tile_min_x = px_min_x / TILE_W;
-        let tile_max_x = min((px_max_x + TILE_W - 1u) / TILE_W, num_tiles_x);
-        let tile_min_y = px_min_y / TILE_H;
-        let tile_max_y = min((px_max_y + TILE_H - 1u) / TILE_H, num_tiles_y);
-
-        // Append polygon index to each overlapping tile
-        for (var ty = tile_min_y; ty < tile_max_y; ty++) {
-            for (var tx = tile_min_x; tx < tile_max_x; tx++) {
-                let tile_id = ty * num_tiles_x + tx;
-                let tile_global = offspring_id * num_tiles + tile_id;
+        for (var pi = 0u; pi < poly_count; pi++) {
+            let bounds = polygon_bounds[pi];
+            if tx >= bounds.x && tx < bounds.y && ty >= bounds.z && ty < bounds.w {
                 let slot = atomicAdd(&tile_counts[tile_global], 1u);
                 if slot < TILE_MAX_POLYS {
                     let data_offset = offspring_id * num_tiles * TILE_MAX_POLYS + tile_id * TILE_MAX_POLYS + slot;

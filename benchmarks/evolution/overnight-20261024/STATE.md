@@ -11,8 +11,9 @@ throughput work until morning, fixed evolution parameters and frequent commits.
 - Training uses the original ff/mona/darwin mature corpus; reserved confirmation
   uses the distinct mature corpus and seeds 11/13/17.
 
-The exact previously confirmed tile-parallel shader is installed in the working
-tree for an engine recheck. A resident comparison example is being implemented
-to amortize device, pipeline and scalar-qualification setup. No new optimization
-has been accepted under this campaign yet. Earlier live-preview results retain
-their original dispositions and are outside the new score.
+The exact previously confirmed tile-parallel shader passed three fresh seeded
+replays and is adopted as the engine baseline. Its record is
+[00-tile-parallel-baseline.md](00-tile-parallel-baseline.md). The resident
+comparison example has passed its CPU checks and release build; real A/A and
+candidate verification follow. Earlier live-preview results retain their
+original dispositions and are outside the new score.
