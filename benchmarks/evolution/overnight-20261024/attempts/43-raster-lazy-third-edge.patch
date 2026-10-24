@@ -1,0 +1,23 @@
+--- a/src/shaders/rasterize_error.wgsl
++++ b/src/shaders/rasterize_error.wgsl
+@@ -165,11 +165,18 @@
+     // Half-space triangle test (3 edge evaluations)
+     let e0 = edge_fn(pv0.x, pv0.y, pv1.x, pv1.y, fx, fy);
+     let e1 = edge_fn(pv1.x, pv1.y, pv2.x, pv2.y, fx, fy);
++    // A third edge cannot rescue incompatible signs on the first two edges.
++    // Keep inclusive zero handling and each original edge expression unchanged.
++    let first_pos = e0 >= 0.0 && e1 >= 0.0;
++    let first_neg = e0 <= 0.0 && e1 <= 0.0;
++    if !(first_pos || first_neg) {
++        return;
++    }
+     let e2 = edge_fn(pv2.x, pv2.y, pv0.x, pv0.y, fx, fy);
+ 
+     // Inside if all same sign (handle both CW and CCW winding)
+-    let all_pos = e0 >= 0.0 && e1 >= 0.0 && e2 >= 0.0;
+-    let all_neg = e0 <= 0.0 && e1 <= 0.0 && e2 <= 0.0;
++    let all_pos = first_pos && e2 >= 0.0;
++    let all_neg = first_neg && e2 <= 0.0;
+ 
+     if all_pos || all_neg {
+         // Unpack color and alpha blend: out = src * alpha + dst * (1 - alpha)
