@@ -1,0 +1,35 @@
+--- a/src/shaders/rasterize_error.wgsl
++++ b/src/shaders/rasterize_error.wgsl
+@@ -194,6 +194,7 @@
+     @builtin(subgroup_invocation_id) sg_inv_id: u32,
+     @builtin(subgroup_id) sg_idx: u32,
+     @builtin(num_subgroups) num_subgroups: u32,
++    @builtin(subgroup_size) sg_size: u32,
+ ) {
+     // Derive 2D pixel coordinates from 1D thread index + workgroup ID
+     let local_x = local_idx % WG_X;
+@@ -321,12 +322,22 @@
+ 
+     // Subgroup leaders write distinct, dense slots before thread 0 sums them.
+     // Subgroup IDs cannot be inferred from local invocation indices.
+-    let sg_sum = subgroupAdd(pixel_error);
++    var sg_sum = 0u;
++    var sg_sum_old = 0u;
++    // Each error <= 765; at most 64 lanes gives each sum <= 48960.
++    // Thus the low 16 bits cannot carry into the high 16 bits.
++    if sg_size <= 64u {
++        let packed_sum = subgroupAdd(pixel_error | (pixel_error_old << 16u));
++        sg_sum = packed_sum & 0xFFFFu;
++        sg_sum_old = packed_sum >> 16u;
++    } else {
++        sg_sum = subgroupAdd(pixel_error);
++        sg_sum_old = subgroupAdd(pixel_error_old);
++    }
+     if sg_inv_id == 0u {
+         shared_errors[sg_idx] = sg_sum;
+     }
+ 
+-    let sg_sum_old = subgroupAdd(pixel_error_old);
+     if sg_inv_id == 0u {
+         shared_errors_old[sg_idx] = sg_sum_old;
+     }

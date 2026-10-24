@@ -1,0 +1,55 @@
+--- a/src/shaders/rasterize_error.wgsl
++++ b/src/shaders/rasterize_error.wgsl
+@@ -260,9 +260,9 @@
+     var r = 255.0;
+     var g = 255.0;
+     var b = 255.0;
+-    var refr = 0.0;
+-    var refg = 0.0;
+-    var refb = 0.0;
++    var refr = 0u;
++    var refg = 0u;
++    var refb = 0u;
+ 
+     if valid_pixel {
+         fx = (f32(px) + 0.5) / f32(w);
+@@ -271,17 +271,17 @@
+         let ref_color = textureLoad(reference_image, vec2<i32>(i32(px), i32(py)), 0);
+         // Match init_framebuffers: L1 compares exact reference bytes, not the
+         // approximate UNORM reconstruction whose error would be truncated.
+-        refr = round(ref_color.x * 255.0);
+-        refg = round(ref_color.y * 255.0);
+-        refb = round(ref_color.z * 255.0);
++        refr = u32(round(ref_color.x * 255.0));
++        refg = u32(round(ref_color.y * 255.0));
++        refb = u32(round(ref_color.z * 255.0));
+ 
+         // Read cached parent pixel from chain_framebuffers (O(1) per pixel).
+         let fb_idx = parent_chain * w * h + py * w + px;
+         let packed = chain_framebuffers[fb_idx];
+-        let old_ri = f32(packed & 0xFFu);
+-        let old_gi = f32((packed >> 8u) & 0xFFu);
+-        let old_bi = f32((packed >> 16u) & 0xFFu);
+-        pixel_error_old = u32(abs(old_ri - refr) + abs(old_gi - refg) + abs(old_bi - refb));
++        let old_ri = packed & 0xFFu;
++        let old_gi = (packed >> 8u) & 0xFFu;
++        let old_bi = (packed >> 16u) & 0xFFu;
++        pixel_error_old = u32(abs(i32(old_ri) - i32(refr)) + abs(i32(old_gi) - i32(refg)) + abs(i32(old_bi) - i32(refb)));
+     }
+ 
+     // Tile-culled rasterization: ALL threads participate in shared memory loads
+@@ -313,10 +313,10 @@
+     // L1 error: quantize to u8 integers (floor) so error matches
+     // framebuffer precision (pack_fb_pixel truncates to u8).
+     if valid_pixel {
+-        let qr = floor(clamp(r, 0.0, 255.0));
+-        let qg = floor(clamp(g, 0.0, 255.0));
+-        let qb = floor(clamp(b, 0.0, 255.0));
+-        pixel_error = u32(abs(qr - refr) + abs(qg - refg) + abs(qb - refb));
++        let qr = u32(clamp(r, 0.0, 255.0));
++        let qg = u32(clamp(g, 0.0, 255.0));
++        let qb = u32(clamp(b, 0.0, 255.0));
++        pixel_error = u32(abs(i32(qr) - i32(refr)) + abs(i32(qg) - i32(refg)) + abs(i32(qb) - i32(refb)));
+     }
+ 
+     // Subgroup leaders write distinct, dense slots before thread 0 sums them.
