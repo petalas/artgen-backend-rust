@@ -63,7 +63,7 @@
  
      // Inside if all same sign (handle both CW and CCW winding)
      let all_pos = e0 >= 0.0 && e1 >= 0.0 && e2 >= 0.0;
-@@ -294,12 +293,11 @@
+@@ -294,11 +293,10 @@
          let pv1 = unpack_vertex(poly.data.z);
          let pv2 = unpack_vertex(poly.data.w);
  
@@ -79,4 +79,3 @@
 +            pv0, pv1, pv2, poly.data.x, edge01, edge12, edge20);
      }
      workgroupBarrier();
- 

@@ -45,7 +45,7 @@
  
      // Inside if all same sign (handle both CW and CCW winding)
      let all_pos = e0 >= 0.0 && e1 >= 0.0 && e2 >= 0.0;
-@@ -298,8 +301,12 @@
+@@ -298,7 +301,11 @@
          let bb_max_x = max(pv0.x, max(pv1.x, pv2.x));
          let bb_min_y = min(pv0.y, min(pv1.y, pv2.y));
          let bb_max_y = max(pv0.y, max(pv1.y, pv2.y));
@@ -58,4 +58,3 @@
 +            edge01, edge12, edge20);
      }
      workgroupBarrier();
- 
