@@ -161,3 +161,27 @@ Inspect individual previews around the end-to-end p95. Component p95 values do
 not add. Keep the inconclusive result and original gate intact while qualifying
 trial scheduling and sample budgets. Removing the sender cadence would change
 the workload. See [the captured diagnosis](../benchmarks/evolution/v1/live-latency-diagnosis.md).
+
+
+### Frozen benchmark output writers are exclusive
+
+**Context**: A continuation wrapper saved training progress and later tried to save
+its final disposition to the same outcome.json.
+**Gotcha**: `scripts/evolution-bench.py::write_json` uses mode `x`. The second write
+raises FileExistsError even after every GPU worker and statistical analysis finishes.
+**Fix**: Use distinct immutable phase/final filenames or an explicitly mutable
+progress writer. Preserve failed progress and raw worker files; correct aggregation
+offline instead of rerunning measurements. The continuation's lazy-edge package
+retains its original outcome.json and corrected final-outcome.json.
+
+### CPU fitness bit equality is stronger than the numerical policy
+
+**Context**: Independently auditing reserved ff/mona packed fitness.
+**Gotcha**: Three qualified reference parents differ from the step-rounded CPU
+formula by one f32 ULP, about 0.00000763. Their GPU states and quality records match
+the older qualified trajectory. Requiring CPU bit equality would invent a stricter
+gate than `ChainQuality::passes_numerical_policy`.
+**Fix**: Preserve the existing 0.00002 CPU/GPU fitness bound and report observed
+rounding differences. GPU candidate/reference canonical fields and stored errors
+versus framebuffer-byte L1 still require exact equality. Never relax those checks
+to accommodate a candidate.

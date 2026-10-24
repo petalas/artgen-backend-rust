@@ -1,0 +1,12 @@
+--- reference.wgsl
++++ candidate.wgsl
+@@ -587,6 +587,9 @@
+             shared_parent_poly_count = poly_count;
+             shared_parent_fitness_bits = chain_states[chain_id].fitness_bits;
+             shared_parent_mutation_scale = chain_states[chain_id].mutation_scale;
++            if poly_count == 0u {
++                shared_parent_polygons[0].data = vec4<u32>(0u);
++            }
+         }
+         for (var i = lid.x; i < poly_count; i += PHYSICAL_WG_SIZE) {
+             shared_parent_polygons[i] = chain_states[chain_id].polygons[i];
