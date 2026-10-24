@@ -79,3 +79,7 @@ descriptor. It is a compiler regression check, not a GPU numerical oracle.
 Prove It Works replaced a source-only assumption with an exact compiler
 reproduction. Explain the Number keeps this failed launch out of performance
 statistics. The fast loop required no dependency upgrade or production change.
+
+The scalar-pointer revision was subsequently qualified and kept in
+[report 22](22-paired-pixel-raster.md). The original compiler-failed cohort
+remains INCONCLUSIVE; its raw records and verdict are unchanged.

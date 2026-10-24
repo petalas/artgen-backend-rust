@@ -544,6 +544,7 @@
     "delivery/lab-tests.log": "f45ff5e7ec034377c8dbacf12aa8248efacd062f10ce10075dfa4204de60a5bf"
   },
   "limits": "Fixed image corpora, same-seed repeated timing, one RTX5090/Dozen device/session. No hardware-counter cause, UI/preview, startup or new original-to-current ratio claim.",
-  "default_path_verification": "PENDING",
-  "release_build_record": "pixel-pair-release.json"
+  "default_path_verification": "PASS_UNSCORED",
+  "release_build_record": "pixel-pair-release.json",
+  "default_verification_record": "pixel-pair-default-verification-result.json"
 }

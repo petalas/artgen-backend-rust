@@ -82,9 +82,17 @@ Focused CPU checks pass: 18 pipeline tests and 14 lab tests. The normal release
 build passes for the application, evolution-bench and engine-lab with optimization
 3 and debug assertions disabled. All six complete shader strings are verified in
 each fresh executable; the [release record](profiles/pixel-pair-release.json) pins
-the actual Cargo artifacts and 83-file source freeze. One separately frozen,
-unscored default-path verification is pending; it contributes no performance
-samples. No UI or preview latency claim follows from the resident throughput result.
+the actual Cargo artifacts and 83-file source freeze. The source keep is
+committed as bb255c0. A separate, precommitted default-path worker passes Mona,
+seed 7, 64 batches and the ordinary two warmups using the rebuilt bundled shader,
+without a source override. Its 1,048,576 evaluations, two snapshots and eight
+parents match both the qualified candidate and the reference; 51 recorded
+predicates pass. Its [delivery record](profiles/pixel-pair-default-verification-result.json)
+is explicitly unscored and adds no samples to the completed five-worker cohort.
+The first offline metadata preflight caught the compact LabRow/TrialRecord
+representation difference before GPU execution; it was corrected without a rerun.
+All raw qualification files remain unchanged. The normal application was rebuilt
+but its UI/WebSocket path was not launched; no preview or startup claim follows.
 
 The raster/error interval remains the largest sampled GPU stage. Training
 trial-average raster medians decrease from about 436/560/556 microseconds to

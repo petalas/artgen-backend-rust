@@ -1,0 +1,43 @@
+{
+  "status": "PASS",
+  "mode": "default_delivery_verification",
+  "score_eligible": false,
+  "comparison": false,
+  "binary_sha256": "1cf30fea6f7cb91f645b192c9b6a148fa500196eef1d463ebd17701e884a2fa2",
+  "source_commit": "bb255c04f41f6889c3dc43067e7ef9a11d63c1e6",
+  "source_files": 83,
+  "only_runtime_source_change": "src/shaders/rasterize_error.wgsl",
+  "raster_sha256": "83c505bcc9220f39c11354692cdec3828e4d76681df8468ea93d597b4f4ceb7b",
+  "errors": [],
+  "counters": {
+    "completed_batches": 64,
+    "completed_evaluations": 1048576,
+    "completed_iterations": 4096,
+    "submitted_batches": 64,
+    "submitted_evaluations": 1048576,
+    "submitted_iterations": 4096
+  },
+  "timestamp_samples": 64,
+  "snapshots_checked": 2,
+  "parents_checked": 8,
+  "recorded_predicates": 51,
+  "matches_qualified_candidate": true,
+  "matches_qualified_reference": true,
+  "elapsed_and_rate_excluded_from_scores": true,
+  "UI_or_websocket_run": false,
+  "separate_from_closed_five_worker_qualification": true,
+  "artifact_sha256": {
+    "spec.json": "43a4371dbe18fbe4d0a92feb1fe93d053cf14d00d91c5393095af7cffdd4b874",
+    "run.py": "971bbba5b87fa2719f3191ee4c81596313705b730c469b16f1701f9135266557",
+    "metadata-preflight.json": "9d2422391313444f9c86a53b369c2c5faced6f9bc7e2a736f6ac7da56da378d5",
+    "verification-result.json": "1f74e7a2851728c014e7e5701e82e3cac3fc80fc92fb89fb9f9fa680486acaa4",
+    "worker/output/result.json": "f2b8ac1aa030ca85c0becfb3ee70d6201f6422a1843ebca5f884793d64b23f53"
+  },
+  "release_binary_sha256": {
+    "evolution-bench": "1cf30fea6f7cb91f645b192c9b6a148fa500196eef1d463ebd17701e884a2fa2",
+    "engine-lab": "70491fbcf1d811268e97430002b4752b10f26db62ce3ed6af3b1bde7276dc364",
+    "artgen-backend-rust": "c0a5128573754a83e9469b88f6d53a8f981640f048ba90dc6330083a0074fc60"
+  },
+  "all_qualification_raw_files_unchanged": true,
+  "completed_utc": "2026-10-24T19:32:11.564404+00:00"
+}

@@ -208,7 +208,8 @@ passing a struct-member address such as `&pixel.r` to a function taking
 
 Validate through the actual SPIR-V writer before spending another GPU run on
 this pattern. Keep RGB accumulators in local scalars when passing their pointers
-to the blend helper. The source-only workaround compiles for all five raster
-shapes, but still needs exact GPU error/framebuffer and throughput qualification.
-The failed native cohort remains inconclusive; compiler success supplies no
-numerical or performance evidence. See [the retained reproducer and result](../benchmarks/evolution/continuation-20261024/21-paired-pixel-compiler-blocker.md).
+to the blend helper. The workaround subsequently passed exact GPU error/framebuffer
+fixtures across all five raster shapes and reserved throughput confirmation; it
+is now kept in the engine. The original compiler-failed cohort remains inconclusive. Compilation
+alone supplied no numerical or performance evidence; those came from the separate
+qualified revision. See [the retained reproducer and result](../benchmarks/evolution/continuation-20261024/21-paired-pixel-compiler-blocker.md).
