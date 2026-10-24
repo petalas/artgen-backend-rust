@@ -29,7 +29,10 @@ measuring 1.06371 and 1.06264 times decoded C throughput. It preserves the logic
 [11-fixed-tile-physical-lanes.md](11-fixed-tile-physical-lanes.md).
 
 Both compact-raster prefix experiments failed their short filters and their
-runtime path was removed. Source-coupled mutation workgroup splitting is the next
-measured family. Every evolution setting remains pinned.
+runtime path was removed. One logical offspring per mutation workgroup also passed full confirmation,
+measuring 1.10181 and 1.10980 times the preceding engine throughput. It is now
+the default; see [13-one-offspring-workgroups.md](13-one-offspring-workgroups.md).
+Every evolution setting remains pinned. Conservative raster masks, cached alpha
+and small binning operations are the next isolated filters.
 Earlier live-preview results retain their original dispositions and are outside
 this engine-only score. Work continues until the morning cutoff.

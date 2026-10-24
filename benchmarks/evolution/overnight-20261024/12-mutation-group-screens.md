@@ -3,12 +3,13 @@
 The original mutation dispatched four groups of 64 offspring lanes. These four
 independent candidates keep all 256 logical offspring, their IDs, RNG streams,
 mutation branches and parameters. They change physical grouping and cooperate
-only on the parent copy before the original leader body. The original shader
-remains the production default until full confirmation passes.
+only on the parent copy before the original leader body. G1 subsequently passed
+full confirmation and the independent audit, and became the production default. [Report 13](13-one-offspring-workgroups.md) records the
+final adoption, rates, stage attribution and frozen evidence.
 
 | Attempt | Logical offspring/group | Physical lanes | Copy lanes/child | Preliminary throughput ratio | Disposition |
 | --- | ---: | ---: | ---: | ---: | --- |
-| 28 | 1 | 64 | 64 | 1.113554518 | Selected for confirmation |
+| 28 | 1 | 64 | 64 | 1.113554518 | Adopted after confirmation; report 13 |
 | 29 | 4 | 128 | 32 | 1.072687909 | Pass; not selected |
 | 30 | 16 | 256 | 16 | 1.026791657 | Pass; not selected |
 | 31 | 32 | 256 | 8 | 1.003724085 | Reject practical gate |
@@ -76,5 +77,6 @@ fixture. The kept binner is 598b32 and the fixed raster is AE1 (report 11).
 
 Background isolation remains unverified on the recorded RTX 5090 Vulkan/Dozen
 backend. Sampled mutation intervals can support attribution but are not whole-run
-shares or hardware-utilization measurements. Full training, reserved and endpoint
-audits remain the adoption gates.
+shares or hardware-utilization measurements. Full training, distinct reserved
+confirmation and the independent endpoint audit subsequently passed. [Report 13](13-one-offspring-workgroups.md) records
+the final KEEP decision. The short-screen ratios above remain preliminary.

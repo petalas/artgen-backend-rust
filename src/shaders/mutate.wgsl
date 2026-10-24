@@ -1,6 +1,6 @@
-// Mutation compute shader — one workgroup per chain, one thread per offspring
-// Cooperatively loads parent into shared memory, then each thread copies to its
-// offspring slot and applies probabilistic mutations.
+// Mutation compute shader — split each chain across logical offspring groups.
+// Physical lanes load the parent and cooperatively copy child prefixes.
+// Compact leaders apply the original mutations after both barriers.
 // Single-pass: tries all mutations once, then forces a vertex micro-nudge if none fired.
 
 struct Polygon {
@@ -145,8 +145,8 @@ struct Params {
 
 // Shared memory for cooperative parent loading.
 // All threads in a workgroup collaboratively load the parent chain's polygon data
-// here, then each thread copies from shared memory to its offspring slot.
-// This avoids lambda redundant global memory reads of the same ~16KB parent.
+// here, then copy roles stripe each offspring prefix from shared memory.
+// Each offspring group loads one parent prefix; groups do not share memory.
 var<workgroup> shared_parent_poly_count: u32;
 var<workgroup> shared_parent_fitness_bits: u32;
 var<workgroup> shared_parent_mutation_scale: f32;
@@ -551,40 +551,58 @@ fn single_mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<functio
     return merge_bbox(old_bbox, polygon_bbox_pixels(poly, w, h));
 }
 
-@compute @workgroup_size(64, 1, 1)
+// Source metadata must match the host's offspring dispatch group size.
+const OFFSPRING_GROUP_SIZE: u32 = 1u;
+const PHYSICAL_WG_SIZE: u32 = 64u;
+const COPY_LANES: u32 = 64u;
+
+// Copy roles are independent of the compact mutation leaders.
+fn copy_parent_prefix(chain_id: u32, group_base: u32, local_idx: u32,
+                      poly_count: u32, lambda: u32) {
+    let copy_child = local_idx / COPY_LANES;
+    let copy_rank = local_idx % COPY_LANES;
+    let logical_child = group_base + copy_child;
+    if copy_child < OFFSPRING_GROUP_SIZE && logical_child < lambda {
+        let copy_oid = chain_id * lambda + logical_child;
+        for (var i = copy_rank; i < poly_count; i += COPY_LANES) {
+            working_states[copy_oid].polygons[i] = shared_parent_polygons[i];
+        }
+    }
+}
+
+@compute @workgroup_size(PHYSICAL_WG_SIZE, 1, 1)
 fn main(@builtin(workgroup_id) wid: vec3<u32>,
         @builtin(local_invocation_id) lid: vec3<u32>) {
     let chain_id = wid.x;
-    let offspring_local_idx = lid.x;
+    let group_base = wid.y * OFFSPRING_GROUP_SIZE;
+    let offspring_local_idx = group_base + lid.x;
     let chain_count = arrayLength(&chain_states);
-    if chain_id >= chain_count {
-        return;
-    }
-    // Early exit for threads beyond lambda
-    if offspring_local_idx >= params.lambda {
-        return;
-    }
-
-    // --- Cooperative parent load into shared memory ---
-    // All lambda threads collaborate to load the parent's polygon data once,
-    // instead of each thread independently reading ~16KB from global memory.
-    let poly_count = min(chain_states[chain_id].polygon_count, params.max_polygons);
     let lambda = params.lambda;
+    var poly_count = 0u;
 
-    // Thread 0 loads the scalar header fields
-    if offspring_local_idx == 0u {
-        shared_parent_poly_count = poly_count;
-        shared_parent_fitness_bits = chain_states[chain_id].fitness_bits;
-        shared_parent_mutation_scale = chain_states[chain_id].mutation_scale;
-    }
-
-    // All threads cooperatively load polygons in stripes
-    for (var i = offspring_local_idx; i < poly_count; i += lambda) {
-        shared_parent_polygons[i] = chain_states[chain_id].polygons[i];
+    // All physical lanes reach both barriers, including invalid chains/children.
+    if chain_id < chain_count {
+        poly_count = min(chain_states[chain_id].polygon_count, params.max_polygons);
+        if lid.x == 0u {
+            shared_parent_poly_count = poly_count;
+            shared_parent_fitness_bits = chain_states[chain_id].fitness_bits;
+            shared_parent_mutation_scale = chain_states[chain_id].mutation_scale;
+        }
+        for (var i = lid.x; i < poly_count; i += PHYSICAL_WG_SIZE) {
+            shared_parent_polygons[i] = chain_states[chain_id].polygons[i];
+        }
     }
 
     workgroupBarrier();
-    // --- Parent data is now in shared memory ---
+    if chain_id < chain_count {
+        copy_parent_prefix(chain_id, group_base, lid.x, poly_count, lambda);
+    }
+    storageBarrier();
+
+    // Only compact leaders continue, with the original logical offspring index.
+    if chain_id >= chain_count || lid.x >= OFFSPRING_GROUP_SIZE || offspring_local_idx >= lambda {
+        return;
+    }
 
     // Compute offspring buffer index
     let offspring_id = chain_id * lambda + offspring_local_idx;
@@ -634,11 +652,6 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
     working_states[offspring_id].fitness_bits = shared_parent_fitness_bits;
     working_states[offspring_id].mutation_scale = mutation_scale;
     working_states[offspring_id].stagnation_counter = 0u;
-
-    // Copy polygons from shared memory
-    for (var i = 0u; i < poly_count; i++) {
-        working_states[offspring_id].polygons[i] = shared_parent_polygons[i];
-    }
 
     // Apply mutation
     var count = working_states[offspring_id].polygon_count;
