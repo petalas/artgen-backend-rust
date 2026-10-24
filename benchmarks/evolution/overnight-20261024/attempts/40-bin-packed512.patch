@@ -1,0 +1,35 @@
+--- base.wgsl
++++ candidate.wgsl
+@@ -100,9 +100,9 @@
+ @group(0) @binding(2) var<storage, read_write> tile_counts:    array<atomic<u32>>;
+ @group(1) @binding(0) var<uniform>             params:         Params;
+ 
+-// [min_x, max_x, min_y, max_y], 16,000 bytes per workgroup.
++// Packed [min_x | max_x << 16, min_y | max_y << 16], 8,000 bytes per workgroup.
+ // The validated drawing contract bounds polygon_count by the 1000 polygon slots.
+-var<workgroup> polygon_bounds: array<vec4<u32>, 1000>;
++var<workgroup> polygon_bounds: array<vec2<u32>, 1000>;
+ 
+ fn polygon_tile_bounds(poly: Polygon, w: u32, h: u32, num_tiles_x: u32, num_tiles_y: u32) -> vec4<u32> {
+     // Unpack vertices
+@@ -149,7 +149,8 @@
+     // Each consumed slot has exactly one writer, including partial lane batches.
+     for (var pi = local_idx; pi < poly_count; pi += 512u) {
+         let poly = working_states[offspring_id].polygons[pi];
+-        polygon_bounds[pi] = polygon_tile_bounds(poly, w, h, num_tiles_x, num_tiles_y);
++        let bounds = polygon_tile_bounds(poly, w, h, num_tiles_x, num_tiles_y);
++        polygon_bounds[pi] = vec2<u32>(bounds.x | (bounds.y << 16u), bounds.z | (bounds.w << 16u));
+     }
+     workgroupBarrier();
+ 
+@@ -161,7 +162,9 @@
+         let ty = tile_id / num_tiles_x;
+ 
+         for (var pi = 0u; pi < poly_count; pi++) {
+-            let bounds = polygon_bounds[pi];
++            let packed_bounds = polygon_bounds[pi];
++            let bounds = vec4<u32>(packed_bounds.x & 0xFFFFu, packed_bounds.x >> 16u,
++                packed_bounds.y & 0xFFFFu, packed_bounds.y >> 16u);
+             if tx >= bounds.x && tx < bounds.y && ty >= bounds.z && ty < bounds.w {
+                 let slot = raw_count;
+                 raw_count += 1u;

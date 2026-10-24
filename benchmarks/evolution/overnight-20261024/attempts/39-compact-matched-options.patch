@@ -1,0 +1,92 @@
+--- a/examples/check-gpu-raster-grid.rs
++++ b/examples/check-gpu-raster-grid.rs
+@@ -882,7 +882,15 @@
+     evidence.source(&format!("coverage-{name}"), &source)?;
+     let params_layout = r.prefix_pipeline.get_bind_group_layout(1);
+     let layout = coverage_layout(&p.device);
+-    let instrumented = compile_coverage(&p.device, &layout, &params_layout, &source);
++    let compilation_options = wgpu::PipelineCompilationOptions {
++        zero_initialize_workgroup_memory: p.device.adapter_info().backend != wgpu::Backend::Vulkan,
++        ..Default::default()
++    };
++    evidence.event(&json!({"event":"instrumented_compilation_options",
++        "wg":f.wg, "backend":format!("{:?}", p.device.adapter_info().backend),
++        "zero_initialize_workgroup_memory":compilation_options.zero_initialize_workgroup_memory,
++        "prefix_zero_initialize_workgroup_memory":wgpu::PipelineCompilationOptions::default().zero_initialize_workgroup_memory}))?;
++    let instrumented = compile_coverage(&p.device, &layout, &params_layout, &source, compilation_options);
+     let prefix_group = p.device.create_bind_group(&wgpu::BindGroupDescriptor {
+         label: Some("grid actual prefix layout"),
+         layout: &r.prefix_layout,
+@@ -914,6 +922,7 @@
+     layout: &wgpu::BindGroupLayout,
+     params: &wgpu::BindGroupLayout,
+     source: &str,
++    compilation_options: wgpu::PipelineCompilationOptions<'_>,
+ ) -> wgpu::ComputePipeline {
+     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+         label: Some("grid instrumented pipeline layout"),
+@@ -929,7 +938,7 @@
+         layout: Some(&pipeline_layout),
+         module: &shader,
+         entry_point: Some("main"),
+-        compilation_options: wgpu::PipelineCompilationOptions::default(),
++        compilation_options,
+         cache: None,
+     })
+ }
+@@ -1026,7 +1035,7 @@
+         "poll_map_timeout_seconds":120, "outer_timeout_seconds":600, "scored":false,
+         "coverage":"direct strict original tile predicate, exactly once or zero",
+         "errors":"both stride-two accumulators before selection", "retained_history":true,
+-        "instrumented_compilation_options":"wgpu::PipelineCompilationOptions::default()"}),
++        "instrumented_compilation_options":"zero_initialize_workgroup_memory = device.adapter_info().backend != Backend::Vulkan; other fields Default"}),
+     )?;
+     evidence.source("ordinary-accepted-C", ORIGINAL)?;
+     remaining(deadline)?;
+--- a/src/gpu_evolver/compact_raster.rs
++++ b/src/gpu_evolver/compact_raster.rs
+@@ -4,7 +4,7 @@
+ 
+ use sha2::{Digest, Sha256};
+ use wgpu::{
+-    BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
++    Backend, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
+     BindGroupLayoutEntry, BindingResource, BindingType, Buffer, BufferBindingType,
+     BufferDescriptor, BufferUsages, ComputePipeline, ComputePipelineDescriptor, Device,
+     ErrorFilter, ErrorScopeGuard, PipelineCache, PipelineCompilationOptions, PipelineLayout,
+@@ -406,6 +406,7 @@
+         &prefix_layout,
+         &prefix_source,
+         cache,
++        PipelineCompilationOptions::default(),
+     );
+     let raster = compile_shader(
+         device,
+@@ -413,6 +414,10 @@
+         &raster_layout,
+         &raster_source,
+         cache,
++        PipelineCompilationOptions {
++            zero_initialize_workgroup_memory: device.adapter_info().backend != Backend::Vulkan,
++            ..Default::default()
++        },
+     );
+     CompactVariant {
+         wg,
+@@ -429,6 +434,7 @@
+     layout: &PipelineLayout,
+     source: &str,
+     cache: &PipelineCache,
++    compilation_options: PipelineCompilationOptions<'_>,
+ ) -> ComputePipeline {
+     let shader = device.create_shader_module(ShaderModuleDescriptor {
+         label: Some(label),
+@@ -439,7 +445,7 @@
+         layout: Some(layout),
+         module: &shader,
+         entry_point: Some("main"),
+-        compilation_options: PipelineCompilationOptions::default(),
++        compilation_options,
+         cache: Some(cache),
+     })
+ }
