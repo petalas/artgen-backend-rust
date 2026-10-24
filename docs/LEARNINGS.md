@@ -33,8 +33,8 @@ Project-specific gotchas and hard-won knowledge. Search here when you hit unexpe
 ### A smaller decoded raster cache can lose throughput
 
 **Context**: Replacing AE1's three shared `vec2<f32>` vertex fields with six scalar fields reduced the inferred polygon stride from 48 to 44 bytes while retaining packed color and arithmetic.
-**Gotcha**: All fifteen paired throughput ratios were below one on Vulkan/Dozen. The aggregate was 0.910216, with interval [0.907813, 0.912492], despite passing the training numerical gates. Sampled raster intervals increased; the compiled lowering, bank conflicts and occupancy were not measured.
-**Fix**: Retain AE1's 48-byte record. Treat source allocation savings as a hypothesis, then verify completed-engine throughput and exact state/error associations. Do not infer performance from struct size or retime this rejected candidate. See the [scalar-layout record](../benchmarks/evolution/continuation-20261024/18-scalar-geometry-cache.md).
+**Gotcha**: All fifteen paired throughput ratios were below one on Vulkan/Dozen. The aggregate was 0.910216, with interval [0.907813, 0.912492], despite passing the training numerical gates. A later reference-only compiler capture shows that Mesa splits AE1 into field arrays with 11,264 bytes of declared polygon elements. Its source-level 48-byte array-record stride does not survive at that IR level. Hardware allocation, bank conflicts and the slowdown's cause remain unmeasured.
+**Fix**: Retain AE1's source declaration. Inspect emitted layout before assuming source padding consumes shared storage, then verify completed-engine throughput and exact state/error associations. Do not retime the rejected candidate. See the [scalar-layout record](../benchmarks/evolution/continuation-20261024/18-scalar-geometry-cache.md) and [compiled-reference evidence](../benchmarks/evolution/continuation-20261024/20-compiled-shader-observation.md).
 
 ### Frozen floating-point metadata needs JSON roundtrip parsing
 

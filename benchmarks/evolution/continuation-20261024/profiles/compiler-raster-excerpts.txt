@@ -1,0 +1,132 @@
+Compiler observation only. Not final NVIDIA ISA or dynamic cost.
+Source log SHA256 7694fc1ad00b813a7f628f0cf90e6af2078ccd09c877b586fd35bb69a286c1e3
+
+Original stderr.log lines 55616-55650, inclusive
+shader: MESA_SHADER_COMPUTE
+source_blake3: {0x3ae92ca2, 0xccf5110d, 0x5f3a14b1, 0x54c239bf, 0xdd7e6aeb, 0xa7d4b13f, 0x00958fa7, 0xf0e1548c}
+workgroup_size: 256, 1, 1
+num_textures: 1
+num_ubos: 1
+num_ssbos: 5
+system_values_read: 0x00000000'00000000'00088800'00000003
+max_subgroup_size: 32
+min_subgroup_size: 32
+uses_wide_subgroup_intrinsics: true
+uses_resource_info_query: true
+bit_sizes_float: 0x20
+bit_sizes_int: 0x21
+writes_memory: true
+decl_var uniform INTERP_MODE_NONE restrict texture2D #0 (~0, 0, 1)
+decl_var ubo INTERP_MODE_NONE none block #1 (~0, 0, 0)
+decl_var ubo INTERP_MODE_NONE none runtime_data#2 runtime_data (0, 0, 0)
+decl_var ssbo INTERP_MODE_NONE restrict readonly block#4 #3 (~0, 0, 0)
+decl_var ssbo INTERP_MODE_NONE restrict block#6 #5 (~0, 0, 2)
+decl_var ssbo INTERP_MODE_NONE restrict readonly block#6 #7 (~0, 0, 3)
+decl_var ssbo INTERP_MODE_NONE restrict readonly block#6 #8 (~0, 0, 4)
+decl_var ssbo INTERP_MODE_NONE restrict readonly block#6 #9 (~0, 0, 6)
+decl_var shared INTERP_MODE_NONE none uint[128] #10
+decl_var shared INTERP_MODE_NONE none uint[128] #11
+decl_var shared INTERP_MODE_NONE none uint #12
+decl_var shared INTERP_MODE_NONE none float[512] {unnamed struct}_field0
+decl_var shared INTERP_MODE_NONE none float[512] {unnamed struct}_field1
+decl_var shared INTERP_MODE_NONE none float[512] {unnamed struct}_field2
+decl_var shared INTERP_MODE_NONE none float[256] {unnamed struct}_field3
+decl_var shared INTERP_MODE_NONE none float[256] {unnamed struct}_field4
+decl_var shared INTERP_MODE_NONE none float[256] {unnamed struct}_field5
+decl_var shared INTERP_MODE_NONE none float[256] {unnamed struct}_field6
+decl_var shared INTERP_MODE_NONE none uint[256] {unnamed struct}_field7
+decl_function main () (entrypoint)
+
+
+Original stderr.log lines 56135-56172, inclusive
+                    32    %398 = deref_array &(*%390)[%386] (shared float)  // &{unnamed struct}_field4[%386]
+                    32    %399 = deref_array &(*%391)[%386] (shared float)  // &{unnamed struct}_field3[%386]
+                    32    %400 = load_const (0x00000001)
+                    32    %401 = ishl %386, %400 (0x1)
+                    32    %402 = deref_array &(*%394)[%401] (shared float)  // &{unnamed struct}_field0[%401]
+                    32    %403 = @load_deref (%402) (access=none)
+                    32    %404 = load_const (0x00000001)
+                    32    %405 = iadd %401, %404 (0x1)
+                    32    %406 = deref_array &(*%394)[%405] (shared float)  // &{unnamed struct}_field0[%405]
+                    32    %407 = @load_deref (%406) (access=none)
+                    32    %408 = deref_array &(*%393)[%401] (shared float)  // &{unnamed struct}_field1[%401]
+                    32    %409 = @load_deref (%408) (access=none)
+                    32    %410 = deref_array &(*%393)[%405] (shared float)  // &{unnamed struct}_field1[%405]
+                    32    %411 = @load_deref (%410) (access=none)
+                    32    %412 = deref_array &(*%392)[%401] (shared float)  // &{unnamed struct}_field2[%401]
+                    32    %413 = @load_deref (%412) (access=none)
+                    32    %414 = deref_array &(*%392)[%405] (shared float)  // &{unnamed struct}_field2[%405]
+                    32    %415 = @load_deref (%414) (access=none)
+                    32    %416 = @load_deref (%399) (access=none)
+                    32    %417 = @load_deref (%398) (access=none)
+                    32    %418 = @load_deref (%397) (access=none)
+                    32    %419 = @load_deref (%396) (access=none)
+                    32    %420 = @load_deref (%395) (access=none)
+                    1     %421 = flt! %295, %416
+                    1     %422 = flt! %417, %295
+                    1     %423 = ior %421, %422
+                    1     %424 = flt! %300, %418
+                    1     %425 = ior %423, %424
+                    1     %426 = flt! %419, %300
+                    1     %427 = ior %425, %426
+                    1     %428 = inot %427
+                                 // succs: b25 b29
+                    if %428 {
+                        block b25:   // preds: b24
+                        32    %429 = fsub %409, %403
+                        32    %430 = fsub %300, %407
+                        32    %431 = fmul %429, %430
+                        32    %432 = fsub %411, %407
+
+Original stderr.log lines 56590-56602, inclusive
+  address_space(3) align int32[128] val_id:0
+  address_space(3) align int32[128] val_id:1
+  address_space(3) align int32 val_id:2
+  address_space(3) align float32[512] val_id:3
+  address_space(3) align float32[512] val_id:4
+  address_space(3) align float32[512] val_id:5
+  address_space(3) align float32[256] val_id:6
+  address_space(3) align float32[256] val_id:7
+  address_space(3) align float32[256] val_id:8
+  address_space(3) align float32[256] val_id:9
+  address_space(3) align int32[256] val_id:10
+Functions:
+  main (void)()
+
+Original stderr.log lines 57029-57064, inclusive
+  %393int32 = dx.op.binary.i32(int32  %74int32, int32 %386int32, int32  %57int32)
+  %394int32 = shl %393int32,  %31int32
+  %395float32* = getelementptr inbounds float32[512],   %3float32[512]*,  %30int32, %394int32
+  %396float32 = load float32, %395float32*, 3
+  %397int32 = add %394int32,  %31int32
+  %398float32* = getelementptr inbounds float32[512],   %3float32[512]*,  %30int32, %397int32
+  %399float32 = load float32, %398float32*, 3
+  %400float32* = getelementptr inbounds float32[512],   %4float32[512]*,  %30int32, %394int32
+  %401float32 = load float32, %400float32*, 3
+  %402float32* = getelementptr inbounds float32[512],   %4float32[512]*,  %30int32, %397int32
+  %403float32 = load float32, %402float32*, 3
+  %404float32* = getelementptr inbounds float32[512],   %5float32[512]*,  %30int32, %394int32
+  %405float32 = load float32, %404float32*, 3
+  %406float32* = getelementptr inbounds float32[512],   %5float32[512]*,  %30int32, %397int32
+  %407float32 = load float32, %406float32*, 3
+  %408float32* = getelementptr inbounds float32[256],   %6float32[256]*,  %30int32, %393int32
+  %409float32 = load float32, %408float32*, 3
+  %410float32* = getelementptr inbounds float32[256],   %7float32[256]*,  %30int32, %393int32
+  %411float32 = load float32, %410float32*, 3
+  %412float32* = getelementptr inbounds float32[256],   %8float32[256]*,  %30int32, %393int32
+  %413float32 = load float32, %412float32*, 3
+  %414float32* = getelementptr inbounds float32[256],   %9float32[256]*,  %30int32, %393int32
+  %415float32 = load float32, %414float32*, 3
+  %416int32* = getelementptr inbounds int32[256],  %10int32[256]*,  %30int32, %393int32
+  %417int32 = load int32, %416int32*, 3
+  %418int1 = ord-fLT %323float32, %409float32
+  %419int1 = ord-fLT %411float32, %323float32
+  %420int1 = or %418int1, %419int1
+  %421int1 = ord-fLT %327float32, %413float32
+  %422int1 = or %420int1, %421int1
+  %423int1 = ord-fLT %415float32, %327float32
+  %424int1 = or %422int1, %423int1
+  %425int1 = xor %424int1, %102int1
+   branch %425int1 25 29
+  %426float32 = sub %401float32, %396float32
+  %427float32 = sub %327float32, %399float32

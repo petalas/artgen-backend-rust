@@ -1,0 +1,332 @@
+{
+  "protocol": "engine-compiler-observation-20261024-v1",
+  "status": "OBSERVED_COMPILER_STRUCTURE",
+  "mode": "compiler_observation",
+  "score_eligible": false,
+  "adoption": false,
+  "production_runtime_changed": false,
+  "evolution_parameters_changed": false,
+  "data_validity": "PASS",
+  "validation": {
+    "artifact_file_count": 32,
+    "blob_count": 24,
+    "captured_bytes": 26658154,
+    "checks_passed": 339,
+    "compiler_stage_association": "separate analyst118; no order-only mapping",
+    "max_f32_fitness_abs_difference": 0.0,
+    "measured_evaluations": 1048576,
+    "mode": "compiler_observation",
+    "parents_checked": 8,
+    "scalar_rerenders": 0,
+    "score_eligible": false,
+    "status": "DATA_VALIDITY_PASS",
+    "timing_comparison": false,
+    "total_logical_evaluations_lower_bound": 1081344,
+    "warmup_evaluations_source_accounted": 32768
+  },
+  "capture": {
+    "native_workload_runs": 1,
+    "retries": 0,
+    "rust_builds": 0,
+    "process": {
+      "artifact_file_byte_limit": 67108864,
+      "command": [
+        "/usr/bin/env",
+        "DXIL_DEBUG=verbose,dump_module,dump_blob",
+        "MESA_SHADER_CACHE_DIR=/home/nick/git/artgen-backend-rust/.cache/evolution-observation-20261024/mesa-cache",
+        "/home/nick/git/artgen-backend-rust/.cache/evolution-continuation-20261024/build-v12/evolution-bench",
+        "trial",
+        "--manifest",
+        "/home/nick/git/artgen-backend-rust/.cache/evolution-bench/baseline-20261023T172054.919294Z-95742/fixtures/manifest.json",
+        "--case",
+        "mona",
+        "--seed",
+        "7",
+        "--batches",
+        "64",
+        "--warmup",
+        "2",
+        "--diagnostic",
+        "false",
+        "--profile-mode",
+        "stages",
+        "--output",
+        "/home/nick/git/artgen-backend-rust/.cache/evolution-observation-20261024/worker/output"
+      ],
+      "cwd": "/home/nick/git/artgen-backend-rust/.cache/evolution-observation-20261024/worker/cwd",
+      "process_wall_seconds": 22.513104738995025,
+      "returncode": 0,
+      "started_utc": "2026-10-24T16:41:52.179370+00:00",
+      "status": "completed"
+    },
+    "controller_wall_seconds": 22.626705155998934,
+    "files": 32,
+    "blobs": 24,
+    "bytes": 26658154
+  },
+  "compiler_analysis": {
+    "status": "COMPILER_EVIDENCE_COMPLETE_PARENT_VALIDATION_SEPARATE",
+    "score_eligible": false,
+    "native_workload_runs": 0,
+    "new_hypothesis": null,
+    "conclusion": "Eager shared vertex/color loads survive Mesa IR; source record padding does not. No supported optimization yet.",
+    "identity": {
+      "source_head_supplied": "fefc1fa, docs-only over accepted runtime",
+      "spec_revision": "7fda848",
+      "binary_sha256_from_spec": "0cdf0caa4cb361f997fd42902e042ab3463a40049727047eecd4c0ddf74be732",
+      "numerical_replay": "parent-owned; not repeated"
+    },
+    "mapping": {
+      "basis": "Unique workgroup/resource-space/binding/texture/UAV fingerprints, not filename or compilation order",
+      "confidence": "high for six application pairs; static compilation does not establish dispatch use",
+      "application_sections": [
+        {
+          "section": 18,
+          "stage": "mutate",
+          "blob": "shader_cs_18.blob",
+          "line_range": [
+            10815,
+            55615
+          ],
+          "byte_range_half_open": [
+            340543,
+            3215305
+          ]
+        },
+        {
+          "section": 19,
+          "stage": "rasterize_error",
+          "blob": "shader_cs_19.blob",
+          "line_range": [
+            55616,
+            57902
+          ],
+          "byte_range_half_open": [
+            3215305,
+            3315318
+          ]
+        },
+        {
+          "section": 20,
+          "stage": "bin_polygons",
+          "blob": "shader_cs_20.blob",
+          "line_range": [
+            57903,
+            87174
+          ],
+          "byte_range_half_open": [
+            3315318,
+            5049330
+          ]
+        },
+        {
+          "section": 21,
+          "stage": "select",
+          "blob": "shader_cs_21.blob",
+          "line_range": [
+            87175,
+            90248
+          ],
+          "byte_range_half_open": [
+            5049330,
+            5198971
+          ]
+        },
+        {
+          "section": 22,
+          "stage": "init_framebuffers",
+          "blob": "shader_cs_22.blob",
+          "line_range": [
+            90249,
+            92351
+          ],
+          "byte_range_half_open": [
+            5198971,
+            5288248
+          ]
+        },
+        {
+          "section": 23,
+          "stage": "update_framebuffers",
+          "blob": "shader_cs_23.blob",
+          "line_range": [
+            92352,
+            94263
+          ],
+          "byte_range_half_open": [
+            5288248,
+            5377711
+          ]
+        }
+      ],
+      "other_sections": "0..15 explicitly named Dozen indirect-draw helpers, exact blob variants ambiguous; 16/17 unnamed auxiliary programs, exact purpose unproven"
+    },
+    "raster": {
+      "configuration": {
+        "logical_tile": [
+          32,
+          16
+        ],
+        "physical_workgroup": [
+          256,
+          1,
+          1
+        ],
+        "confidence": "high",
+        "log_lines": [
+          55730,
+          55740,
+          55985,
+          56005
+        ],
+        "blob_threads_bytes": [
+          148,
+          160
+        ],
+        "blob_psv_resources_bytes": [
+          172,
+          364
+        ],
+        "blob_dxil_chunk_bytes": [
+          380,
+          6724
+        ]
+      },
+      "cache_layout": {
+        "representation": "Three float[512] vertex arrays, four float[256] AABB arrays, one uint[256] color array",
+        "cache_declared_element_bytes": 11264,
+        "hardware_allocation_bytes": null,
+        "aos_48_byte_stride_survives": false,
+        "nir_lines": [
+          55641,
+          55648
+        ],
+        "dxil_globals_lines": [
+          56593,
+          56600
+        ],
+        "dxil_vertex_index": "2*min(i,255) and +1",
+        "dxil_bound_color_index": "min(i,255)"
+      },
+      "eager_loads": {
+        "confidence": "high at Mesa NIR/DXIL module level",
+        "vertex_scalar_load_sites": 6,
+        "aabb_scalar_load_sites": 4,
+        "packed_color_load_sites": 1,
+        "count_kind": "static sites in polygon loop body, not dynamic executed operations",
+        "nir_lines": [
+          56140,
+          56157
+        ],
+        "nir_bytes_half_open": [
+          3242679,
+          3244067
+        ],
+        "dxil_lines": [
+          57031,
+          57062
+        ],
+        "aabb_branch_nir_line": 56167,
+        "aabb_branch_dxil_line": 57062
+      },
+      "guards_and_loops": {
+        "tile_skip_after_barrier_lines": [
+          55759,
+          55765
+        ],
+        "valid_pixel_guard_lines": [
+          56007,
+          56014
+        ],
+        "tile_polygon_cap": 256,
+        "loader_step": 256,
+        "pixel_ordinal_bound": 512,
+        "pixel_ordinal_step": 256,
+        "polygon_loop_step": 1,
+        "unrolled_pixel_or_polygon_loop": false,
+        "extra_notes": "Index clamps and two-word decrement/termination guards remain visible; their dynamic cost is unknown."
+      },
+      "color_conversion": {
+        "coverage_guard_nir_line": 56208,
+        "nir_lines": [
+          56211,
+          56240
+        ],
+        "dxil_lines": [
+          57095,
+          57111
+        ],
+        "cooperative_color_predecode_observed": false,
+        "four_normalizing_float_divisions_and_three_rgb_rescalings_present": true,
+        "dump_caveat": "DXIL tree prints sdiv with float32 operands; NIR explicitly prints fdiv. No integer divide or final-ISA inference."
+      }
+    },
+    "limits": [
+      "No timing/rate comparison or rescore",
+      "No dynamic instruction counts, hardware cost, utilization, bank conflicts, occupancy, spills or final NVIDIA ISA derived",
+      "Compilation presence alone does not prove runtime dispatch or active specialization",
+      "No shader/prototype/source/feature/parameter/pass edits; prior rejected routes remain closed",
+      "Selection strict-< and bit-reversed ties untouched",
+      "Mesa packaging patch parity remains unverified per backend-116"
+    ],
+    "artifacts": [
+      "section-index.json",
+      "blob-inventory.json",
+      "input-hashes.json",
+      "raster-nir.txt",
+      "raster-dxil.txt",
+      "section-headers.txt",
+      "source-excerpts.txt",
+      "index.py"
+    ]
+  },
+  "parent_container_checks": {
+    "analysis_inputs_unchanged": 42,
+    "valid_dxbc_with_dxil": 24,
+    "raster_num_threads": [
+      256,
+      1,
+      1
+    ],
+    "cache_element_bytes": 11264,
+    "actual_hardware_allocation": "unknown"
+  },
+  "actual_gpu": {
+    "name": "Microsoft Direct3D12 (NVIDIA GeForce RTX 5090)",
+    "vendor": 4318,
+    "device": 11141,
+    "device_type": "DiscreteGpu",
+    "backend": "Vulkan",
+    "driver": "Dozen",
+    "driver_info": "Mesa 25.3.6 - kisak-mesa PPA",
+    "timestamp_period_ns": 1.0,
+    "allocated_chains": 1024,
+    "offspring_capacity": 8371,
+    "max_storage_buffer_binding_size": 134217728,
+    "max_buffer_size": 134217728
+  },
+  "timing_comparison": null,
+  "artifact_sha256": {
+    ".cache/evolution-observation-20261024/spec.json": "4207a4fba33cc781ea01218386c8a6798aa7fc1d0394416d0498576deec35b11",
+    ".cache/evolution-observation-20261024/run-observation.py": "dc1631a10640342adf5804c35aa438e8eb9f206c5a7e4de27e3852ec0bf30b82",
+    ".cache/evolution-observation-20261024/capture-result.json": "d7383ab5df39ded58b9c8a1e0fc51872747cbff723bb5c4bba1a66fa4515ad55",
+    ".cache/evolution-observation-20261024/worker/output/result.json": "87f50e6a08ef439543de7b5539bcaa76dfd6f0b8b5d2e53681e92a5f879aa66c",
+    ".cache/evolution-observation-20261024/worker/evidence/stderr.log": "7694fc1ad00b813a7f628f0cf90e6af2078ccd09c877b586fd35bb69a286c1e3",
+    ".cache/evolution-observation-20261024/data-validation.json": "2a674d62afb45f6679276bb117dd2c99a14d2b6e5910975b9f7939ff184d1f5b",
+    ".cache/evolution-observation-20261024/validate-data.py": "a7d93212a70bb0f41ce6a5f4042713165fcde01cc56c7ff7619cba412c6cfbdb",
+    ".cache/evolution-observation-20261024/compiler-analysis-118/findings.json": "7e829ace6374d7e573fb4c02b6ff6b381e357e5e0e5bcac0eb76e3110a3c15c1",
+    ".cache/evolution-observation-20261024/compiler-analysis-118/report.md": "6d38f72d3ec47784953b52076f2a0747a4bb76b16c8be45a697eaddf97e91190",
+    ".cache/evolution-observation-20261024/compiler-analysis-118/input-hashes.json": "124ba159323a51c50bc60cb8d0f79d67be3b9efb7b3531dfa144cf84017fa2b2",
+    ".cache/evolution-observation-20261024/compiler-analysis-118/section-index.json": "f84e2a56598e1a50292f50beae79935df3c3089c10ea6c85c724062ac0c125ce",
+    ".cache/evolution-observation-20261024/compiler-analysis-118/blob-inventory.json": "90624a8c18520ca34df83194278ae588097dad8c53d333c8b3f7ea74b4a67a44",
+    "benchmarks/evolution/continuation-20261024/profiles/compiler-raster-excerpts.txt": "c43fab9dd142765df5033f3ffb7c4cb7964575eb5f9f1e3e95e842e085f3b369"
+  },
+  "limits": [
+    "One diagnostic reference run, no performance comparison or adoption claim.",
+    "Raw ordinary TrialRecord may contain a rate; the bundle excludes all timing/rates from scoring. Raw files remain unchanged.",
+    "NIR/DXIL module output is compiler evidence, not final NVIDIA ISA, dynamic instructions, occupancy, bandwidth or utilization.",
+    "Compilation cache hits or unavailable diagnostics are retained and stop this route without retry.",
+    "No candidate source, parameter, shader, pass, timestamp feature or ordinary executable changes.",
+    "Selection/update midpoint feature capability remains unqueried and observation build is deferred."
+  ]
+}

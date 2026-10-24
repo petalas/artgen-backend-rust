@@ -1,71 +1,106 @@
-# Observe compiled reference shaders before another microexperiment
+# The compiled reference cache differs from the source struct
 
-Status is FROZEN_UNRUN. No optimization is proposed or adopted here. Recent
-source-level cache and bbox experiments remain rejected. This investigation
-asks what the installed compiler actually emits for the accepted engine.
+The accepted AE1 raster cache is split into field arrays in the captured Mesa
+NIR and DXIL module. Its source-level 48-byte record stride does not survive at
+this IR level. This directly challenges the padding-saving premise behind the
+closed scalar44 experiment. It does not measure hardware allocation or explain
+that experiment's slowdown. No new optimization is proposed or adopted.
 
-A bounded source/tool audit finds Nsight Systems and Nsight Compute installed,
-but does not establish hardware-counter support for Vulkan translated through
-Dozen. The old 80–93 microsecond selection-plus-framebuffer samples also cannot
-justify a selection rewrite. The current device does not request the feature
-required for a same-pass midpoint timestamp. That separate observation is
-conditional on runtime adapter support and would need a private device/build;
-it is deferred here. No capability probe was executed.
+The same capture confirms eager shared loads of six vertex floats, four bounds
+and packed color before the polygon AABB branch. Edge arithmetic follows that
+branch; color normalization remains after triangle coverage. These are static
+compiler facts, not dynamic cost or a reason to reopen the rejected deferred-load,
+RGBA or bbox experiments. No supported new performance hypothesis emerged.
 
-## Source-supported compiler route
+## Actual compiler evidence
 
-The installed Vulkan driver contains the `DXIL_DEBUG`, `verbose`, `dump_module`,
-`dump_blob` and `shader_%s_%d.blob` strings. Its binary hash is frozen. The
-[official Mesa 25.3.6 archive](https://archive.mesa3d.org/mesa-25.3.6.tar.xz)
-implements those flags in `src/microsoft/compiler/nir_to_dxil.c`: verbose prints
-final pre-emission NIR, dump_module prints Mesa's DXIL module tree, and dump_blob
-writes shader containers. This upstream version matches the installed package;
-Kisak patch parity remains unverified. Runtime output must confirm the route.
-`DZN_DEBUG=dxil` is guarded by `_WIN32` in the matching source and is unsuitable
-for Linux disassembly.
+The [bounded raw excerpts](profiles/compiler-raster-excerpts.txt) retain exact log
+lines and the source-log SHA256. NIR lines 55641–55648 and DXIL globals
+56593–56600 declare three float[512] vertex arrays, four float[256] bounds arrays
+and one uint[256] color array. Their declared element storage totals 11,264 bytes.
+Vertices index 2*i and 2*i+1; bounds and color index i. There is no retained array
+of 48-byte records. Final hardware alignment, allocation and bank behavior remain
+unknown. The scalar44 result remains REJECT with its original data unchanged.
 
-The [frozen protocol](profiles/compiler-observation-spec.json) requests one
-reference-only Mona worker, seed 7, 64 measured batches, two warmups, diagnostic
-false and ordinary Stages timestamps. It uses the unchanged accepted v12 release
-executable, not a rejected prototype or instrumented build. All 83 archived
-source entries match root and archive; all six full production shader strings
-are verified inside the executable. No Rust build, shader, precision, dispatch,
-pass, parameter, timestamp feature or ordinary executable change is needed.
+NIR lines 56140–56157 and DXIL lines 57031–57062 place all eleven shared-load sites
+before the AABB branch. No cross-pixel hoisting or loop unrolling appears in this
+output. The loader steps by 256, the pixel ordinal bound is 512 with step 256,
+and polygon traversal steps by one with the existing 256 clamp. Per-hit color
+byte extraction and floating normalization/rescaling remain represented. The
+DXIL tree's printed division mnemonic alone is not a final hardware instruction.
 
-The [one-shot runner](attempts/22-compiler-observation-runner.patch) sets only
-`DXIL_DEBUG=verbose,dump_module,dump_blob` and a fresh private
-`MESA_SHADER_CACHE_DIR`. It starts from an empty working directory, excluding
-application pipeline-cache hits and the ordinary Mesa disk cache. Native/global
-GPU caches and background isolation remain unverified.
+The analyst associates six application sections with blobs through independent
+workgroup/resource/texture/UAV properties, rather than their file order:
 
-There is one native workload, no retries, a 600-second package deadline and a
-300-second child limit with 30 seconds reserved for cleanup. The pinned supervisor
-applies a 64 MiB per-file process limit and kills/reaps its owned child on timeout
-or cancellation. Post-run bounds are 512 files, 256 MiB in worker/cache outputs,
-and at most 32 blobs. Missing diagnostics, process failure, replay failure or
-exhaustion is retained and stops this route. No candidate or paired timing runs.
+| Blob | Application stage | Physical workgroup |
+| --- | --- | ---: |
+| shader_cs_18.blob | mutation | 64 |
+| shader_cs_19.blob | raster/error | 256 |
+| shader_cs_20.blob | binning | 512 |
+| shader_cs_21.blob | selection | 64 |
+| shader_cs_22.blob | framebuffer initialization | 512 |
+| shader_cs_23.blob | framebuffer update | 512 |
 
-The ordinary frozen producer can still emit a rate in its raw TrialRecord.
-That raw record remains unchanged. This bundle is `compiler_observation` with
-`score_eligible:false`; every elapsed time and rate is excluded from performance
-scoring and comparisons. Logging/compiler diagnostics are uncalibrated overhead.
+The raster fingerprint also establishes logical 32 by 16 through shifts/masks and
+its pixel-loop bound. Six application associations have high static confidence;
+compilation presence alone is not a runtime dispatch trace. Sections 0–15 name
+Dozen indirect-draw helpers, with some property-equivalent blob associations
+ambiguous. Sections 16/17 are auxiliary programs of unproven exact purpose.
+All 24 blobs are structurally valid DXBC containers with DXIL chunks. The parent
+checks the raster's 256,1,1 thread dimensions directly in its blob. All 42 bounded
+analysis inputs retain their hashes.
 
-## Required evidence and limits
+## One validated, unscored capture
 
-Before interpreting the compiler output, verify complete counters, 64 timestamp
-samples, exact parameters/device, initial/final seven-field canonical replay,
-cached errors versus actual framebuffer RGB-byte-L1 and packed fitness under the
-existing 2e-5 policy. Expected measured work is 1,048,576 evaluations. Two warmups
-add 32,768 source-accounted evaluations; full-fitness/reset work stays separate.
+The [protocol](profiles/compiler-observation-spec.json) and
+[runner](attempts/22-compiler-observation-runner.patch) were frozen in fefc1fa
+before execution. One unchanged v12 reference executable runs Mona, seed 7,
+64 batches, two warmups, diagnostic false and ordinary Stages timestamps. It
+completes 1,048,576 measured evaluations, 4096 iterations, 64 batches and 64
+samples with zero recorded errors. Source-accounted warmups add
+32,768 evaluations. Full-fitness/reset GPU work remains separate.
 
-Retain stdout/stderr, all blobs, pipeline/Mesa caches, sizes and hashes. Associate
-compiler sections with stages through actual thread-group/resource properties;
-container order alone is insufficient. NIR and DXIL are intermediate compiler
-evidence, not final NVIDIA ISA, dynamic instruction counts, occupancy, register
-spills, bandwidth saturation or utilization. One reference capture establishes
-neither repeatability nor an engine speedup.
+The parent offline audit passes all 339 predicates. Both saved canonical states
+match accepted reference in all seven fields. All eight parents match exact
+cached-versus-framebuffer RGB-byte-L1; maximum independent f32 fitness difference
+is zero under the unchanged 2e-5 policy. Previously independently audited numerical
+functions are reused unchanged. No scalar rerender or fresh independent numerical
+audit is claimed. All 83 archived source entries still match root/archive, three
+ordinary binaries and two helpers retain their identities, and six complete shader
+strings are verified inside the immutable release executable.
 
-Prove It Works requires actual output and replay. Attack the Premise changes the
-next step from another guessed edit to observation. Explain the Number keeps
-compiler structure separate from a hardware limiter. The capability audits and
-capture artifacts are under `.cache/evolution-observation-20261024/`.
+The run captures 24 blobs and a 5,377,711-byte compiler log, among 32 files totaling
+26,658,154 bytes. It returns zero; controller duration is 22.627 seconds, within
+the declared bounds. These are capture/resource facts, not engine performance.
+There is no retry, second worker, candidate source, Rust build, feature change,
+new pass or production modification.
+
+The raw frozen TrialRecord still contains its ordinary rate. It remains unchanged;
+the surrounding bundle is compiler_observation with score_eligible:false. All
+elapsed/rate fields are excluded from performance scoring and comparisons.
+Compiler logging can perturb execution. This single observation establishes no
+speedup or repeatability and supplies no final NVIDIA ISA, dynamic instruction
+counts, utilization, occupancy, register spills, bandwidth limit or hardware cause.
+
+## Repeatable diagnostic route
+
+The installed driver accepts `DXIL_DEBUG=verbose,dump_module,dump_blob` in this
+run. Fresh private working and Mesa-cache directories prevent the known application
+cache from suppressing compilation. Global/native GPU caches remain unverified.
+Matching flags are implemented by the
+[official Mesa 25.3.6 source](https://archive.mesa3d.org/mesa-25.3.6.tar.xz) in
+src/microsoft/compiler/nir_to_dxil.c. Kisak patch parity remains unverified; actual
+captured output establishes this installed route. DZN_DEBUG=dxil disassembly is
+behind _WIN32 in that upstream source and is unsuitable on Linux.
+
+Nsight tools are installed, but hardware-counter support for the translated
+Dozen workload is not verified. Selection and framebuffer costs remain combined
+in the ordinary timer. A same-pass midpoint requires an additional enabled feature;
+its adapter capability was not queried and no private observer was built here.
+The [machine record](profiles/compiler-observation-result.json) and
+`.cache/evolution-observation-20261024/` retain source/tool audits, complete raw
+capture, mappings, excerpts, containers, correctness evidence and hashes.
+
+Attack the Premise replaced another layout guess with emitted-code evidence.
+Prove It Works required actual dumps, container checks and replay. Explain the
+Number keeps compiler structure separate from a measured hardware limiter.
