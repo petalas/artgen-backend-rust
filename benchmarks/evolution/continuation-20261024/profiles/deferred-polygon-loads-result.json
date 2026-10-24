@@ -1,0 +1,541 @@
+{
+  "adoption": false,
+  "controller_wall_seconds": 265.02625585200076,
+  "deadline": 30996.867058154,
+  "errors": [],
+  "gate": {
+    "pass": false,
+    "statistics": {
+      "aggregate": {
+        "interval95": [
+          1.00073828225412,
+          1.006734175066504
+        ],
+        "ratio": 1.0037759369034747
+      },
+      "bootstrap_seed": 20261024,
+      "cases": {
+        "darwin": {
+          "geomean_ratio": 1.0045297208756914,
+          "interval95": [
+            1.0010145123541536,
+            1.0085462603862287
+          ],
+          "interval_statistic": "exp(mean(log(paired ratio)))",
+          "paired_ratios": {
+            "cv": 0.0043141693427251274,
+            "max": 1.0118243151942758,
+            "mean": 1.0045390543131085,
+            "median": 1.0039295066216614,
+            "min": 0.999592537886353,
+            "n": 5,
+            "range": 0.012231777307922798,
+            "raw": [
+              1.000982119184971,
+              1.0039295066216614,
+              1.0063667926782809,
+              1.0118243151942758,
+              0.999592537886353
+            ]
+          }
+        },
+        "ff": {
+          "geomean_ratio": 1.0036396925649098,
+          "interval95": [
+            0.9960515546176733,
+            1.0112856386017373
+          ],
+          "interval_statistic": "exp(mean(log(paired ratio)))",
+          "paired_ratios": {
+            "cv": 0.008984007539837517,
+            "max": 1.014560766333516,
+            "mean": 1.003680234662406,
+            "median": 1.0019609464454702,
+            "min": 0.9901997314927607,
+            "n": 5,
+            "range": 0.024361034840755358,
+            "raw": [
+              0.9901997314927607,
+              1.014560766333516,
+              1.0019609464454702,
+              1.0127007660392982,
+              0.9989789630009857
+            ]
+          }
+        },
+        "mona": {
+          "geomean_ratio": 1.0031588791435866,
+          "interval95": [
+            1.0012317320657254,
+            1.0052908458065453
+          ],
+          "interval_statistic": "exp(mean(log(paired ratio)))",
+          "paired_ratios": {
+            "cv": 0.0024068397842688734,
+            "max": 1.0071871159930619,
+            "mean": 1.0031617827898411,
+            "median": 1.0033683815238783,
+            "min": 1.0000047274938775,
+            "n": 5,
+            "range": 0.0071823884991844,
+            "raw": [
+              1.0000047274938775,
+              1.0015387183761135,
+              1.0037099705622743,
+              1.0071871159930619,
+              1.0033683815238783
+            ]
+          }
+        }
+      },
+      "resamples": 10000,
+      "uncertainty": "conditional on same-seed timing repeats; exploratory, not independent search seeds"
+    }
+  },
+  "monotonic_start": 29196.867058154,
+  "process": {
+    "artifact_file_byte_limit": 67108864,
+    "command": [
+      "/home/nick/git/artgen-backend-rust/.cache/evolution-qualification-prepared-20261024/build-100/build/engine-qualification-lab",
+      "--manifest",
+      "/home/nick/git/artgen-backend-rust/.cache/evolution-bench/baseline-20261023T172054.919294Z-95742/fixtures/manifest.json",
+      "--reference-shader",
+      "/home/nick/git/artgen-backend-rust/.cache/evolution-profiling-20261024/build-finalize-v1/source/src/shaders/rasterize_error.wgsl",
+      "--variant",
+      "deferred=/home/nick/git/artgen-backend-rust/.cache/evolution-next-20261024/selection-107/candidate.wgsl",
+      "--output",
+      "/home/nick/git/artgen-backend-rust/.cache/evolution-next-20261024/deferred-loads/train/output",
+      "--pairs",
+      "5",
+      "--batches",
+      "64",
+      "--seed",
+      "7",
+      "--case",
+      "all",
+      "--shader-stage",
+      "raster",
+      "--diagnostics",
+      "true",
+      "--finalize-overlap",
+      "false"
+    ],
+    "cwd": "/home/nick/git/artgen-backend-rust/.cache/evolution-next-20261024/deferred-loads/train/cwd",
+    "process_wall_seconds": 262.6783127919989,
+    "returncode": 0,
+    "started_utc": "2026-10-24T14:58:05.911341+00:00",
+    "status": "completed"
+  },
+  "protocol": "deferred-raster-loads-20261024-v1",
+  "reserved_started": false,
+  "spec_sha256": "0d958afb240e2cc68acc884c0c61b95fc077865413513e1c190f7080ad4a5e70",
+  "started_utc": "2026-10-24T14:58:05.815357+00:00",
+  "status": "REJECT",
+  "validated": {
+    "ratios": {
+      "darwin": [
+        1.000982119184971,
+        1.0039295066216614,
+        1.0063667926782809,
+        1.0118243151942758,
+        0.999592537886353
+      ],
+      "ff": [
+        0.9901997314927607,
+        1.014560766333516,
+        1.0019609464454702,
+        1.0127007660392982,
+        0.9989789630009857
+      ],
+      "mona": [
+        1.0000047274938775,
+        1.0015387183761135,
+        1.0037099705622743,
+        1.0071871159930619,
+        1.0033683815238783
+      ]
+    },
+    "startup": {
+      "drain": "already included in scored elapsed; never added again",
+      "per_arm": {
+        "diagnostic/darwin/deferred": {
+          "preparation_seconds": {
+            "count": 1,
+            "first": 0.899915062,
+            "max": 0.899915062,
+            "median": 0.899915062,
+            "min": 0.899915062
+          },
+          "source_install_seconds": {
+            "count": 1,
+            "first": 1.3676e-05,
+            "max": 1.3676e-05,
+            "median": 1.3676e-05,
+            "min": 1.3676e-05
+          }
+        },
+        "diagnostic/darwin/reference": {
+          "preparation_seconds": {
+            "count": 1,
+            "first": 0.907149546,
+            "max": 0.907149546,
+            "median": 0.907149546,
+            "min": 0.907149546
+          },
+          "source_install_seconds": {
+            "count": 1,
+            "first": 1.1943e-05,
+            "max": 1.1943e-05,
+            "median": 1.1943e-05,
+            "min": 1.1943e-05
+          }
+        },
+        "diagnostic/ff/deferred": {
+          "preparation_seconds": {
+            "count": 1,
+            "first": 0.824349391,
+            "max": 0.824349391,
+            "median": 0.824349391,
+            "min": 0.824349391
+          },
+          "source_install_seconds": {
+            "count": 1,
+            "first": 1.0911e-05,
+            "max": 1.0911e-05,
+            "median": 1.0911e-05,
+            "min": 1.0911e-05
+          }
+        },
+        "diagnostic/ff/reference": {
+          "preparation_seconds": {
+            "count": 1,
+            "first": 0.827214581,
+            "max": 0.827214581,
+            "median": 0.827214581,
+            "min": 0.827214581
+          },
+          "source_install_seconds": {
+            "count": 1,
+            "first": 1.1693e-05,
+            "max": 1.1693e-05,
+            "median": 1.1693e-05,
+            "min": 1.1693e-05
+          }
+        },
+        "diagnostic/mona/deferred": {
+          "preparation_seconds": {
+            "count": 1,
+            "first": 0.955685498,
+            "max": 0.955685498,
+            "median": 0.955685498,
+            "min": 0.955685498
+          },
+          "source_install_seconds": {
+            "count": 1,
+            "first": 1.3927e-05,
+            "max": 1.3927e-05,
+            "median": 1.3927e-05,
+            "min": 1.3927e-05
+          }
+        },
+        "diagnostic/mona/reference": {
+          "preparation_seconds": {
+            "count": 1,
+            "first": 1.047804267,
+            "max": 1.047804267,
+            "median": 1.047804267,
+            "min": 1.047804267
+          },
+          "source_install_seconds": {
+            "count": 1,
+            "first": 1.3286e-05,
+            "max": 1.3286e-05,
+            "median": 1.3286e-05,
+            "min": 1.3286e-05
+          }
+        },
+        "normal/darwin/deferred": {
+          "preparation_seconds": {
+            "count": 5,
+            "first": 0.911310551,
+            "max": 0.955685616,
+            "median": 0.918088719,
+            "min": 0.896645206
+          },
+          "source_install_seconds": {
+            "count": 5,
+            "first": 1.4378e-05,
+            "max": 1.4378e-05,
+            "median": 1.1723e-05,
+            "min": 1.1632e-05
+          }
+        },
+        "normal/darwin/reference": {
+          "preparation_seconds": {
+            "count": 5,
+            "first": 0.915292313,
+            "max": 0.948460364,
+            "median": 0.915292313,
+            "min": 0.904727826
+          },
+          "source_install_seconds": {
+            "count": 5,
+            "first": 1.4308e-05,
+            "max": 1.4308e-05,
+            "median": 1.3687e-05,
+            "min": 1.1282e-05
+          }
+        },
+        "normal/ff/deferred": {
+          "preparation_seconds": {
+            "count": 5,
+            "first": 0.885507492,
+            "max": 0.885507492,
+            "median": 0.853888752,
+            "min": 0.840454293
+          },
+          "source_install_seconds": {
+            "count": 5,
+            "first": 1.3266e-05,
+            "max": 1.3436e-05,
+            "median": 1.1662e-05,
+            "min": 1.1312e-05
+          }
+        },
+        "normal/ff/reference": {
+          "preparation_seconds": {
+            "count": 5,
+            "first": 0.842545409,
+            "max": 0.872233433,
+            "median": 0.851900369,
+            "min": 0.842545409
+          },
+          "source_install_seconds": {
+            "count": 5,
+            "first": 1.1512e-05,
+            "max": 2.4258e-05,
+            "median": 1.3426e-05,
+            "min": 1.1512e-05
+          }
+        },
+        "normal/mona/deferred": {
+          "preparation_seconds": {
+            "count": 5,
+            "first": 0.975513136,
+            "max": 0.975513136,
+            "median": 0.972019762,
+            "min": 0.960971067
+          },
+          "source_install_seconds": {
+            "count": 5,
+            "first": 1.4037e-05,
+            "max": 1.4418e-05,
+            "median": 1.4037e-05,
+            "min": 1.1763e-05
+          }
+        },
+        "normal/mona/reference": {
+          "preparation_seconds": {
+            "count": 5,
+            "first": 0.972231362,
+            "max": 0.98136446,
+            "median": 0.972773828,
+            "min": 0.971661077
+          },
+          "source_install_seconds": {
+            "count": 5,
+            "first": 1.3897e-05,
+            "max": 1.4088e-05,
+            "median": 1.3887e-05,
+            "min": 1.1412e-05
+          }
+        }
+      },
+      "qualification_preparation": "unmeasured placeholder; excluded",
+      "scope": "host brackets exclude other checks; not whole application startup; no causal claim",
+      "shared_per_case": [
+        {
+          "case_id": "ff",
+          "device_initialization_seconds": 15.372953004,
+          "source_precompile_seconds": 0.877347628
+        },
+        {
+          "case_id": "mona",
+          "device_initialization_seconds": 11.4001217,
+          "source_precompile_seconds": 0.822090498
+        },
+        {
+          "case_id": "darwin",
+          "device_initialization_seconds": 11.557829451,
+          "source_precompile_seconds": 0.813129662
+        }
+      ]
+    },
+    "valid": true,
+    "work": {
+      "category_counters": {
+        "diagnostic": {
+          "completed_batches": 384,
+          "completed_evaluations": 6291456,
+          "completed_iterations": 24576,
+          "submitted_batches": 384,
+          "submitted_evaluations": 6291456,
+          "submitted_iterations": 24576
+        },
+        "normal": {
+          "completed_batches": 1920,
+          "completed_evaluations": 31457280,
+          "completed_iterations": 122880,
+          "submitted_batches": 1920,
+          "submitted_evaluations": 31457280,
+          "submitted_iterations": 122880
+        },
+        "qualification": {
+          "completed_batches": 192,
+          "completed_evaluations": 3145728,
+          "completed_iterations": 12288,
+          "submitted_batches": 192,
+          "submitted_evaluations": 3145728,
+          "submitted_iterations": 12288
+        }
+      },
+      "interpretation": "partial counters and source-accounted warmups are lower bounds; resets excluded",
+      "logical_evaluations_lower_bound": 46006272,
+      "read_errors": [],
+      "successful_preparations_lower_bound": 39,
+      "warmup_evaluations_source_accounted_lower_bound": 5111808
+    }
+  },
+  "validator_sha256": "4f73cbbe74204fa128239cbffd9f80bf967284260ab3a1a820e4deea3794839b",
+  "work": {
+    "category_counters": {
+      "diagnostic": {
+        "completed_batches": 384,
+        "completed_evaluations": 6291456,
+        "completed_iterations": 24576,
+        "submitted_batches": 384,
+        "submitted_evaluations": 6291456,
+        "submitted_iterations": 24576
+      },
+      "normal": {
+        "completed_batches": 1920,
+        "completed_evaluations": 31457280,
+        "completed_iterations": 122880,
+        "submitted_batches": 1920,
+        "submitted_evaluations": 31457280,
+        "submitted_iterations": 122880
+      },
+      "qualification": {
+        "completed_batches": 192,
+        "completed_evaluations": 3145728,
+        "completed_iterations": 12288,
+        "submitted_batches": 192,
+        "submitted_evaluations": 3145728,
+        "submitted_iterations": 12288
+      }
+    },
+    "interpretation": "partial counters and source-accounted warmups are lower bounds; resets excluded",
+    "logical_evaluations_lower_bound": 46006272,
+    "read_errors": [],
+    "successful_preparations_lower_bound": 39,
+    "warmup_evaluations_source_accounted_lower_bound": 5111808
+  },
+  "independent_offline_audit": {
+    "audit_pass": true,
+    "candidate_rejection": "Valid timing evidence. Sole failing gate is aggregate strictly >1.005. No observed GPU correctness failure.",
+    "candidate_verdict": "REJECT",
+    "changed_protected_paths": [],
+    "check_count": 916,
+    "combined_work": {
+      "diagnostic": 12582912,
+      "logical_source_accounted_lower_bound": 92012544,
+      "normal": 62914560,
+      "qualification": 6291456,
+      "warmup": 10223616
+    },
+    "completed_utc": "2026-10-24T15:09:57.294565+00:00",
+    "control_verdict": "PASS_CONTROL_ONLY",
+    "distinct_protected_paths": 376,
+    "failed_checks": [],
+    "final_preservation": {
+      "method": "SHA256 only after parent steering; no numerical, bootstrap or scoring recomputation.",
+      "mismatches": [],
+      "protected_paths": 376
+    },
+    "findings": [],
+    "forbidden_operations_performed": [],
+    "historical_dispositions": "All prior REJECT/INCONCLUSIVE dispositions unchanged. No historical rates reused or outcomes rescored.",
+    "initial_audit": {
+      "artifact": "audit-v1-observations.json",
+      "invalid_cleanliness_assumptions": 2,
+      "original_total": 914,
+      "passed_data_and_protection_checks": 912,
+      "retention": "Observed initial summary and failed predicate evidence; original complete overwritten JSON is not presented as preserved."
+    },
+    "initial_clocks": "Start records intentionally retain INCONCLUSIVE. Completed result files carry final verdicts.",
+    "max_fitness_abs_difference": 0.0,
+    "normal_snapshot_limit": "Normal rows retain canonical hashes only; associated with independently audited saved qualification and diagnostic endpoints.",
+    "observations": [
+      {
+        "kind": "parent_documentation_worktree",
+        "status_after": " M benchmarks/evolution/continuation-20261024/16-deferred-polygon-loads.md\n",
+        "status_before": " M benchmarks/evolution/continuation-20261024/16-deferred-polygon-loads.md\n"
+      },
+      {
+        "kind": "permitted_parent_documentation_and_profile_edits",
+        "paths": [
+          "benchmarks/evolution/continuation-20261024/16-deferred-polygon-loads.md",
+          "benchmarks/evolution/continuation-20261024/profiles/deferred-polygon-loads-result.json"
+        ]
+      }
+    ],
+    "operations": "Bounded offline Python reads, SHA256, strict JSON and selected AST definitions, byte/f32 arithmetic, independent paired bootstrap; git HEAD/status metadata only. Writes exclusively result-audit-109.",
+    "parent_RGB_byte_L1_f32_checks": 144,
+    "passed_checks": 916,
+    "preservation_group_counts": {
+      "binary_metadata": 1,
+      "fixture_files": 8,
+      "helper_hashes": 2,
+      "normal_binary_hashes": 3,
+      "pinned_identity_metadata": 8,
+      "prior_audit_and_campaign_closure": 28,
+      "prior_campaign_raw_pins": 44,
+      "private_binary": 1,
+      "private_sources": 86,
+      "raw_completed_workers_and_source_contracts": 124,
+      "root_source_hashes": 78
+    },
+    "principles": {
+      "Explain the Number": "Separate timed/setup/warmup work; do not infer physical traffic or a hardware limiter.",
+      "Prove It Works": "Validate actual retained raw rows/endpoints and pinned source bytes.",
+      "benchmark-checklist": "Count errors/work, verify alternate repeats and full aggregate gates; retain conditional scope."
+    },
+    "recomputation_timeline": "Second offline computation with independent parameter-byte check and corrected metadata assumptions completed before the parent steering message. No numerical/scoring rerun followed that message.",
+    "record_counts": {
+      "diagnostic": 12,
+      "normal": 60,
+      "qualification": 6
+    },
+    "saved_snapshots": 36,
+    "schema": "offline-kernel-result-audit-109-v1",
+    "source_reference": "Hash-pinned source-image RGBA at actual benchmark resolution; RGB byte L1 recomputed from retained packed buffers; no rerasterization.",
+    "workspace": {
+      "allowlist": [
+        "benchmarks/evolution/continuation-20261024/16-deferred-polygon-loads.md",
+        "benchmarks/evolution/continuation-20261024/profiles/deferred-polygon-loads-result.json"
+      ],
+      "head": "10f89e0acffacff10a6c915c8872792619a857b5",
+      "interpretation": "Permitted parent result-recording edits, including untracked profile JSON. Whole-worktree cleanliness is not claimed.",
+      "status": " M benchmarks/evolution/continuation-20261024/16-deferred-polygon-loads.md\n?? benchmarks/evolution/continuation-20261024/profiles/deferred-polygon-loads-result.json\n",
+      "tracked_diff_paths": [
+        "benchmarks/evolution/continuation-20261024/16-deferred-polygon-loads.md"
+      ],
+      "unexpected_paths": [],
+      "untracked_paths": [
+        "benchmarks/evolution/continuation-20261024/profiles/deferred-polygon-loads-result.json"
+      ]
+    },
+    "audit_sha256": "e975c2b4298f9dbdb1f7f3fe42090a23730ac3db6d15d2584d28854b9111c94e",
+    "artifacts_sha256": "0d90fc8d16d2f8ca474d4d9203417278eabb76986615fb6b4e74269468fb872c"
+  }
+}

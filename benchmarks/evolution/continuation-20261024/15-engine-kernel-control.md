@@ -56,5 +56,6 @@ noise for longer windows.
 
 The [machine result](profiles/kernel-control64-result.json) retains every pair,
 per-case ranges/intervals, setup clocks and completed-work accounting. Independent
-byte-L1 auditing will follow this investigation's timing. No control rates enter
-the candidate comparison.
+byte-L1 audit of this control and the candidate is complete: 916 scoped checks,
+36 saved snapshots and 144 parent comparisons pass. No control rates enter the
+candidate comparison. See [the completed candidate record](16-deferred-polygon-loads.md).
