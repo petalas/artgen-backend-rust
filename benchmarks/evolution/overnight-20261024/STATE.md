@@ -11,9 +11,14 @@ throughput work until morning, fixed evolution parameters and frequent commits.
 - Training uses the original ff/mona/darwin mature corpus; reserved confirmation
   uses the distinct mature corpus and seeds 11/13/17.
 
-The exact previously confirmed tile-parallel shader passed three fresh seeded
-replays and is adopted as the engine baseline. Its record is
-[00-tile-parallel-baseline.md](00-tile-parallel-baseline.md). The resident
-comparison example has passed its CPU checks and release build; real A/A and
-candidate verification follow. Earlier live-preview results retain their
-original dispositions and are outside the new score.
+The starting tile-parallel baseline is recorded in
+[00-tile-parallel-baseline.md](00-tile-parallel-baseline.md). The resident loop
+passed physical A/A, deliberately invalid-source and overflow proofs. Ten
+binner configurations have been screened. The retained 512-lane local-count
+implementation passed full original and reserved confirmations, measuring
+1.36266 and 1.38601 times the starting fast baseline's throughput. See
+[03-512-lane-local-count.md](03-512-lane-local-count.md).
+
+The next family is raster cache capacity, loading and decoded vertex reuse.
+Earlier live-preview results retain their original dispositions and are outside
+this engine-only score. Work continues until the morning cutoff.
