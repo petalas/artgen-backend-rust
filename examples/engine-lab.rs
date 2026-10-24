@@ -22,8 +22,8 @@ use artgen_backend_rust::{
     },
     gpu_evolver::{
         benchmark::{
-            benchmark_mutate_group_size_from_source, benchmark_raster_tiles_per_group_from_source,
-            BenchmarkCounters, BenchmarkProvenance, BenchmarkSnapshot,
+            benchmark_mutate_group_size_from_source, BenchmarkCounters, BenchmarkProvenance,
+            BenchmarkSnapshot,
         },
         GpuEvolver,
     },
@@ -184,7 +184,6 @@ fn valid_name(name: &str) -> bool {
 struct Source {
     shader_stage: ShaderStage,
     mutate_group_size: Option<u32>,
-    raster_tiles_per_group: Option<u32>,
     name: String,
     path: PathBuf,
     sha256: String,
@@ -208,11 +207,6 @@ fn read_sources(config: &Config) -> Result<Vec<Source>> {
         } else {
             None
         };
-        let raster_tiles_per_group = if config.shader_stage == ShaderStage::Raster {
-            Some(benchmark_raster_tiles_per_group_from_source(&wgsl).map_err(anyhow::Error::msg)?)
-        } else {
-            None
-        };
         let module = wgpu::naga::front::wgsl::parse_str(&wgsl)
             .map_err(|error| anyhow::anyhow!("{name}: {}", error.emit_to_string(&wgsl)))?;
         wgpu::naga::valid::Validator::new(
@@ -224,7 +218,6 @@ fn read_sources(config: &Config) -> Result<Vec<Source>> {
         sources.push(Source {
             shader_stage: config.shader_stage,
             mutate_group_size,
-            raster_tiles_per_group,
             name: name.into(),
             path: path.clone(),
             sha256,
@@ -234,21 +227,6 @@ fn read_sources(config: &Config) -> Result<Vec<Source>> {
     Ok(sources)
 }
 
-#[derive(Clone, Copy)]
-struct ExecutionShape {
-    mutate_group_size: u32,
-    raster_tiles_per_group: u32,
-}
-
-impl ExecutionShape {
-    fn read(evolver: &GpuEvolver) -> Self {
-        Self {
-            mutate_group_size: evolver.benchmark_mutate_group_size(),
-            raster_tiles_per_group: evolver.benchmark_raster_tiles_per_group(),
-        }
-    }
-}
-
 #[derive(Serialize)]
 struct TrialRow {
     schema: &'static str,
@@ -256,7 +234,6 @@ struct TrialRow {
     variant: String,
     shader_stage: ShaderStage,
     mutate_group_size: u32,
-    raster_tiles_per_group: u32,
     timing_eligible: bool,
     initial_max_tile_occupancy: Option<u32>,
     validation_max_tile_occupancy: Option<u32>,
@@ -292,7 +269,7 @@ impl TrialRow {
         case: &str,
         manifest: &str,
         gpu: BenchmarkProvenance,
-        shape: ExecutionShape,
+        mutate_group_size: u32,
         timing_eligible: bool,
     ) -> Self {
         Self {
@@ -300,8 +277,7 @@ impl TrialRow {
             case_id: case.into(),
             variant: source.name.clone(),
             shader_stage: config.shader_stage,
-            mutate_group_size: shape.mutate_group_size,
-            raster_tiles_per_group: shape.raster_tiles_per_group,
+            mutate_group_size,
             timing_eligible,
             initial_max_tile_occupancy: None,
             validation_max_tile_occupancy: None,
@@ -334,28 +310,12 @@ impl TrialRow {
             evals_per_second: None,
         }
     }
-
-    fn record_execution_shape(&mut self, source: &Source, shape: ExecutionShape) {
-        self.mutate_group_size = shape.mutate_group_size;
-        self.raster_tiles_per_group = shape.raster_tiles_per_group;
-        if source.mutate_group_size.is_some_and(|group| group != self.mutate_group_size) {
-            self.errors.push(
-                "actual mutation group size differs from selected source metadata".into(),
-            );
-        }
-        if source.raster_tiles_per_group.is_some_and(|tiles| tiles != self.raster_tiles_per_group) {
-            self.errors.push(
-                "actual raster tile grouping differs from selected source metadata".into(),
-            );
-        }
-    }
 }
 
 #[derive(Serialize)]
 struct QualifiedCase {
     case_id: String,
     mutate_group_size: u32,
-    raster_tiles_per_group: u32,
     params: MutationParams,
     params_sha256: String,
     initial_state_sha256: String,
@@ -507,7 +467,6 @@ fn run_cases(summary: &mut Summary<'_>, rows: &mut File) -> Result<()> {
         summary.cases.push(QualifiedCase {
             case_id: case.into(),
             mutate_group_size: evolver.benchmark_mutate_group_size(),
-            raster_tiles_per_group: evolver.benchmark_raster_tiles_per_group(),
             params: input.manifest.params.clone(),
             params_sha256,
             initial_state_sha256: state_hash(&initial)?,
@@ -618,12 +577,6 @@ fn qualify_inner(
         .install(evolver, &summary.sources[0].wgsl)?;
     let spec = spec(summary.config, &input.fixture.id);
     let mut record = trial::prepare(evolver, input, &spec, output)?;
-    ensure!(
-        summary.sources[0].raster_tiles_per_group.is_none_or(
-            |tiles| tiles == evolver.benchmark_raster_tiles_per_group()
-        ),
-        "qualification raster grouping differs from selected source metadata"
-    );
     let params = &input.manifest.params;
     let initial = evolver
         .benchmark_snapshot(params.chain_count, params.lambda)
@@ -829,7 +782,7 @@ fn run_trial(
         &input.fixture.id,
         &input.manifest_sha256,
         evolver.benchmark_provenance(),
-        ExecutionShape::read(evolver),
+        evolver.benchmark_mutate_group_size(),
         timing_eligible,
     );
     if let Err(error) = execute_trial(
@@ -844,7 +797,10 @@ fn run_trial(
         row.timestamp_samples = evolver.pass_timings().sample_count;
         row.errors.push(format!("{error:#}"));
     }
-    row.record_execution_shape(source, ExecutionShape::read(evolver));
+    row.mutate_group_size = evolver.benchmark_mutate_group_size();
+    if source.mutate_group_size.is_some_and(|group| group != row.mutate_group_size) {
+        row.errors.push("actual mutation group size differs from selected source metadata".into());
+    }
     row
 }
 
@@ -859,11 +815,10 @@ fn execute_trial(
     let params = &input.manifest.params;
     row.params_sha256 = fixtures::sha256(&serde_json::to_vec(params)?);
     config.shader_stage.install(evolver, &source.wgsl)?;
-    row.record_execution_shape(source, ExecutionShape::read(evolver));
+    row.mutate_group_size = evolver.benchmark_mutate_group_size();
     evolver
         .prepare_seeded_benchmark(&input.drawing, params, config.seed, 2, true)
         .map_err(anyhow::Error::msg)?;
-    row.record_execution_shape(source, ExecutionShape::read(evolver));
     let initial = evolver
         .benchmark_snapshot(params.chain_count, params.lambda)
         .map_err(anyhow::Error::msg)?;
@@ -1160,13 +1115,6 @@ mod tests {
         }
     }
 
-    fn shape(mutate_group_size: u32, raster_tiles_per_group: u32) -> ExecutionShape {
-        ExecutionShape {
-            mutate_group_size,
-            raster_tiles_per_group,
-        }
-    }
-
     fn provenance() -> BenchmarkProvenance {
         BenchmarkProvenance {
             name: "cpu test".into(),
@@ -1245,7 +1193,6 @@ mod tests {
         let source = Source {
             shader_stage: ShaderStage::Bin,
             mutate_group_size: None,
-            raster_tiles_per_group: None,
             name: "candidate".into(),
             path: "candidate.wgsl".into(),
             sha256: "abc".into(),
@@ -1254,7 +1201,7 @@ mod tests {
         let result = (|| -> Result<()> {
             for maximum in [None, Some(257), Some(256)] {
                 let mut row =
-                    TrialRow::new(&config, &source, "ff", "manifest", provenance(), shape(64, 1), false);
+                    TrialRow::new(&config, &source, "ff", "manifest", provenance(), 64, false);
                 let mut state = white();
                 state.validation_max_tile_occupancy = maximum;
                 record_diagnostic_state(&config, &mut row, &state, "initial")?;
@@ -1543,7 +1490,7 @@ mod tests {
                 "ff",
                 "manifest",
                 provenance(),
-                shape(group, 1),
+                group,
                 timing_eligible,
             );
             let value = serde_json::to_value(row)?;
@@ -1561,7 +1508,6 @@ mod tests {
         let mut source = Source {
             shader_stage: ShaderStage::Mutate,
             mutate_group_size: Some(4),
-            raster_tiles_per_group: None,
             name: "candidate".into(),
             path: "candidate.wgsl".into(),
             sha256: "abc".into(),
@@ -1573,7 +1519,7 @@ mod tests {
             for actual in [1, 4, 16, 32, 64] {
                 for timing_eligible in [true, false] {
                     let row = TrialRow::new(
-                        &config, &source, "ff", "manifest", provenance(), shape(actual, 1), timing_eligible,
+                        &config, &source, "ff", "manifest", provenance(), actual, timing_eligible,
                     );
                     let value = serde_json::to_value(row)?;
                     assert_eq!(value["mutate_group_size"], actual);
@@ -1586,7 +1532,6 @@ mod tests {
         let case = QualifiedCase {
             case_id: "ff".into(),
             mutate_group_size: 16,
-            raster_tiles_per_group: 1,
             params: MutationParams::default(),
             params_sha256: "params".into(),
             initial_state_sha256: "initial".into(),
@@ -1601,71 +1546,12 @@ mod tests {
     }
 
     #[test]
-    fn raster_source_metadata_and_actual_rows_keep_shape_outside_params_and_gpu() -> Result<()> {
-        let directory = std::env::temp_dir()
-            .join(format!("engine-lab-raster-{}", uuid::Uuid::new_v4()));
-        fs::create_dir(&directory)?;
-        let result = (|| -> Result<()> {
-            let mut config = Config::parse(&args())?;
-            config.shader_stage = ShaderStage::Raster;
-            config.reference_shader = directory.join("reference.wgsl");
-            config.variants[0].1 = directory.join("candidate.wgsl");
-            let bundled = include_str!("../src/shaders/rasterize_error.wgsl");
-            let bundled_tiles = benchmark_raster_tiles_per_group_from_source(bundled)
-                .map_err(anyhow::Error::msg)?;
-            fs::write(&config.reference_shader, bundled)?;
-            for requested in [1, 2, 4] {
-                let wgsl = format!("const RASTER_TILES_PER_GROUP: u32 = {requested}u;\n\
-                    @compute @workgroup_size(1) fn main() {{}}");
-                fs::write(&config.variants[0].1, &wgsl)?;
-                let sources = read_sources(&config)?;
-                assert_eq!(sources[0].raster_tiles_per_group, Some(bundled_tiles));
-                let source = &sources[1];
-                assert_eq!(source.raster_tiles_per_group, Some(requested));
-                assert_eq!(source.mutate_group_size, None);
-                assert_eq!(source.wgsl, wgsl);
-                assert_eq!(source.sha256, fixtures::sha256(wgsl.as_bytes()));
-                let value = serde_json::to_value(source)?;
-                assert_eq!(value["shader_stage"], "raster");
-                assert_eq!(value["raster_tiles_per_group"], requested);
-                for actual in [1, 2, 4] {
-                    for timing_eligible in [true, false] {
-                        let mut row = TrialRow::new(&config, source, "ff", "manifest",
-                            provenance(), shape(1, actual), timing_eligible);
-                        row.record_execution_shape(source, shape(1, actual));
-                        assert_eq!(row.errors.is_empty(), actual == requested);
-                        let value = serde_json::to_value(row)?;
-                        assert_eq!(value["raster_tiles_per_group"], actual);
-                        assert_eq!(value["source_sha256"], source.sha256);
-                        assert_eq!(value["gpu"], serde_json::to_value(provenance())?);
-                        assert!(value["gpu"].get("raster_tiles_per_group").is_none());
-                    }
-                }
-            }
-            let case = QualifiedCase {
-                case_id: "ff".into(), mutate_group_size: 1, raster_tiles_per_group: 4,
-                params: MutationParams::default(), params_sha256: "params".into(),
-                initial_state_sha256: "initial".into(), final_state_sha256: "final".into(),
-                gpu: provenance(),
-            };
-            let value = serde_json::to_value(case)?;
-            assert_eq!(value["raster_tiles_per_group"], 4);
-            assert!(value["params"].get("raster_tiles_per_group").is_none());
-            assert!(value["gpu"].get("raster_tiles_per_group").is_none());
-            Ok(())
-        })();
-        fs::remove_dir_all(directory)?;
-        result
-    }
-
-    #[test]
     fn summary_schema_preserves_raw_rates_and_source_identity() -> Result<()> {
         let config = Config::parse(&args())?;
         let sources = vec![
             Source {
                 shader_stage: config.shader_stage,
                 mutate_group_size: None,
-                raster_tiles_per_group: None,
                 name: "reference".into(),
                 path: "reference.wgsl".into(),
                 sha256: "abc".into(),
@@ -1674,7 +1560,6 @@ mod tests {
             Source {
                 shader_stage: config.shader_stage,
                 mutate_group_size: None,
-                raster_tiles_per_group: None,
                 name: "candidate".into(),
                 path: "candidate.wgsl".into(),
                 sha256: "def".into(),
