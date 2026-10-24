@@ -1,0 +1,40 @@
+{
+  "frozen_utc": "2026-10-24T12:24:53.295783+00:00",
+  "mechanism": "only exact existingearly-conflictcalls finalize independent compute/timestamp prefixbeforewait; sameGPUcommands/order/params/controlreset; one submit2CB",
+  "baseline_source_commit": "6b7c2d5",
+  "default_enabled": false,
+  "params_sha256": "755575d7c391eaa45ba8358724d0c66ae499c445a388badb5d465fb07a824f60",
+  "correctness_gate": "strictAA in both timestamp modes before AB on actual ordinary8batch API; noSome/None/header/geometry/counter/canonical/numeric/flushchange. AAfailureinconclusive, no race repair.",
+  "short": {
+    "pairs": 2,
+    "batches": 8,
+    "seed": 7,
+    "warmup": 2,
+    "cases": [
+      "ff",
+      "mona",
+      "darwin"
+    ],
+    "diagnostics": true,
+    "minimum_aggregate_ratio": 1.005,
+    "minimum_case_median": 0.98
+  },
+  "full_if_short_passes": {
+    "pairs": 5,
+    "batches": 64,
+    "training_seed": 7,
+    "reserved_seeds": {
+      "ff": 11,
+      "mona": 13,
+      "darwin": 17
+    },
+    "minimum_aggregate_ratio": 1.005,
+    "aggregate_lower_bound_gt": 1,
+    "minimum_case_median": 0.995,
+    "minimum_case_lower_bound": 0.99,
+    "bootstrap_seed": 20261024,
+    "resamples": 10000
+  },
+  "no_extensions_or_exclusions": true,
+  "adoption": "onlyaftercorrectness/training/reserved and audit; formalpolicy1stillcannotemitKEEP/liveclaims. Failedruntimeprototype removed andpatcharchived."
+}

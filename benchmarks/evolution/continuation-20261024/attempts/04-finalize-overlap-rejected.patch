@@ -1,0 +1,1342 @@
+diff --git a/examples/engine-lab.rs b/examples/engine-lab.rs
+index 2f05f7051255e4195de003f74a67b6fc0af278c5..d6dddb9e6c953c3a5114dbb917a0cbdc4f26414f 100644
+--- a/examples/engine-lab.rs
++++ b/examples/engine-lab.rs
+@@ -36,7 +36,7 @@ const SCHEMA: &str = "engine-lab-v1";
+ const MAX_SOURCE_BYTES: u64 = 256 * 1024;
+ const MAX_ROW_BYTES: usize = 64 * 1024;
+ const MAX_TRIALS: usize = 3 * 16 * 10 * 2;
+-const FLAGS: [&str; 10] = [
++const FLAGS: [&str; 11] = [
+     "manifest",
+     "reference-shader",
+     "pairs",
+@@ -47,9 +47,10 @@ const FLAGS: [&str; 10] = [
+     "shader-stage",
+     "diagnostics",
+     "mutate-zero-initialize",
++    "finalize-overlap",
+ ];
+ const MAX_ARGS: usize = 2 * (16 + FLAGS.len());
+-const USAGE: &str = "engine-lab --reference-shader PATH --variant NAME=PATH [--variant NAME=PATH ...]\n  --output NEWDIR [--manifest PATH] [--pairs 1..10] [--batches 1..64] [--seed U64] [--case ff|mona|darwin|all]\n  [--shader-stage bin|raster|mutate] [--diagnostics true|false] [--mutate-zero-initialize true|false]\nMutation zeroing defaults to true; the flag requires stage mutate and applies only to candidates. Reference always uses true.\nDefaults: fixtures .cache/evolution-bench/fixtures/v1/manifest.json, pairs 2, batches 8, shader-stage bin, diagnostics false.\nFixed manifest parameters: 4 chains, lambda 64, 64 iterations, raster WG 32x16, resolution 384.\nTwo Stages warmups, default seed 7 and all cases; use a parent process timeout. No GPU work for --help.";
++const USAGE: &str = "engine-lab --reference-shader PATH --variant NAME=PATH [--variant NAME=PATH ...]\n  --output NEWDIR [--manifest PATH] [--pairs 1..10] [--batches 1..64] [--seed U64] [--case ff|mona|darwin|all]\n  [--shader-stage bin|raster|mutate] [--diagnostics true|false] [--mutate-zero-initialize true|false] [--finalize-overlap true|false]\nFinalize overlap inherits the constructor default when absent. An explicit flag pins reference false and candidate to the requested mode. True requires identical reference/candidate shader bytes and mutation options.\nMutation zeroing defaults to true; the flag requires stage mutate and applies only to candidates. Reference always uses true.\nDefaults: fixtures .cache/evolution-bench/fixtures/v1/manifest.json, pairs 2, batches 8, shader-stage bin, diagnostics false.\nFixed manifest parameters: 4 chains, lambda 64, 64 iterations, raster WG 32x16, resolution 384.\nTwo Stages warmups, default seed 7 and all cases; use a parent process timeout. No GPU work for --help.";
+ 
+ #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+ #[serde(rename_all = "lowercase")]
+@@ -78,7 +79,13 @@ impl ShaderStage {
+                 source.mutate_options.unwrap_or_default(),
+             ),
+         }
+-        .map_err(anyhow::Error::msg)
++        .map_err(anyhow::Error::msg)?;
++        if let Some(enabled) = source.finalize_overlap {
++            evolver
++                .benchmark_set_finalize_overlap(enabled)
++                .map_err(anyhow::Error::msg)?;
++        }
++        Ok(())
+     }
+ }
+ 
+@@ -95,6 +102,7 @@ struct Config {
+     shader_stage: ShaderStage,
+     diagnostics: bool,
+     mutate_zero_initialize: Option<bool>,
++    finalize_overlap: Option<bool>,
+ }
+ 
+ impl Config {
+@@ -164,6 +172,10 @@ impl Config {
+             shader_stage,
+             mutate_zero_initialize,
+             diagnostics: values.get("diagnostics").unwrap_or(&"false").parse()?,
++            finalize_overlap: values
++                .get("finalize-overlap")
++                .map(|value| value.parse())
++                .transpose()?,
+         })
+     }
+ 
+@@ -199,6 +211,7 @@ fn valid_name(name: &str) -> bool {
+ 
+ #[derive(Serialize)]
+ struct Source {
++    finalize_overlap: Option<bool>,
+     shader_stage: ShaderStage,
+     mutate_group_size: Option<u32>,
+     mutate_options: Option<BenchmarkMutateOptions>,
+@@ -234,6 +247,9 @@ fn read_sources(config: &Config) -> Result<Vec<Source>> {
+         .validate(&module)
+         .with_context(|| format!("invalid shader {name}"))?;
+         sources.push(Source {
++            finalize_overlap: config
++                .finalize_overlap
++                .map(|enabled| name != "reference" && enabled),
+             shader_stage: config.shader_stage,
+             mutate_group_size,
+             mutate_options: (config.shader_stage == ShaderStage::Mutate).then_some(
+@@ -248,18 +264,36 @@ fn read_sources(config: &Config) -> Result<Vec<Source>> {
+             wgsl,
+         });
+     }
++    validate_finalize_sources(config, &sources)?;
+     Ok(sources)
+ }
+ 
+-#[derive(Clone, Copy)]
+-struct MutationExecution {
++fn validate_finalize_sources(config: &Config, sources: &[Source]) -> Result<()> {
++    if config.finalize_overlap == Some(true) {
++        let reference = sources.first().context("missing reference source")?;
++        ensure!(
++            sources.iter().all(|source| {
++                source.wgsl == reference.wgsl && source.mutate_options == reference.mutate_options
++            }),
++            "finalize-overlap requires identical reference/candidate WGSL bytes and mutation options"
++        );
++    }
++    Ok(())
++}
++
++#[derive(Clone, Copy, Serialize)]
++struct EngineExecution {
++    finalize_overlap: bool,
++    #[serde(rename = "mutate_group_size")]
+     group_size: u32,
++    #[serde(rename = "mutate_zero_initialize_workgroup_memory")]
+     zero_initialize_workgroup_memory: bool,
+ }
+ 
+-impl MutationExecution {
++impl EngineExecution {
+     fn installed(evolver: &GpuEvolver) -> Self {
+         Self {
++            finalize_overlap: evolver.benchmark_finalize_overlap(),
+             group_size: evolver.benchmark_mutate_group_size(),
+             zero_initialize_workgroup_memory: evolver
+                 .benchmark_mutate_zero_initialize_workgroup_memory(),
+@@ -267,7 +301,13 @@ impl MutationExecution {
+     }
+ }
+ 
+-fn check_mutation_execution(evolver: &GpuEvolver, source: &Source) -> Result<()> {
++fn check_execution(evolver: &GpuEvolver, source: &Source) -> Result<()> {
++    if let Some(expected) = source.finalize_overlap {
++        ensure!(
++            evolver.benchmark_finalize_overlap() == expected,
++            "actual finalize-overlap mode differs from selected source metadata"
++        );
++    }
+     if let Some(options) = source.mutate_options {
+         ensure!(
+             evolver.benchmark_mutate_shader_matches(&source.wgsl, options),
+@@ -283,12 +323,12 @@ fn check_mutation_execution(evolver: &GpuEvolver, source: &Source) -> Result<()>
+ 
+ #[derive(Serialize)]
+ struct TrialRow {
++    #[serde(flatten)]
++    execution: EngineExecution,
+     schema: &'static str,
+     case_id: String,
+     variant: String,
+     shader_stage: ShaderStage,
+-    mutate_group_size: u32,
+-    mutate_zero_initialize_workgroup_memory: bool,
+     timing_eligible: bool,
+     initial_max_tile_occupancy: Option<u32>,
+     validation_max_tile_occupancy: Option<u32>,
+@@ -324,16 +364,15 @@ impl TrialRow {
+         case: &str,
+         manifest: &str,
+         gpu: BenchmarkProvenance,
+-        mutation: MutationExecution,
++        mutation: EngineExecution,
+         timing_eligible: bool,
+     ) -> Self {
+         Self {
++            execution: mutation,
+             schema: SCHEMA,
+             case_id: case.into(),
+             variant: source.name.clone(),
+             shader_stage: config.shader_stage,
+-            mutate_group_size: mutation.group_size,
+-            mutate_zero_initialize_workgroup_memory: mutation.zero_initialize_workgroup_memory,
+             timing_eligible,
+             initial_max_tile_occupancy: None,
+             validation_max_tile_occupancy: None,
+@@ -370,6 +409,7 @@ impl TrialRow {
+ 
+ #[derive(Serialize)]
+ struct QualifiedCase {
++    finalize_overlap: bool,
+     case_id: String,
+     mutate_group_size: u32,
+     mutate_zero_initialize_workgroup_memory: bool,
+@@ -526,6 +566,7 @@ fn run_cases(summary: &mut Summary<'_>, rows: &mut File) -> Result<()> {
+         let (initial, endpoint) = qualify(&mut evolver, &input, summary)?;
+         let params_sha256 = fixtures::sha256(&serde_json::to_vec(&input.manifest.params)?);
+         summary.cases.push(QualifiedCase {
++            finalize_overlap: evolver.benchmark_finalize_overlap(),
+             case_id: case.into(),
+             mutate_group_size: evolver.benchmark_mutate_group_size(),
+             mutate_zero_initialize_workgroup_memory: evolver
+@@ -573,7 +614,7 @@ fn precompile_sources(
+             .map_err(anyhow::Error::msg)?;
+         for source in summary.sources {
+             summary.config.shader_stage.install(evolver, source)?;
+-            check_mutation_execution(evolver, source)?;
++            check_execution(evolver, source)?;
+         }
+         Ok(())
+     })();
+@@ -619,7 +660,10 @@ fn qualify(
+     trial::finish_record(&mut record);
+     fs::write(
+         output.join("result.json"),
+-        serde_json::to_vec_pretty(&record)?,
++        serde_json::to_vec_pretty(&qualification_value(
++            &record,
++            evolver.benchmark_finalize_overlap(),
++        )?)?,
+     )?;
+     ensure!(
+         record.correctness,
+@@ -629,6 +673,15 @@ fn qualify(
+     Ok((initial, endpoint))
+ }
+ 
++fn qualification_value(
++    record: &trial::TrialRecord,
++    finalize_overlap: bool,
++) -> Result<serde_json::Value> {
++    let mut value = serde_json::to_value(record)?;
++    value["finalize_overlap"] = finalize_overlap.into();
++    Ok(value)
++}
++
+ fn qualify_inner(
+     evolver: &mut GpuEvolver,
+     input: &LoadedFixture,
+@@ -639,10 +692,10 @@ fn qualify_inner(
+         .config
+         .shader_stage
+         .install(evolver, &summary.sources[0])?;
+-    check_mutation_execution(evolver, &summary.sources[0])?;
++    check_execution(evolver, &summary.sources[0])?;
+     let spec = spec(summary.config, &input.fixture.id);
+     let mut record = trial::prepare(evolver, input, &spec, output)?;
+-    check_mutation_execution(evolver, &summary.sources[0])?;
++    check_execution(evolver, &summary.sources[0])?;
+     let params = &input.manifest.params;
+     let initial = evolver
+         .benchmark_snapshot(params.chain_count, params.lambda)
+@@ -848,7 +901,7 @@ fn run_trial(
+         &input.fixture.id,
+         &input.manifest_sha256,
+         evolver.benchmark_provenance(),
+-        MutationExecution::installed(evolver),
++        EngineExecution::installed(evolver),
+         timing_eligible,
+     );
+     if let Err(error) = execute_trial(
+@@ -863,10 +916,8 @@ fn run_trial(
+         row.timestamp_samples = evolver.pass_timings().sample_count;
+         row.errors.push(format!("{error:#}"));
+     }
+-    row.mutate_group_size = evolver.benchmark_mutate_group_size();
+-    row.mutate_zero_initialize_workgroup_memory =
+-        evolver.benchmark_mutate_zero_initialize_workgroup_memory();
+-    if let Err(error) = check_mutation_execution(evolver, source) {
++    row.execution = EngineExecution::installed(evolver);
++    if let Err(error) = check_execution(evolver, source) {
+         row.errors.push(error.to_string());
+     }
+     row
+@@ -883,14 +934,12 @@ fn execute_trial(
+     let params = &input.manifest.params;
+     row.params_sha256 = fixtures::sha256(&serde_json::to_vec(params)?);
+     config.shader_stage.install(evolver, source)?;
+-    check_mutation_execution(evolver, source)?;
+-    row.mutate_group_size = evolver.benchmark_mutate_group_size();
+-    row.mutate_zero_initialize_workgroup_memory =
+-        evolver.benchmark_mutate_zero_initialize_workgroup_memory();
++    check_execution(evolver, source)?;
++    row.execution = EngineExecution::installed(evolver);
+     evolver
+         .prepare_seeded_benchmark(&input.drawing, params, config.seed, 2, true)
+         .map_err(anyhow::Error::msg)?;
+-    check_mutation_execution(evolver, source)?;
++    check_execution(evolver, source)?;
+     let initial = evolver
+         .benchmark_snapshot(params.chain_count, params.lambda)
+         .map_err(anyhow::Error::msg)?;
+@@ -1255,6 +1304,110 @@ mod tests {
+         Ok(())
+     }
+ 
++    #[test]
++    fn finalize_overlap_cli_is_optional_strict_and_candidate_only() -> Result<()> {
++        assert_eq!(Config::parse(&args())?.finalize_overlap, None);
++        for enabled in [false, true] {
++            let mut selected = args();
++            selected.extend(["--finalize-overlap".into(), enabled.to_string()]);
++            assert_eq!(Config::parse(&selected)?.finalize_overlap, Some(enabled));
++            selected.extend(["--finalize-overlap".into(), "false".into()]);
++            assert!(Config::parse(&selected).is_err());
++        }
++        for invalid in ["TRUE", "1", "", "later"] {
++            let mut selected = args();
++            selected.extend(["--finalize-overlap".into(), invalid.into()]);
++            assert!(Config::parse(&selected).is_err());
++        }
++        Ok(())
++    }
++
++    #[test]
++    fn finalize_overlap_preflight_excludes_shader_and_option_confounders() -> Result<()> {
++        let directory =
++            std::env::temp_dir().join(format!("engine-lab-finalize-{}", uuid::Uuid::new_v4()));
++        fs::create_dir(&directory)?;
++        let result = (|| -> Result<()> {
++            let mut config = Config::parse(&args())?;
++            config.reference_shader = directory.join("reference.wgsl");
++            config.variants[0].1 = directory.join("candidate.wgsl");
++            fs::write(&config.reference_shader, GROUPED_MUTATE_G1)?;
++            for stage in [ShaderStage::Bin, ShaderStage::Raster, ShaderStage::Mutate] {
++                config.shader_stage = stage;
++                config.mutate_zero_initialize = None;
++                config.finalize_overlap = Some(true);
++                fs::write(&config.variants[0].1, GROUPED_MUTATE_G1)?;
++                let sources = read_sources(&config)?;
++                assert_eq!(sources[0].finalize_overlap, Some(false));
++                assert_eq!(sources[1].finalize_overlap, Some(true));
++                fs::write(&config.variants[0].1, format!("{GROUPED_MUTATE_G1}\n"))?;
++                assert!(read_sources(&config).is_err());
++                config.finalize_overlap = Some(false);
++                assert!(read_sources(&config)?
++                    .iter()
++                    .all(|source| source.finalize_overlap == Some(false)));
++            }
++            config.shader_stage = ShaderStage::Mutate;
++            fs::write(&config.variants[0].1, GROUPED_MUTATE_G1)?;
++            config
++                .variants
++                .push(("second".into(), directory.join("second.wgsl")));
++            fs::write(&config.variants[1].1, format!("{GROUPED_MUTATE_G1}\n"))?;
++            config.finalize_overlap = Some(true);
++            assert!(read_sources(&config).is_err());
++            fs::write(&config.variants[1].1, GROUPED_MUTATE_G1)?;
++            config.mutate_zero_initialize = Some(false);
++            fs::write(&config.variants[0].1, GROUPED_MUTATE_G1)?;
++            assert!(read_sources(&config).is_err());
++            config.finalize_overlap = Some(false);
++            assert!(read_sources(&config).is_ok());
++            Ok(())
++        })();
++        fs::remove_dir_all(directory)?;
++        result
++    }
++
++    #[test]
++    fn rows_record_actual_finalize_mode_outside_parameter_and_gpu_identity() -> Result<()> {
++        let config = Config::parse(&args())?;
++        let source = Source {
++            finalize_overlap: None,
++            shader_stage: ShaderStage::Bin,
++            mutate_group_size: None,
++            mutate_options: None,
++            name: "candidate".into(),
++            path: "candidate.wgsl".into(),
++            sha256: "source".into(),
++            wgsl: String::new(),
++        };
++        let gpu = serde_json::to_value(provenance())?;
++        for enabled in [false, true] {
++            for timing in [false, true] {
++                let row = TrialRow::new(
++                    &config,
++                    &source,
++                    "mona",
++                    "manifest",
++                    provenance(),
++                    EngineExecution {
++                        finalize_overlap: enabled,
++                        group_size: 1,
++                        zero_initialize_workgroup_memory: true,
++                    },
++                    timing,
++                );
++                let value = serde_json::to_value(row)?;
++                assert_eq!(value["finalize_overlap"], enabled);
++                assert_eq!(value["gpu"], gpu);
++                assert!(value["gpu"].get("finalize_overlap").is_none());
++            }
++        }
++        assert!(serde_json::to_value(MutationParams::default())?
++            .get("finalize_overlap")
++            .is_none());
++        Ok(())
++    }
++
+     #[test]
+     fn mutate_zeroing_flag_is_optional_strict_and_mutation_only() -> Result<()> {
+         assert_eq!(Config::parse(&args())?.mutate_zero_initialize, None);
+@@ -1308,6 +1461,7 @@ mod tests {
+         let output = config.output.join("diagnostic-ff-candidate");
+         fs::create_dir_all(&output)?;
+         let source = Source {
++            finalize_overlap: None,
+             shader_stage: ShaderStage::Bin,
+             mutate_group_size: None,
+             mutate_options: None,
+@@ -1324,7 +1478,8 @@ mod tests {
+                     "ff",
+                     "manifest",
+                     provenance(),
+-                    MutationExecution {
++                    EngineExecution {
++                        finalize_overlap: false,
+                         group_size: 64,
+                         zero_initialize_workgroup_memory: true,
+                     },
+@@ -1412,10 +1567,12 @@ mod tests {
+                 "true",
+                 "--mutate-zero-initialize",
+                 "false",
++                "--finalize-overlap",
++                "false",
+             ]
+             .map(str::to_owned),
+         );
+-        assert_eq!(maximal.len(), 52);
++        assert_eq!(maximal.len(), MAX_ARGS);
+         let config = Config::parse(&collect_cli_args(maximal.iter().cloned()))?;
+         assert_eq!(config.variants.len(), 16);
+         assert_eq!(config.variants[15], ("v15".into(), PathBuf::from("path")));
+@@ -1423,6 +1580,7 @@ mod tests {
+         assert_eq!(config.shader_stage, ShaderStage::Mutate);
+         assert!(config.diagnostics);
+         assert_eq!(config.mutate_zero_initialize, Some(false));
++        assert_eq!(config.finalize_overlap, Some(false));
+         assert_eq!(config.manifest, PathBuf::from("manifest.json"));
+         assert_eq!(config.reference_shader, PathBuf::from("reference.wgsl"));
+         assert_eq!(config.output, PathBuf::from("new-output"));
+@@ -1433,7 +1591,7 @@ mod tests {
+                 .cloned()
+                 .chain(overflow.into_iter().map(str::to_owned));
+             let collected = collect_cli_args(input);
+-            assert_eq!(collected.len(), 53);
++            assert_eq!(collected.len(), MAX_ARGS + 1);
+             assert!(Config::parse(&collected).is_err());
+         }
+         Ok(())
+@@ -1547,6 +1705,9 @@ mod tests {
+                 fs::write(&config.reference_shader, reference)?;
+                 fs::write(&config.variants[0].1, &candidate)?;
+                 let sources = read_sources(&config)?;
++                assert!(sources
++                    .iter()
++                    .all(|source| source.finalize_overlap.is_none()));
+                 ensure!(sources.len() == 2, "expected both arbitrary sources");
+                 ensure!(
+                     sources[0].wgsl == reference && sources[1].wgsl == candidate,
+@@ -1669,7 +1830,8 @@ mod tests {
+                 "ff",
+                 "manifest",
+                 provenance(),
+-                MutationExecution {
++                EngineExecution {
++                    finalize_overlap: false,
+                     group_size: group,
+                     zero_initialize_workgroup_memory: source
+                         .mutate_options
+@@ -1698,6 +1860,7 @@ mod tests {
+     fn normal_and_diagnostic_rows_record_actual_group_without_changing_gpu_identity() -> Result<()> {
+         let config = Config::parse(&args())?;
+         let mut source = Source {
++            finalize_overlap: None,
+             shader_stage: ShaderStage::Mutate,
+             mutate_group_size: Some(4),
+             mutate_options: Some(BenchmarkMutateOptions::default()),
+@@ -1717,7 +1880,8 @@ mod tests {
+                         "ff",
+                         "manifest",
+                         provenance(),
+-                        MutationExecution {
++                        EngineExecution {
++                            finalize_overlap: false,
+                             group_size: actual,
+                             zero_initialize_workgroup_memory: false,
+                         },
+@@ -1736,6 +1900,7 @@ mod tests {
+             }
+         }
+         let case = QualifiedCase {
++            finalize_overlap: false,
+             case_id: "ff".into(),
+             mutate_group_size: 16,
+             mutate_zero_initialize_workgroup_memory: false,
+@@ -1746,6 +1911,9 @@ mod tests {
+             gpu: provenance(),
+         };
+         let value = serde_json::to_value(case)?;
++        assert_eq!(value["finalize_overlap"], false);
++        assert!(value["gpu"].get("finalize_overlap").is_none());
++        assert!(value["params"].get("finalize_overlap").is_none());
+         assert_eq!(value["mutate_group_size"], 16);
+         assert_eq!(value["mutate_zero_initialize_workgroup_memory"], false);
+         assert!(value["params"]
+@@ -1761,6 +1929,7 @@ mod tests {
+         let config = Config::parse(&args())?;
+         let sources = vec![
+             Source {
++                finalize_overlap: None,
+                 shader_stage: config.shader_stage,
+                 mutate_group_size: None,
+                 mutate_options: None,
+@@ -1770,6 +1939,7 @@ mod tests {
+                 wgsl: "private source".into(),
+             },
+             Source {
++                finalize_overlap: None,
+                 shader_stage: config.shader_stage,
+                 mutate_group_size: None,
+                 mutate_options: None,
+diff --git a/src/gpu_evolver/benchmark.rs b/src/gpu_evolver/benchmark.rs
+index 3ae988d0cbc81dbc714a7ff2d8defddc0b0a2a0b..90f9ae1687c0b69fa70b7e14223165bf137bacb0 100644
+--- a/src/gpu_evolver/benchmark.rs
++++ b/src/gpu_evolver/benchmark.rs
+@@ -290,6 +290,24 @@ impl GpuEvolver {
+         self.pipeline.mutate_group_size
+     }
+ 
++    /// Finalize the compute/timestamp prefix before collecting a conflicting
++    /// readback, then submit prefix and copy tail once in their original order.
++    /// Defaults to false and persists across preparation. Call while drained
++    /// to preserve ordinary Drawing results.
++    ///
++    /// # Errors
++    /// Rejects a failed drain before changing the mode.
++    pub fn benchmark_set_finalize_overlap(&mut self, enabled: bool) -> Result<(), String> {
++        self.benchmark_drain()?;
++        self.benchmark_finalize_overlap = enabled;
++        Ok(())
++    }
++
++    #[must_use]
++    pub fn benchmark_finalize_overlap(&self) -> bool {
++        self.benchmark_finalize_overlap
++    }
++
+     /// Install a lab bin shader while drained, retaining device, layouts and buffers.
+     /// Repeated sources reuse compiled handles. Preparation and validation retain
+     /// the override; compilation uses the production bin options and pipeline cache.
+diff --git a/src/gpu_evolver/mod.rs b/src/gpu_evolver/mod.rs
+index 3ee9dc074cddf2a353caeb06504a69d0952143e9..4c8ef3b38549c84de3e4e0fe7d75cf3b54f9b9ce 100644
+--- a/src/gpu_evolver/mod.rs
++++ b/src/gpu_evolver/mod.rs
+@@ -89,6 +89,7 @@ pub struct GpuEvolver {
+     start_time: Instant,
+     best_fitness_bits: u32, // track best fitness across batches for control flag reset
+     pass_timings: PassTimings,
++    benchmark_finalize_overlap: bool,
+     benchmark_batch_envelope: bool,
+     benchmark_envelope_timings: benchmark::BenchmarkEnvelopeTimings,
+     chain_fitness: Vec<f32>,
+@@ -171,6 +172,7 @@ impl GpuEvolver {
+             start_time: Instant::now(),
+             best_fitness_bits: 0,
+             pass_timings: PassTimings::default(),
++            benchmark_finalize_overlap: false,
+             benchmark_batch_envelope: false,
+             benchmark_envelope_timings: benchmark::BenchmarkEnvelopeTimings::default(),
+             chain_fitness: vec![0.0; actual_max as usize],
+@@ -278,17 +280,14 @@ impl GpuEvolver {
+         mut prev_pending: Option<PendingBatch>,
+         mut prev_receivers: Option<PendingMapReceivers>,
+     ) -> Option<Drawing> {
+-        // 0. If we'll need readback_staging_buf for a deferred best-chain copy
+-        //    but it's still mapped from the previous batch, collect the previous
+-        //    batch's results first to unmap it. readback_staging_buf is single-
+-        //    buffered (not double-buffered like control/fitness/timestamp staging),
+-        //    so we can't overlap its use across batches.
+-        let mut early_result: Option<Drawing> = None;
+-        if self.pending_best_chain.is_some() && self.deferred_best_readback {
+-            if let Some(pending) = prev_pending.take() {
+-                self.pending_map_receivers = prev_receivers.take();
+-                early_result = self.finish_pending_readback(&pending);
+-            }
++        let finalize_overlap = self.benchmark_finalize_overlap
++            && self.pending_best_chain.is_some()
++            && self.deferred_best_readback
++            && prev_pending.is_some();
++        let mut early_result = None;
++        if !finalize_overlap {
++            early_result =
++                self.collect_conflicting_readback(&mut prev_pending, &mut prev_receivers);
+         }
+ 
+         let p = &self.pipeline;
+@@ -304,24 +303,9 @@ impl GpuEvolver {
+         let write_idx = self.staging_idx;
+         self.staging_idx = 1 - self.staging_idx;
+ 
+-        // 2. Build params and upload to uniform buffer
+-        let mut params = gpu_params_from(mutation_params, p.image_width, p.image_height, active);
+-        params.iteration_number = self.iteration;
+-        let params_bytes: &[u8] = bytemuck::bytes_of(&params);
+-        p.queue.write_buffer(&p.params_buf, 0, params_bytes);
+-
+-        // Reset control flags before batch — preserve best_fitness_bits so atomicMax
+-        // only triggers new_best_found when fitness actually improves over last known best.
+-        // Note: best_fitness_bits may be one batch stale (from batch N-2 instead of N-1)
+-        // since we haven't collected the previous batch yet. This is harmless — worst case
+-        // the shader re-detects an improvement already found, causing a redundant readback.
+-        let control_reset = ControlFlags {
+-            new_best_found: 0,
+-            best_chain_id: 0,
+-            best_fitness_bits: self.best_fitness_bits,
+-            _pad: 0,
+-        };
+-        p.queue.write_buffer(&p.control_flags_buf, 0, bytemuck::bytes_of(&control_reset));
++        if !finalize_overlap {
++            self.upload_batch_inputs(mutation_params, active);
++        }
+ 
+         // Note: error accumulators are NOT reset here — the select shader
+         // resets them via atomicExchange after each iteration. They're
+@@ -490,6 +474,26 @@ impl GpuEvolver {
+             );
+         }
+ 
++        // Finalize all compute and timestamp work while the previous GPU batch
++        // runs. The single drawing staging buffer remains absent from this prefix.
++        let prefix = if finalize_overlap {
++            let prefix = encoder.finish();
++            early_result =
++                self.collect_conflicting_readback(&mut prev_pending, &mut prev_receivers);
++            // Collection can change the control threshold and selected chain.
++            self.upload_batch_inputs(mutation_params, active);
++            encoder = self
++                .pipeline
++                .device
++                .create_command_encoder(&CommandEncoderDescriptor {
++                    label: Some("gpu_evolver_batch_readback_tail"),
++                });
++            Some(prefix)
++        } else {
++            None
++        };
++        let p = &self.pipeline;
++
+         // Copy control flags to staging[write_idx] for readback
+         encoder.copy_buffer_to_buffer(
+             &p.control_flags_buf,
+@@ -527,7 +531,11 @@ impl GpuEvolver {
+         };
+ 
+         // 5. Submit — GPU starts working on this batch IMMEDIATELY
+-        let submission_index = p.queue.submit(std::iter::once(encoder.finish()));
++        let submission_index = if let Some(prefix) = prefix {
++            p.queue.submit([prefix, encoder.finish()])
++        } else {
++            p.queue.submit(std::iter::once(encoder.finish()))
++        };
+ 
+         self.iteration += iterations;
+         let evaluations = iterations as u64 * active as u64 * lambda as u64;
+@@ -565,6 +573,49 @@ impl GpuEvolver {
+         prev_result
+     }
+ 
++    fn collect_conflicting_readback(
++        &mut self,
++        prev_pending: &mut Option<PendingBatch>,
++        prev_receivers: &mut Option<PendingMapReceivers>,
++    ) -> Option<Drawing> {
++        // 0. If we'll need readback_staging_buf for a deferred best-chain copy
++        //    but it's still mapped from the previous batch, collect the previous
++        //    batch's results first to unmap it. readback_staging_buf is single-
++        //    buffered (not double-buffered like control/fitness/timestamp staging),
++        //    so we can't overlap its use across batches.
++        let mut early_result: Option<Drawing> = None;
++        if self.pending_best_chain.is_some() && self.deferred_best_readback {
++            if let Some(pending) = prev_pending.take() {
++                self.pending_map_receivers = prev_receivers.take();
++                early_result = self.finish_pending_readback(&pending);
++            }
++        }
++
++        early_result
++    }
++
++    fn upload_batch_inputs(&self, mutation_params: &MutationParams, active: u32) {
++        let p = &self.pipeline;
++        // 2. Build params and upload to uniform buffer
++        let mut params = gpu_params_from(mutation_params, p.image_width, p.image_height, active);
++        params.iteration_number = self.iteration;
++        let params_bytes: &[u8] = bytemuck::bytes_of(&params);
++        p.queue.write_buffer(&p.params_buf, 0, params_bytes);
++
++        // Reset control flags before batch — preserve best_fitness_bits so atomicMax
++        // only triggers new_best_found when fitness actually improves over last known best.
++        // Note: best_fitness_bits may be one batch stale (from batch N-2 instead of N-1)
++        // since we haven't collected the previous batch yet. This is harmless — worst case
++        // the shader re-detects an improvement already found, causing a redundant readback.
++        let control_reset = ControlFlags {
++            new_best_found: 0,
++            best_chain_id: 0,
++            best_fitness_bits: self.best_fitness_bits,
++            _pad: 0,
++        };
++        p.queue.write_buffer(&p.control_flags_buf, 0, bytemuck::bytes_of(&control_reset));
++    }
++
+     /// Issue map_async on the staging buffers at the given index.
+     /// Stores the receiver channels so finish_pending_readback can poll them.
+     /// If `deferred_readback` is true, also issues map_async on readback_staging_buf
+diff --git a/examples/check-gpu-finalize-order.rs b/examples/check-gpu-finalize-order.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..c8efa4a9db11995470ed723dcf4e93292688a647
+--- /dev/null
++++ b/examples/check-gpu-finalize-order.rs
+@@ -0,0 +1,639 @@
++//! Ordinary API equivalence for the default-off finalize-overlap prototype.
++//! Run on the main thread under `timeout 600s ... --output NEWDIR`.
++//! No performance score: qualification, event hashing and JSON are outside runs.
++//! Eight fixed mature-mona batches check delivery/non-delivery, including returned
++//! drawings at the previously observed conflicts at completed batches 3 and 6. Optional 64-batch coverage
++//! uses the same fixture, seed and parameters. A/A must pass before A/B runs.
++//! Shared `trial::prepare`/`trial::complete_record` own all numerical qualification. Snapshot
++//! maps retain their existing 120-second timeout; production waits/compilation
++//! require the outer timeout. No per-batch snapshot, drain or extra engine API.
++//! Live bounds: one device, eight runs, <=64 ordinary events plus one flush per
++//! run, four fitness words per event, <=1000 triangles per returned Drawing.
++//! Existing wgpu callbacks, driver allocations and serde macros are framework
++//! deviations. Event vectors are preallocated; hashing/JSON may allocate only
++//! after the ordinary batch/flush sequence. Own JSON artifacts are capped at 2 MiB;
++//! `trial::prepare` also writes its existing bounded initial snapshot outside runs.
++use std::{fs, path::PathBuf};
++
++use anyhow::{ensure, Context, Result};
++use artgen_backend_rust::{
++    benchmark::{
++        fixtures::{self, LoadedFixture},
++        trial::{self, TimestampMode, TrialRecord, TrialSpec},
++    },
++    gpu_evolver::{
++        benchmark::{
++            BenchmarkCounters, BenchmarkMutateOptions, BenchmarkPackedState, BenchmarkSnapshot,
++        },
++        buffers::{gpu_to_drawing, GpuDrawingState, GpuPolygon},
++        GpuEvolver,
++    },
++    models::drawing::Drawing,
++};
++use bytemuck::Zeroable;
++use serde::Serialize;
++
++const MAX_ARGS: usize = 6;
++const MAX_JSON_BYTES: usize = 2 * 1024 * 1024;
++const USAGE: &str = "check-gpu-finalize-order --output NEWDIR [--manifest PATH] [--batches 8|64]\nFixed mature mona, seed 7, unchanged manifest parameters. Runs A/A before A/B, with timestamps disabled and enabled. Use an outer 600-second process timeout. No GPU work for --help.";
++
++#[derive(Debug, Serialize)]
++struct Config {
++    manifest: PathBuf,
++    output: PathBuf,
++    batches: u32,
++}
++
++impl Config {
++    fn parse(args: &[String]) -> Result<Self> {
++        ensure!(
++            args.len() <= MAX_ARGS && args.len() % 2 == 0,
++            "expected --flag value pairs"
++        );
++        let mut manifest = None;
++        let mut output = None;
++        let mut batches = None;
++        for pair in args.as_chunks::<2>().0 {
++            ensure!(
++                pair.iter().all(|arg| arg.len() <= 4096),
++                "argument exceeds 4096 bytes"
++            );
++            let slot = match pair[0].as_str() {
++                "--manifest" => &mut manifest,
++                "--output" => &mut output,
++                "--batches" => &mut batches,
++                _ => anyhow::bail!("unknown flag {}", pair[0]),
++            };
++            ensure!(
++                slot.replace(pair[1].as_str()).is_none(),
++                "duplicate flag {}",
++                pair[0]
++            );
++        }
++        let batches = batches.unwrap_or("8").parse()?;
++        ensure!([8, 64].contains(&batches), "batches must be 8 or 64");
++        Ok(Self {
++            manifest: manifest
++                .unwrap_or(".cache/evolution-bench/fixtures/v1/manifest.json")
++                .into(),
++            output: output.context("missing --output")?.into(),
++            batches,
++        })
++    }
++}
++
++#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
++struct DrawingObservation {
++    fitness_bits: u32,
++    geometry_sha256: String,
++}
++
++impl DrawingObservation {
++    fn new(drawing: &Drawing) -> Result<Self> {
++        Ok(Self {
++            // Keep the mapped header's own score, including scores below the
++            // acquisition maximum. Never replace it with snapshot/control data.
++            fitness_bits: drawing.fitness.to_bits(),
++            geometry_sha256: fixtures::sha256(&serde_json::to_vec(&drawing.polygons)?),
++        })
++    }
++}
++
++struct RawEvent {
++    call: u32,
++    drawing: Option<Drawing>,
++    counters: BenchmarkCounters,
++    chain_fitness_bits: [u32; 4],
++}
++
++#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
++struct Event {
++    call: u32,
++    drawing: Option<DrawingObservation>,
++    counters: BenchmarkCounters,
++    chain_fitness_bits: [u32; 4],
++}
++
++impl RawEvent {
++    fn capture(evolver: &GpuEvolver, call: u32, drawing: Option<Drawing>) -> Self {
++        let mut chain_fitness_bits = [0; 4];
++        for (word, fitness) in chain_fitness_bits.iter_mut().zip(evolver.chain_fitness()) {
++            *word = fitness.to_bits();
++        }
++        Self {
++            call,
++            drawing,
++            counters: evolver.benchmark_counters(),
++            chain_fitness_bits,
++        }
++    }
++
++    fn observe(self) -> Result<Event> {
++        Ok(Event {
++            call: self.call,
++            drawing: self
++                .drawing
++                .as_ref()
++                .map(DrawingObservation::new)
++                .transpose()?,
++            counters: self.counters,
++            chain_fitness_bits: self.chain_fitness_bits,
++        })
++    }
++}
++
++#[derive(Clone, Copy)]
++struct Execution {
++    finalize_overlap: bool,
++    collect_timestamps: bool,
++}
++
++#[derive(Serialize)]
++struct Run {
++    name: String,
++    finalize_overlap: bool,
++    collect_timestamps: bool,
++    events: Vec<Event>,
++    flush: Event,
++    terminal_returned: Option<DrawingObservation>,
++    actual_max_parents: Vec<DrawingObservation>,
++    qualification: TrialRecord,
++}
++
++#[derive(Serialize)]
++struct Report {
++    schema: &'static str,
++    status: &'static str,
++    config: Config,
++    // Both sides use these exact bundled sources and the default true mutation
++    // compilation policy. Only the evolver's host scheduling flag changes.
++    sources: Vec<(&'static str, String)>,
++    mutate_zero_initialize_workgroup_memory: bool,
++    runs: Vec<Run>,
++    errors: Vec<String>,
++}
++
++fn main() -> Result<()> {
++    let args: Vec<_> = std::env::args().skip(1).take(MAX_ARGS + 1).collect();
++    if args == ["--help"] {
++        println!("{USAGE}");
++        return Ok(());
++    }
++    let config = Config::parse(&args)?;
++    let input = fixtures::load(&config.manifest, "mona")?;
++    validate_fixture(&input)?;
++    fs::create_dir(&config.output).context("output must be a new directory")?;
++    let mut report = Report {
++        schema: "gpu-finalize-order-v1",
++        status: "running",
++        config,
++        sources: sources(),
++        mutate_zero_initialize_workgroup_memory: true,
++        runs: Vec::with_capacity(8),
++        errors: Vec::new(),
++    };
++    write_report(&report)?;
++    if let Err(error) = run_checks(&input, &mut report) {
++        report.status = "failed";
++        report.errors.push(format!("{error:#}"));
++    }
++    write_report(&report)?;
++    ensure!(
++        report.status == "passed",
++        "readback check {}: {:?}",
++        report.status,
++        report.errors
++    );
++    Ok(())
++}
++
++fn validate_fixture(input: &LoadedFixture) -> Result<()> {
++    let p = &input.manifest.params;
++    ensure!(
++        input.manifest.resolution == 384
++            && p.chain_count == 4
++            && p.lambda == 64
++            && p.gpu_batch_iters == 64
++            && p.rasterize_wg == [32, 16],
++        "fixed protocol mismatch"
++    );
++    ensure!(
++        input.fixture.complexity.overflowed_tiles == 0,
++        "initial tile overflow"
++    );
++    Ok(())
++}
++
++fn sources() -> Vec<(&'static str, String)> {
++    [
++        ("mutate", include_str!("../src/shaders/mutate.wgsl")),
++        ("bin", include_str!("../src/shaders/bin_polygons.wgsl")),
++        (
++            "raster",
++            include_str!("../src/shaders/rasterize_error.wgsl"),
++        ),
++        ("select", include_str!("../src/shaders/select.wgsl")),
++        (
++            "init",
++            include_str!("../src/shaders/init_framebuffers.wgsl"),
++        ),
++        (
++            "update",
++            include_str!("../src/shaders/update_framebuffers.wgsl"),
++        ),
++    ]
++    .into_iter()
++    .map(|(name, source)| (name, fixtures::sha256(source.as_bytes())))
++    .collect()
++}
++
++fn run_checks(input: &LoadedFixture, report: &mut Report) -> Result<()> {
++    let mut evolver = futures_lite::future::block_on(GpuEvolver::new(
++        &input.rgba,
++        input.fixture.width,
++        input.fixture.height,
++        &input.drawing,
++    ));
++    // Qualify both timestamp paths before exercising either candidate path.
++    for timestamps in [false, true] {
++        let errors = run_pair(
++            &mut evolver,
++            input,
++            report,
++            timestamps,
++            [("aa-first", false), ("aa-repeat", false)],
++        )?;
++        if !errors.is_empty() {
++            report.status = "inconclusive";
++            report.errors.extend(errors);
++            report.errors.push(
++                "strict A/A did not qualify; existing best-ID race was not weakened or repaired"
++                    .into(),
++            );
++            return Ok(());
++        }
++    }
++    for timestamps in [false, true] {
++        let errors = run_pair(
++            &mut evolver,
++            input,
++            report,
++            timestamps,
++            [("baseline", false), ("candidate", true)],
++        )?;
++        report.errors.extend(errors);
++        if !report.errors.is_empty() {
++            report.status = "failed";
++            return Ok(());
++        }
++    }
++    report.status = "passed";
++    Ok(())
++}
++
++fn run_pair(
++    evolver: &mut GpuEvolver,
++    input: &LoadedFixture,
++    report: &mut Report,
++    timestamps: bool,
++    sides: [(&str, bool); 2],
++) -> Result<Vec<String>> {
++    let start = report.runs.len();
++    for (name, finalize_overlap) in sides {
++        report.runs.push(run_once(
++            evolver,
++            input,
++            &report.config,
++            name,
++            Execution {
++                finalize_overlap,
++                collect_timestamps: timestamps,
++            },
++        )?);
++    }
++    let mut errors = compare_runs(&report.runs[start], &report.runs[start + 1]);
++    if report.runs[start..]
++        .iter()
++        .any(|run| !run.qualification.correctness)
++    {
++        errors.push("pair numerical/header/terminal qualification failed".into());
++    }
++    Ok(errors)
++}
++
++fn run_once(
++    evolver: &mut GpuEvolver,
++    input: &LoadedFixture,
++    config: &Config,
++    name: &str,
++    execution: Execution,
++) -> Result<Run> {
++    let output = config.output.join(format!(
++        "{name}-timestamps-{}",
++        execution.collect_timestamps
++    ));
++    fs::create_dir(&output)?;
++    let scopes = evolver.benchmark_error_scopes();
++    let result = execute_run(evolver, input, config, name, execution, &output);
++    let device_errors = futures_lite::future::block_on(scopes.finish());
++    write_json(output.join("device-errors.json"), &device_errors)?;
++    let mut run = result?;
++    run.qualification.errors.extend(device_errors);
++    trial::finish_record(&mut run.qualification);
++    write_json(output.join("result.json"), &run)?;
++    Ok(run)
++}
++
++fn execute_run(
++    evolver: &mut GpuEvolver,
++    input: &LoadedFixture,
++    config: &Config,
++    name: &str,
++    execution: Execution,
++    output: &std::path::Path,
++) -> Result<Run> {
++    let mut qualification = prepare_run(evolver, input, config, execution, output)?;
++    let (raw, raw_flush) =
++        collect_events(evolver, input, config.batches, execution.collect_timestamps);
++    let endpoint = qualify_endpoint(evolver, input, &mut qualification, execution)?;
++    let events = raw
++        .into_iter()
++        .map(RawEvent::observe)
++        .collect::<Result<Vec<_>>>()?;
++    let flush = raw_flush.observe()?;
++    let terminal_returned = flush
++        .drawing
++        .clone()
++        .or_else(|| events.iter().rev().find_map(|e| e.drawing.clone()));
++    let actual_max_parents = maximum_drawings(&endpoint)?;
++    check_events(&events, &flush, &mut qualification.errors);
++    for completed in [3, 6] {
++        if !events
++            .iter()
++            .any(|event| event.counters.completed_batches == completed && event.drawing.is_some())
++        {
++            qualification.errors.push(format!(
++                "missing fixed-case conflict delivery at completed batch {completed}"
++            ));
++        }
++    }
++    if !terminal_returned
++        .as_ref()
++        .is_some_and(|returned| actual_max_parents.contains(returned))
++    {
++        qualification.errors.push(
++            "terminal returned Drawing header/geometry differs from actual maximum parent".into(),
++        );
++    }
++    Ok(Run {
++        name: name.into(),
++        finalize_overlap: evolver.benchmark_finalize_overlap(),
++        collect_timestamps: execution.collect_timestamps,
++        events,
++        flush,
++        terminal_returned,
++        actual_max_parents,
++        qualification,
++    })
++}
++
++fn prepare_run(
++    evolver: &mut GpuEvolver,
++    input: &LoadedFixture,
++    config: &Config,
++    execution: Execution,
++    output: &std::path::Path,
++) -> Result<TrialRecord> {
++    evolver
++        .benchmark_set_finalize_overlap(execution.finalize_overlap)
++        .map_err(anyhow::Error::msg)?;
++    check_mode(evolver, execution.finalize_overlap)?;
++    let spec = TrialSpec {
++        case_id: "mona".into(),
++        seed: 7,
++        batches: config.batches,
++        warmup_batches: 2,
++        diagnostic: false,
++        timestamp_mode: TimestampMode::Stages,
++    };
++    let record = trial::prepare(evolver, input, &spec, output)?;
++    check_mode(evolver, execution.finalize_overlap)?;
++    Ok(record)
++}
++
++fn qualify_endpoint(
++    evolver: &mut GpuEvolver,
++    input: &LoadedFixture,
++    record: &mut TrialRecord,
++    execution: Execution,
++) -> Result<BenchmarkSnapshot> {
++    // collect_events already captured flush_pending's return before this drain.
++    record.counters = evolver.benchmark_drain().map_err(anyhow::Error::msg)?;
++    record.timestamp_samples = evolver.pass_timings().sample_count;
++    let endpoint = evolver
++        .benchmark_snapshot(
++            input.manifest.params.chain_count,
++            input.manifest.params.lambda,
++        )
++        .map_err(anyhow::Error::msg)?;
++    check_mode(evolver, execution.finalize_overlap)?;
++    trial::complete_record(record, &endpoint, input)?;
++    if record.timestamp_samples
++        != if execution.collect_timestamps {
++            u64::from(record.batches)
++        } else {
++            0
++        }
++    {
++        record.errors.push("timestamp sample count mismatch".into());
++    }
++    Ok(endpoint)
++}
++
++fn check_mode(evolver: &GpuEvolver, late: bool) -> Result<()> {
++    ensure!(
++        evolver.benchmark_finalize_overlap() == late,
++        "installed finalize-overlap mode changed"
++    );
++    ensure!(
++        evolver.benchmark_mutate_shader_matches(
++            include_str!("../src/shaders/mutate.wgsl"),
++            BenchmarkMutateOptions::default()
++        ),
++        "mutation source/options changed"
++    );
++    Ok(())
++}
++
++fn collect_events(
++    evolver: &mut GpuEvolver,
++    input: &LoadedFixture,
++    batches: u32,
++    timestamps: bool,
++) -> (Vec<RawEvent>, RawEvent) {
++    let mut events = Vec::with_capacity(batches as usize);
++    for call in 1..=batches {
++        let drawing = evolver.run_batch(&input.manifest.params, timestamps);
++        events.push(RawEvent::capture(evolver, call, drawing));
++    }
++    let drawing = evolver.flush_pending();
++    let flush = RawEvent::capture(evolver, batches + 1, drawing);
++    (events, flush)
++}
++
++fn maximum_drawings(snapshot: &BenchmarkSnapshot) -> Result<Vec<DrawingObservation>> {
++    let maximum = snapshot
++        .parents
++        .iter()
++        .map(|p| p.fitness_bits)
++        .max()
++        .context("no parents")?;
++    snapshot
++        .parents
++        .iter()
++        .filter(|p| p.fitness_bits == maximum)
++        .map(observe_parent)
++        .collect()
++}
++
++fn observe_parent(parent: &BenchmarkPackedState) -> Result<DrawingObservation> {
++    let mut state = GpuDrawingState::zeroed();
++    state.polygon_count = parent.polygon_count;
++    state.fitness_bits = parent.fitness_bits;
++    for (polygon, data) in state.polygons.iter_mut().zip(&parent.polygons) {
++        *polygon = GpuPolygon { data: *data };
++    }
++    DrawingObservation::new(&gpu_to_drawing(&state))
++}
++
++fn check_events(events: &[Event], flush: &Event, errors: &mut Vec<String>) {
++    if !events.iter().any(|e| e.drawing.is_none()) || !events.iter().any(|e| e.drawing.is_some()) {
++        errors.push("ordinary Some/None coverage missing".into());
++    }
++    for event in events.iter().chain(std::iter::once(flush)) {
++        if let Some(drawing) = &event.drawing {
++            if !f32::from_bits(drawing.fitness_bits).is_finite()
++                || !event.chain_fitness_bits.contains(&drawing.fitness_bits)
++            {
++                errors.push(format!(
++                    "call {} returned header not present in collected chain fitness",
++                    event.call
++                ));
++            }
++        }
++    }
++}
++
++fn compare_runs(expected: &Run, actual: &Run) -> Vec<String> {
++    let mut errors = Vec::new();
++    if expected.qualification.initial_state_sha256 != actual.qualification.initial_state_sha256
++        || expected.qualification.final_state_sha256 != actual.qualification.final_state_sha256
++    {
++        errors.push("seven-field canonical state differs".into());
++    }
++    compare_events(&expected.events, &actual.events, &mut errors);
++    if expected.flush != actual.flush || expected.terminal_returned != actual.terminal_returned {
++        errors.push("terminal flush/returned Drawing differs".into());
++    }
++    if expected.qualification.counters != actual.qualification.counters
++        || expected.qualification.timestamp_samples != actual.qualification.timestamp_samples
++    {
++        errors.push("completed work/timestamp accounting differs".into());
++    }
++    errors
++}
++
++fn compare_events(expected: &[Event], actual: &[Event], errors: &mut Vec<String>) {
++    if expected != actual {
++        errors.push(
++            "ordinary Some/None, own header/geometry, chain fitness or copied counters differ"
++                .into(),
++        );
++    }
++}
++
++fn write_report(report: &Report) -> Result<()> {
++    write_json(report.config.output.join("summary.json"), report)
++}
++
++fn write_json(path: PathBuf, value: &impl Serialize) -> Result<()> {
++    let bytes = serde_json::to_vec_pretty(value)?;
++    ensure!(bytes.len() <= MAX_JSON_BYTES, "JSON exceeds 2 MiB");
++    fs::write(path, bytes)?;
++    Ok(())
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn cli_bounds_the_fixed_workload() -> Result<()> {
++        let args = ["--output", "new-dir"].map(str::to_owned);
++        assert_eq!(Config::parse(&args)?.batches, 8);
++        for value in ["0", "7", "9", "65", "garbage"] {
++            let mut invalid = args.to_vec();
++            invalid.extend(["--batches".into(), value.into()]);
++            assert!(Config::parse(&invalid).is_err());
++        }
++        let mut duplicate = args.to_vec();
++        duplicate.extend(args.clone());
++        assert!(Config::parse(&duplicate).is_err());
++        Ok(())
++    }
++
++    #[test]
++    fn ordinary_comparison_rejects_delivery_header_geometry_fitness_and_counters() {
++        let original = Event {
++            call: 4,
++            drawing: Some(DrawingObservation {
++                fitness_bits: 98.0f32.to_bits(),
++                geometry_sha256: "copied-drawing".into(),
++            }),
++            counters: BenchmarkCounters {
++                completed_batches: 3,
++                ..Default::default()
++            },
++            chain_fitness_bits: [98.0f32.to_bits(), 99.0f32.to_bits(), 0, 0],
++        };
++        let mut errors = Vec::new();
++        compare_events(&[original.clone()], &[original.clone()], &mut errors);
++        assert!(errors.is_empty());
++        for changed in 0..5 {
++            let mut event = original.clone();
++            match changed {
++                0 => event.drawing = None,
++                1 => event.drawing.as_mut().unwrap().fitness_bits = 99.0f32.to_bits(),
++                2 => event.drawing.as_mut().unwrap().geometry_sha256 = "other".into(),
++                3 => event.chain_fitness_bits[0] = 97.0f32.to_bits(),
++                _ => event.counters.completed_batches = 4,
++            }
++            let mut failures = Vec::new();
++            compare_events(&[original.clone()], &[event], &mut failures);
++            assert!(!failures.is_empty());
++        }
++    }
++
++    #[test]
++    fn header_membership_preserves_scores_below_acquisition_maximum() {
++        let own = 98.0f32.to_bits();
++        let some = Event {
++            call: 4,
++            drawing: Some(DrawingObservation {
++                fitness_bits: own,
++                geometry_sha256: "own".into(),
++            }),
++            counters: Default::default(),
++            chain_fitness_bits: [own, 99.0f32.to_bits(), 0, 0],
++        };
++        let mut none = some.clone();
++        none.drawing = None;
++        let mut errors = Vec::new();
++        check_events(&[none.clone(), some.clone()], &none, &mut errors);
++        assert!(errors.is_empty());
++        let mut wrong = some;
++        wrong.drawing.as_mut().unwrap().fitness_bits = 97.0f32.to_bits();
++        check_events(&[none.clone(), wrong], &none, &mut errors);
++        assert_eq!(errors.len(), 1);
++    }
++}

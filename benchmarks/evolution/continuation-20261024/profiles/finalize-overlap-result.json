@@ -1,0 +1,353 @@
+{
+  "schema": "rejected-finalization-overlap-v1",
+  "disposition": "REJECT",
+  "production_changed": false,
+  "full_confirmation_run": false,
+  "sample_exclusions": [],
+  "primary_screen": {
+    "status": "valid",
+    "error_count": 0,
+    "timing_scope": "resident engine loop including normal readback and checked drain; setup and extra verification excluded",
+    "trials": 12,
+    "completed_evaluations": 1572864,
+    "candidates": {
+      "overlap": {
+        "statistics": {
+          "cases": {
+            "ff": {
+              "paired_ratios": {
+                "n": 2,
+                "median": 0.7913243295991436,
+                "min": 0.4504323768327867,
+                "max": 1.1322162823655004,
+                "range": 0.6817839055327137,
+                "mean": 0.7913243295991436,
+                "cv": 0.43078664463538036,
+                "raw": [
+                  0.4504323768327867,
+                  1.1322162823655004
+                ]
+              },
+              "geomean_ratio": 0.7141336507648088,
+              "interval95": [
+                0.4504323768327867,
+                1.1322162823655004
+              ],
+              "interval_statistic": "exp(mean(log(paired ratio)))"
+            },
+            "mona": {
+              "paired_ratios": {
+                "n": 2,
+                "median": 0.8136289178518924,
+                "min": 0.5146249811253987,
+                "max": 1.1126328545783861,
+                "range": 0.5980078734529874,
+                "mean": 0.8136289178518924,
+                "cv": 0.3674942349835732,
+                "raw": [
+                  0.5146249811253987,
+                  1.1126328545783861
+                ]
+              },
+              "geomean_ratio": 0.7566958846107863,
+              "interval95": [
+                0.5146249811253987,
+                1.1126328545783861
+              ],
+              "interval_statistic": "exp(mean(log(paired ratio)))"
+            },
+            "darwin": {
+              "paired_ratios": {
+                "n": 2,
+                "median": 0.8308713566028494,
+                "min": 0.5465934745074812,
+                "max": 1.1151492386982176,
+                "range": 0.5685557641907364,
+                "mean": 0.8308713566028494,
+                "cv": 0.34214428002149916,
+                "raw": [
+                  0.5465934745074812,
+                  1.1151492386982176
+                ]
+              },
+              "geomean_ratio": 0.780726134425146,
+              "interval95": [
+                0.5465934745074812,
+                1.1151492386982176
+              ],
+              "interval_statistic": "exp(mean(log(paired ratio)))"
+            }
+          },
+          "aggregate": {
+            "ratio": 0.7500090936697308,
+            "interval95": [
+              0.5656394966095984,
+              0.9944737663458023
+            ]
+          },
+          "bootstrap_seed": 20261024,
+          "resamples": 10000,
+          "uncertainty": "conditional on same-seed timing repeats; exploratory, not independent search seeds"
+        },
+        "details": {
+          "ff": {
+            "ratios": {
+              "median": 0.7913243295991436,
+              "min": 0.4504323768327867,
+              "max": 1.1322162823655004,
+              "samples": [
+                0.4504323768327867,
+                1.1322162823655004
+              ]
+            },
+            "rates": {
+              "reference": {
+                "median": 333952.5284774528,
+                "min": 330126.5355677554,
+                "max": 337778.52138715016,
+                "samples": [
+                  337778.52138715016,
+                  330126.5355677554
+                ]
+              },
+              "overlap": {
+                "median": 262960.51052110223,
+                "min": 152146.38223147832,
+                "max": 373774.6388107262,
+                "samples": [
+                  152146.38223147832,
+                  373774.6388107262
+                ]
+              }
+            },
+            "sampled_stage_median_ns": {
+              "reference": [
+                88628.0,
+                49188.0,
+                412394.0,
+                79024.0
+              ],
+              "overlap": [
+                88494.0,
+                48334.0,
+                413720.0,
+                79440.0
+              ]
+            }
+          },
+          "mona": {
+            "ratios": {
+              "median": 0.8136289178518924,
+              "min": 0.5146249811253987,
+              "max": 1.1126328545783861,
+              "samples": [
+                0.5146249811253987,
+                1.1126328545783861
+              ]
+            },
+            "rates": {
+              "reference": {
+                "median": 272575.1429502529,
+                "min": 269196.57832237496,
+                "max": 275953.7075781309,
+                "samples": [
+                  275953.7075781309,
+                  269196.57832237496
+                ]
+              },
+              "overlap": {
+                "median": 220764.8144677188,
+                "min": 142012.6715538794,
+                "max": 299516.9573815582,
+                "samples": [
+                  142012.6715538794,
+                  299516.9573815582
+                ]
+              }
+            },
+            "sampled_stage_median_ns": {
+              "reference": [
+                108040.0,
+                60714.0,
+                555948.0,
+                85666.0
+              ],
+              "overlap": [
+                107874.0,
+                61282.0,
+                556842.0,
+                84060.0
+              ]
+            }
+          },
+          "darwin": {
+            "ratios": {
+              "median": 0.8308713566028494,
+              "min": 0.5465934745074812,
+              "max": 1.1151492386982176,
+              "samples": [
+                0.5465934745074812,
+                1.1151492386982176
+              ]
+            },
+            "rates": {
+              "reference": {
+                "median": 269157.4841820814,
+                "min": 267624.0750250053,
+                "max": 270690.8933391575,
+                "samples": [
+                  270690.8933391575,
+                  267624.0750250053
+                ]
+              },
+              "overlap": {
+                "median": 223199.3297146167,
+                "min": 147957.8759077841,
+                "max": 298440.7835214493,
+                "samples": [
+                  147957.8759077841,
+                  298440.7835214493
+                ]
+              }
+            },
+            "sampled_stage_median_ns": {
+              "reference": [
+                98240.0,
+                54458.0,
+                552632.0,
+                95172.0
+              ],
+              "overlap": [
+                98666.0,
+                52386.0,
+                552662.0,
+                93344.0
+              ]
+            }
+          }
+        },
+        "screen_advance": false,
+        "confirmation_eligible": false,
+        "confirmation_pass": false
+      }
+    }
+  },
+  "correctness": {
+    "ordinary_api_runs": 8,
+    "timing_evaluations": 1572864,
+    "diagnostic_evaluations": 786432,
+    "qualification_evaluations": 393216,
+    "errors": 0,
+    "independent_offline_audit_checks": 675,
+    "independent_offline_audit_artifacts": 209,
+    "canonical_snapshots": 26,
+    "byte_l1_parent_checks": 104,
+    "maximum_cpu_fitness_difference": 7.62939453125e-06,
+    "cpu_fitness_tolerance": 2e-05
+  },
+  "separate_diagnostic": {
+    "binary_sha256": "44066ca86d42c52b877f5c7065d8ae61a196795c474e81b773b62e78e95e3e09",
+    "diagnostic_completed_evaluations": 262144,
+    "errors": [],
+    "normal_completed_evaluations": 524288,
+    "observed_pair_ratios": [
+      0.5040554081539443,
+      1.1016714702394763
+    ],
+    "optimization_claim": false,
+    "original_warmup2_reject_stands": true,
+    "original_warmup2_replay_matches": true,
+    "primary_score_eligible": false,
+    "purpose": "one mona four-warmup diagnostic to test first-use preparation, no promotion/statistics merging",
+    "qualification_completed_evaluations": 131072,
+    "valid": true,
+    "trials": [
+      {
+        "case_id": "mona",
+        "pair": 0,
+        "variant": "reference",
+        "elapsed_seconds": 0.467903525,
+        "warmup_batches": 4,
+        "finalize_overlap": false,
+        "timestamp_samples": 8,
+        "counters": {
+          "submitted_iterations": 512,
+          "submitted_evaluations": 131072,
+          "submitted_batches": 8,
+          "completed_iterations": 512,
+          "completed_evaluations": 131072,
+          "completed_batches": 8
+        }
+      },
+      {
+        "case_id": "mona",
+        "pair": 0,
+        "variant": "overlap",
+        "elapsed_seconds": 0.928277958,
+        "warmup_batches": 4,
+        "finalize_overlap": true,
+        "timestamp_samples": 8,
+        "counters": {
+          "submitted_iterations": 512,
+          "submitted_evaluations": 131072,
+          "submitted_batches": 8,
+          "completed_iterations": 512,
+          "completed_evaluations": 131072,
+          "completed_batches": 8
+        }
+      },
+      {
+        "case_id": "mona",
+        "pair": 1,
+        "variant": "overlap",
+        "elapsed_seconds": 0.433279925,
+        "warmup_batches": 4,
+        "finalize_overlap": true,
+        "timestamp_samples": 8,
+        "counters": {
+          "submitted_iterations": 512,
+          "submitted_evaluations": 131072,
+          "submitted_batches": 8,
+          "completed_iterations": 512,
+          "completed_evaluations": 131072,
+          "completed_batches": 8
+        }
+      },
+      {
+        "case_id": "mona",
+        "pair": 1,
+        "variant": "reference",
+        "elapsed_seconds": 0.477332132,
+        "warmup_batches": 4,
+        "finalize_overlap": false,
+        "timestamp_samples": 8,
+        "counters": {
+          "submitted_iterations": 512,
+          "submitted_evaluations": 131072,
+          "submitted_batches": 8,
+          "completed_iterations": 512,
+          "completed_evaluations": 131072,
+          "completed_batches": 8
+        }
+      }
+    ]
+  },
+  "restoration": {
+    "runtime_equals_commit": "6b7c2d5",
+    "tracked_rust_wgsl_files": 78,
+    "cpu_tests_passed": 42,
+    "normal_tools_match_v12": true,
+    "app_sha256_unchanged": "9131b1a2f1551b14426d20740be5e7118a367b604638f0c1d4f4e260c43f09db"
+  },
+  "evidence_sha256": {
+    "benchmarks/evolution/continuation-20261024/attempts/04-finalize-overlap-rejected.patch": "6a2cc61bc36d53b4e3d1ae480ca4757cba0a6a0a7c47552a151ded50acedf6d1",
+    ".cache/evolution-profiling-20261024/build-finalize-v1/engine-lab": "3a3142bccbdf446feff1f2428b2c39baa89b7165e7ec2cb319cc89e51b74d969",
+    ".cache/evolution-profiling-20261024/build-finalize-v1/check-gpu-finalize-order": "31b6144f55920db396c1b62e40f56a55aa48c2d4fb621d9e2eb92068b8024c54",
+    ".cache/evolution-profiling-20261024/finalize-screen/output/analysis.json": "f1a4ed46b097b065aaec312836620a63f23ec3d4fcab9588a94c9766e199e33b",
+    ".cache/evolution-profiling-20261024/finalize-result-audit-90/audit.json": "b3fe9a70168b74c61de5701fe29a0cb5f4fc694563c5e55d84716da89607a384",
+    ".cache/evolution-profiling-20261024/finalize-warmup-diagnostic-88/engine-lab": "44066ca86d42c52b877f5c7065d8ae61a196795c474e81b773b62e78e95e3e09",
+    ".cache/evolution-profiling-20261024/finalize-warmup-diagnostic-88/runtime-summary.json": "3d2d55b0984b34216eaa2705e523b32930a772641c1d685dcec0ba30aac4cf27",
+    ".cache/evolution-profiling-20261024/finalize-rejected-cleanup-89/proof.json": "663b3cfc52eae89e23bc9b503b78d0441e76f9ea5486ccd4a31cd405d313eff4",
+    ".cache/evolution-profiling-20261024/restored-default-build/result.json": "096a59f4c895a82cf8710ee3ba4dbeb55c5da5013191b1dc46a04c31cf86f40c"
+  }
+}
