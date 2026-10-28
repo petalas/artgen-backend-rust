@@ -20,10 +20,16 @@ Every row of [`log.tsv`](log.tsv) is one `scripts/hillclimb.py` run; see
 | `3f8e9e4` | Delivered chain chosen from fitness readback (determinism fix) | 512 batches 1.0002 | — |
 | `dd7e1ad` | Bitmask binning of dirty tiles, 4 row bands per offspring | confirm 1.0530 / 1.0630 | — |
 | `15519ce` | Unchanged-pixel skip for crossover offspring (≤4 changed slots) | confirm 1.7380 / 1.8355, lifecycle same | — |
+| `54286cc` + `50854a0` | Unchanged-pixel skip in framebuffer updates; raster tiles no changed polygon meets exit early | stacked confirm 1.2257 / 1.2027, lifecycle same | — |
 
 Confirm ratios are 64 batches × 5 pairs / 512 batches × 3 pairs. In crossovers
 between real chains, 38–53% of offspring are exact copies of parent A and
 almost all differ in at most 4 slots, which is why `15519ce` is so large.
+
+`54286cc` keeps the parent versions of a winner's changed polygons in polygon
+slots 996–999 of the chain (past every drawing's count, outside the replay
+hash); the skip turns itself off for drawings above 996 polygons. Code that
+reads past `polygon_count` or raises the polygon limit must account for it.
 
 `70c9031` (4-iteration chunked submits, +13.7% when kept) was later shown to
 lock the driver into a slow submit state once readback was double-buffered and
