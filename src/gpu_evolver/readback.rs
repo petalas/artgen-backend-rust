@@ -182,14 +182,19 @@ impl Readback {
         for (i, &bits) in packed.iter().enumerate() {
             self.chain_fitness[i] = f32::from_bits(bits);
         }
+        let best_chain = best_chain(&self.chain_fitness[..packed.len()]);
         drop(fitness_data);
         p.control_staging_bufs[idx].unmap();
         p.fitness_staging_bufs[idx].unmap();
 
         if flags.new_best_found != 0 {
             self.best_fitness_bits = flags.best_fitness_bits;
+            // `flags.best_chain_id` is the last of racing stores from select's
+            // atomicMax, so it varies between runs. The per-chain fitness gives
+            // the same winner every run. Chain fitness never decreases, so the
+            // copy made one batch later is at least this good.
             // A newer winning chain supersedes a queued copy not yet encoded.
-            self.pending_best_chain = Some(flags.best_chain_id);
+            self.pending_best_chain = best_chain;
         }
         drawing
     }
@@ -251,6 +256,17 @@ impl Readback {
     }
 }
 
+/// Highest fitness wins; ties go to the lowest chain id.
+fn best_chain(chain_fitness: &[f32]) -> Option<u32> {
+    let mut best: Option<(usize, f32)> = None;
+    for (i, &fitness) in chain_fitness.iter().enumerate() {
+        if best.is_none_or(|(_, b)| fitness.total_cmp(&b).is_gt()) {
+            best = Some((i, fitness));
+        }
+    }
+    best.map(|(i, _)| u32::try_from(i).expect("chain count fits u32"))
+}
+
 fn map_read(slice: BufferSlice<'_>) -> MapReceiver {
     let (tx, rx) = mpsc::channel();
     slice.map_async(MapMode::Read, move |result| tx.send(result).unwrap());
@@ -298,4 +314,17 @@ pub(super) fn readback_chain(p: &GpuPipeline, chain_id: u32) -> Drawing {
         })
         .unwrap();
     mapped_drawing(p, 0, &rx, "Failed to access mapped drawing readback buffer")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::best_chain;
+
+    #[test]
+    fn best_chain_prefers_highest_fitness_then_lowest_id() {
+        assert_eq!(best_chain(&[]), None);
+        assert_eq!(best_chain(&[1.0, 3.0, 2.0]), Some(1));
+        assert_eq!(best_chain(&[2.0, 3.0, 3.0, 1.0]), Some(1));
+        assert_eq!(best_chain(&[-1.0, -0.5]), Some(1));
+    }
 }

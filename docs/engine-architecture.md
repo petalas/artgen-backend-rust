@@ -56,7 +56,16 @@ a drawing (every third batch); removing that drain raised throughput about 2%
 a single-buffer reference, `check-gpu-lifecycle` differs only in event `drawing`
 fields: the single-buffer build returned no drawing every third call, because
 its early collection consumed the copy and left the next batch none to copy.
-Copy source selection remains at the same position in the encoder. Terminal
+Copy source selection remains at the same position in the encoder.
+
+The host picks the winning chain from the batch's `fitness_packed` readback:
+highest fitness, ties to the lowest chain id. The control word `best_chain_id`
+is not used. Select writes it after an `atomicMax`, so concurrent workgroups
+race, and the last store can name a chain other than the best, or a different
+tied chain on each run. That race made `check-gpu-lifecycle` deliveries differ
+between runs of one build. `new_best_found` and `best_fitness_bits` are
+deterministic and still gate delivery. Chain fitness never decreases, so the
+copy taken a batch later is at least as good as the reported best. Terminal
 flush still prefers a newer synchronous drawing over an older deferred drawing.
 
 Ordinary reinitialization preserves staging alternation; seeded preparation resets
