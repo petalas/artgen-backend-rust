@@ -1,2 +1,9 @@
 utc	control	candidate	cases	pairs	batches	ratio	low95	high95	verdict	replay	control_evals_per_s	candidate_evals_per_s	evidence	note
 2026-10-28T13:57:07+00:00	worktree	worktree	ff,mona,darwin	5	64	0.99751	0.99474	1.00029	NOISE	same	294527	295029	.cache/hillclimb/runs/20261028T135300Z-y_54iest	A/A noise floor, defaults, quiet host
+2026-10-28T14:59:26+00:00	HEAD@d1a9bf692a	chunk8	ff,mona,darwin	3	64	1.07526	1.02498	1.11631	FASTER	same	299784	325722	.cache/hillclimb/runs/20261028T145625Z-_z97vods	H1 split batch submits every 8 iterations
+2026-10-28T15:02:12+00:00	HEAD@d1a9bf692a	chunk4	ff,mona,darwin	3	64	1.07566	1.05074	1.09804	FASTER	same	301365	326882	.cache/hillclimb/runs/20261028T145926Z-ih533yk2	H1 split batch submits every 4 iterations
+2026-10-28T15:05:06+00:00	HEAD@d1a9bf692a	chunk16	ff,mona,darwin	3	64	1.01166	0.98384	1.03635	NOISE	same	300654	320191	.cache/hillclimb/runs/20261028T150212Z-n52mp67q	H1 split batch submits every 16 iterations
+2026-10-28T15:09:31+00:00	HEAD@d1a9bf692a	chunk4	ff,mona,darwin	5	64	1.13650	1.12938	1.14333	FASTER	same	288589	327410	.cache/hillclimb/runs/20261028T150531Z-m7r5f4rk	H1 split batch submits every 4 iterations, primed
+2026-10-28T15:13:31+00:00	HEAD@d1a9bf692a	chunk8	ff,mona,darwin	5	64	1.12906	1.12152	1.13598	FASTER	same	288865	325601	.cache/hillclimb/runs/20261028T150931Z-iji838ti	H1 split batch submits every 8 iterations, primed
+2026-10-28T15:17:59+00:00	chunk4	chunk2	ff,mona,darwin	3	64	0.98946	0.98135	0.99679	SLOWER	same	326934	323630	.cache/hillclimb/runs/20261028T151439Z-u8dwkmp1	H1 chunk 2 vs chunk 4
+2026-10-28T15:21:09+00:00	chunk4	chunk1	ff,mona,darwin	3	64	0.93694	0.93349	0.94013	SLOWER	same	327281	310608	.cache/hillclimb/runs/20261028T151759Z-y19yydge	H1 chunk 1 vs chunk 4

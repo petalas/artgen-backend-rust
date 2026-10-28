@@ -228,5 +228,6 @@ so the long-running app is affected too (inferred ~15–20% host-side, then flat
 **Fix**: None in our code. Compare sides that have run the same number of
 batches (`scripts/hillclimb.py` alternates AB/BA across two servers) and never
 compare early trials of one process with late ones. A throwaway split of each
-batch into several submits (every 8 iterations) cut ff elapsed 2.98–3.24 s to
-2.61–2.65 s with an unchanged hash; it is an unadopted engine candidate.
+batch into several submits cut ff elapsed 2.98–3.24 s to 2.61–2.65 s with an
+unchanged hash. The engine now submits every 4 bulk iterations
+(`SUBMIT_CHUNK_ITERATIONS`, +13.7% across all three cases).
