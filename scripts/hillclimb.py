@@ -456,21 +456,20 @@ def verdict(point, low, high, pairs, min_effect):
 
 
 def case_table(rows, ratios, candidate):
+    """Median rate, GPU share and per-stage GPU µs per iteration, control → candidate."""
     lines = [(f"{'case':8}{'control':>12}{'candidate':>12}{'ratio':>9}{'gpu%':>12}  "
-              "GPU µs/iteration mut/bin/rast/sel (cand)")]
+              "GPU µs/iteration control→candidate: mutate bin raster select")]
     for case, values in ratios.items():
-        rate = {side: statistics.median(r["rate"] for r in rows
-                                        if r["case"] == case and r["side"] == side)
-                for side in ("control", candidate)}
-        stages = [statistics.median(r["stage_ns"][i] for r in rows
-                                    if r["case"] == case and r["side"] == candidate) / 1e3
-                  for i in range(4)]
-        share = {side: statistics.median(r["gpu_share"] for r in rows
-                                         if r["case"] == case and r["side"] == side)
-                 for side in ("control", candidate)}
-        lines.append(f"{case:8}{rate['control']:>12,.0f}{rate[candidate]:>12,.0f}"
-                     f"{statistics.median(values):>9.4f}{share['control']:>6.0%}→{share[candidate]:<4.0%} "
-                     + "/".join(f"{s:.0f}" for s in stages))
+        def median(field, side, index=None, case=case):
+            return statistics.median(
+                r[field] if index is None else r[field][index]
+                for r in rows if r["case"] == case and r["side"] == side)
+        stages = "  ".join(f"{median('stage_ns', 'control', i) / 1e3:.0f}→"
+                           f"{median('stage_ns', candidate, i) / 1e3:.0f}" for i in range(4))
+        lines.append(f"{case:8}{median('rate', 'control'):>12,.0f}"
+                     f"{median('rate', candidate):>12,.0f}{statistics.median(values):>9.4f}"
+                     f"{median('gpu_share', 'control'):>6.0%}→"
+                     f"{median('gpu_share', candidate):<4.0%}  {stages}")
     return "\n".join(lines)
 
 
