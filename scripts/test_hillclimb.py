@@ -24,7 +24,7 @@ _spec.loader.exec_module(hillclimb)
 FAKE = r'''#!/usr/bin/env python3
 import json, os, sys
 from pathlib import Path
-name = Path(sys.argv[0]).name           # e.g. rate-100-hash-a-serve-1-ok-1
+name = Path(sys.argv[0]).name           # e.g. rate-100-hash-a-serve-1-ok-1-gain-1
 fields = dict(zip(name.split("-")[::2], name.split("-")[1::2]))
 
 def record(flags):
@@ -35,7 +35,9 @@ def record(flags):
            "evals_per_second": float(fields["rate"]) if ok else None,
            "final_state_sha256": fields["hash"] + flags["case"],
            "timestamp_samples": 4, "sampled_gpu_stage_totals_ns": [4e3, 4e3, 4e3, 4e3],
-           "elapsed_seconds": 0.01, "params": {"gpuBatchIters": 4}}
+           "elapsed_seconds": 0.01, "params": {"gpuBatchIters": 4},
+           "initial_similarity_percent": 97.0,
+           "final_fitness_percent": [97.0, 97.0 + float(fields["gain"]) / 100]}
     out = Path(flags["output"]); out.mkdir(parents=True)
     (out / "result.json").write_text(json.dumps(rec))
     return rec
@@ -69,8 +71,8 @@ class HillclimbCli(unittest.TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
 
-    def fake(self, rate=100, digest="a", serve=1, ok=1):
-        path = self.root / "bin" / f"rate-{rate}-hash-{digest}-serve-{serve}-ok-{ok}"
+    def fake(self, rate=100, digest="a", serve=1, ok=1, gain=1):
+        path = self.root / "bin" / f"rate-{rate}-hash-{digest}-serve-{serve}-ok-{ok}-gain-{gain}"
         path.parent.mkdir(exist_ok=True)
         path.write_text(FAKE)
         path.chmod(0o755)
@@ -124,10 +126,10 @@ class HillclimbCli(unittest.TestCase):
         self.assertFalse(hillclimb.LOG.exists())
 
     def test_busy_host_is_recorded_and_warned(self):
-        with mock.patch.object(hillclimb.os, "getloadavg", return_value=(9.0, 1.0, 1.0)):
+        with mock.patch.object(hillclimb, "foreign_cores", return_value=9.0):
             code, out, _ = self.run_cli(self.fake(), self.fake())
         self.assertEqual(code, 0)
-        self.assertIn("WARNING: host load reached 9.0", out)
+        self.assertIn("WARNING: other processes used up to 9.0 CPU cores during 12 of 12", out)
         self.assertEqual(self.log_rows()[0]["host_load"], "9.0")
 
     def test_effect_below_min_effect_is_noise(self):
@@ -144,6 +146,17 @@ class HillclimbCli(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertEqual([r["verdict"] for r in self.log_rows()], ["REPLAY-MISMATCH", "FASTER"])
         self.assertEqual(self.log_rows()[1]["replay"], "differs")
+
+    def test_behavior_change_reports_fitness_gain_per_second(self):
+        code, out, _ = self.run_cli(self.fake(), self.fake(digest="b", gain=2),
+                                    "--allow-behavior-change")
+        self.assertEqual(code, 0, out)
+        [row] = self.log_rows()
+        self.assertEqual((row["verdict"], row["quality_verdict"]), ("NOISE", "FASTER"))
+        self.assertAlmostEqual(float(row["quality_ratio"]), 2.0, places=3)
+        evidence = Path(out.rsplit("evidence ", 1)[1].strip())
+        rows = json.loads((hillclimb.REPO / evidence / "summary.json").read_text())["rows"]
+        self.assertEqual(sorted({r["seed"] for r in rows}), [7, 8, 9])
 
     def test_executables_without_serve_run_one_process_per_trial(self):
         code, out, err = self.run_cli(self.fake(serve=0), self.fake())
@@ -169,6 +182,15 @@ class HillclimbCli(unittest.TestCase):
             self.assertEqual(code, 1)
             self.assertIn("hillclimb:", err)
         self.assertFalse((hillclimb.ROOT / "runs").exists())
+
+
+class ForeignCpu(unittest.TestCase):
+    def test_busy_child_counts_as_ours_and_idle_host_is_near_zero(self):
+        before = hillclimb.cpu_snapshot([])
+        deadline = hillclimb.time.monotonic() + 0.3
+        while hillclimb.time.monotonic() < deadline:
+            pass
+        self.assertLess(hillclimb.foreign_cores(before, hillclimb.cpu_snapshot([])), 0.9)
 
 
 class Statistics(unittest.TestCase):

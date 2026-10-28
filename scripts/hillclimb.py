@@ -24,6 +24,7 @@ through the reserved-seed confirmation in benchmarks/evolution.
 """
 
 import argparse
+import contextlib
 import datetime
 import fcntl
 import hashlib
@@ -32,6 +33,7 @@ import math
 import os
 import queue
 import random
+import resource
 import shutil
 import statistics
 import subprocess
@@ -68,9 +70,11 @@ RESAMPLES = 10000
 BOOTSTRAP_SEED = 20261028
 LOG_COLUMNS = ("utc", "control", "candidate", "cases", "pairs", "batches", "ratio",
                "low95", "high95", "verdict", "replay", "control_evals_per_s",
-               "candidate_evals_per_s", "evidence", "note", "host_load")
-# One-minute load average above this while timing means other work shared the CPU.
-BUSY_LOAD = 2.5
+               "candidate_evals_per_s", "evidence", "note", "host_load", "quality_ratio",
+               "quality_low95", "quality_high95", "quality_verdict")
+# Other processes averaging more CPU cores than this during a timed trial (e.g. a
+# parallel cargo build) biased results; the one-minute load average missed them.
+BUSY_CORES = 1.0
 
 
 class HillclimbError(Exception):
@@ -183,6 +187,7 @@ class Server:
         self.process = subprocess.Popen(
             [str(executable), "serve", "--manifest", str(MANIFEST)], cwd=workdir,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.stderr, text=True)
+        self.pid = self.process.pid
         self.lines = queue.Queue()
         threading.Thread(target=self._pump, daemon=True).start()
 
@@ -225,6 +230,7 @@ class OneShot:
 
     def __init__(self, name, executable, workdir, timeout):
         self.name, self.executable, self.workdir, self.timeout = name, executable, workdir, timeout
+        self.pid = None
         workdir.mkdir(parents=True, exist_ok=True)
 
     def trial(self, case, seed, batches, warmup, output):
@@ -262,6 +268,29 @@ def gpu_share(record):
     return per_iteration_s * iterations / record["elapsed_seconds"]
 
 
+CLOCK_TICKS = os.sysconf("SC_CLK_TCK")
+
+
+def cpu_snapshot(pids):
+    """(wall seconds, system busy ticks, ticks used by this script, its children and pids)."""
+    with open("/proc/stat") as stream:
+        fields = [int(value) for value in stream.readline().split()[1:]]
+    busy = sum(fields) - fields[3] - fields[4]  # minus idle and iowait
+    usage = [resource.getrusage(who) for who in (resource.RUSAGE_SELF, resource.RUSAGE_CHILDREN)]
+    ours = sum(u.ru_utime + u.ru_stime for u in usage) * CLOCK_TICKS
+    for pid in pids:
+        with contextlib.suppress(OSError):
+            stat = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+            ours += int(stat[11]) + int(stat[12])
+    return time.monotonic(), busy, ours
+
+
+def foreign_cores(before, after):
+    """Average CPU cores used by other processes between two snapshots."""
+    wall = max(after[0] - before[0], 1e-9)
+    return max(0.0, (after[1] - before[1]) - (after[2] - before[2])) / CLOCK_TICKS / wall
+
+
 def check_record(record, case, seed, batches):
     require(record["case_id"] == case and record["seed"] == seed
             and record["batches"] == batches, "record does not match its request")
@@ -289,13 +318,20 @@ def run_case(servers, case, args, evidence, rows):
     for pair in range(args.pairs):
         shift = pair % len(names)
         order = names[shift:] + names[:shift]
+        # A behavior change is judged on several trajectories; sides share each seed.
+        seed = args.seed + pair if args.allow_behavior_change else args.seed
         rates = {}
         for side in order:
             output = evidence / case / f"{pair:02d}-{side}"
-            record = servers[side].trial(case, args.seed, args.batches, args.warmup, output)
-            rates[side] = check_record(record, case, args.seed, args.batches)
-            rows.append({"case": case, "pair": pair, "side": side, "rate": rates[side],
-                         "gpu_share": gpu_share(record),
+            pids = [server.pid for server in servers.values() if server.pid]
+            before = cpu_snapshot(pids)
+            record = servers[side].trial(case, seed, args.batches, args.warmup, output)
+            foreign = foreign_cores(before, cpu_snapshot(pids))
+            rates[side] = check_record(record, case, seed, args.batches)
+            rows.append({"case": case, "pair": pair, "seed": seed, "side": side,
+                         "rate": rates[side], "gpu_share": gpu_share(record),
+                         "foreign_cores": foreign,
+                         "gain_per_s": fitness_gain(record) / record["elapsed_seconds"],
                          "hash": record["final_state_sha256"],
                          "stage_ns": [total / max(1, record["timestamp_samples"])
                                       for total in record["sampled_gpu_stage_totals_ns"]]})
@@ -308,12 +344,32 @@ def run_case(servers, case, args, evidence, rows):
 
 
 def replay_gate(rows, candidate):
-    """Per case: True when every control and candidate trial ends in one state."""
+    """Per case: True when control and candidate trials of each seed end in one state."""
     hashes = {}
     for row in rows:
         if row["side"] in ("control", candidate):
-            hashes.setdefault(row["case"], set()).add(row["hash"])
-    return {case: len(values) == 1 for case, values in hashes.items()}
+            hashes.setdefault(row["case"], {}).setdefault(row["seed"], set()).add(row["hash"])
+    return {case: all(len(values) == 1 for values in seeds.values())
+            for case, seeds in hashes.items()}
+
+
+def fitness_gain(record):
+    """Best final fitness minus the starting fitness, in percentage points."""
+    gain = max(record["final_fitness_percent"]) - record["initial_similarity_percent"]
+    require(gain > 0, f"{record['case_id']}: no fitness gain; raise --batches")
+    return gain
+
+
+def quality_ratios(rows, candidate):
+    """Per case: candidate/control fitness gain per second, paired by round."""
+    by_round = {}
+    for row in rows:
+        if row["side"] in ("control", candidate):
+            by_round.setdefault((row["case"], row["pair"]), {})[row["side"]] = row["gain_per_s"]
+    ratios = {}
+    for (case, _), sides in by_round.items():
+        ratios.setdefault(case, []).append(sides[candidate] / sides["control"])
+    return ratios
 
 
 def percentile(values, fraction):
@@ -374,7 +430,7 @@ def append_log(entry):
     else:
         LOG.write_text(header)
     with LOG.open("a") as stream:
-        clean = [str(entry[key]).replace("\t", " ").replace("\n", " ") for key in LOG_COLUMNS]
+        clean = [str(entry.get(key, "")).replace("\t", " ").replace("\n", " ") for key in LOG_COLUMNS]
         stream.write("\t".join(clean) + "\n")
 
 
@@ -383,7 +439,7 @@ def median_rate(rows, side):
 
 
 def measure(args, sides, evidence):
-    rows, args.host_load = [], os.getloadavg()[0]
+    rows = []
     ratios = {name: {} for name in list(sides)[1:]}
     kinds = {side: Server if supports_serve(executable) else OneShot
              for side, (_, _, executable) in sides.items()}
@@ -404,7 +460,6 @@ def measure(args, sides, evidence):
         finally:
             for server in servers.values():
                 server.close()
-        args.host_load = max(args.host_load, os.getloadavg()[0])
     return rows, ratios
 
 
@@ -416,9 +471,11 @@ def summarize(args, sides, evidence, rows, ratios):
         {"entries": entries, "ratios": ratios, "rows": rows,
          "identities": {side: value[1] for side, value in sides.items()},
          "args": {k: v for k, v in vars(args).items()}}, indent=2, default=str))
-    if args.host_load > BUSY_LOAD:
-        print(f"WARNING: host load reached {args.host_load:.1f} while timing; other work "
-              "may have biased these results. Rerun on an idle machine.")
+    busy = [row for row in rows if row["foreign_cores"] > BUSY_CORES]
+    if busy:
+        worst = max(row["foreign_cores"] for row in busy)
+        print(f"WARNING: other processes used up to {worst:.1f} CPU cores during {len(busy)} "
+              f"of {len(rows)} timed trials; results may be biased. Rerun on an idle machine.")
     print(f"evidence {os.path.relpath(evidence, REPO)}")
     return 1 if any(entry["verdict"] == "REPLAY-MISMATCH" for entry in entries) else 0
 
@@ -438,13 +495,21 @@ def summarize_candidate(args, sides, evidence, rows, name, ratios):
              "control_evals_per_s": median_rate(rows, "control"),
              "candidate_evals_per_s": median_rate(rows, name),
              "evidence": os.path.relpath(evidence, REPO), "note": args.note,
-             "host_load": f"{args.host_load:.1f}"}
+             "host_load": f"{max(row['foreign_cores'] for row in rows):.1f}"}
+    if args.allow_behavior_change:
+        q_point, q_low, q_high = aggregate(quality_ratios(rows, name))
+        entry.update(quality_ratio=f"{q_point:.5f}", quality_low95=f"{q_low:.5f}",
+                     quality_high95=f"{q_high:.5f}",
+                     quality_verdict=verdict(q_point, q_low, q_high, args.pairs, args.min_effect))
     entry["replay_by_case"] = replay
     append_log(entry)
     print(f"\n== {name}: {entry['candidate']}")
     print(case_table(rows, ratios, name))
     print(f"{result}: candidate/control {point:.4f}  95% [{low:.4f}, {high:.4f}]  "
           f"replay {entry['replay']}")
+    if args.allow_behavior_change:
+        print(f"QUALITY {entry['quality_verdict']}: fitness gain per second, candidate/control "
+              f"{entry['quality_ratio']}  95% [{entry['quality_low95']}, {entry['quality_high95']}]")
     return entry
 
 

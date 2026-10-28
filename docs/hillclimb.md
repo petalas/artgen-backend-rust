@@ -59,7 +59,11 @@ A resident trial takes ~4.7 s of wall time instead of 16–21 s.
 
 - Every trial must complete all work with zero numerical errors.
 - Every trial of a case must end in the same canonical replay hash on both sides.
-  A change meant to alter evolution passes `--allow-behavior-change`.
+  A change meant to alter evolution passes `--allow-behavior-change`. Then each
+  pair uses its own seed (shared by both sides), and a second verdict, `QUALITY`,
+  compares fitness gained per second (best final fitness minus the start,
+  divided by timed seconds) with the same paired bootstrap. That is the measure
+  of how quickly images evolve; evals/s alone can hide a worse search.
 - Verdict uses the equal-case geometric mean of paired ratios with a stratified
   bootstrap 95% interval. `FASTER`/`SLOWER` need the interval to exclude 1.0 and
   a move of at least `--min-effect` (default 0.5%). Fewer than three pairs give
@@ -86,8 +90,10 @@ produced a false 3.4% SLOWER in an earlier A/A):
   sampled stage times. Near 100% the kernels are the lever; well below, the host.
 - Parallel `cargo` builds skewed timing by up to 17% (two false SLOWER runs).
   Builds started by the script wait for timing runs and vice versa; builds you
-  start yourself do not, so avoid them while a run times. Each log row records
-  the peak one-minute load (`host_load`), and runs above 2.5 print a warning.
+  start yourself do not, so avoid them while a run times. Each trial measures
+  CPU used by processes outside the run (`/proc/stat` minus our own process
+  tree); `host_load` in the log is the peak, and above 1 core the run warns.
+  The one-minute load average missed short parallel builds.
 - Below ~1% effects, rerun before trusting a verdict, and run an A/A when the
   machine state changes.
 
