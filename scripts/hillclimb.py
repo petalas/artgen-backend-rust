@@ -103,7 +103,17 @@ def checkout_ref(commit):
 
 
 def resolve(side):
-    """Return (label, identity, executable) for a side, building it if not cached."""
+    """Return (label, identity, executable) for a side, building it if not cached.
+
+    Concurrent invocations share the ref worktree and build cache, so builds are
+    serialized by a lock separate from the GPU benchmark lock."""
+    ROOT.mkdir(parents=True, exist_ok=True)
+    with (ROOT / "build.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return resolve_locked(side)
+
+
+def resolve_locked(side):
     if Path(side).is_file():
         path = Path(side).resolve()
         return path.name, f"binary:{path}", path
