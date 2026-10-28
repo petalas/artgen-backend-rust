@@ -42,10 +42,20 @@ import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-ROOT = REPO / ".cache/hillclimb"
-MANIFEST = REPO / ".cache/evolution-bench/fixtures/v1/manifest.json"
-LOCK = REPO / ".cache/evolution-bench/benchmark.lock"
-LOG = REPO / "benchmarks/hillclimb/log.tsv"
+
+
+def main_checkout():
+    """The primary checkout, so linked worktrees share fixtures, builds, the lock and the log."""
+    common = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                            cwd=REPO, capture_output=True, text=True, check=False)
+    return Path(common.stdout.strip()).parent if common.returncode == 0 else REPO
+
+
+SHARED = main_checkout()
+ROOT = SHARED / ".cache/hillclimb"
+MANIFEST = SHARED / ".cache/evolution-bench/fixtures/v1/manifest.json"
+LOCK = SHARED / ".cache/evolution-bench/benchmark.lock"
+LOG = SHARED / "benchmarks/hillclimb/log.tsv"
 CASES = ("ff", "mona", "darwin")
 WORKTREE = "WORKTREE"
 KEEP_BUILDS = 8

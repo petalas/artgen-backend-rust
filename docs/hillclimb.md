@@ -51,6 +51,9 @@ A resident trial takes ~4.7 s of wall time instead of 16–21 s.
   Without it, a candidate's first trial after engine construction sometimes ran
   10–15% slow and widened the interval from ±1% to ±4%.
 - Runs take the shared `.cache/evolution-bench/benchmark.lock`.
+- From a linked git worktree, the script still uses the primary checkout's
+  fixtures, build cache, lock and log, so parallel agents can screen their own
+  `WORKTREE` without copying state.
 
 ## Gates and verdict
 
