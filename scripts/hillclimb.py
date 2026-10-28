@@ -67,6 +67,9 @@ KEEP_BUILDS = 8
 BUILD_INPUTS = ("src", "examples/evolution-bench.rs", "Cargo.toml", "Cargo.lock",
                 "rust-toolchain.toml")
 MAX_CANDIDATES = 6
+# --confirm: the default screen, then a long horizon where host-side costs show
+# (64-batch screens missed a 25-42% regression that 512 batches exposed).
+CONFIRM_HORIZONS = ((64, 5), (512, 3))
 RESAMPLES = 10000
 BOOTSTRAP_SEED = 20261028
 LOG_COLUMNS = ("utc", "control", "candidate", "cases", "pairs", "batches", "ratio",
@@ -503,7 +506,7 @@ def summarize(args, sides, evidence, rows, ratios):
         print(f"WARNING: other processes used up to {worst:.1f} CPU cores during {len(busy)} "
               f"of {len(rows)} timed trials; results may be biased. Rerun on an idle machine.")
     print(f"evidence {os.path.relpath(evidence, REPO)}")
-    return 1 if any(entry["verdict"] == "REPLAY-MISMATCH" for entry in entries) else 0
+    return entries
 
 
 def summarize_candidate(args, sides, evidence, rows, name, ratios):
@@ -547,6 +550,9 @@ def parse_args(argv):
                      help="git ref, WORKTREE, revert:SHA[@BASE] (BASE with SHA reverted, "
                           "for ablation) or executable; repeat to compare several "
                           "candidates against one control in one run (default WORKTREE)")
+    cli.add_argument("--confirm", action="store_true",
+                     help="run 64 batches x 5 pairs and 512 x 3; ADOPT only if neither "
+                          "horizon regresses (speed or quality) and one improves")
     cli.add_argument("--build-only", action="store_true",
                      help="build or find each side and print its cached executable path")
     cli.add_argument("--cases", default=",".join(CASES), help="comma-separated subset of ff,mona,darwin")
@@ -576,26 +582,68 @@ def parse_args(argv):
     return args
 
 
+def resolve_sides(args):
+    """Resolve control and candidates; a revert that does not apply is skipped, not fatal."""
+    sides = {"control": resolve(args.control)}
+    candidates = []
+    for side in args.candidate:
+        try:
+            candidates.append(resolve(side))
+        except HillclimbError as exc:
+            if not side.startswith(REVERT):
+                raise
+            print(f"skipping {side}: {exc}", file=sys.stderr)
+    require(candidates, "no candidate could be built")
+    names = ["candidate"] if len(candidates) == 1 else [
+        f"candidate{index}" for index in range(1, len(candidates) + 1)]
+    sides.update(zip(names, candidates))
+    return sides
+
+
+def run_horizon(args, sides):
+    """Measure every side at one batch budget; return one log entry per candidate."""
+    stamp = datetime.datetime.now(datetime.UTC).strftime("%Y%m%dT%H%M%SZ")
+    (ROOT / "runs").mkdir(parents=True, exist_ok=True)
+    evidence = Path(tempfile.mkdtemp(prefix=f"{stamp}-", dir=ROOT / "runs"))
+    LOCK.parent.mkdir(parents=True, exist_ok=True)
+    with LOCK.open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        rows, ratios = measure(args, sides, evidence)
+    return summarize(args, sides, evidence, rows, ratios)
+
+
+def confirmation(entries):
+    """Adopt only if no horizon regresses and at least one improves."""
+    verdicts = [entry["verdict"] for entry in entries]
+    verdicts += [entry["quality_verdict"] for entry in entries if "quality_verdict" in entry]
+    if any(v in ("SLOWER", "REPLAY-MISMATCH", "SCREEN") for v in verdicts):
+        return "REJECT"
+    return "ADOPT" if "FASTER" in verdicts else "NOISE"
+
+
 def main(argv=None):
     try:
         args = parse_args(argv)
         require(MANIFEST.is_file(), f"missing fixtures {MANIFEST}; run scripts/evolution-bench.py freeze")
-        names = ["candidate"] if len(args.candidate) == 1 else [
-            f"candidate{index}" for index in range(1, len(args.candidate) + 1)]
-        sides = {"control": resolve(args.control)}
-        sides.update((name, resolve(side)) for name, side in zip(names, args.candidate))
+        sides = resolve_sides(args)
         if args.build_only:
             for name, (label, _, executable) in sides.items():
                 print(f"{name}\t{label}\t{executable}")
             return 0
-        stamp = datetime.datetime.now(datetime.UTC).strftime("%Y%m%dT%H%M%SZ")
-        (ROOT / "runs").mkdir(parents=True, exist_ok=True)
-        evidence = Path(tempfile.mkdtemp(prefix=f"{stamp}-", dir=ROOT / "runs"))
-        LOCK.parent.mkdir(parents=True, exist_ok=True)
-        with LOCK.open("a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            rows, ratios = measure(args, sides, evidence)
-        return summarize(args, sides, evidence, rows, ratios)
+        horizons = CONFIRM_HORIZONS if args.confirm else ((args.batches, args.pairs),)
+        entries = []
+        for batches, pairs in horizons:
+            args.batches, args.pairs = batches, pairs
+            entries.extend(run_horizon(args, sides))
+        if args.confirm:
+            print()
+            for name in list(sides)[1:]:
+                mine = [e for e in entries if e["candidate"] == sides[name][0]]
+                print(f"CONFIRM {confirmation(mine)}: {sides[name][0]} "
+                      + "  ".join(f"{e['batches']} batches {e['verdict']}"
+                                  + (f"/quality {e['quality_verdict']}" if "quality_verdict" in e else "")
+                                  for e in mine))
+        return 1 if any(e["verdict"] == "REPLAY-MISMATCH" for e in entries) else 0
     except HillclimbError as exc:
         print(f"hillclimb: {exc}", file=sys.stderr)
         return 1

@@ -11,6 +11,7 @@ scripts/hillclimb.py --cases ff --pairs 3 --batches 16  # quick screen, ~1 min, 
 scripts/hillclimb.py --control HEAD~1 --candidate HEAD  # two commits
 scripts/hillclimb.py --candidate HEAD                   # A/A noise check
 scripts/hillclimb.py --candidate revert:70c9031         # ablation: HEAD without one kept change
+scripts/hillclimb.py --confirm                          # adoption gate: 64x5 and 512x3, ADOPT/REJECT/NOISE
 ```
 
 A kept change can turn harmful after later changes: chunked submits gained

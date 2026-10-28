@@ -132,6 +132,23 @@ class HillclimbCli(unittest.TestCase):
         self.assertIn("WARNING: other processes used up to 9.0 CPU cores during 12 of 12", out)
         self.assertEqual(self.log_rows()[0]["host_load"], "9.0")
 
+    def test_confirm_runs_both_horizons_and_adopts_only_without_regressions(self):
+        code, out, _ = self.run_cli(self.fake(rate=100), self.fake(rate=110),
+                                    "--candidate", self.fake(rate=110, digest="b"), "--confirm")
+        self.assertEqual(code, 1, out)
+        rows = self.log_rows()
+        self.assertEqual([(r["batches"], r["pairs"]) for r in rows],
+                         [("64", "5"), ("64", "5"), ("512", "3"), ("512", "3")])
+        self.assertIn("CONFIRM ADOPT: rate-110-hash-a", out)
+        self.assertIn("CONFIRM REJECT: rate-110-hash-b", out)
+
+    def test_unappliable_revert_is_skipped(self):
+        code, out, err = self.run_cli(self.fake(), self.fake(rate=110),
+                                      "--candidate", "revert:0000000000")
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("skipping revert:0000000000", err)
+        self.assertEqual(len(self.log_rows()), 1)
+
     def test_effect_below_min_effect_is_noise(self):
         code, out, _ = self.run_cli(self.fake(rate=1000), self.fake(rate=1003))
         self.assertEqual(code, 0, out)
