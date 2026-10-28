@@ -48,6 +48,7 @@ LOG = REPO / "benchmarks/hillclimb/log.tsv"
 CASES = ("ff", "mona", "darwin")
 WORKTREE = "WORKTREE"
 KEEP_BUILDS = 8
+MAX_CANDIDATES = 6
 RESAMPLES = 10000
 BOOTSTRAP_SEED = 20261028
 LOG_COLUMNS = ("utc", "control", "candidate", "cases", "pairs", "batches", "ratio",
@@ -224,16 +225,21 @@ def check_record(record, case, seed, batches):
 
 
 def run_case(servers, case, args, evidence, rows):
-    """Prime each side, then alternate AB/BA pairs; return paired candidate/control ratios."""
+    """Prime each side, then run rounds in rotated side order; return candidate/control ratios.
+
+    With one candidate the rotation is AB/BA. Every side runs the same number of
+    batches before each round, so in-process drift affects all sides alike."""
     for side, server in servers.items():
         for index in range(args.prime):
             # The first trials after engine construction can stall; they are not scored.
             record = server.trial(case, args.seed, args.batches, args.warmup,
                                   evidence / case / f"prime{index}-{side}")
             check_record(record, case, args.seed, args.batches)
-    ratios = []
+    names = list(servers)
+    ratios = {name: [] for name in names[1:]}
     for pair in range(args.pairs):
-        order = ("control", "candidate") if pair % 2 == 0 else ("candidate", "control")
+        shift = pair % len(names)
+        order = names[shift:] + names[:shift]
         rates = {}
         for side in order:
             output = evidence / case / f"{pair:02d}-{side}"
@@ -243,17 +249,20 @@ def run_case(servers, case, args, evidence, rows):
                          "hash": record["final_state_sha256"],
                          "stage_ns": [total / max(1, record["timestamp_samples"])
                                       for total in record["sampled_gpu_stage_totals_ns"]]})
-        ratios.append(rates["candidate"] / rates["control"])
-        print(f"  {case} pair {pair}: control {rates['control']:,.0f}  candidate "
-              f"{rates['candidate']:,.0f}  ratio {ratios[-1]:.4f}", file=sys.stderr)
+        for name, values in ratios.items():
+            values.append(rates[name] / rates["control"])
+        print(f"  {case} pair {pair}: control {rates['control']:,.0f}  " + "  ".join(
+            f"{name} {rates[name]:,.0f} ({ratios[name][-1]:.4f})" for name in ratios),
+            file=sys.stderr)
     return ratios
 
 
-def replay_gate(rows):
-    """Return per-case hash identity: True when every trial of a case ends in one state."""
+def replay_gate(rows, candidate):
+    """Per case: True when every control and candidate trial ends in one state."""
     hashes = {}
     for row in rows:
-        hashes.setdefault(row["case"], set()).add(row["hash"])
+        if row["side"] in ("control", candidate):
+            hashes.setdefault(row["case"], set()).add(row["hash"])
     return {case: len(values) == 1 for case, values in hashes.items()}
 
 
@@ -285,16 +294,16 @@ def verdict(point, low, high, pairs, min_effect):
     return "NOISE"
 
 
-def case_table(rows, ratios):
+def case_table(rows, ratios, candidate):
     lines = [f"{'case':8}{'control':>12}{'candidate':>12}{'ratio':>9}  GPU µs/batch mut/bin/rast/sel (cand)"]
     for case, values in ratios.items():
         rate = {side: statistics.median(r["rate"] for r in rows
                                         if r["case"] == case and r["side"] == side)
-                for side in ("control", "candidate")}
+                for side in ("control", candidate)}
         stages = [statistics.median(r["stage_ns"][i] for r in rows
-                                    if r["case"] == case and r["side"] == "candidate") / 1e3
+                                    if r["case"] == case and r["side"] == candidate) / 1e3
                   for i in range(4)]
-        lines.append(f"{case:8}{rate['control']:>12,.0f}{rate['candidate']:>12,.0f}"
+        lines.append(f"{case:8}{rate['control']:>12,.0f}{rate[candidate]:>12,.0f}"
                      f"{statistics.median(values):>9.4f}  " + "/".join(f"{s:.0f}" for s in stages))
     return "\n".join(lines)
 
@@ -314,7 +323,8 @@ def median_rate(rows, side):
 
 
 def measure(args, sides, evidence):
-    rows, ratios, servers = [], {}, {}
+    rows, servers = [], {}
+    ratios = {name: {} for name in list(sides)[1:]}
     try:
         for side, (_, identity, executable) in sides.items():
             workdir = ROOT / "serve" / identity.replace(":", "-").replace("/", "_")[-80:] / side
@@ -324,7 +334,8 @@ def measure(args, sides, evidence):
                       file=sys.stderr)
             servers[side] = kind(side, executable, workdir, args.timeout)
         for case in args.cases:
-            ratios[case] = run_case(servers, case, args, evidence, rows)
+            for name, values in run_case(servers, case, args, evidence, rows).items():
+                ratios[name][case] = values
     finally:
         for server in servers.values():
             server.close()
@@ -332,36 +343,50 @@ def measure(args, sides, evidence):
 
 
 def summarize(args, sides, evidence, rows, ratios):
-    replay = replay_gate(rows)
+    """Log and print one verdict per candidate; return the process exit code."""
+    entries = [summarize_candidate(args, sides, evidence, rows, name, by_case)
+               for name, by_case in ratios.items()]
+    (evidence / "summary.json").write_text(json.dumps(
+        {"entries": entries, "ratios": ratios, "rows": rows,
+         "identities": {side: value[1] for side, value in sides.items()},
+         "args": {k: v for k, v in vars(args).items()}}, indent=2, default=str))
+    print(f"evidence {os.path.relpath(evidence, REPO)}")
+    return 1 if any(entry["verdict"] == "REPLAY-MISMATCH" for entry in entries) else 0
+
+
+def summarize_candidate(args, sides, evidence, rows, name, ratios):
+    replay = replay_gate(rows, name)
     point, low, high = aggregate(ratios)
     result = verdict(point, low, high, args.pairs, args.min_effect)
     replay_ok = all(replay.values())
     if not replay_ok and not args.allow_behavior_change:
         result = "REPLAY-MISMATCH"
     entry = {"utc": datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds"),
-             "control": sides["control"][0], "candidate": sides["candidate"][0],
+             "control": sides["control"][0], "candidate": sides[name][0],
              "cases": ",".join(args.cases), "pairs": args.pairs, "batches": args.batches,
              "ratio": f"{point:.5f}", "low95": f"{low:.5f}", "high95": f"{high:.5f}",
              "verdict": result, "replay": "same" if replay_ok else "differs",
              "control_evals_per_s": median_rate(rows, "control"),
-             "candidate_evals_per_s": median_rate(rows, "candidate"),
+             "candidate_evals_per_s": median_rate(rows, name),
              "evidence": os.path.relpath(evidence, REPO), "note": args.note}
-    (evidence / "summary.json").write_text(json.dumps(
-        {"entry": entry, "ratios": ratios, "replay": replay, "rows": rows,
-         "identities": {side: value[1] for side, value in sides.items()},
-         "args": {k: v for k, v in vars(args).items()}}, indent=2, default=str))
+    entry["replay_by_case"] = replay
     append_log(entry)
-    print(case_table(rows, ratios))
-    print(f"\n{result}: candidate/control {point:.4f}  95% [{low:.4f}, {high:.4f}]  "
-          f"replay {entry['replay']}\nevidence {entry['evidence']}")
-    return 0 if result != "REPLAY-MISMATCH" else 1
+    print(f"\n== {name}: {entry['candidate']}")
+    print(case_table(rows, ratios, name))
+    print(f"{result}: candidate/control {point:.4f}  95% [{low:.4f}, {high:.4f}]  "
+          f"replay {entry['replay']}")
+    return entry
 
 
 def parse_args(argv):
     cli = argparse.ArgumentParser(description=__doc__,
                                   formatter_class=argparse.RawDescriptionHelpFormatter)
     cli.add_argument("--control", default="HEAD", help="git ref, WORKTREE or executable (default HEAD)")
-    cli.add_argument("--candidate", default=WORKTREE, help="git ref, WORKTREE or executable (default WORKTREE)")
+    cli.add_argument("--candidate", action="append",
+                     help="git ref, WORKTREE or executable; repeat to compare several "
+                          "candidates against one control in one run (default WORKTREE)")
+    cli.add_argument("--build-only", action="store_true",
+                     help="build or find each side and print its cached executable path")
     cli.add_argument("--cases", default=",".join(CASES), help="comma-separated subset of ff,mona,darwin")
     cli.add_argument("--pairs", type=int, default=5, help="AB/BA pairs per case, 1..20 (default 5)")
     cli.add_argument("--batches", type=int, default=64, help="timed batches per trial, 1..4096 (default 64)")
@@ -376,6 +401,8 @@ def parse_args(argv):
                      help="report replay mismatches instead of failing on them")
     cli.add_argument("--note", default="", help="free text recorded in the log")
     args = cli.parse_args(argv)
+    args.candidate = args.candidate or [WORKTREE]
+    require(len(args.candidate) <= MAX_CANDIDATES, f"at most {MAX_CANDIDATES} candidates")
     args.cases = tuple(dict.fromkeys(args.cases.split(",")))
     require(args.cases and set(args.cases) <= set(CASES), "cases must be a subset of ff,mona,darwin")
     require(1 <= args.pairs <= 20, "pairs must be 1..20")
@@ -391,7 +418,14 @@ def main(argv=None):
     try:
         args = parse_args(argv)
         require(MANIFEST.is_file(), f"missing fixtures {MANIFEST}; run scripts/evolution-bench.py freeze")
-        sides = {"control": resolve(args.control), "candidate": resolve(args.candidate)}
+        names = ["candidate"] if len(args.candidate) == 1 else [
+            f"candidate{index}" for index in range(1, len(args.candidate) + 1)]
+        sides = {"control": resolve(args.control)}
+        sides.update((name, resolve(side)) for name, side in zip(names, args.candidate))
+        if args.build_only:
+            for name, (label, _, executable) in sides.items():
+                print(f"{name}\t{label}\t{executable}")
+            return 0
         stamp = datetime.datetime.now(datetime.UTC).strftime("%Y%m%dT%H%M%SZ")
         (ROOT / "runs").mkdir(parents=True, exist_ok=True)
         evidence = Path(tempfile.mkdtemp(prefix=f"{stamp}-", dir=ROOT / "runs"))

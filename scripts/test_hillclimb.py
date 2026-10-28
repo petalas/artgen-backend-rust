@@ -105,6 +105,23 @@ class HillclimbCli(unittest.TestCase):
         rows = json.loads((hillclimb.REPO / evidence / "summary.json").read_text())["rows"]
         self.assertEqual(len(rows), 2 * 3 * 2)  # primes are not scored rows
 
+    def test_several_candidates_share_one_control_and_log_a_row_each(self):
+        code, out, _ = self.run_cli(self.fake(rate=100), self.fake(rate=110),
+                                    "--candidate", self.fake(rate=90),
+                                    "--candidate", self.fake(digest="b"))
+        self.assertEqual(code, 1, out)
+        self.assertEqual([r["verdict"] for r in self.log_rows()],
+                         ["FASTER", "SLOWER", "REPLAY-MISMATCH"])
+        evidence = Path(out.rsplit("evidence ", 1)[1].strip())
+        rows = json.loads((hillclimb.REPO / evidence / "summary.json").read_text())["rows"]
+        self.assertEqual(len(rows), 4 * 3 * 2)
+
+    def test_build_only_prints_executables_without_trials(self):
+        code, out, _ = self.run_cli(self.fake(), self.fake(rate=110), "--build-only")
+        self.assertEqual(code, 0)
+        self.assertEqual([line.split("\t")[0] for line in out.splitlines()], ["control", "candidate"])
+        self.assertFalse(hillclimb.LOG.exists())
+
     def test_effect_below_min_effect_is_noise(self):
         code, out, _ = self.run_cli(self.fake(rate=1000), self.fake(rate=1003))
         self.assertEqual(code, 0, out)

@@ -7,3 +7,5 @@ utc	control	candidate	cases	pairs	batches	ratio	low95	high95	verdict	replay	cont
 2026-10-28T15:13:31+00:00	HEAD@d1a9bf692a	chunk8	ff,mona,darwin	5	64	1.12906	1.12152	1.13598	FASTER	same	288865	325601	.cache/hillclimb/runs/20261028T150931Z-iji838ti	H1 split batch submits every 8 iterations, primed
 2026-10-28T15:17:59+00:00	chunk4	chunk2	ff,mona,darwin	3	64	0.98946	0.98135	0.99679	SLOWER	same	326934	323630	.cache/hillclimb/runs/20261028T151439Z-u8dwkmp1	H1 chunk 2 vs chunk 4
 2026-10-28T15:21:09+00:00	chunk4	chunk1	ff,mona,darwin	3	64	0.93694	0.93349	0.94013	SLOWER	same	327281	310608	.cache/hillclimb/runs/20261028T151759Z-y19yydge	H1 chunk 1 vs chunk 4
+2026-10-28T15:28:11+00:00	HEAD@70c90316a2	chunk8	ff	3	16	1.01161	0.97845	1.06241	NOISE	same	395239	400227	.cache/hillclimb/runs/20261028T152701Z-t2uvusxs	harness smoke: multi-candidate
+2026-10-28T15:28:11+00:00	HEAD@70c90316a2	chunk16	ff	3	16	1.00344	0.97592	1.03467	NOISE	same	395239	392561	.cache/hillclimb/runs/20261028T152701Z-t2uvusxs	harness smoke: multi-candidate

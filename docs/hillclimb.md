@@ -7,10 +7,25 @@ correctness and replay identity, prints a verdict and appends a row to
 
 ```sh
 scripts/hillclimb.py --note "what I changed"          # working tree vs HEAD
-scripts/hillclimb.py --cases ff --pairs 3 --batches 16  # quick screen, ~1 min
+scripts/hillclimb.py --cases ff --pairs 3 --batches 16  # quick screen, ~1 min, ±3–6% per pair
 scripts/hillclimb.py --control HEAD~1 --candidate HEAD  # two commits
 scripts/hillclimb.py --candidate HEAD                   # A/A noise check
 ```
+
+To sweep a constant, build each variant, then compare them in one run against a
+shared control (each candidate gets its own verdict and log row):
+
+```sh
+for k in 2 4 8; do
+  sed -i "s/^const SUBMIT_CHUNK_ITERATIONS: u32 = .*/const SUBMIT_CHUNK_ITERATIONS: u32 = $k;/" src/gpu_evolver/mod.rs
+  scripts/hillclimb.py --build-only | awk '/^candidate/{print $3}' > /tmp/chunk$k
+done
+git checkout src/gpu_evolver/mod.rs
+scripts/hillclimb.py $(for k in 2 4 8; do echo --candidate "$(cat /tmp/chunk$k)"; done)
+```
+
+Rounds rotate the side order, so every side runs the same number of batches
+before each round.
 
 Each side is a git ref, `WORKTREE` (uncommitted tree, default candidate) or a
 prebuilt `evolution-bench` executable. Fixtures come from
