@@ -225,6 +225,40 @@ fn may_cover(poly: DecodedPolygon, fx: f32, fy: f32) -> bool {
     return all_pos || all_neg;
 }
 
+// Whether a changed version may cover a pixel centre of the tile [lo, hi) in
+// pixels. The test uses tile edges, half a pixel beyond the outermost centres, so
+// it is a superset of may_cover for every pixel of the tile.
+fn changed_may_meet_tile(poly: Polygon, lo: vec2<f32>, hi: vec2<f32>) -> bool {
+    let d = decode_changed(poly);
+    return hi.x >= d.bb_min_x - COVER_MARGIN && lo.x <= d.bb_max_x + COVER_MARGIN &&
+           hi.y >= d.bb_min_y - COVER_MARGIN && lo.y <= d.bb_max_y + COVER_MARGIN;
+}
+
+// Workgroup-uniform: whether any parent or offspring version of the listed
+// changed indices may cover a pixel of the tile. Same slot decoding as the
+// shared_changed loader; indices at or beyond a drawing's count are empty.
+fn changed_meets_tile(
+    changed: vec2<u32>, parent_chain: u32, chain_id: u32, lo: vec2<f32>, hi: vec2<f32>,
+) -> bool {
+    let parent_count = chain_states[parent_chain].polygon_count;
+    let offspring_count = working_states[chain_id].polygon_count;
+    var meets = false;
+    for (var half = 0u; half < CHANGED_INDICES; half++) {
+        let word = select(changed.x, changed.y, half >= 2u);
+        let encoded = (word >> (16u * (half & 1u))) & 0xFFFFu;
+        if encoded != 0u {
+            let idx = encoded - 1u;
+            if idx < parent_count {
+                meets = meets || changed_may_meet_tile(chain_states[parent_chain].polygons[idx], lo, hi);
+            }
+            if idx < offspring_count {
+                meets = meets || changed_may_meet_tile(working_states[chain_id].polygons[idx], lo, hi);
+            }
+        }
+    }
+    return meets;
+}
+
 // Tests the first `slots` entries of shared_changed (workgroup-uniform).
 fn may_change(fx: f32, fy: f32, slots: u32) -> bool {
     var touched = false;
@@ -490,6 +524,20 @@ fn main(
     }
     // Slots to test per pixel; zero disables the shortcut.
     let shortcut_slots = select(0u, select(4u, CHANGED_SLOTS, changed.y != 0u), changed.x != 0u);
+
+    // --- Unchanged-tile skip ---
+    // When no changed version may cover any pixel of the tile, every pixel takes
+    // the shortcut and adds its old error to both sums, which select subtracts
+    // again. Skipping the tile leaves the offspring error unchanged. Exact copies
+    // (NO_CHANGES) list no index and skip every tile. The inputs are uniform
+    // storage reads, so the return precedes any shared memory or barrier.
+    if shortcut_slots != 0u {
+        let tile_lo = vec2<f32>(f32(tile_min_x) / f32(w), f32(tile_min_y) / f32(h));
+        let tile_hi = vec2<f32>(f32(tile_max_x) / f32(w), f32(tile_max_y) / f32(h));
+        if !changed_meets_tile(changed, parent_chain, chain_id, tile_lo, tile_hi) {
+            return;
+        }
+    }
 
     // Slot k holds index half k/2, from the parent (even k) or offspring (odd k).
     // Halves 0..1 are in .y, 2..3 in .z. An index at or beyond the drawing's
