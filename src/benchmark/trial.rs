@@ -174,6 +174,76 @@ impl TrialRecord {
 /// # Errors
 /// Rejects invalid inputs, failed GPU preparation/readback and unwritable outputs.
 pub fn run(manifest: &Path, spec: &TrialSpec, output: &Path) -> Result<TrialRecord> {
+    validate_budget(spec, output)?;
+    let setup = Instant::now();
+    let mut case = ResidentCase::open(manifest, &spec.case_id)?;
+    case.run_from(spec, output, setup)
+}
+
+/// One fixture and its constructed engine, reused across trials.
+///
+/// Engine construction dominates process setup (driver shader compilation), so a
+/// resident case lets a supervisor alternate many trials per process. Each trial
+/// restarts from the seeded fixture; `prepare_seeded_benchmark` guarantees that
+/// earlier trials and warmups cannot affect the restart.
+pub struct ResidentCase {
+    input: LoadedFixture,
+    evolver: GpuEvolver,
+}
+
+impl ResidentCase {
+    /// # Errors
+    /// Rejects invalid fixtures and initial tile-bin overflow.
+    pub fn open(manifest: &Path, case_id: &str) -> Result<Self> {
+        let input = fixtures::load(manifest, case_id)?;
+        ensure!(
+            input.fixture.complexity.overflowed_tiles == 0,
+            "initial tile-bin overflow"
+        );
+        let evolver = futures_lite::future::block_on(GpuEvolver::new(
+            &input.rgba,
+            input.fixture.width,
+            input.fixture.height,
+            &input.drawing,
+        ));
+        Ok(Self { input, evolver })
+    }
+
+    /// Run one trial on the resident engine. `setup_seconds` covers preparation only.
+    ///
+    /// # Errors
+    /// Rejects invalid budgets, a mismatched case, failed GPU work and unwritable outputs.
+    pub fn run(&mut self, spec: &TrialSpec, output: &Path) -> Result<TrialRecord> {
+        validate_budget(spec, output)?;
+        self.run_from(spec, output, Instant::now())
+    }
+
+    fn run_from(&mut self, spec: &TrialSpec, output: &Path, setup: Instant) -> Result<TrialRecord> {
+        ensure!(
+            spec.case_id == self.input.fixture.id,
+            "trial case differs from resident case"
+        );
+        ensure!(
+            spec.timestamp_mode != TimestampMode::BatchEnvelope
+                || self.input.manifest.params.gpu_batch_iters >= 2,
+            "batch-envelope profiling requires at least two iterations per batch"
+        );
+        fs::create_dir_all(output)?;
+        let scopes = self.evolver.benchmark_error_scopes();
+        let result = execute(&mut self.evolver, &self.input, spec, output, setup);
+        let device_errors = futures_lite::future::block_on(scopes.finish());
+        let mut record = result?;
+        record.errors.extend(device_errors);
+        finish_record(&mut record);
+        fs::write(
+            output.join("result.json"),
+            serde_json::to_vec_pretty(&record)?,
+        )?;
+        Ok(record)
+    }
+}
+
+fn validate_budget(spec: &TrialSpec, output: &Path) -> Result<()> {
     ensure!(
         (1..=4096).contains(&spec.batches),
         "batches must be 1..4096"
@@ -183,35 +253,7 @@ pub fn run(manifest: &Path, spec: &TrialSpec, output: &Path) -> Result<TrialReco
         !output.join("result.json").exists(),
         "result already exists"
     );
-    fs::create_dir_all(output)?;
-    let input = fixtures::load(manifest, &spec.case_id)?;
-    ensure!(
-        spec.timestamp_mode != TimestampMode::BatchEnvelope
-            || input.manifest.params.gpu_batch_iters >= 2,
-        "batch-envelope profiling requires at least two iterations per batch"
-    );
-    ensure!(
-        input.fixture.complexity.overflowed_tiles == 0,
-        "initial tile-bin overflow"
-    );
-    let setup = Instant::now();
-    let mut evolver = futures_lite::future::block_on(GpuEvolver::new(
-        &input.rgba,
-        input.fixture.width,
-        input.fixture.height,
-        &input.drawing,
-    ));
-    let scopes = evolver.benchmark_error_scopes();
-    let result = execute(&mut evolver, &input, spec, output, setup);
-    let device_errors = futures_lite::future::block_on(scopes.finish());
-    let mut record = result?;
-    record.errors.extend(device_errors);
-    finish_record(&mut record);
-    fs::write(
-        output.join("result.json"),
-        serde_json::to_vec_pretty(&record)?,
-    )?;
-    Ok(record)
+    Ok(())
 }
 
 fn execute(
