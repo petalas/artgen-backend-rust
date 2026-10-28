@@ -103,7 +103,7 @@ class HillclimbCli(unittest.TestCase):
         self.assertAlmostEqual(float(row["ratio"]), 1.1, places=6)
         evidence = Path(out.rsplit("evidence ", 1)[1].strip())
         rows = json.loads((hillclimb.REPO / evidence / "summary.json").read_text())["rows"]
-        self.assertEqual(len(rows), 2 * 3 * 2)
+        self.assertEqual(len(rows), 2 * 3 * 2)  # primes are not scored rows
 
     def test_effect_below_min_effect_is_noise(self):
         code, out, _ = self.run_cli(self.fake(rate=1000), self.fake(rate=1003))

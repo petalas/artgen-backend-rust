@@ -32,6 +32,9 @@ A resident trial takes ~4.7 s of wall time instead of 16–21 s.
   Refs build in one reusable worktree (`.cache/hillclimb/ref-src`) with its own
   incremental target dir; `WORKTREE` builds in the normal `target/`.
 - Executables built before `serve` existed fall back to one process per trial.
+- Each server runs one unscored priming trial per case (`--prime`) before pairs.
+  Without it, a candidate's first trial after engine construction sometimes ran
+  10–15% slow and widened the interval from ±1% to ±4%.
 - Runs take the shared `.cache/evolution-bench/benchmark.lock`.
 
 ## Gates and verdict

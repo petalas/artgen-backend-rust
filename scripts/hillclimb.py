@@ -224,7 +224,13 @@ def check_record(record, case, seed, batches):
 
 
 def run_case(servers, case, args, evidence, rows):
-    """Alternate AB/BA pairs; return paired candidate/control ratios."""
+    """Prime each side, then alternate AB/BA pairs; return paired candidate/control ratios."""
+    for side, server in servers.items():
+        for index in range(args.prime):
+            # The first trials after engine construction can stall; they are not scored.
+            record = server.trial(case, args.seed, args.batches, args.warmup,
+                                  evidence / case / f"prime{index}-{side}")
+            check_record(record, case, args.seed, args.batches)
     ratios = []
     for pair in range(args.pairs):
         order = ("control", "candidate") if pair % 2 == 0 else ("candidate", "control")
@@ -359,6 +365,8 @@ def parse_args(argv):
     cli.add_argument("--cases", default=",".join(CASES), help="comma-separated subset of ff,mona,darwin")
     cli.add_argument("--pairs", type=int, default=5, help="AB/BA pairs per case, 1..20 (default 5)")
     cli.add_argument("--batches", type=int, default=64, help="timed batches per trial, 1..4096 (default 64)")
+    cli.add_argument("--prime", type=int, default=1,
+                     help="unscored trials per case and side before pairing, 0..4 (default 1)")
     cli.add_argument("--warmup", type=int, default=8, help="untimed warmup batches, 0..16 (default 8)")
     cli.add_argument("--seed", type=int, default=7)
     cli.add_argument("--min-effect", type=float, default=0.005,
@@ -373,6 +381,7 @@ def parse_args(argv):
     require(1 <= args.pairs <= 20, "pairs must be 1..20")
     require(1 <= args.batches <= 4096, "batches must be 1..4096")
     require(0 <= args.warmup <= 16, "warmup must be 0..16")
+    require(0 <= args.prime <= 4, "prime must be 0..4")
     require(args.timeout > 0, "timeout must be positive")
     require(0 <= args.min_effect < 1, "min-effect must be in 0..1")
     return args
