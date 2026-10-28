@@ -4,6 +4,11 @@
 // Workgroups outside dirty bbox → early-exit (tile-level skip).
 // Remaining workgroups: parallel rasterize into chain_framebuffers.
 // No error computation — total_error was already set by select.
+// Polygons come from the winning offspring's tile list built by bin_polygons this
+// iteration (select records the offspring in chain_update_flags[4c+3]). The list
+// holds, in drawing order, every polygon whose AABB can reach a pixel centre in
+// this tile, so blending the same polygons in the same order is bit-identical to
+// scanning all polygons. An overflowed list falls back to the full scan.
 //
 // Workgroup size is configurable — pipeline.rs uses string replacement on WG_X/WG_Y.
 
@@ -114,6 +119,8 @@ fn pack_fb_pixel(r: f32, g: f32, b: f32) -> u32 {
 @group(0) @binding(0) var<storage, read>       chain_states:       array<DrawingState>;
 @group(0) @binding(1) var<storage, read_write> chain_framebuffers: array<u32>;
 @group(0) @binding(2) var<storage, read>       chain_update_flags: array<u32>;
+@group(0) @binding(3) var<storage, read>       tile_data:          array<u32>;
+@group(0) @binding(4) var<storage, read>       tile_counts:        array<u32>;
 @group(1) @binding(0) var<uniform>             params:             Params;
 
 // Shared memory: acceptance flag + dirty bbox (read by thread 0, broadcast to workgroup)
@@ -122,6 +129,10 @@ var<workgroup> shared_dirty_min_x: u32;
 var<workgroup> shared_dirty_min_y: u32;
 var<workgroup> shared_dirty_max_x: u32;
 var<workgroup> shared_dirty_max_y: u32;
+var<workgroup> shared_offspring_id: u32;
+
+// Must match bin_polygons.wgsl and settings::TILE_MAX_POLYS.
+const TILE_MAX_POLYS: u32 = 256u;
 
 // Shared memory for polygon tiling (same approach as init_framebuffers)
 const TILE_CAP: u32 = THREAD_COUNT * 3u;
@@ -149,6 +160,7 @@ fn main(
             shared_dirty_min_y = (bbox_lo >> 16u) & 0xFFFFu;
             shared_dirty_max_x = bbox_hi & 0xFFFFu;
             shared_dirty_max_y = (bbox_hi >> 16u) & 0xFFFFu;
+            shared_offspring_id = chain_update_flags[chain_id * 4u + 3u];
         }
     }
     workgroupBarrier();
@@ -192,8 +204,15 @@ fn main(
     var g = 255.0;
     var b = 255.0;
 
-    // Brute-force rasterize with shared memory tiling (same pattern as init_framebuffers)
-    let poly_count = chain_states[chain_id].polygon_count;
+    // Workgroup-uniform polygon source: the winner's tile list, or every polygon
+    // when the list overflowed TILE_MAX_POLYS.
+    let num_tiles_x = (w + WG_X - 1u) / WG_X;
+    let num_tiles = num_tiles_x * ((h + WG_Y - 1u) / WG_Y);
+    let bin_tile = shared_offspring_id * num_tiles + wid.y * num_tiles_x + wid.x;
+    let listed_count = tile_counts[bin_tile];
+    let use_list = listed_count <= TILE_MAX_POLYS;
+    let list_base = bin_tile * TILE_MAX_POLYS;
+    let poly_count = select(chain_states[chain_id].polygon_count, listed_count, use_list);
     let tile_count = (poly_count + TILE_CAP - 1u) / TILE_CAP;
 
     for (var tile = 0u; tile < tile_count; tile++) {
@@ -204,7 +223,11 @@ fn main(
         for (var load_pass = 0u; load_pass < LOADS_PER_THREAD; load_pass++) {
             let slot = local_idx + load_pass * THREAD_COUNT;
             if slot < tile_end {
-                shared_polys[slot] = chain_states[chain_id].polygons[tile_base + slot];
+                var poly_idx = tile_base + slot;
+                if use_list {
+                    poly_idx = tile_data[list_base + poly_idx];
+                }
+                shared_polys[slot] = chain_states[chain_id].polygons[poly_idx];
             }
         }
         workgroupBarrier();

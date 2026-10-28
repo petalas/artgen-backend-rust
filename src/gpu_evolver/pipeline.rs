@@ -685,7 +685,8 @@ impl GpuPipeline {
                 },
             ],
         });
-        // Update framebuffers: chain_states(read), chain_framebuffers(rw), chain_update_flags(read)
+        // Update framebuffers: chain_states(read), chain_framebuffers(rw), chain_update_flags(read),
+        // tile_data(read), tile_counts(read) — the winning offspring's tile polygon lists
         let update_framebuffers_bgl = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some("update_framebuffers_bgl"),
             entries: &[
@@ -711,6 +712,26 @@ impl GpuPipeline {
                 },
                 BindGroupLayoutEntry {
                     binding: 2,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: NonZeroU64::new(std::mem::size_of::<u32>() as u64),
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: NonZeroU64::new(std::mem::size_of::<u32>() as u64),
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 4,
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Storage { read_only: true },
@@ -791,6 +812,8 @@ impl GpuPipeline {
                 BindGroupEntry { binding: 0, resource: chain_states_buf.as_entire_binding() },
                 BindGroupEntry { binding: 1, resource: chain_framebuffers_buf.as_entire_binding() },
                 BindGroupEntry { binding: 2, resource: chain_update_flags_buf.as_entire_binding() },
+                BindGroupEntry { binding: 3, resource: tile_data_buf.as_entire_binding() },
+                BindGroupEntry { binding: 4, resource: tile_counts_buf.as_entire_binding() },
             ],
         });
 

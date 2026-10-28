@@ -221,6 +221,8 @@ fn select_main(@builtin(global_invocation_id) gid: vec3<u32>,
             chain_update_flags[chain_id * 4u] = 1u;       // accepted
             chain_update_flags[chain_id * 4u + 1u] = bbox_lo;
             chain_update_flags[chain_id * 4u + 2u] = bbox_hi;
+            // Winner whose tile lists update_framebuffers reuses; outside canonical state.
+            chain_update_flags[chain_id * 4u + 3u] = best_offspring_id;
 
             // Adaptive mutation scale: only update when enabled
             if params.adaptive_mutation == 1u {
