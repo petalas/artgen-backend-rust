@@ -133,12 +133,6 @@ struct Params {
 var<workgroup> shared_polys: array<DecodedPolygon, TILE_MAX_POLYS>;
 var<workgroup> shared_errors: array<u32, 128>;      // only num_subgroups entries are used
 var<workgroup> shared_errors_old: array<u32, 128>;  // old errors for incremental eval
-var<workgroup> shared_skip_tile: u32;               // set by thread 0 if tile is outside dirty bbox
-// Dirty bbox unpacked from offspring header (set by thread 0, read after barrier)
-var<workgroup> shared_dirty_min_x: u32;
-var<workgroup> shared_dirty_min_y: u32;
-var<workgroup> shared_dirty_max_x: u32;
-var<workgroup> shared_dirty_max_y: u32;
 
 // Half-space edge function: positive if point (px,py) is on the left side of edge (ax,ay)->(bx,by)
 fn edge_fn(ax: f32, ay: f32, bx: f32, by: f32, px: f32, py: f32) -> f32 {
@@ -377,28 +371,21 @@ fn main(
     let parent_chain = chain_id / lambda;
 
     // --- Dirty bbox tile skip ---
-    // Thread 0 reads the dirty bbox from offspring header and checks if this tile overlaps.
-    // Workgroups fully outside the dirty region early-exit (major perf win for single mutations).
-    if local_idx == 0u {
-        let bbox_lo = working_states[chain_id].fitness_bits;
-        let bbox_hi = working_states[chain_id].stagnation_counter;
-        shared_dirty_min_x = bbox_lo & 0xFFFFu;
-        shared_dirty_min_y = (bbox_lo >> 16u) & 0xFFFFu;
-        shared_dirty_max_x = bbox_hi & 0xFFFFu;
-        shared_dirty_max_y = (bbox_hi >> 16u) & 0xFFFFu;
-
-        let tile_min_x = wid.x * WG_X;
-        let tile_min_y = wid.y * WG_Y;
-        let tile_max_x = min(tile_min_x + WG_X, w);
-        let tile_max_y = min(tile_min_y + WG_Y, h);
-
-        let no_overlap = tile_max_x <= shared_dirty_min_x || tile_min_x >= shared_dirty_max_x ||
-                         tile_max_y <= shared_dirty_min_y || tile_min_y >= shared_dirty_max_y;
-        shared_skip_tile = select(0u, 1u, no_overlap);
-    }
-
-    workgroupBarrier();
-    if shared_skip_tile == 1u {
+    // Every lane reads the same header words from read-only storage, so the
+    // skip is workgroup-uniform and returns before any shared memory or barrier.
+    // Workgroups fully outside the dirty region (most of the grid) do nothing else.
+    let bbox_lo = working_states[chain_id].fitness_bits;
+    let bbox_hi = working_states[chain_id].stagnation_counter;
+    let dirty_min_x = bbox_lo & 0xFFFFu;
+    let dirty_min_y = (bbox_lo >> 16u) & 0xFFFFu;
+    let dirty_max_x = bbox_hi & 0xFFFFu;
+    let dirty_max_y = (bbox_hi >> 16u) & 0xFFFFu;
+    let tile_min_x = wid.x * WG_X;
+    let tile_min_y = wid.y * WG_Y;
+    let tile_max_x = min(tile_min_x + WG_X, w);
+    let tile_max_y = min(tile_min_y + WG_Y, h);
+    if tile_max_x <= dirty_min_x || tile_min_x >= dirty_max_x ||
+       tile_max_y <= dirty_min_y || tile_min_y >= dirty_max_y {
         return;
     }
 
