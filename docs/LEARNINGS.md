@@ -213,3 +213,20 @@ fixtures across all five raster shapes and reserved throughput confirmation; it
 is now kept in the engine. The original compiler-failed cohort remains inconclusive. Compilation
 alone supplied no numerical or performance evidence; those came from the separate
 qualified revision. See [the retained reproducer and result](../benchmarks/evolution/continuation-20261024/21-paired-pixel-compiler-blocker.md).
+
+### Host submit time grows with batches run in one process (Dozen/NVIDIA)
+
+**Context**: Many trials in one `evolution-bench serve` process.
+**Gotcha**: ff throughput falls ~7% over 12 trials (357k to 332k evals/s) while
+GPU kernel time, drain, replay hash and work stay constant. The time is in
+`encoder.finish()` (`src/gpu_evolver/mod.rs` `run_batch_inner`): 13 ms to 21 ms per
+batch, plateauing near 22 ms after ~4000 batches. `perf` puts it in a linked-list
+walk inside NVIDIA's D3D12 user-mode driver (`libnvwgf2umx.so`): constant
+instructions, ~1.8x cache and ~6x dTLB misses. RSS, mappings, fds, extra buffers,
+map/unmap, timestamps and fresh encoders do not change it. It grows per batch,
+so the long-running app is affected too (inferred ~15–20% host-side, then flat).
+**Fix**: None in our code. Compare sides that have run the same number of
+batches (`scripts/hillclimb.py` alternates AB/BA across two servers) and never
+compare early trials of one process with late ones. A throwaway split of each
+batch into several submits (every 8 iterations) cut ff elapsed 2.98–3.24 s to
+2.61–2.65 s with an unchanged hash; it is an unadopted engine candidate.

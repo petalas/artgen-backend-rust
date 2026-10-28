@@ -1,0 +1,2 @@
+utc	control	candidate	cases	pairs	batches	ratio	low95	high95	verdict	replay	control_evals_per_s	candidate_evals_per_s	evidence	note
+2026-10-28T13:57:07+00:00	worktree	worktree	ff,mona,darwin	5	64	0.99751	0.99474	1.00029	NOISE	same	294527	295029	.cache/hillclimb/runs/20261028T135300Z-y_54iest	A/A noise floor, defaults, quiet host

@@ -34,6 +34,7 @@ This project uses a routing table (below) to map file patterns to docs you must 
 | `src/main.rs` | SDL2 display, worker thread spawning (`num_cpus`), broadcast channel for new best, CLI args |
 | `src/gpu_evolver/**` | Read [engine module ownership](docs/engine-architecture.md) before changing capacity, shader installation, command scheduling or readback. |
 | `src/benchmark/**`, `examples/engine-lab.rs`, `scripts/evolution-bench.py` | Read [trial qualification](docs/trial-qualification.md) before changing record purpose, canonical identity or timed work. |
+| Engine performance work, `scripts/hillclimb.py`, `examples/evolution-bench.rs` | Read [hill-climbing](docs/hillclimb.md). Screen every engine change with `scripts/hillclimb.py` before and after; it logs to `benchmarks/hillclimb/log.tsv`. |
 | `src/shaders/*.wgsl` | GPU compute shaders — `mutate.wgsl` (PCG RNG + all mutations), `rasterize.wgsl` (half-space triangle per pixel), `error_reduce.wgsl` (error + workgroup reduction), `select.wgsl` (selection + migration) |
 | `src/texture_wrapper.rs`, `src/buffer_dimensions.rs` | wgpu texture/buffer helpers (row alignment padding) |
 | `benches/**` | Benchmarks use `divan` crate, not `criterion` |

@@ -11,7 +11,13 @@
 
 ## Benchmarks
 
-`cargo bench`
+To compare engine throughput of the working tree against `HEAD` (or any two refs), with replay and numerical gates:
+
+```sh
+scripts/hillclimb.py --note "what changed"
+```
+
+See [docs/hillclimb.md](docs/hillclimb.md). Micro-benchmarks: `cargo bench`
 
 To check GPU rasterization, framebuffer updates, and workgroup changes:
 
