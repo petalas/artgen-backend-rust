@@ -707,8 +707,8 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
                 mutation_scale = shared_parent_mutation_scale;
             }
 
-            if params.crossover_prob > 0.0 && rand_f32(&rng) < params.crossover_prob && chain_count >= 2u {
-                shared_crossover_parent_b = tournament_select(&rng, chain_id, chain_count);
+            if params.crossover_prob > 0.0 && rand_f32(&rng) < params.crossover_prob && params.chain_count_param >= 2u {
+                shared_crossover_parent_b = tournament_select(&rng, chain_id, params.chain_count_param);
                 shared_crossover_rng = rng;
                 crossover = 1u;
 
