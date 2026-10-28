@@ -1,4 +1,4 @@
-utc	control	candidate	cases	pairs	batches	ratio	low95	high95	verdict	replay	control_evals_per_s	candidate_evals_per_s	evidence	note
+utc	control	candidate	cases	pairs	batches	ratio	low95	high95	verdict	replay	control_evals_per_s	candidate_evals_per_s	evidence	note	host_load
 2026-10-28T13:57:07+00:00	worktree	worktree	ff,mona,darwin	5	64	0.99751	0.99474	1.00029	NOISE	same	294527	295029	.cache/hillclimb/runs/20261028T135300Z-y_54iest	A/A noise floor, defaults, quiet host
 2026-10-28T14:59:26+00:00	HEAD@d1a9bf692a	chunk8	ff,mona,darwin	3	64	1.07526	1.02498	1.11631	FASTER	same	299784	325722	.cache/hillclimb/runs/20261028T145625Z-_z97vods	H1 split batch submits every 8 iterations
 2026-10-28T15:02:12+00:00	HEAD@d1a9bf692a	chunk4	ff,mona,darwin	3	64	1.07566	1.05074	1.09804	FASTER	same	301365	326882	.cache/hillclimb/runs/20261028T145926Z-ih533yk2	H1 split batch submits every 4 iterations
@@ -9,3 +9,17 @@ utc	control	candidate	cases	pairs	batches	ratio	low95	high95	verdict	replay	cont
 2026-10-28T15:21:09+00:00	chunk4	chunk1	ff,mona,darwin	3	64	0.93694	0.93349	0.94013	SLOWER	same	327281	310608	.cache/hillclimb/runs/20261028T151759Z-y19yydge	H1 chunk 1 vs chunk 4
 2026-10-28T15:28:11+00:00	HEAD@70c90316a2	chunk8	ff	3	16	1.01161	0.97845	1.06241	NOISE	same	395239	400227	.cache/hillclimb/runs/20261028T152701Z-t2uvusxs	harness smoke: multi-candidate
 2026-10-28T15:28:11+00:00	HEAD@70c90316a2	chunk16	ff	3	16	1.00344	0.97592	1.03467	NOISE	same	395239	392561	.cache/hillclimb/runs/20261028T152701Z-t2uvusxs	harness smoke: multi-candidate
+2026-10-28T15:54:53+00:00	bench-master	bench-cand	ff,mona,darwin	3	64	0.91451	0.88056	0.94835	SLOWER	same	326606	288292	.cache/hillclimb/runs/20261028T155057Z-s0x_g6bq	A2 double-buffer best-drawing readback
+2026-10-28T16:03:01+00:00	bench-master	bench-cand	ff,mona,darwin	3	64	0.94453	0.91317	0.96551	SLOWER	same	326112	304047	.cache/hillclimb/runs/20261028T155615Z-tyahoav7	A2 recheck + nocopy probe
+2026-10-28T16:03:01+00:00	bench-master	bench-nocopy	ff,mona,darwin	3	64	0.94607	0.93042	0.95608	SLOWER	same	326112	322224	.cache/hillclimb/runs/20261028T155615Z-tyahoav7	A2 recheck + nocopy probe
+2026-10-28T16:14:32+00:00	bench-master	bench-drain3	ff,mona,darwin	3	64	1.00691	0.99960	1.01388	NOISE	same	324487	325875	.cache/hillclimb/runs/20261028T160359Z-s9dp08hq	A2 probe: periodic drain on double-buffered readback
+2026-10-28T16:14:32+00:00	bench-master	bench-drain1	ff,mona,darwin	3	64	0.99821	0.99192	1.00581	NOISE	same	324487	320729	.cache/hillclimb/runs/20261028T160359Z-s9dp08hq	A2 probe: periodic drain on double-buffered readback
+2026-10-28T16:14:32+00:00	bench-master	bench-cand	ff,mona,darwin	3	64	1.01920	1.01118	1.02833	FASTER	same	324487	331399	.cache/hillclimb/runs/20261028T160359Z-s9dp08hq	A2 probe: periodic drain on double-buffered readback
+2026-10-28T16:19:40+00:00	bench-master	bench-master-aa	ff,mona,darwin	3	64	1.00061	0.99712	1.00372	NOISE	same	325977	327111	.cache/hillclimb/runs/20261028T161449Z-js6sy00z	A2 rerun 4 with A/A
+2026-10-28T16:19:40+00:00	bench-master	bench-cand	ff,mona,darwin	3	64	1.02096	1.01590	1.02547	FASTER	same	325977	331587	.cache/hillclimb/runs/20261028T161449Z-js6sy00z	A2 rerun 4 with A/A
+2026-10-28T16:24:45+00:00	bench-master	bench-master-aa	ff,mona,darwin	3	64	1.00151	0.99871	1.00475	NOISE	same	326013	326910	.cache/hillclimb/runs/20261028T161940Z-offpjz69	A2 rerun 5 with A/A
+2026-10-28T16:24:45+00:00	bench-master	bench-cand	ff,mona,darwin	3	64	1.02316	1.01934	1.02708	FASTER	same	326013	331924	.cache/hillclimb/runs/20261028T161940Z-offpjz69	A2 rerun 5 with A/A
+2026-10-28T16:40:03+00:00	master@a2367fab89	worktree-agent-a4040495384e00bdf@58804ce723	ff,mona,darwin	5	64	1.02380	1.02011	1.02767	FASTER	same	324616	331141	.cache/hillclimb/runs/20261028T162945Z-xe6n1t7o	round 2 shared control: A2 readback, A3 crossover lanes, A4 binned update, combined	1.2
+2026-10-28T16:40:03+00:00	master@a2367fab89	worktree-agent-acce39fde26141205@be6f5587fa	ff,mona,darwin	5	64	1.13853	1.13276	1.14379	FASTER	same	324616	370316	.cache/hillclimb/runs/20261028T162945Z-xe6n1t7o	round 2 shared control: A2 readback, A3 crossover lanes, A4 binned update, combined	1.2
+2026-10-28T16:40:03+00:00	master@a2367fab89	worktree-agent-abf6b91d37ee0583b@51c42d760c	ff,mona,darwin	5	64	1.09048	1.08482	1.09611	FASTER	same	324616	354156	.cache/hillclimb/runs/20261028T162945Z-xe6n1t7o	round 2 shared control: A2 readback, A3 crossover lanes, A4 binned update, combined	1.2
+2026-10-28T16:40:03+00:00	master@a2367fab89	hc-combined@011a5821a0	ff,mona,darwin	5	64	1.18077	1.15170	1.21481	FASTER	same	324616	380188	.cache/hillclimb/runs/20261028T162945Z-xe6n1t7o	round 2 shared control: A2 readback, A3 crossover lanes, A4 binned update, combined	1.2
