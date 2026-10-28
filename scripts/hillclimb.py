@@ -60,6 +60,7 @@ LOCK = SHARED / ".cache/evolution-bench/benchmark.lock"
 LOG = SHARED / "benchmarks/hillclimb/log.tsv"
 CASES = ("ff", "mona", "darwin")
 WORKTREE = "WORKTREE"
+REVERT = "revert:"
 KEEP_BUILDS = 8
 # Everything the evolution-bench executable is built from; script and doc commits
 # leave this key, and therefore the cached build, unchanged.
@@ -118,6 +119,27 @@ def cargo_build(source, target_dir, log):
     return target_dir / "release/examples/evolution-bench"
 
 
+def revert_commit(spec):
+    """Commit `BASE` with `SHA` reverted, for `revert:SHA[@BASE]` (BASE defaults to HEAD).
+
+    Ablation: re-check whether an earlier kept change still pays on today's code."""
+    target, _, base = spec.partition("@")
+    target = git("rev-parse", "--verify", f"{target}^{{commit}}")
+    base = git("rev-parse", "--verify", f"{base or 'HEAD'}^{{commit}}")
+    source = checkout_ref(base)
+    reverted = subprocess.run(["git", "revert", "--no-commit", target], cwd=source,
+                              capture_output=True, text=True, check=False)
+    try:
+        require(reverted.returncode == 0,
+                f"cannot revert {target[:10]} on {base[:10]}: {reverted.stderr.strip()[-300:]}")
+        tree = subprocess.run(["git", "write-tree"], cwd=source, capture_output=True,
+                              text=True, check=True).stdout.strip()
+    finally:
+        subprocess.run(["git", "reset", "--hard", "--quiet", base], cwd=source, check=True)
+    commit = git("commit-tree", tree, "-p", base, "-m", f"hillclimb: revert {target[:10]}")
+    return commit, f"revert:{target[:10]}@{base[:10]}"
+
+
 def checkout_ref(commit):
     """Check a commit out into one reusable worktree so its target dir stays incremental."""
     source = ROOT / "ref-src"
@@ -151,8 +173,12 @@ def resolve_locked(side):
     if side == WORKTREE:
         tree, label, source, target = worktree_tree(), "worktree", REPO, REPO / "target"
     else:
-        commit = git("rev-parse", "--verify", f"{side}^{{commit}}")
-        tree, label = git("rev-parse", f"{commit}^{{tree}}"), f"{side}@{commit[:10]}"
+        if side.startswith(REVERT):
+            commit, label = revert_commit(side[len(REVERT):])
+        else:
+            commit = git("rev-parse", "--verify", f"{side}^{{commit}}")
+            label = f"{side}@{commit[:10]}"
+        tree = git("rev-parse", f"{commit}^{{tree}}")
         source, target = None, ROOT / "ref-target"
     key = build_key(tree)
     cached = ROOT / "bin" / key / "evolution-bench"
@@ -518,7 +544,8 @@ def parse_args(argv):
                                   formatter_class=argparse.RawDescriptionHelpFormatter)
     cli.add_argument("--control", default="HEAD", help="git ref, WORKTREE or executable (default HEAD)")
     cli.add_argument("--candidate", action="append",
-                     help="git ref, WORKTREE or executable; repeat to compare several "
+                     help="git ref, WORKTREE, revert:SHA[@BASE] (BASE with SHA reverted, "
+                          "for ablation) or executable; repeat to compare several "
                           "candidates against one control in one run (default WORKTREE)")
     cli.add_argument("--build-only", action="store_true",
                      help="build or find each side and print its cached executable path")

@@ -184,6 +184,33 @@ class HillclimbCli(unittest.TestCase):
         self.assertFalse((hillclimb.ROOT / "runs").exists())
 
 
+class RevertSide(unittest.TestCase):
+    def test_revert_builds_base_without_the_named_commit(self):
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        repo = Path(scratch.name) / "repo"
+        repo.mkdir()
+        def run(*args):
+            return hillclimb.subprocess.run(args, cwd=repo, check=True, capture_output=True,
+                                            text=True).stdout.strip()
+        run("git", "init", "-q")
+        run("git", "config", "user.email", "t@example.com")
+        run("git", "config", "user.name", "t")
+        for name in ("a", "b", "c"):
+            (repo / name).write_text(name)
+            run("git", "add", name)
+            run("git", "commit", "-qm", name)
+        middle = run("git", "rev-parse", "HEAD~1")
+        with mock.patch.object(hillclimb, "REPO", repo), \
+                mock.patch.object(hillclimb, "ROOT", Path(scratch.name) / "hc"):
+            commit, label = hillclimb.revert_commit(middle)
+            content = hillclimb.git("ls-tree", "--name-only", commit)
+            clean = hillclimb.git("-C", str(hillclimb.ROOT / "ref-src"), "status", "--porcelain")
+        self.assertTrue(label.startswith(f"revert:{middle[:10]}@"))
+        self.assertEqual(content.split(), ["a", "c"])
+        self.assertEqual(clean, "")
+
+
 class ForeignCpu(unittest.TestCase):
     def test_busy_child_counts_as_ours_and_idle_host_is_near_zero(self):
         before = hillclimb.cpu_snapshot([])

@@ -10,7 +10,12 @@ scripts/hillclimb.py --note "what I changed"          # working tree vs HEAD
 scripts/hillclimb.py --cases ff --pairs 3 --batches 16  # quick screen, ~1 min, ±3–6% per pair
 scripts/hillclimb.py --control HEAD~1 --candidate HEAD  # two commits
 scripts/hillclimb.py --candidate HEAD                   # A/A noise check
+scripts/hillclimb.py --candidate revert:70c9031         # ablation: HEAD without one kept change
 ```
+
+A kept change can turn harmful after later changes: chunked submits gained
+13.7% when adopted and cost 25–42% at 512 batches once readback was
+double-buffered. Ablate kept changes with `revert:SHA` after each round.
 
 To sweep a constant, build each variant, then compare them in one run against a
 shared control (each candidate gets its own verdict and log row):
