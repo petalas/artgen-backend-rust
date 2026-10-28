@@ -58,6 +58,14 @@ elif sys.argv[1] == "trial":
 '''
 
 
+LIFECYCLE_FAKE = """#!/usr/bin/env python3
+import sys
+from pathlib import Path
+out = Path(sys.argv[sys.argv.index("--output") + 1]); out.mkdir(parents=True)
+(out / "comparison.json").write_text("CONTENT")
+"""
+
+
 class HillclimbCli(unittest.TestCase):
     def setUp(self):
         scratch = tempfile.TemporaryDirectory()
@@ -71,11 +79,15 @@ class HillclimbCli(unittest.TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
 
-    def fake(self, rate=100, digest="a", serve=1, ok=1, gain=1):
-        path = self.root / "bin" / f"rate-{rate}-hash-{digest}-serve-{serve}-ok-{ok}-gain-{gain}"
-        path.parent.mkdir(exist_ok=True)
+    def fake(self, rate=100, digest="a", serve=1, ok=1, gain=1, lifecycle="same"):
+        folder = self.root / f"bin-{lifecycle}"
+        path = folder / f"rate-{rate}-hash-{digest}-serve-{serve}-ok-{ok}-gain-{gain}"
+        folder.mkdir(exist_ok=True)
         path.write_text(FAKE)
         path.chmod(0o755)
+        checker = folder / "check-gpu-lifecycle"
+        checker.write_text(LIFECYCLE_FAKE.replace("CONTENT", lifecycle))
+        checker.chmod(0o755)
         return str(path)
 
     def run_cli(self, control, candidate, *extra):
@@ -151,6 +163,13 @@ class HillclimbCli(unittest.TestCase):
                          [("64", "5"), ("64", "5"), ("512", "3"), ("512", "3")])
         self.assertIn("CONFIRM ADOPT: rate-110-hash-a", out)
         self.assertIn("CONFIRM REJECT: rate-110-hash-b", out)
+
+    def test_confirm_rejects_a_lifecycle_difference(self):
+        code, out, _ = self.run_cli(self.fake(), self.fake(rate=110, lifecycle="other"), "--confirm")
+        self.assertEqual(code, 0, out)
+        self.assertIn("lifecycle differs", out)
+        self.assertIn("CONFIRM REJECT", out)
+        self.assertEqual({r["lifecycle"] for r in self.log_rows()}, {"differs"})
 
     def test_unappliable_revert_is_skipped(self):
         code, out, err = self.run_cli(self.fake(), self.fake(rate=110),

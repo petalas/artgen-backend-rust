@@ -70,6 +70,11 @@ A resident trial takes ~4.7 s of wall time instead of 16–21 s.
   compares fitness gained per second (best final fitness minus the start,
   divided by timed seconds) with the same paired bootstrap. That is the measure
   of how quickly images evolve; evals/s alone can hide a worse search.
+- `--lifecycle` (implied by `--confirm` unless `--allow-behavior-change`) builds
+  each side's `check-gpu-lifecycle` with its benchmark binary and requires a
+  byte-identical `comparison.json` (delivery, returned drawings, counters, state
+  digests). It became deterministic in `3f8e9e4`; agents had been running it by
+  hand against separately built master checkers.
 - Verdict uses the equal-case geometric mean of paired ratios with a stratified
   bootstrap 95% interval. `FASTER`/`SLOWER` need the interval to exclude 1.0 and
   a move of at least `--min-effect` (default 0.5%). Fewer than three pairs give

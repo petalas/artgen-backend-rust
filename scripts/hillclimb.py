@@ -64,8 +64,9 @@ REVERT = "revert:"
 KEEP_BUILDS = 8
 # Everything the evolution-bench executable is built from; script and doc commits
 # leave this key, and therefore the cached build, unchanged.
-BUILD_INPUTS = ("src", "examples/evolution-bench.rs", "Cargo.toml", "Cargo.lock",
-                "rust-toolchain.toml")
+BUILD_INPUTS = ("src", "examples/evolution-bench.rs", "examples/check-gpu-lifecycle.rs",
+                "Cargo.toml", "Cargo.lock", "rust-toolchain.toml")
+LIFECYCLE = "check-gpu-lifecycle"
 MAX_CANDIDATES = 6
 # --confirm: the default screen, then a long horizon where host-side costs show
 # (64-batch screens missed a 25-42% regression that 512 batches exposed).
@@ -75,7 +76,7 @@ BOOTSTRAP_SEED = 20261028
 LOG_COLUMNS = ("utc", "control", "candidate", "cases", "pairs", "batches", "ratio",
                "low95", "high95", "verdict", "replay", "control_evals_per_s",
                "candidate_evals_per_s", "evidence", "note", "host_load", "quality_ratio",
-               "quality_low95", "quality_high95", "quality_verdict")
+               "quality_low95", "quality_high95", "quality_verdict", "lifecycle")
 # Other processes averaging more CPU cores than this during a timed trial (e.g. a
 # parallel cargo build) biased results; the one-minute load average missed them.
 BUSY_CORES = 1.0
@@ -116,7 +117,10 @@ def build_key(tree):
 
 
 def cargo_build(source, target_dir, log):
+    """Build the benchmark executable and, where the tree has it, the lifecycle checker."""
     command = ["cargo", "build", "--release", "--example", "evolution-bench"]
+    if (source / "examples" / f"{LIFECYCLE}.rs").is_file():
+        command += ["--example", LIFECYCLE]
     env = dict(os.environ, CARGO_TARGET_DIR=str(target_dir))
     with log.open("w") as stream:
         result = subprocess.run(command, cwd=source, env=env, stdout=stream,
@@ -197,6 +201,9 @@ def resolve_locked(side):
         cached.parent.mkdir(parents=True, exist_ok=True)
         print(f"building {label} (build inputs {key[:10]})", file=sys.stderr)
         built = cargo_build(source, target, cached.parent / "build.log")
+        checker = built.with_name(LIFECYCLE)
+        if checker.is_file():
+            shutil.copy2(checker, cached.with_name(LIFECYCLE))
         shutil.copy2(built, cached.with_suffix(".partial"))
         cached.with_suffix(".partial").rename(cached)
     return label, f"build:{key}", cached
@@ -518,7 +525,8 @@ def summarize(args, sides, evidence, rows, ratios):
     (evidence / "summary.json").write_text(json.dumps(
         {"entries": entries, "ratios": ratios, "rows": rows, "discarded": args.discarded,
          "identities": {side: value[1] for side, value in sides.items()},
-         "args": {k: v for k, v in vars(args).items() if k != "discarded"}},
+         "args": {k: v for k, v in vars(args).items() if k != "discarded"},
+         "lifecycle": args.lifecycle_digests},
         indent=2, default=str))
     if args.discarded:
         print(f"re-timed {len(args.discarded)} trials that overlapped other CPU work")
@@ -546,7 +554,8 @@ def summarize_candidate(args, sides, evidence, rows, name, ratios):
              "control_evals_per_s": median_rate(rows, "control"),
              "candidate_evals_per_s": median_rate(rows, name),
              "evidence": os.path.relpath(evidence, REPO), "note": args.note,
-             "host_load": f"{max(row['foreign_cores'] for row in rows):.1f}"}
+             "host_load": f"{max(row['foreign_cores'] for row in rows):.1f}",
+             "lifecycle": lifecycle_verdict(args.lifecycle_digests, name)}
     if args.allow_behavior_change:
         q_point, q_low, q_high = aggregate(quality_ratios(rows, name))
         entry.update(quality_ratio=f"{q_point:.5f}", quality_low95=f"{q_low:.5f}",
@@ -557,7 +566,8 @@ def summarize_candidate(args, sides, evidence, rows, name, ratios):
     print(f"\n== {name}: {entry['candidate']}")
     print(case_table(rows, ratios, name))
     print(f"{result}: candidate/control {point:.4f}  95% [{low:.4f}, {high:.4f}]  "
-          f"replay {entry['replay']}")
+          f"replay {entry['replay']}" + (f"  lifecycle {entry['lifecycle']}"
+                                         if entry["lifecycle"] else ""))
     if args.allow_behavior_change:
         print(f"QUALITY {entry['quality_verdict']}: fitness gain per second, candidate/control "
               f"{entry['quality_ratio']}  95% [{entry['quality_low95']}, {entry['quality_high95']}]")
@@ -575,6 +585,9 @@ def parse_args(argv):
     cli.add_argument("--confirm", action="store_true",
                      help="run 64 batches x 5 pairs and 512 x 3; ADOPT only if neither "
                           "horizon regresses (speed or quality) and one improves")
+    cli.add_argument("--lifecycle", action="store_true",
+                     help="also run each side's check-gpu-lifecycle and require a "
+                          "byte-identical comparison.json (implied by --confirm)")
     cli.add_argument("--build-only", action="store_true",
                      help="build or find each side and print its cached executable path")
     cli.add_argument("--cases", default=",".join(CASES), help="comma-separated subset of ff,mona,darwin")
@@ -592,6 +605,7 @@ def parse_args(argv):
     cli.add_argument("--note", default="", help="free text recorded in the log")
     args = cli.parse_args(argv)
     args.candidate = args.candidate or [WORKTREE]
+    args.lifecycle = args.lifecycle or (args.confirm and not args.allow_behavior_change)
     require(len(args.candidate) <= MAX_CANDIDATES, f"at most {MAX_CANDIDATES} candidates")
     args.cases = tuple(dict.fromkeys(args.cases.split(",")))
     require(args.cases and set(args.cases) <= set(CASES), "cases must be a subset of ff,mona,darwin")
@@ -634,9 +648,45 @@ def run_horizon(args, sides):
     return summarize(args, sides, evidence, rows, ratios)
 
 
+def lifecycle_digests(sides, evidence):
+    """Run each side's lifecycle checker; return {side: comparison.json sha256 or None}.
+
+    comparison.json covers delivery, returned drawings, counters and state digests
+    and is byte-identical across runs of one build, so any difference is real."""
+    digests = {}
+    for side, (_, _, executable) in sides.items():
+        checker = Path(executable).with_name(LIFECYCLE)
+        if not checker.is_file():
+            digests[side] = None
+            continue
+        output = evidence / "lifecycle" / side
+        output.parent.mkdir(parents=True, exist_ok=True)
+        with LOCK.open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            result = subprocess.run([str(checker), "--manifest", str(MANIFEST), "--output",
+                                     str(output), "--batches", "64"], cwd=output.parent,
+                                    capture_output=True, text=True, timeout=1800, check=False)
+        report = output / "comparison.json"
+        require(result.returncode == 0 and report.is_file(),
+                f"{side}: lifecycle checker failed: {result.stderr.strip()[-300:]}")
+        digests[side] = hashlib.sha256(report.read_bytes()).hexdigest()
+    return digests
+
+
+def lifecycle_verdict(digests, side):
+    if digests is None:
+        return ""
+    if digests.get(side) is None or digests.get("control") is None:
+        return "unavailable"
+    return "same" if digests[side] == digests["control"] else "differs"
+
+
 def confirmation(entries):
     """Adopt only if no horizon regresses and at least one improves."""
     verdicts = [entry["verdict"] for entry in entries]
+    if any(entry.get("lifecycle") in ("differs", "unavailable")
+           and entry["replay"] == "same" for entry in entries):
+        return "REJECT"
     verdicts += [entry["quality_verdict"] for entry in entries if "quality_verdict" in entry]
     if any(v in ("SLOWER", "REPLAY-MISMATCH", "SCREEN") for v in verdicts):
         return "REJECT"
@@ -652,6 +702,12 @@ def main(argv=None):
             for name, (label, _, executable) in sides.items():
                 print(f"{name}\t{label}\t{executable}")
             return 0
+        args.lifecycle_digests = None
+        if args.lifecycle:
+            stamp = datetime.datetime.now(datetime.UTC).strftime("%Y%m%dT%H%M%SZ")
+            (ROOT / "runs").mkdir(parents=True, exist_ok=True)
+            checks = Path(tempfile.mkdtemp(prefix=f"{stamp}-lifecycle-", dir=ROOT / "runs"))
+            args.lifecycle_digests = lifecycle_digests(sides, checks)
         horizons = CONFIRM_HORIZONS if args.confirm else ((args.batches, args.pairs),)
         entries = []
         for batches, pairs in horizons:
