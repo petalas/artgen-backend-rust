@@ -152,6 +152,13 @@ var<workgroup> shared_parent_fitness_bits: u32;
 var<workgroup> shared_parent_mutation_scale: f32;
 var<workgroup> shared_parent_polygons: array<Polygon, 1000>;
 
+// Cooperative crossover: lane 0 decides and broadcasts; tail keep bits (one per
+// polygon slot) give each kept tail slot its output rank.
+var<workgroup> shared_crossover_parent_b: u32;
+var<workgroup> shared_crossover_rng: u32;
+var<workgroup> shared_crossover_flag: u32;
+var<workgroup> shared_crossover_keep: array<atomic<u32>, 32>;
+
 // --- PCG32 RNG ---
 // 32-bit PCG hash (PCG-RXS-M-XS): ~8 ALU ops per call, only .x of rng_state used
 fn pcg_step(state: ptr<function, u32>) -> u32 {
@@ -194,36 +201,111 @@ fn tournament_select(rng: ptr<function, u32>, chain_id: u32, chain_count: u32) -
     return best_id;
 }
 
+/// LCG jump-ahead: returns (mul, add) such that `n` calls of `pcg_step` map
+/// state s to mul * s + add (mod 2^32). Powers of one LCG commute, so the
+/// square-and-multiply order does not matter.
+fn pcg_jump(n: u32) -> vec2<u32> {
+    var acc_mul = 1u;
+    var acc_add = 0u;
+    var cur_mul = 747796405u;
+    var cur_add = 2891336453u;
+    var k = n;
+    while k != 0u {
+        if (k & 1u) != 0u {
+            acc_mul = acc_mul * cur_mul;
+            acc_add = acc_add * cur_mul + cur_add;
+        }
+        cur_add = cur_add * cur_mul + cur_add;
+        cur_mul = cur_mul * cur_mul;
+        k = k >> 1u;
+    }
+    return vec2<u32>(acc_mul, acc_add);
+}
+
+/// Crossover offspring polygons are stored with their alpha clamped.
+fn clamp_polygon_alpha(poly_in: Polygon) -> Polygon {
+    var poly = poly_in;
+    var color = unpack_color(poly);
+    color.w = clamp(color.w, params.min_alpha_norm, params.max_alpha_norm);
+    poly.data.x = pack_color(color);
+    return poly;
+}
+
 /// Uniform crossover: walk both parents in lockstep by layer index, coin-flip each slot.
 /// Preserves z-ordering (alpha compositing order) — no centroid math needed.
 /// Parent A from shared memory, parent B from global.
-fn crossover_uniform_offspring(rng: ptr<function, u32>, parent_b: u32, offspring_id: u32) {
+///
+/// Cooperative: every lane of the offspring's workgroup calls this in uniform
+/// control flow. Slot i consumes exactly the i-th draw after `base_rng` (one
+/// draw per slot of max(count_a, count_b), as in the serial walk, whose
+/// `out_count >= max_polygons` break cannot fire because out_count <= i <
+/// max_count <= max_polygons). Lane l starts at draw l and jumps by the
+/// workgroup width. Slots below min(count_a, count_b) always emit at index i.
+/// Tail slots emit at min_count + (number of kept tail slots before them),
+/// found from a workgroup bitmask after a barrier. Alpha clamping is fused into
+/// each write. Returns the RNG state after max_count draws (valid on lane 0).
+fn crossover_uniform_offspring(base_rng: u32, parent_b: u32, offspring_id: u32, lane: u32) -> u32 {
     let count_a = min(shared_parent_poly_count, params.max_polygons);
     let count_b = min(chain_states[parent_b].polygon_count, params.max_polygons);
     let max_count = max(count_a, count_b);
-    var out_count = 0u;
-    for (var i = 0u; i < max_count; i++) {
-        if out_count >= params.max_polygons { break; }
-        let have_a = i < count_a;
-        let have_b = i < count_b;
-        let pick_a = rand_f32(rng) < 0.5;
-        if have_a && have_b {
+    let min_count = min(count_a, count_b);
+    let a_is_longer = count_a > count_b;
+
+    let start = pcg_jump(lane);
+    let stride = pcg_jump(PHYSICAL_WG_SIZE);
+    var state = start.x * base_rng + start.y;
+    for (var i = lane; i < max_count; i += PHYSICAL_WG_SIZE) {
+        var draw_state = state;
+        let pick_a = rand_f32(&draw_state) < 0.5;
+        state = stride.x * state + stride.y;
+        if i < min_count {
+            var poly: Polygon;
             if pick_a {
-                working_states[offspring_id].polygons[out_count] = shared_parent_polygons[i];
+                poly = shared_parent_polygons[i];
             } else {
-                working_states[offspring_id].polygons[out_count] = chain_states[parent_b].polygons[i];
+                poly = chain_states[parent_b].polygons[i];
             }
-            out_count++;
-        } else if have_a {
-            if pick_a { working_states[offspring_id].polygons[out_count] = shared_parent_polygons[i]; out_count++; }
-        } else if have_b {
-            if !pick_a { working_states[offspring_id].polygons[out_count] = chain_states[parent_b].polygons[i]; out_count++; }
+            working_states[offspring_id].polygons[i] = clamp_polygon_alpha(poly);
+        } else if pick_a == a_is_longer {
+            atomicOr(&shared_crossover_keep[i >> 5u], 1u << (i & 31u));
         }
     }
-    working_states[offspring_id].polygon_count = max(out_count, 1u);
-    if out_count == 0u {
-        working_states[offspring_id].polygons[0] = shared_parent_polygons[0];
+    workgroupBarrier();
+
+    let first_word = min_count >> 5u;
+    let tail_start = (min_count / PHYSICAL_WG_SIZE) * PHYSICAL_WG_SIZE + lane;
+    for (var i = tail_start; i < max_count; i += PHYSICAL_WG_SIZE) {
+        if i < min_count { continue; }
+        let word = i >> 5u;
+        let bit = 1u << (i & 31u);
+        let bits = atomicLoad(&shared_crossover_keep[word]);
+        if (bits & bit) == 0u { continue; }
+        var rank = countOneBits(bits & (bit - 1u));
+        for (var w = first_word; w < word; w++) {
+            rank += countOneBits(atomicLoad(&shared_crossover_keep[w]));
+        }
+        var poly: Polygon;
+        if a_is_longer {
+            poly = shared_parent_polygons[i];
+        } else {
+            poly = chain_states[parent_b].polygons[i];
+        }
+        working_states[offspring_id].polygons[min_count + rank] = clamp_polygon_alpha(poly);
     }
+
+    if lane == 0u {
+        var out_count = min_count;
+        let last_word = (max_count + 31u) >> 5u;
+        for (var w = first_word; w < last_word; w++) {
+            out_count += countOneBits(atomicLoad(&shared_crossover_keep[w]));
+        }
+        working_states[offspring_id].polygon_count = max(out_count, 1u);
+        if out_count == 0u {
+            working_states[offspring_id].polygons[0] = clamp_polygon_alpha(shared_parent_polygons[0]);
+        }
+    }
+    let end = pcg_jump(max_count);
+    return end.x * base_rng + end.y;
 }
 
 // --- Single-mutation mode (offspring-aware, with adaptive mutation scale) ---
@@ -555,6 +637,8 @@ fn single_mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<functio
 const OFFSPRING_GROUP_SIZE: u32 = 1u;
 const PHYSICAL_WG_SIZE: u32 = 64u;
 const COPY_LANES: u32 = 64u;
+// Cooperative crossover gives the whole workgroup to one offspring.
+const_assert OFFSPRING_GROUP_SIZE == 1u;
 
 // Copy roles are independent of the compact mutation leaders.
 fn copy_parent_prefix(chain_id: u32, group_base: u32, local_idx: u32,
@@ -599,49 +683,59 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
     }
     storageBarrier();
 
-    // Only compact leaders continue, with the original logical offspring index.
-    if chain_id >= chain_count || lid.x >= OFFSPRING_GROUP_SIZE || offspring_local_idx >= lambda {
+    // One offspring per workgroup (OFFSPRING_GROUP_SIZE == 1), so the leader's
+    // validity and crossover decision are workgroup-uniform.
+    let group_valid = chain_id < chain_count && group_base < lambda;
+
+    // Compute offspring buffer index (leader lane's logical offspring)
+    let offspring_id = chain_id * lambda + group_base;
+
+    var rng = 0u;
+    var mutation_scale = 1.0;
+    if lid.x < 32u {
+        atomicStore(&shared_crossover_keep[lid.x], 0u);
+    }
+    if lid.x == 0u {
+        var crossover = 0u;
+        if group_valid {
+            // Load per-offspring RNG from working_states (persistent across iterations)
+            rng = working_states[offspring_id].rng_state.x;
+
+            // Adaptive mutation scale: only for offspring 1..λ-1 when enabled
+            // Offspring 0 always uses scale 1.0 so (1+1) behavior is unchanged
+            if params.adaptive_mutation == 1u && offspring_local_idx > 0u {
+                mutation_scale = shared_parent_mutation_scale;
+            }
+
+            if params.crossover_prob > 0.0 && rand_f32(&rng) < params.crossover_prob && chain_count >= 2u {
+                shared_crossover_parent_b = tournament_select(&rng, chain_id, chain_count);
+                shared_crossover_rng = rng;
+                crossover = 1u;
+
+                // Initialize working state header from shared memory
+                working_states[offspring_id].fitness_bits = shared_parent_fitness_bits;
+                working_states[offspring_id].mutation_scale = mutation_scale;
+                working_states[offspring_id].stagnation_counter = 0u;
+            }
+        }
+        shared_crossover_flag = crossover;
+    }
+
+    // --- Crossover path (all lanes; the uniform load also publishes the keep-bit reset) ---
+    if workgroupUniformLoad(&shared_crossover_flag) != 0u {
+        // Uniform crossover: parent A from shared memory, parent B from global
+        let crossover_rng = crossover_uniform_offspring(
+            shared_crossover_rng, shared_crossover_parent_b, offspring_id, lid.x);
+        if lid.x == 0u {
+            // Crossover dirties the full image
+            write_dirty_bbox(offspring_id, full_image_bbox());
+            working_states[offspring_id].rng_state.x = crossover_rng;
+        }
         return;
     }
 
-    // Compute offspring buffer index
-    let offspring_id = chain_id * lambda + offspring_local_idx;
-
-    // Load per-offspring RNG from working_states (persistent across iterations)
-    var rng = working_states[offspring_id].rng_state.x;
-
-    // Adaptive mutation scale: only for offspring 1..λ-1 when enabled
-    // Offspring 0 always uses scale 1.0 so (1+1) behavior is unchanged
-    var mutation_scale = 1.0;
-    if params.adaptive_mutation == 1u && offspring_local_idx > 0u {
-        mutation_scale = shared_parent_mutation_scale;
-    }
-
-    // --- Crossover path ---
-    if params.crossover_prob > 0.0 && rand_f32(&rng) < params.crossover_prob && chain_count >= 2u {
-        let parent_b = tournament_select(&rng, chain_id, chain_count);
-
-        // Initialize working state header from shared memory
-        working_states[offspring_id].fitness_bits = shared_parent_fitness_bits;
-        working_states[offspring_id].mutation_scale = mutation_scale;
-        working_states[offspring_id].stagnation_counter = 0u;
-
-        // Uniform crossover: parent A from shared memory, parent B from global
-        crossover_uniform_offspring(&rng, parent_b, offspring_id);
-
-        // Clamp alphas on crossover offspring
-        let offspring_count = working_states[offspring_id].polygon_count;
-        for (var i = 0u; i < offspring_count; i++) {
-            var poly = working_states[offspring_id].polygons[i];
-            var color = unpack_color(poly);
-            color.w = clamp(color.w, params.min_alpha_norm, params.max_alpha_norm);
-            poly.data.x = pack_color(color);
-            working_states[offspring_id].polygons[i] = poly;
-        }
-
-        // Crossover dirties the full image
-        write_dirty_bbox(offspring_id, full_image_bbox());
-        working_states[offspring_id].rng_state.x = rng;
+    // Only the leader continues, with the original logical offspring index.
+    if !group_valid || lid.x >= OFFSPRING_GROUP_SIZE {
         return;
     }
 
