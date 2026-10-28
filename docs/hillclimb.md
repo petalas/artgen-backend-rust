@@ -79,8 +79,11 @@ produced a false 3.4% SLOWER in an earlier A/A):
   with an idle sibling 0.997–0.998).
 - Throughput drifts down inside every process as it runs more batches, from the
   driver's submit path, not the kernels (see LEARNINGS, "Host submit time grows").
-  Both servers run the same batches at each pair, so AB/BA mostly cancels it.
-  Compare only within one run; absolute evals/s from a long run read low.
+  The drift differs per process: servers reused across cases gave persistent
+  ±11% per-case offsets in an A/A once the engine got faster. Each case now gets
+  fresh server processes; the A/A at 520k/422k/420k evals/s stays within ±0.5%.
+- The `gpu%` column estimates the GPU-busy share of the timed clock from the
+  sampled stage times. Near 100% the kernels are the lever; well below, the host.
 - Parallel `cargo` builds skewed timing by up to 17% (two false SLOWER runs).
   Builds started by the script wait for timing runs and vice versa; builds you
   start yourself do not, so avoid them while a run times. Each log row records

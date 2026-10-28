@@ -225,9 +225,10 @@ walk inside NVIDIA's D3D12 user-mode driver (`libnvwgf2umx.so`): constant
 instructions, ~1.8x cache and ~6x dTLB misses. RSS, mappings, fds, extra buffers,
 map/unmap, timestamps and fresh encoders do not change it. It grows per batch,
 so the long-running app is affected too (inferred ~15–20% host-side, then flat).
-**Fix**: None in our code. Compare sides that have run the same number of
-batches (`scripts/hillclimb.py` alternates AB/BA across two servers) and never
-compare early trials of one process with late ones. A throwaway split of each
+**Fix**: None in our code. The drift differs between processes, so equal batch
+counts are not enough: `scripts/hillclimb.py` starts fresh servers for every
+case. Never compare early trials of one process with late ones, or engines in
+long-lived processes with fresh ones. A throwaway split of each
 batch into several submits cut ff elapsed 2.98–3.24 s to 2.61–2.65 s with an
 unchanged hash. The engine now submits every 4 bulk iterations
 (`SUBMIT_CHUNK_ITERATIONS`, +13.7% across all three cases).

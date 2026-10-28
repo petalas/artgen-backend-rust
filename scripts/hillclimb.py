@@ -251,6 +251,17 @@ def supports_serve(executable):
     return probe.returncode == 0
 
 
+def gpu_share(record):
+    """Estimated GPU-busy fraction of the timed clock, from the sampled stage times.
+
+    Near 1.0 the engine is GPU-bound, so kernel work is the lever; well below 1.0
+    the host (encoding, submission, readback waits) limits throughput."""
+    samples = max(1, record["timestamp_samples"])
+    per_iteration_s = sum(record["sampled_gpu_stage_totals_ns"]) / samples / 1e9
+    iterations = record["batches"] * record["params"]["gpuBatchIters"]
+    return per_iteration_s * iterations / record["elapsed_seconds"]
+
+
 def check_record(record, case, seed, batches):
     require(record["case_id"] == case and record["seed"] == seed
             and record["batches"] == batches, "record does not match its request")
@@ -284,6 +295,7 @@ def run_case(servers, case, args, evidence, rows):
             record = servers[side].trial(case, args.seed, args.batches, args.warmup, output)
             rates[side] = check_record(record, case, args.seed, args.batches)
             rows.append({"case": case, "pair": pair, "side": side, "rate": rates[side],
+                         "gpu_share": gpu_share(record),
                          "hash": record["final_state_sha256"],
                          "stage_ns": [total / max(1, record["timestamp_samples"])
                                       for total in record["sampled_gpu_stage_totals_ns"]]})
@@ -333,7 +345,8 @@ def verdict(point, low, high, pairs, min_effect):
 
 
 def case_table(rows, ratios, candidate):
-    lines = [f"{'case':8}{'control':>12}{'candidate':>12}{'ratio':>9}  GPU µs/batch mut/bin/rast/sel (cand)"]
+    lines = [(f"{'case':8}{'control':>12}{'candidate':>12}{'ratio':>9}{'gpu%':>12}  "
+              "GPU µs/iteration mut/bin/rast/sel (cand)")]
     for case, values in ratios.items():
         rate = {side: statistics.median(r["rate"] for r in rows
                                         if r["case"] == case and r["side"] == side)
@@ -341,8 +354,12 @@ def case_table(rows, ratios, candidate):
         stages = [statistics.median(r["stage_ns"][i] for r in rows
                                     if r["case"] == case and r["side"] == candidate) / 1e3
                   for i in range(4)]
+        share = {side: statistics.median(r["gpu_share"] for r in rows
+                                         if r["case"] == case and r["side"] == side)
+                 for side in ("control", candidate)}
         lines.append(f"{case:8}{rate['control']:>12,.0f}{rate[candidate]:>12,.0f}"
-                     f"{statistics.median(values):>9.4f}  " + "/".join(f"{s:.0f}" for s in stages))
+                     f"{statistics.median(values):>9.4f}{share['control']:>6.0%}→{share[candidate]:<4.0%} "
+                     + "/".join(f"{s:.0f}" for s in stages))
     return "\n".join(lines)
 
 
@@ -366,23 +383,28 @@ def median_rate(rows, side):
 
 
 def measure(args, sides, evidence):
-    rows, servers, args.host_load = [], {}, os.getloadavg()[0]
+    rows, args.host_load = [], os.getloadavg()[0]
     ratios = {name: {} for name in list(sides)[1:]}
-    try:
-        for side, (_, identity, executable) in sides.items():
-            workdir = ROOT / "serve" / identity.replace(":", "-").replace("/", "_")[-80:] / side
-            kind = Server if supports_serve(executable) else OneShot
-            if kind is OneShot:
-                print(f"{side}: no serve mode; one process per trial (~12 s setup each)",
-                      file=sys.stderr)
-            servers[side] = kind(side, executable, workdir, args.timeout)
-        for case in args.cases:
+    kinds = {side: Server if supports_serve(executable) else OneShot
+             for side, (_, _, executable) in sides.items()}
+    for side, kind in kinds.items():
+        if kind is OneShot:
+            print(f"{side}: no serve mode; one process per trial (~12 s setup each)", file=sys.stderr)
+    for case in args.cases:
+        # Fresh processes per case: driver submit cost drifts with every batch a
+        # process has run, and differently per process. Servers reused across
+        # cases showed persistent ±11% A/A offsets; fresh ones stay within ±0.4%.
+        servers = {}
+        try:
+            for side, (_, identity, executable) in sides.items():
+                workdir = ROOT / "serve" / identity.replace(":", "-").replace("/", "_")[-80:] / side
+                servers[side] = kinds[side](side, executable, workdir, args.timeout)
             for name, values in run_case(servers, case, args, evidence, rows).items():
                 ratios[name][case] = values
-            args.host_load = max(args.host_load, os.getloadavg()[0])
-    finally:
-        for server in servers.values():
-            server.close()
+        finally:
+            for server in servers.values():
+                server.close()
+        args.host_load = max(args.host_load, os.getloadavg()[0])
     return rows, ratios
 
 

@@ -34,7 +34,8 @@ def record(flags):
            "errors": [] if ok else ["pixel mismatch"],
            "evals_per_second": float(fields["rate"]) if ok else None,
            "final_state_sha256": fields["hash"] + flags["case"],
-           "timestamp_samples": 4, "sampled_gpu_stage_totals_ns": [4e3, 4e3, 4e3, 4e3]}
+           "timestamp_samples": 4, "sampled_gpu_stage_totals_ns": [4e3, 4e3, 4e3, 4e3],
+           "elapsed_seconds": 0.01, "params": {"gpuBatchIters": 4}}
     out = Path(flags["output"]); out.mkdir(parents=True)
     (out / "result.json").write_text(json.dumps(rec))
     return rec
