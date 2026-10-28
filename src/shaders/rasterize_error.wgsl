@@ -134,6 +134,19 @@ var<workgroup> shared_polys: array<DecodedPolygon, TILE_MAX_POLYS>;
 var<workgroup> shared_errors: array<u32, 128>;      // only num_subgroups entries are used
 var<workgroup> shared_errors_old: array<u32, 128>;  // old errors for incremental eval
 
+// Unchanged-pixel shortcut. mutate.wgsl lists every polygon index a
+// single-mutation offspring changed in rng_state.y (see changed_indices there).
+// Slots hold the parent and offspring versions of up to two indices. A pixel
+// that none of them can cover has the same covering polygon sequence in parent
+// and offspring, so its offspring colour is the cached parent framebuffer pixel
+// and its new error equals its old error. Crossover and multi-mutation
+// offspring store zero and keep the full blend loop.
+const CHANGED_SLOTS: u32 = 4u;
+// Conservative coverage margin in normalized units (a pixel is ~2.6e-3 at 384 px).
+// It absorbs any rounding difference from the blend loop's own coverage test.
+const COVER_MARGIN: f32 = 1e-5;
+var<workgroup> shared_changed: array<DecodedPolygon, CHANGED_SLOTS>;
+
 // Half-space edge function: positive if point (px,py) is on the left side of edge (ax,ay)->(bx,by)
 fn edge_fn(ax: f32, ay: f32, bx: f32, by: f32, px: f32, py: f32) -> f32 {
     return (bx - ax) * (py - ay) - (by - ay) * (px - ax);
@@ -179,10 +192,49 @@ fn rasterize_blend(poly: DecodedPolygon, fx: f32, fy: f32, r: ptr<function, f32>
     }
 }
 
+fn decode_changed(poly: Polygon) -> DecodedPolygon {
+    let pv0 = unpack_vertex(poly.data.y);
+    let pv1 = unpack_vertex(poly.data.z);
+    let pv2 = unpack_vertex(poly.data.w);
+    return DecodedPolygon(
+        pv0, pv1, pv2,
+        min(pv0.x, min(pv1.x, pv2.x)), max(pv0.x, max(pv1.x, pv2.x)),
+        min(pv0.y, min(pv1.y, pv2.y)), max(pv0.y, max(pv1.y, pv2.y)),
+        poly.data.x);
+}
+
+// Empty slots have an inverted box outside the unit square.
+fn no_changed_polygon() -> DecodedPolygon {
+    return DecodedPolygon(vec2<f32>(0.0), vec2<f32>(0.0), vec2<f32>(0.0), 2.0, -1.0, 2.0, -1.0, 0u);
+}
+
+// Superset of rasterize_blend's coverage test: false only when the pixel is
+// outside the polygon by more than COVER_MARGIN.
+fn may_cover(poly: DecodedPolygon, fx: f32, fy: f32) -> bool {
+    if fx < poly.bb_min_x - COVER_MARGIN || fx > poly.bb_max_x + COVER_MARGIN ||
+       fy < poly.bb_min_y - COVER_MARGIN || fy > poly.bb_max_y + COVER_MARGIN {
+        return false;
+    }
+    let e0 = edge_fn(poly.pv0.x, poly.pv0.y, poly.pv1.x, poly.pv1.y, fx, fy);
+    let e1 = edge_fn(poly.pv1.x, poly.pv1.y, poly.pv2.x, poly.pv2.y, fx, fy);
+    let e2 = edge_fn(poly.pv2.x, poly.pv2.y, poly.pv0.x, poly.pv0.y, fx, fy);
+    let all_pos = e0 >= -COVER_MARGIN && e1 >= -COVER_MARGIN && e2 >= -COVER_MARGIN;
+    let all_neg = e0 <= COVER_MARGIN && e1 <= COVER_MARGIN && e2 <= COVER_MARGIN;
+    return all_pos || all_neg;
+}
+
+fn may_change(fx: f32, fy: f32) -> bool {
+    var touched = false;
+    for (var k = 0u; k < CHANGED_SLOTS; k++) {
+        touched = touched || may_cover(shared_changed[k], fx, fy);
+    }
+    return touched;
+}
+
 // No barriers or cross-pixel floating-point state are permitted in this helper.
 fn pixel_errors(
     px: u32, py: u32, w: u32, h: u32,
-    parent_chain: u32, tile_poly_count: u32, valid_pixel: bool,
+    parent_chain: u32, tile_poly_count: u32, valid_pixel: bool, shortcut: bool,
 ) -> vec2<u32> {
     if !valid_pixel {
         return vec2<u32>(0u, 0u);
@@ -216,6 +268,9 @@ fn pixel_errors(
     let old_gi = f32((packed >> 8u) & 0xFFu);
     let old_bi = f32((packed >> 16u) & 0xFFu);
     pixel_error_old = u32(abs(old_ri - refr) + abs(old_gi - refg) + abs(old_bi - refb));
+    if shortcut && !may_change(fx, fy) {
+        return vec2<u32>(pixel_error_old, pixel_error_old);
+    }
 
     for (var i = 0u; i < tile_poly_count; i++) {
         rasterize_blend(shared_polys[i], fx, fy, &r, &g, &b);
@@ -308,10 +363,18 @@ fn paired_pixel_errors(pixel: RasterPixelState) -> vec2<u32> {
     return vec2<u32>(pixel_error, pixel_error_old);
 }
 
+// A valid pixel that skipped blending keeps its parent colour and old error.
+fn kept_or_blended_errors(pixel: RasterPixelState, blended: bool) -> vec2<u32> {
+    if pixel.valid_pixel && !blended {
+        return vec2<u32>(pixel.pixel_error_old, pixel.pixel_error_old);
+    }
+    return paired_pixel_errors(pixel);
+}
+
 // Used only when the supported logical tile has two ordinals per physical lane.
 fn pixel_pair_errors(
     wid: vec3<u32>, local_idx: u32, w: u32, h: u32,
-    parent_chain: u32, tile_poly_count: u32, valid_chain: bool,
+    parent_chain: u32, tile_poly_count: u32, valid_chain: bool, shortcut: bool,
 ) -> vec2<u32> {
     let ordinal0 = local_idx;
     let ordinal1 = local_idx + PHYSICAL_LANES;
@@ -326,6 +389,9 @@ fn pixel_pair_errors(
     if !valid0 && !valid1 {
         return vec2<u32>(0u, 0u);
     }
+    let blend0 = valid0 && (!shortcut || may_change(pixel0.fx, pixel0.fy));
+    let blend1 = valid1 && (!shortcut || may_change(pixel1.fx, pixel1.fy));
+    let blend_count = select(0u, tile_poly_count, blend0 || blend1);
 
     var r0 = pixel0.r;
     var g0 = pixel0.g;
@@ -334,12 +400,12 @@ fn pixel_pair_errors(
     var g1 = pixel1.g;
     var b1 = pixel1.b;
 
-    for (var i = 0u; i < tile_poly_count; i++) {
+    for (var i = 0u; i < blend_count; i++) {
         let poly = shared_polys[i];
-        if valid0 {
+        if blend0 {
             rasterize_blend(poly, pixel0.fx, pixel0.fy, &r0, &g0, &b0);
         }
-        if valid1 {
+        if blend1 {
             rasterize_blend(poly, pixel1.fx, pixel1.fy, &r1, &g1, &b1);
         }
     }
@@ -352,7 +418,7 @@ fn pixel_pair_errors(
     pixel1.b = b1;
 
     // Only the already-integer errors cross pixels; each component is at most 1530.
-    return paired_pixel_errors(pixel0) + paired_pixel_errors(pixel1);
+    return kept_or_blended_errors(pixel0, blend0) + kept_or_blended_errors(pixel1, blend1);
 }
 
 @compute @workgroup_size(PHYSICAL_LANES, 1, 1)
@@ -400,10 +466,35 @@ fn main(
 
     var tile_poly_count = 0u;
     var tile_data_base = 0u;
+    var changed = 0u;
     if chain_id < chain_count {
         let tile_global = chain_id * num_tiles + tile_id;
-        tile_poly_count = min(tile_counts_buf[tile_global], TILE_MAX_POLYS);
+        let raw_count = tile_counts_buf[tile_global];
+        tile_poly_count = min(raw_count, TILE_MAX_POLYS);
         tile_data_base = chain_id * num_tiles * TILE_MAX_POLYS + tile_id * TILE_MAX_POLYS;
+        // Neither the parent's nor the offspring's list may be truncated: each
+        // changed index moves at most one polygon in or out of this tile.
+        if raw_count + 2u <= TILE_MAX_POLYS {
+            changed = working_states[chain_id].rng_state.y;
+        }
+    }
+    let shortcut = changed != 0u;
+
+    // Slot k holds index half k/2, from the parent (even k) or offspring (odd k).
+    if local_idx < CHANGED_SLOTS {
+        var decoded = no_changed_polygon();
+        let encoded = (changed >> (16u * (local_idx >> 1u))) & 0xFFFFu;
+        if encoded != 0u {
+            let idx = encoded - 1u;
+            if (local_idx & 1u) == 0u {
+                if idx < chain_states[parent_chain].polygon_count {
+                    decoded = decode_changed(chain_states[parent_chain].polygons[idx]);
+                }
+            } else if idx < working_states[chain_id].polygon_count {
+                decoded = decode_changed(working_states[chain_id].polygons[idx]);
+            }
+        }
+        shared_changed[local_idx] = decoded;
     }
 
     // Tile-culled rasterization: ALL threads participate in shared memory loads
@@ -433,13 +524,14 @@ fn main(
             let px = wid.x * WG_X + ordinal % WG_X;
             let py = wid.y * WG_Y + ordinal / WG_X;
             let valid_pixel = px < w && py < h && chain_id < chain_count;
-            let errors = pixel_errors(px, py, w, h, parent_chain, tile_poly_count, valid_pixel);
+            let errors = pixel_errors(
+                px, py, w, h, parent_chain, tile_poly_count, valid_pixel, shortcut);
             pixel_error += errors.x;
             pixel_error_old += errors.y;
         }
     } else {
         let errors = pixel_pair_errors(
-            wid, local_idx, w, h, parent_chain, tile_poly_count, chain_id < chain_count);
+            wid, local_idx, w, h, parent_chain, tile_poly_count, chain_id < chain_count, shortcut);
         pixel_error = errors.x;
         pixel_error_old = errors.y;
     }

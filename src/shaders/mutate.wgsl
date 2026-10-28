@@ -65,6 +65,16 @@ fn pack_bbox(bb: vec4<u32>) -> vec2<u32> {
     );
 }
 
+// Changed polygon indices for rasterize_error's unchanged-pixel shortcut, kept in
+// the unhashed rng_state.y word: (first + 1) | (second + 1) << 16. A zero half
+// means "none"; a zero word means unknown, so the rasterizer blends every pixel.
+// Every changed index of a single-mutation offspring is listed, so a pixel
+// covered by none of their parent or offspring versions keeps its parent colour.
+const NO_CHANGED_INDEX: u32 = 0xFFFFu;
+fn changed_indices(first: u32, second: u32) -> u32 {
+    return (first + 1u) | ((second + 1u) << 16u);
+}
+
 fn write_dirty_bbox(oid: u32, bb: vec4<u32>) {
     let packed = pack_bbox(bb);
     working_states[oid].fitness_bits = packed.x;
@@ -310,7 +320,7 @@ fn crossover_uniform_offspring(base_rng: u32, parent_b: u32, offspring_id: u32, 
 
 // --- Single-mutation mode (offspring-aware, with adaptive mutation scale) ---
 // Returns dirty bbox as vec4<u32>(min_x, min_y, max_x, max_y) in pixel coords.
-fn single_mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<function, u32>, ms: f32) -> vec4<u32> {
+fn single_mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<function, u32>, ms: f32, changed: ptr<function, u32>) -> vec4<u32> {
     let c = *count;
     let w = params.image_width;
     let h = params.image_height;
@@ -354,6 +364,7 @@ fn single_mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<functio
         working_states[oid].polygons[c] = new_poly;
         *count = c + 1u;
         working_states[oid].polygon_count = c + 1u;
+        *changed = changed_indices(c, NO_CHANGED_INDEX);
         return polygon_bbox_pixels(new_poly, w, h);
     }
 
@@ -371,6 +382,7 @@ fn single_mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<functio
         }
         *count = c - 1u;
         working_states[oid].polygon_count = c - 1u;
+        *changed = changed_indices(remove_idx, last_idx);
         return dirty;
     }
 
@@ -385,6 +397,7 @@ fn single_mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<functio
         let tmp = working_states[oid].polygons[i1];
         working_states[oid].polygons[i1] = working_states[oid].polygons[i2];
         working_states[oid].polygons[i2] = tmp;
+        *changed = changed_indices(i1, i2);
         return merge_bbox(bbox1, bbox2);
     }
 
@@ -402,6 +415,7 @@ fn single_mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<functio
         sv2 = clamp(sc + (sv2 - sc) * scale, vec2<f32>(0.0), vec2<f32>(1.0));
         poly.data.y = pack_vertex(sv0); poly.data.z = pack_vertex(sv1); poly.data.w = pack_vertex(sv2);
         working_states[oid].polygons[si] = poly;
+        *changed = changed_indices(si, NO_CHANGED_INDEX);
         return merge_bbox(old_bbox, polygon_bbox_pixels(poly, w, h));
     }
 
@@ -420,6 +434,7 @@ fn single_mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<functio
         let rd2 = rv2 - rc; rv2 = clamp(rc + vec2<f32>(rd2.x * cos_a - rd2.y * sin_a, rd2.x * sin_a + rd2.y * cos_a), vec2<f32>(0.0), vec2<f32>(1.0));
         poly.data.y = pack_vertex(rv0); poly.data.z = pack_vertex(rv1); poly.data.w = pack_vertex(rv2);
         working_states[oid].polygons[ri] = poly;
+        *changed = changed_indices(ri, NO_CHANGED_INDEX);
         return merge_bbox(old_bbox, polygon_bbox_pixels(poly, w, h));
     }
 
@@ -433,6 +448,7 @@ fn single_mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<functio
         let tmp = working_states[oid].polygons[ai];
         working_states[oid].polygons[ai] = working_states[oid].polygons[aj];
         working_states[oid].polygons[aj] = tmp;
+        *changed = changed_indices(ai, aj);
         return merge_bbox(bbox_ai, bbox_aj);
     }
 
@@ -466,6 +482,7 @@ fn single_mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<functio
             }
             *count = c - 1u;
             working_states[oid].polygon_count = c - 1u;
+            *changed = changed_indices(remove_idx, last);
             return dirty;
         }
         // Criteria not met — fall through to next mutation
@@ -499,6 +516,7 @@ fn single_mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<functio
         working_states[oid].polygons[c] = new_poly;
         *count = c + 1u;
         working_states[oid].polygon_count = c + 1u;
+        *changed = changed_indices(c, NO_CHANGED_INDEX);
         return polygon_bbox_pixels(new_poly, w, h);
     }
 
@@ -513,6 +531,7 @@ fn single_mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<functio
         let tmp_color = working_states[oid].polygons[sci].data.x;
         working_states[oid].polygons[sci].data.x = working_states[oid].polygons[scj].data.x;
         working_states[oid].polygons[scj].data.x = tmp_color;
+        *changed = changed_indices(sci, scj);
         return merge_bbox(bbox_sci, bbox_scj);
     }
 
@@ -629,6 +648,7 @@ fn single_mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<functio
     // Repack and write back
     poly.data = vec4<u32>(pack_color(color), pack_vertex(v0), pack_vertex(v1), pack_vertex(v2));
     working_states[oid].polygons[pi] = poly;
+    *changed = changed_indices(pi, NO_CHANGED_INDEX);
     // For per-polygon mutations (vertex/color changes), dirty region is union of old and new bbox
     return merge_bbox(old_bbox, polygon_bbox_pixels(poly, w, h));
 }
@@ -730,6 +750,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
             // Crossover dirties the full image
             write_dirty_bbox(offspring_id, full_image_bbox());
             working_states[offspring_id].rng_state.x = crossover_rng;
+            working_states[offspring_id].rng_state.y = 0u;
         }
         return;
     }
@@ -751,9 +772,11 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
     var count = working_states[offspring_id].polygon_count;
 
     if params.single_mutation_mode == 1u {
-        let dirty_bbox = single_mutate_offspring(&rng, offspring_id, &count, mutation_scale);
+        var changed = 0u;
+        let dirty_bbox = single_mutate_offspring(&rng, offspring_id, &count, mutation_scale, &changed);
         write_dirty_bbox(offspring_id, dirty_bbox);
         working_states[offspring_id].rng_state.x = rng;
+        working_states[offspring_id].rng_state.y = changed;
         return;
     }
 
@@ -1084,4 +1107,5 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
 
     // Save per-offspring RNG state
     working_states[offspring_id].rng_state.x = rng;
+    working_states[offspring_id].rng_state.y = 0u;
 }
