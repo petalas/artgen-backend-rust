@@ -94,6 +94,10 @@ produced a false 3.4% SLOWER in an earlier A/A):
   CPU used by processes outside the run (`/proc/stat` minus our own process
   tree); `host_load` in the log is the peak, and above 1 core the run warns.
   The one-minute load average missed short parallel builds.
+- 64-batch trials are 97–99% GPU-bound, so they barely see host-side costs.
+  Driver submit cost grows within a trial, and at 512 batches GPU share falls to
+  65–82%, which is closer to the long-running app. Judge host-side changes and
+  behavior changes with `--batches 512 --pairs 3` as well.
 - Below ~1% effects, rerun before trusting a verdict, and run an A/A when the
   machine state changes.
 
