@@ -135,13 +135,15 @@ var<workgroup> shared_errors: array<u32, 128>;      // only num_subgroups entrie
 var<workgroup> shared_errors_old: array<u32, 128>;  // old errors for incremental eval
 
 // Unchanged-pixel shortcut. mutate.wgsl lists every polygon index a
-// single-mutation offspring changed in rng_state.y (see changed_indices there).
-// Slots hold the parent and offspring versions of up to two indices. A pixel
-// that none of them can cover has the same covering polygon sequence in parent
-// and offspring, so its offspring colour is the cached parent framebuffer pixel
-// and its new error equals its old error. Crossover and multi-mutation
-// offspring store zero and keep the full blend loop.
-const CHANGED_SLOTS: u32 = 4u;
+// single-mutation or crossover offspring changed in rng_state.y and .z (see
+// changed_indices there). Slots hold the parent and offspring versions of up to
+// four indices. A pixel that none of them can cover has the same covering
+// polygon sequence in parent and offspring, so its offspring colour is the
+// cached parent framebuffer pixel and its new error equals its old error.
+// Multi-mutation offspring, and crossovers with more changed indices, store
+// zero and keep the full blend loop.
+const CHANGED_INDICES: u32 = 4u;
+const CHANGED_SLOTS: u32 = 2u * CHANGED_INDICES;
 // Conservative coverage margin in normalized units (a pixel is ~2.6e-3 at 384 px).
 // It absorbs any rounding difference from the blend loop's own coverage test.
 const COVER_MARGIN: f32 = 1e-5;
@@ -223,9 +225,10 @@ fn may_cover(poly: DecodedPolygon, fx: f32, fy: f32) -> bool {
     return all_pos || all_neg;
 }
 
-fn may_change(fx: f32, fy: f32) -> bool {
+// Tests the first `slots` entries of shared_changed (workgroup-uniform).
+fn may_change(fx: f32, fy: f32, slots: u32) -> bool {
     var touched = false;
-    for (var k = 0u; k < CHANGED_SLOTS; k++) {
+    for (var k = 0u; k < slots; k++) {
         touched = touched || may_cover(shared_changed[k], fx, fy);
     }
     return touched;
@@ -234,7 +237,7 @@ fn may_change(fx: f32, fy: f32) -> bool {
 // No barriers or cross-pixel floating-point state are permitted in this helper.
 fn pixel_errors(
     px: u32, py: u32, w: u32, h: u32,
-    parent_chain: u32, tile_poly_count: u32, valid_pixel: bool, shortcut: bool,
+    parent_chain: u32, tile_poly_count: u32, valid_pixel: bool, shortcut_slots: u32,
 ) -> vec2<u32> {
     if !valid_pixel {
         return vec2<u32>(0u, 0u);
@@ -268,7 +271,7 @@ fn pixel_errors(
     let old_gi = f32((packed >> 8u) & 0xFFu);
     let old_bi = f32((packed >> 16u) & 0xFFu);
     pixel_error_old = u32(abs(old_ri - refr) + abs(old_gi - refg) + abs(old_bi - refb));
-    if shortcut && !may_change(fx, fy) {
+    if shortcut_slots != 0u && !may_change(fx, fy, shortcut_slots) {
         return vec2<u32>(pixel_error_old, pixel_error_old);
     }
 
@@ -374,7 +377,7 @@ fn kept_or_blended_errors(pixel: RasterPixelState, blended: bool) -> vec2<u32> {
 // Used only when the supported logical tile has two ordinals per physical lane.
 fn pixel_pair_errors(
     wid: vec3<u32>, local_idx: u32, w: u32, h: u32,
-    parent_chain: u32, tile_poly_count: u32, valid_chain: bool, shortcut: bool,
+    parent_chain: u32, tile_poly_count: u32, valid_chain: bool, shortcut_slots: u32,
 ) -> vec2<u32> {
     let ordinal0 = local_idx;
     let ordinal1 = local_idx + PHYSICAL_LANES;
@@ -389,8 +392,9 @@ fn pixel_pair_errors(
     if !valid0 && !valid1 {
         return vec2<u32>(0u, 0u);
     }
-    let blend0 = valid0 && (!shortcut || may_change(pixel0.fx, pixel0.fy));
-    let blend1 = valid1 && (!shortcut || may_change(pixel1.fx, pixel1.fy));
+    let shortcut = shortcut_slots != 0u;
+    let blend0 = valid0 && (!shortcut || may_change(pixel0.fx, pixel0.fy, shortcut_slots));
+    let blend1 = valid1 && (!shortcut || may_change(pixel1.fx, pixel1.fy, shortcut_slots));
     let blend_count = select(0u, tile_poly_count, blend0 || blend1);
 
     var r0 = pixel0.r;
@@ -466,24 +470,35 @@ fn main(
 
     var tile_poly_count = 0u;
     var tile_data_base = 0u;
-    var changed = 0u;
+    var changed = vec2<u32>(0u, 0u);
     if chain_id < chain_count {
         let tile_global = chain_id * num_tiles + tile_id;
         let raw_count = tile_counts_buf[tile_global];
         tile_poly_count = min(raw_count, TILE_MAX_POLYS);
         tile_data_base = chain_id * num_tiles * TILE_MAX_POLYS + tile_id * TILE_MAX_POLYS;
+        let first = working_states[chain_id].rng_state.y;
+        var second = 0u;
+        if first != 0u {
+            second = working_states[chain_id].rng_state.z;
+        }
         // Neither the parent's nor the offspring's list may be truncated: each
         // changed index moves at most one polygon in or out of this tile.
-        if raw_count + 2u <= TILE_MAX_POLYS {
-            changed = working_states[chain_id].rng_state.y;
+        let listed = select(2u, CHANGED_INDICES, second != 0u);
+        if raw_count + listed <= TILE_MAX_POLYS {
+            changed = vec2<u32>(first, second);
         }
     }
-    let shortcut = changed != 0u;
+    // Slots to test per pixel; zero disables the shortcut.
+    let shortcut_slots = select(0u, select(4u, CHANGED_SLOTS, changed.y != 0u), changed.x != 0u);
 
     // Slot k holds index half k/2, from the parent (even k) or offspring (odd k).
+    // Halves 0..1 are in .y, 2..3 in .z. An index at or beyond the drawing's
+    // count (including NO_CHANGES's 0xFFFE) leaves the slot empty.
     if local_idx < CHANGED_SLOTS {
         var decoded = no_changed_polygon();
-        let encoded = (changed >> (16u * (local_idx >> 1u))) & 0xFFFFu;
+        let half = local_idx >> 1u;
+        let word = select(changed.x, changed.y, half >= 2u);
+        let encoded = (word >> (16u * (half & 1u))) & 0xFFFFu;
         if encoded != 0u {
             let idx = encoded - 1u;
             if (local_idx & 1u) == 0u {
@@ -525,13 +540,13 @@ fn main(
             let py = wid.y * WG_Y + ordinal / WG_X;
             let valid_pixel = px < w && py < h && chain_id < chain_count;
             let errors = pixel_errors(
-                px, py, w, h, parent_chain, tile_poly_count, valid_pixel, shortcut);
+                px, py, w, h, parent_chain, tile_poly_count, valid_pixel, shortcut_slots);
             pixel_error += errors.x;
             pixel_error_old += errors.y;
         }
     } else {
         let errors = pixel_pair_errors(
-            wid, local_idx, w, h, parent_chain, tile_poly_count, chain_id < chain_count, shortcut);
+            wid, local_idx, w, h, parent_chain, tile_poly_count, chain_id < chain_count, shortcut_slots);
         pixel_error = errors.x;
         pixel_error_old = errors.y;
     }

@@ -66,11 +66,14 @@ fn pack_bbox(bb: vec4<u32>) -> vec2<u32> {
 }
 
 // Changed polygon indices for rasterize_error's unchanged-pixel shortcut, kept in
-// the unhashed rng_state.y word: (first + 1) | (second + 1) << 16. A zero half
-// means "none"; a zero word means unknown, so the rasterizer blends every pixel.
-// Every changed index of a single-mutation offspring is listed, so a pixel
-// covered by none of their parent or offspring versions keeps its parent colour.
+// the unhashed rng_state.y and .z words: each holds (first + 1) | (second + 1) << 16.
+// A zero half means "none". A zero .y means unknown, so the rasterizer blends
+// every pixel; .z is read only when .y is non-zero. NO_CHANGES (.y with both
+// halves naming index 0xFFFE, beyond any drawing) means no index changed.
+// Every changed index is listed, so a pixel covered by none of their parent or
+// offspring versions keeps its parent colour.
 const NO_CHANGED_INDEX: u32 = 0xFFFFu;
+const NO_CHANGES: u32 = 0xFFFFFFFFu;
 fn changed_indices(first: u32, second: u32) -> u32 {
     return (first + 1u) | ((second + 1u) << 16u);
 }
@@ -168,6 +171,12 @@ var<workgroup> shared_crossover_parent_b: u32;
 var<workgroup> shared_crossover_rng: u32;
 var<workgroup> shared_crossover_flag: u32;
 var<workgroup> shared_crossover_keep: array<atomic<u32>, 32>;
+// Crossover slots below min(count_a, offspring count) that differ from parent A.
+// Only the first CROSSOVER_LISTED_MAX are kept; a larger count disables the
+// rasterizer shortcut.
+const CROSSOVER_LISTED_MAX: u32 = 4u;
+var<workgroup> shared_crossover_changed_count: atomic<u32>;
+var<workgroup> shared_crossover_changed: array<u32, CROSSOVER_LISTED_MAX>;
 
 // --- PCG32 RNG ---
 // 32-bit PCG hash (PCG-RXS-M-XS): ~8 ALU ops per call, only .x of rng_state used
@@ -241,6 +250,45 @@ fn clamp_polygon_alpha(poly_in: Polygon) -> Polygon {
     return poly;
 }
 
+/// Write crossover slot `i` and note it if it differs from parent A's slot `i`.
+/// Chains descend from one seed, so most slots equal parent A's.
+fn write_crossover_slot(offspring_id: u32, i: u32, count_a: u32, source: Polygon) {
+    let poly = clamp_polygon_alpha(source);
+    working_states[offspring_id].polygons[i] = poly;
+    if i < count_a && any(poly.data != shared_parent_polygons[i].data) {
+        let k = atomicAdd(&shared_crossover_changed_count, 1u);
+        if k < CROSSOVER_LISTED_MAX {
+            shared_crossover_changed[k] = i;
+        }
+    }
+}
+
+/// Lane 0 only, after every slot is written. Slots in [min(count_a, count_o),
+/// max(count_a, count_o)) exist in only one of the two drawings and are changed
+/// too. Returns the .y and .z words of changed_indices, or zeros (unknown) when
+/// more than four slots changed or the empty-offspring fallback fired.
+fn crossover_changed_words(count_a: u32, out_count: u32) -> vec2<u32> {
+    let listed = atomicLoad(&shared_crossover_changed_count);
+    let lo = min(count_a, out_count);
+    let hi = max(count_a, out_count);
+    let total = listed + (hi - lo);
+    if out_count == 0u || total > CROSSOVER_LISTED_MAX {
+        return vec2<u32>(0u, 0u);
+    }
+    if total == 0u {
+        return vec2<u32>(NO_CHANGES, 0u);
+    }
+    var indices = array<u32, 4>(NO_CHANGED_INDEX, NO_CHANGED_INDEX, NO_CHANGED_INDEX, NO_CHANGED_INDEX);
+    for (var k = 0u; k < listed; k++) {
+        indices[k] = shared_crossover_changed[k];
+    }
+    for (var j = lo; j < hi; j++) {
+        indices[listed + j - lo] = j;
+    }
+    return vec2<u32>(changed_indices(indices[0], indices[1]),
+                     select(0u, changed_indices(indices[2], indices[3]), total > 2u));
+}
+
 /// Uniform crossover: walk both parents in lockstep by layer index, coin-flip each slot.
 /// Preserves z-ordering (alpha compositing order) — no centroid math needed.
 /// Parent A from shared memory, parent B from global.
@@ -275,7 +323,7 @@ fn crossover_uniform_offspring(base_rng: u32, parent_b: u32, offspring_id: u32, 
             } else {
                 poly = chain_states[parent_b].polygons[i];
             }
-            working_states[offspring_id].polygons[i] = clamp_polygon_alpha(poly);
+            write_crossover_slot(offspring_id, i, count_a, poly);
         } else if pick_a == a_is_longer {
             atomicOr(&shared_crossover_keep[i >> 5u], 1u << (i & 31u));
         }
@@ -300,8 +348,10 @@ fn crossover_uniform_offspring(base_rng: u32, parent_b: u32, offspring_id: u32, 
         } else {
             poly = chain_states[parent_b].polygons[i];
         }
-        working_states[offspring_id].polygons[min_count + rank] = clamp_polygon_alpha(poly);
+        write_crossover_slot(offspring_id, min_count + rank, count_a, poly);
     }
+    // Publishes every lane's changed-slot notes to lane 0.
+    workgroupBarrier();
 
     if lane == 0u {
         var out_count = min_count;
@@ -313,6 +363,9 @@ fn crossover_uniform_offspring(base_rng: u32, parent_b: u32, offspring_id: u32, 
         if out_count == 0u {
             working_states[offspring_id].polygons[0] = clamp_polygon_alpha(shared_parent_polygons[0]);
         }
+        let changed = crossover_changed_words(count_a, out_count);
+        working_states[offspring_id].rng_state.y = changed.x;
+        working_states[offspring_id].rng_state.z = changed.y;
     }
     let end = pcg_jump(max_count);
     return end.x * base_rng + end.y;
@@ -716,6 +769,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
         atomicStore(&shared_crossover_keep[lid.x], 0u);
     }
     if lid.x == 0u {
+        atomicStore(&shared_crossover_changed_count, 0u);
         var crossover = 0u;
         if group_valid {
             // Load per-offspring RNG from working_states (persistent across iterations)
@@ -750,7 +804,6 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
             // Crossover dirties the full image
             write_dirty_bbox(offspring_id, full_image_bbox());
             working_states[offspring_id].rng_state.x = crossover_rng;
-            working_states[offspring_id].rng_state.y = 0u;
         }
         return;
     }
@@ -777,6 +830,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
         write_dirty_bbox(offspring_id, dirty_bbox);
         working_states[offspring_id].rng_state.x = rng;
         working_states[offspring_id].rng_state.y = changed;
+        working_states[offspring_id].rng_state.z = 0u;
         return;
     }
 
