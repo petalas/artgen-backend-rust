@@ -252,3 +252,8 @@ the GPU already has a queued batch, so early start buys nothing. hillclimb vs
 64 batches 1.0236 [1.0186, 1.0290]. Replay identical.
 The original +13.7% from chunking predates double-buffered readback, when every
 third batch drained the queue.
+Several command buffers are fine when they go to the GPU in ONE `queue.submit`:
+the engine records each batch as 4 buffers, finishes them on scoped threads
+(`finish` 11 ms to ~4.5 ms per ff batch; recording before `finish` costs only
+0.05 ms) and submits them together. The host then waits ~6.5 ms per batch on
+readback instead of ~0.2 ms; gpu% 85–89% to 99% at 512 batches.

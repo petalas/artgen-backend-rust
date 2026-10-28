@@ -249,7 +249,7 @@ impl GpuEvolver {
         // resets them via atomicExchange after each iteration. They're
         // zero-initialized once at buffer creation and in reinit_chains().
 
-        // 3. Encode N iterations into one command buffer
+        // 3. Encode N iterations into FINISH_THREADS command buffers
         let mut encoder = p.device.create_command_encoder(&CommandEncoderDescriptor {
             label: Some("gpu_evolver_batch"),
         });
@@ -284,11 +284,23 @@ impl GpuEvolver {
             beginning_of_pass_write_index: Some(6),
             end_of_pass_write_index: None,
         });
-        // The whole batch goes in one command buffer. With chunked submits the
-        // GPU runs each chunk while the host encodes the next; on Dozen/NVIDIA
-        // that overlap makes `finish` about 3x slower and the host never gets
-        // ahead again (LEARNINGS, "Chunked submits make `finish` 3x slower").
-        for _ in 0..bulk_count {
+        // The batch is recorded into FINISH_THREADS command buffers that are
+        // finished in parallel and submitted together in one call. `finish`
+        // does the driver-side encoding (~11 ms per batch on Dozen), so one
+        // thread made the host the limiter. Submitting them separately would
+        // let the GPU run one part while the host still encodes the next; on
+        // Dozen/NVIDIA that overlap makes `finish` about 3x slower and the host
+        // never gets ahead again (LEARNINGS, "Chunked submits make `finish` 3x
+        // slower").
+        let chunk_iterations = bulk_count.div_ceil(FINISH_THREADS).max(1);
+        let mut finished_elsewhere: Vec<CommandEncoder> = Vec::with_capacity(FINISH_THREADS as usize);
+        for bulk_index in 0..bulk_count {
+            if bulk_index > 0 && bulk_index % chunk_iterations == 0 {
+                let next = p.device.create_command_encoder(&CommandEncoderDescriptor {
+                    label: Some("gpu_evolver_batch"),
+                });
+                finished_elsewhere.push(std::mem::replace(&mut encoder, next));
+            }
             {
                 let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
                     label: Some("mutate_bin_rasterize"),
@@ -434,7 +446,8 @@ impl GpuEvolver {
         let copied_drawing = self.readback.encode_best_copy(p, &mut encoder, write_idx);
 
         // 5. Submit — GPU starts working on this batch IMMEDIATELY
-        let submission_index = p.queue.submit(std::iter::once(encoder.finish()));
+        let command_buffers = finish_in_parallel(finished_elsewhere, encoder);
+        let submission_index = p.queue.submit(command_buffers);
 
         self.iteration += iterations;
         let evaluations = work.evaluations;
@@ -884,3 +897,23 @@ fn init_offspring_rng(pipeline: &GpuPipeline, iteration: u32) {
     pipeline.queue.write_buffer(&pipeline.working_states_buf, 0, &bytes);
 }
 
+/// Command buffers one batch is split into; each but the last is finished on
+/// its own scoped thread.
+const FINISH_THREADS: u32 = 4;
+
+/// Finish `others` on scoped threads and `last` on this one, preserving order.
+fn finish_in_parallel(others: Vec<CommandEncoder>, last: CommandEncoder) -> Vec<CommandBuffer> {
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = others
+            .into_iter()
+            .map(|encoder| scope.spawn(move || encoder.finish()))
+            .collect();
+        let last = last.finish();
+        let mut buffers: Vec<CommandBuffer> = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("command encoder finish panicked"))
+            .collect();
+        buffers.push(last);
+        buffers
+    })
+}
