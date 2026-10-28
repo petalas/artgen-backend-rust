@@ -16,6 +16,14 @@ Every row of [`log.tsv`](log.tsv) is one `scripts/hillclimb.py` run; see
 | `bd2f732` | Raster skips clean tiles without a barrier | 1.0150 [1.0078, 1.0233] | revert 0.9916 |
 | `bde7fbd` | Crossover partners drawn from active chains (bug fix, behavior change) | quality 1.3446 [1.2947, 1.3990]; 512 batches 1.2777 | — |
 | `352951f` | One command buffer per batch (undoes `70c9031`) | 512 batches 1.2541 [1.2452, 1.2630]; 64 batches 1.0236 | — |
+| `554d828` | Skip blending pixels no changed polygon covers (single mutations) | confirm 1.1174 / 1.1161 | — |
+| `3f8e9e4` | Delivered chain chosen from fitness readback (determinism fix) | 512 batches 1.0002 | — |
+| `dd7e1ad` | Bitmask binning of dirty tiles, 4 row bands per offspring | confirm 1.0530 / 1.0630 | — |
+| `15519ce` | Unchanged-pixel skip for crossover offspring (≤4 changed slots) | confirm 1.7380 / 1.8355, lifecycle same | — |
+
+Confirm ratios are 64 batches × 5 pairs / 512 batches × 3 pairs. In crossovers
+between real chains, 38–53% of offspring are exact copies of parent A and
+almost all differ in at most 4 slots, which is why `15519ce` is so large.
 
 `70c9031` (4-iteration chunked submits, +13.7% when kept) was later shown to
 lock the driver into a slow submit state once readback was double-buffered and
@@ -25,13 +33,15 @@ restarted per case; the ablation and cumulative rows use the corrected harness.
 Cumulative against the session start (`f76e8cd`, one fresh process per trial),
 quality mode because evolution changed:
 
-| Horizon | evals/s ratio | Fitness gain per second |
-| --- | --- | --- |
-| 64 batches × 5 pairs | 1.3969 [1.3942, 1.3996] | 1.9497 [1.8779, 2.0283] |
-| 512 batches × 3 pairs | 1.4362 [1.4283, 1.4448] | 1.7340 [1.7015, 1.7666] |
+| After | Horizon | evals/s ratio | Fitness gain per second |
+| --- | --- | --- | --- |
+| round 4 | 64 batches × 5 pairs | 1.3969 [1.3942, 1.3996] | 1.9497 [1.8779, 2.0283] |
+| round 4 | 512 batches × 3 pairs | 1.4362 [1.4283, 1.4448] | 1.7340 [1.7015, 1.7666] |
+| round 5 | 64 batches × 5 pairs | 2.9726 [2.9622, 2.9826] | 4.1490 [4.0023, 4.3110] |
+| round 5 | 512 batches × 3 pairs | 3.3511 [3.3249, 3.3761] | 4.0459 [3.9685, 4.1222] |
 
-Master runs at about 516k / 418k / 415k evals/s (ff / mona / darwin) at 64
-batches, against 358k / 301k / 304k at the start.
+Master runs at about 972k / 895k / 887k evals/s (ff / mona / darwin) at 64
+batches, against 344k / 291k / 294k at the start.
 
 ## Rejected
 
@@ -60,12 +70,16 @@ batches, against 358k / 301k / 304k at the start.
 10. 64-batch screens hid a 25–42% long-run regression: confirm host-side
     changes at 512 batches.
 11. A kept change turned harmful later: `revert:SHA` ablation after each round.
+12. Every adoption needed two horizons by hand: `--confirm`.
+13. The foreign-CPU warning did not stop parallel agents' builds from skewing
+    runs: disturbed pairs are re-timed automatically.
+14. Returned-drawing delivery had become racy (fixed in `3f8e9e4`); agents ran the
+    lifecycle checker by hand: `--lifecycle`, implied by `--confirm`.
 
 ## Remaining ideas
 
-- Raster is ~80% of GPU time (400–520 µs/iteration); prior campaigns already
-  mined tiling, binning and compaction. The next raster gain likely needs a
-  different algorithm (for example, caching per-tile parent prefixes).
+- Raster is still ~70% of GPU time (~180–200 µs of ~260 µs per iteration), now
+  mostly pixels a changed polygon covers.
 - `src/auto_tune.rs` tunes mutation parameters at runtime. Its tuning predates
   the crossover fix, so crossover probability and tournament size may now have
   better values.
