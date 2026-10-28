@@ -123,6 +123,43 @@ var<workgroup> shared_best_offspring_id: u32;
 var<workgroup> reduction_err: array<u32, 64>;
 var<workgroup> reduction_idx: array<u32, 64>;
 
+// Unchanged-pixel note for update_framebuffers. The winner's changed indices
+// (mutate.wgsl changed_indices, in working rng_state.y/.z) go to the chain's
+// unhashed rng_state.y/.z; .w gets bit k set when index half k existed in the
+// parent, whose version is kept in polygons[CHANGED_STASH_BASE + k]. Those
+// slots lie beyond both drawings' polygon counts, so no evolution state reads
+// them. A zero .y means unknown: update_framebuffers blends every dirty pixel.
+const CHANGED_INDICES: u32 = 4u;
+const CHANGED_STASH_BASE: u32 = 1000u - CHANGED_INDICES;
+
+// Must run before the winner's polygons overwrite the parent's.
+fn stash_changed_parents(chain_id: u32, oid: u32, parent_count: u32) {
+    var first = working_states[oid].rng_state.y;
+    var second = 0u;
+    if first != 0u {
+        second = working_states[oid].rng_state.z;
+    }
+    if max(parent_count, working_states[oid].polygon_count) > CHANGED_STASH_BASE {
+        first = 0u;
+        second = 0u;
+    }
+    var parent_mask = 0u;
+    if first != 0u {
+        for (var k = 0u; k < CHANGED_INDICES; k++) {
+            let word = select(first, second, k >= 2u);
+            let encoded = (word >> (16u * (k & 1u))) & 0xFFFFu;
+            if encoded != 0u && encoded - 1u < parent_count {
+                chain_states[chain_id].polygons[CHANGED_STASH_BASE + k] =
+                    chain_states[chain_id].polygons[encoded - 1u];
+                parent_mask |= 1u << k;
+            }
+        }
+    }
+    chain_states[chain_id].rng_state.y = first;
+    chain_states[chain_id].rng_state.z = second;
+    chain_states[chain_id].rng_state.w = parent_mask;
+}
+
 /// Compute fitness from total error and polygon count.
 fn compute_fitness(total_error: u32, polygon_count: u32) -> f32 {
     let w = params.image_width;
@@ -207,6 +244,7 @@ fn select_main(@builtin(global_invocation_id) gid: vec3<u32>,
         let should_accept = dominated || neutral;
 
         if should_accept {
+            stash_changed_parents(chain_id, best_offspring_id, chain_states[chain_id].polygon_count);
             chain_states[chain_id].polygon_count = working_states[best_offspring_id].polygon_count;
             chain_states[chain_id].fitness_bits = fitness_bits;
             chain_states[chain_id].stagnation_counter = 0u;
