@@ -26,6 +26,7 @@ through the reserved-seed confirmation in benchmarks/evolution.
 import argparse
 import datetime
 import fcntl
+import hashlib
 import json
 import math
 import os
@@ -48,6 +49,10 @@ LOG = REPO / "benchmarks/hillclimb/log.tsv"
 CASES = ("ff", "mona", "darwin")
 WORKTREE = "WORKTREE"
 KEEP_BUILDS = 8
+# Everything the evolution-bench executable is built from; script and doc commits
+# leave this key, and therefore the cached build, unchanged.
+BUILD_INPUTS = ("src", "examples/evolution-bench.rs", "Cargo.toml", "Cargo.lock",
+                "rust-toolchain.toml")
 MAX_CANDIDATES = 6
 RESAMPLES = 10000
 BOOTSTRAP_SEED = 20261028
@@ -79,6 +84,12 @@ def worktree_tree():
         git("read-tree", "HEAD", env=env)
         git("add", "-A", env=env)
         return git("write-tree", env=env)
+
+
+def build_key(tree):
+    """Hash the build inputs of a tree."""
+    listing = git("ls-tree", tree, "--", *BUILD_INPUTS)
+    return hashlib.sha256(listing.encode()).hexdigest()[:40]
 
 
 def cargo_build(source, target_dir, log):
@@ -123,7 +134,8 @@ def resolve_locked(side):
         commit = git("rev-parse", "--verify", f"{side}^{{commit}}")
         tree, label = git("rev-parse", f"{commit}^{{tree}}"), f"{side}@{commit[:10]}"
         source, target = None, ROOT / "ref-target"
-    cached = ROOT / "bin" / tree / "evolution-bench"
+    key = build_key(tree)
+    cached = ROOT / "bin" / key / "evolution-bench"
     if cached.is_file():
         os.utime(cached.parent)
     else:
@@ -131,11 +143,11 @@ def resolve_locked(side):
         if source is None:
             source = checkout_ref(commit)
         cached.parent.mkdir(parents=True, exist_ok=True)
-        print(f"building {label} (tree {tree[:10]})", file=sys.stderr)
+        print(f"building {label} (build inputs {key[:10]})", file=sys.stderr)
         built = cargo_build(source, target, cached.parent / "build.log")
         shutil.copy2(built, cached.with_suffix(".partial"))
         cached.with_suffix(".partial").rename(cached)
-    return label, f"tree:{tree}", cached
+    return label, f"build:{key}", cached
 
 
 def prune_binaries():
