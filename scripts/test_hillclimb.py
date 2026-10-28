@@ -122,6 +122,13 @@ class HillclimbCli(unittest.TestCase):
         self.assertEqual([line.split("\t")[0] for line in out.splitlines()], ["control", "candidate"])
         self.assertFalse(hillclimb.LOG.exists())
 
+    def test_busy_host_is_recorded_and_warned(self):
+        with mock.patch.object(hillclimb.os, "getloadavg", return_value=(9.0, 1.0, 1.0)):
+            code, out, _ = self.run_cli(self.fake(), self.fake())
+        self.assertEqual(code, 0)
+        self.assertIn("WARNING: host load reached 9.0", out)
+        self.assertEqual(self.log_rows()[0]["host_load"], "9.0")
+
     def test_effect_below_min_effect_is_noise(self):
         code, out, _ = self.run_cli(self.fake(rate=1000), self.fake(rate=1003))
         self.assertEqual(code, 0, out)

@@ -68,7 +68,9 @@ RESAMPLES = 10000
 BOOTSTRAP_SEED = 20261028
 LOG_COLUMNS = ("utc", "control", "candidate", "cases", "pairs", "batches", "ratio",
                "low95", "high95", "verdict", "replay", "control_evals_per_s",
-               "candidate_evals_per_s", "evidence", "note")
+               "candidate_evals_per_s", "evidence", "note", "host_load")
+# One-minute load average above this while timing means other work shared the CPU.
+BUSY_LOAD = 2.5
 
 
 class HillclimbError(Exception):
@@ -127,10 +129,14 @@ def resolve(side):
     """Return (label, identity, executable) for a side, building it if not cached.
 
     Concurrent invocations share the ref worktree and build cache, so builds are
-    serialized by a lock separate from the GPU benchmark lock."""
+    serialized. A build also holds the benchmark lock shared: compiling on every
+    core skewed concurrent timing runs by up to 17%, so timing waits for builds
+    and builds wait for timing."""
     ROOT.mkdir(parents=True, exist_ok=True)
-    with (ROOT / "build.lock").open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    LOCK.parent.mkdir(parents=True, exist_ok=True)
+    with (ROOT / "build.lock").open("a") as build, LOCK.open("a") as bench:
+        fcntl.flock(build, fcntl.LOCK_EX)
+        fcntl.flock(bench, fcntl.LOCK_SH)
         return resolve_locked(side)
 
 
@@ -342,10 +348,15 @@ def case_table(rows, ratios, candidate):
 
 def append_log(entry):
     LOG.parent.mkdir(parents=True, exist_ok=True)
-    new = not LOG.exists()
+    header = "\t".join(LOG_COLUMNS) + "\n"
+    if LOG.exists():
+        lines = LOG.read_text().splitlines(keepends=True)
+        if lines and lines[0] != header:
+            # Appended columns: rewrite the header; older rows leave them empty.
+            LOG.write_text(header + "".join(lines[1:]))
+    else:
+        LOG.write_text(header)
     with LOG.open("a") as stream:
-        if new:
-            stream.write("\t".join(LOG_COLUMNS) + "\n")
         clean = [str(entry[key]).replace("\t", " ").replace("\n", " ") for key in LOG_COLUMNS]
         stream.write("\t".join(clean) + "\n")
 
@@ -355,7 +366,7 @@ def median_rate(rows, side):
 
 
 def measure(args, sides, evidence):
-    rows, servers = [], {}
+    rows, servers, args.host_load = [], {}, os.getloadavg()[0]
     ratios = {name: {} for name in list(sides)[1:]}
     try:
         for side, (_, identity, executable) in sides.items():
@@ -368,6 +379,7 @@ def measure(args, sides, evidence):
         for case in args.cases:
             for name, values in run_case(servers, case, args, evidence, rows).items():
                 ratios[name][case] = values
+            args.host_load = max(args.host_load, os.getloadavg()[0])
     finally:
         for server in servers.values():
             server.close()
@@ -382,6 +394,9 @@ def summarize(args, sides, evidence, rows, ratios):
         {"entries": entries, "ratios": ratios, "rows": rows,
          "identities": {side: value[1] for side, value in sides.items()},
          "args": {k: v for k, v in vars(args).items()}}, indent=2, default=str))
+    if args.host_load > BUSY_LOAD:
+        print(f"WARNING: host load reached {args.host_load:.1f} while timing; other work "
+              "may have biased these results. Rerun on an idle machine.")
     print(f"evidence {os.path.relpath(evidence, REPO)}")
     return 1 if any(entry["verdict"] == "REPLAY-MISMATCH" for entry in entries) else 0
 
@@ -400,7 +415,8 @@ def summarize_candidate(args, sides, evidence, rows, name, ratios):
              "verdict": result, "replay": "same" if replay_ok else "differs",
              "control_evals_per_s": median_rate(rows, "control"),
              "candidate_evals_per_s": median_rate(rows, name),
-             "evidence": os.path.relpath(evidence, REPO), "note": args.note}
+             "evidence": os.path.relpath(evidence, REPO), "note": args.note,
+             "host_load": f"{args.host_load:.1f}"}
     entry["replay_by_case"] = replay
     append_log(entry)
     print(f"\n== {name}: {entry['candidate']}")

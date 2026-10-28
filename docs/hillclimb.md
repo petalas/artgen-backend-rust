@@ -81,6 +81,10 @@ produced a false 3.4% SLOWER in an earlier A/A):
   driver's submit path, not the kernels (see LEARNINGS, "Host submit time grows").
   Both servers run the same batches at each pair, so AB/BA mostly cancels it.
   Compare only within one run; absolute evals/s from a long run read low.
+- Parallel `cargo` builds skewed timing by up to 17% (two false SLOWER runs).
+  Builds started by the script wait for timing runs and vice versa; builds you
+  start yourself do not, so avoid them while a run times. Each log row records
+  the peak one-minute load (`host_load`), and runs above 2.5 print a warning.
 - Below ~1% effects, rerun before trusting a verdict, and run an A/A when the
   machine state changes.
 
