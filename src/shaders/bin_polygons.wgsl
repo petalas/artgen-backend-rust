@@ -1,6 +1,9 @@
 // Polygon binning compute shader — assigns each polygon to the spatial tiles it overlaps.
-// Dispatch: (offspring_count, 1, 1). Each workgroup computes bounds cooperatively.
-// Each tile has one lane scanning polygons in order, as required for alpha blending.
+// Dispatch: (offspring_count, BIN_ROW_BANDS, 1). Workgroup (offspring, band) bins
+// only the offspring's consumed tiles (those meeting its dirty rectangle) in its
+// band of tile rows. It computes tile bounds cooperatively, then one polygon
+// bitmask per consumed tile column and row. A tile's list is its column mask AND
+// its row mask, walked in ascending polygon order as alpha blending requires.
 //
 // This shader runs between mutate and rasterize_error.
 
@@ -100,9 +103,15 @@ const TILE_MAX_POLYS: u32 = 256u;
 @group(0) @binding(2) var<storage, read_write> tile_counts:    array<atomic<u32>>;
 @group(1) @binding(0) var<uniform>             params:         Params;
 
-// [min_x, max_x, min_y, max_y], 16,000 bytes per workgroup.
-// The validated drawing contract bounds polygon_count by the 1000 polygon slots.
-var<workgroup> polygon_bounds: array<vec4<u32>, 1000>;
+// Shared scratch, 16,320 bytes, below the 16,352-byte downlevel limit.
+// Per chunk of 32 * chunk_words polygons it holds packed tile-column bounds
+// [0, chunk), packed tile-row bounds [chunk, 2 * chunk), then one membership
+// word per (word, line) at mask_base + word * line_count + line. Lines are the
+// consumed tile columns followed by the band's consumed tile rows; bit b of word
+// k marks polygon chunk_base + 32k + b. A tile's polygons are its column mask AND
+// its row mask. Every word read is written first, so the pipeline skips zeroing.
+const SCRATCH_WORDS: u32 = 4080u;
+var<workgroup> scratch: array<u32, SCRATCH_WORDS>;
 
 fn polygon_tile_bounds(poly: Polygon, w: u32, h: u32, num_tiles_x: u32, num_tiles_y: u32) -> vec4<u32> {
     // Unpack vertices
@@ -130,8 +139,24 @@ fn polygon_tile_bounds(poly: Polygon, w: u32, h: u32, num_tiles_x: u32, num_tile
     return vec4<u32>(tile_min_x, tile_max_x, tile_min_y, tile_max_y);
 }
 
+// Whether a tile column (or row) meets the dirty rectangle, using the
+// rasterizer's tile skip test on that axis.
+fn line_consumed(coord: u32, is_row: bool, w: u32, h: u32, dirty_min: vec2<u32>, dirty_max: vec2<u32>) -> bool {
+    let size = select(TILE_W, TILE_H, is_row);
+    let extent = select(w, h, is_row);
+    let lo = select(dirty_min.x, dirty_min.y, is_row);
+    let hi = select(dirty_max.x, dirty_max.y, is_row);
+    let tile_min = coord * size;
+    let tile_max = min(tile_min + size, extent);
+    return tile_max > lo && tile_min < hi;
+}
+
 @compute @workgroup_size(512, 1, 1)
-fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) local_idx: u32) {
+fn main(
+    @builtin(workgroup_id) wid: vec3<u32>,
+    @builtin(num_workgroups) groups: vec3<u32>,
+    @builtin(local_invocation_index) local_idx: u32,
+) {
     let offspring_id = wid.x;
     let offspring_count = arrayLength(&working_states);
     if offspring_id >= offspring_count {
@@ -144,33 +169,142 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) 
     let num_tiles_y = (h + TILE_H - 1u) / TILE_H;
     let num_tiles = num_tiles_x * num_tiles_y;
 
-    let poly_count = working_states[offspring_id].polygon_count;
+    // Workgroup y owns one band of whole tile rows; any y count is valid.
+    let band_rows = (num_tiles_y + groups.y - 1u) / groups.y;
+    let row_lo = wid.y * band_rows;
+    let row_hi = min(row_lo + band_rows, num_tiles_y);
 
-    // Each consumed slot has exactly one writer, including partial lane batches.
-    for (var pi = local_idx; pi < poly_count; pi += 512u) {
-        let poly = working_states[offspring_id].polygons[pi];
-        polygon_bounds[pi] = polygon_tile_bounds(poly, w, h, num_tiles_x, num_tiles_y);
+    // Consumers read only tiles meeting this offspring's dirty rectangle
+    // (rasterize_error, and update_framebuffers for the selected winner). Other
+    // tiles keep stale counts and indices. Same predicate as both consumers.
+    let dirty_lo = working_states[offspring_id].fitness_bits;
+    let dirty_hi = working_states[offspring_id].stagnation_counter;
+    let dirty_min = vec2<u32>(dirty_lo & 0xFFFFu, dirty_lo >> 16u);
+    let dirty_max = vec2<u32>(dirty_hi & 0xFFFFu, dirty_hi >> 16u);
+
+    // Consumed rows and columns are contiguous; narrow the band to them.
+    var first_row = row_lo;
+    while first_row < row_hi && !line_consumed(first_row, true, w, h, dirty_min, dirty_max) {
+        first_row++;
     }
-    workgroupBarrier();
+    var last_row = first_row;
+    while last_row < row_hi && line_consumed(last_row, true, w, h, dirty_min, dirty_max) {
+        last_row++;
+    }
+    var first_col = 0u;
+    while first_col < num_tiles_x && !line_consumed(first_col, false, w, h, dirty_min, dirty_max) {
+        first_col++;
+    }
+    var last_col = first_col;
+    while last_col < num_tiles_x && line_consumed(last_col, false, w, h, dirty_min, dirty_max) {
+        last_col++;
+    }
+    let rows = last_row - first_row;
+    let cols = last_col - first_col;
+    if rows == 0u || cols == 0u {
+        return;
+    }
 
-    // One lane owns each tile, including its count reset for an empty drawing.
-    for (var tile_id = local_idx; tile_id < num_tiles; tile_id += 512u) {
-        let tile_global = offspring_id * num_tiles + tile_id;
-        var raw_count = 0u;
-        let tx = tile_id % num_tiles_x;
-        let ty = tile_id / num_tiles_x;
+    let poly_count = working_states[offspring_id].polygon_count;
+    let line_count = cols + rows;
+    let band_tiles = cols * rows;
 
-        for (var pi = 0u; pi < poly_count; pi++) {
-            let bounds = polygon_bounds[pi];
-            if tx >= bounds.x && tx < bounds.y && ty >= bounds.z && ty < bounds.w {
-                let slot = raw_count;
-                raw_count += 1u;
-                if slot < TILE_MAX_POLYS {
-                    let data_offset = offspring_id * num_tiles * TILE_MAX_POLYS + tile_id * TILE_MAX_POLYS + slot;
-                    tile_data[data_offset] = pi;
+    // Every chunk's bounds plus masks fit: chunk_words * (64 + line_count) words.
+    // Supported images give line_count <= 512, so chunk_words >= 7.
+    let chunk_words = min(32u, SCRATCH_WORDS / (64u + line_count));
+    let chunk_capacity = chunk_words * 32u;
+    let row_base = chunk_capacity;
+    let mask_base = 2u * chunk_capacity;
+    // At least one chunk, so an empty drawing still stores zero counts.
+    let chunk_count = max(1u, (poly_count + chunk_capacity - 1u) / chunk_capacity);
+    // With one chunk, several lanes split one tile's words. Otherwise one lane
+    // owns a tile across chunks and carries its count through tile_counts.
+    let tile_lanes = select(1u, clamp(512u / band_tiles, 1u, 32u), chunk_count == 1u);
+
+    for (var chunk = 0u; chunk < chunk_count; chunk++) {
+        let chunk_base = chunk * chunk_capacity;
+        let chunk_len = min(chunk_capacity, poly_count - min(poly_count, chunk_base));
+        let used_words = (chunk_len + 31u) / 32u;
+
+        // Each bound slot has exactly one writer, including partial lane batches.
+        for (var i = local_idx; i < chunk_len; i += 512u) {
+            let poly = working_states[offspring_id].polygons[chunk_base + i];
+            let bounds = polygon_tile_bounds(poly, w, h, num_tiles_x, num_tiles_y);
+            scratch[i] = bounds.x | (bounds.y << 16u);
+            scratch[row_base + i] = bounds.z | (bounds.w << 16u);
+        }
+        workgroupBarrier();
+
+        // Each (word, line) mask has exactly one writer. Lines are the consumed
+        // columns, then the consumed rows of this band. Neighbouring lanes share
+        // the word, so they read the same bound words.
+        let task_count = used_words * line_count;
+        for (var task = local_idx; task < task_count; task += 512u) {
+            let word = task / line_count;
+            let line = task % line_count;
+            let is_row = line >= cols;
+            let coord = select(first_col + line, first_row + line - cols, is_row);
+            let bound_base = select(0u, row_base, is_row) + word * 32u;
+            let bits = min(32u, chunk_len - word * 32u);
+            var mask = 0u;
+            for (var b = 0u; b < bits; b++) {
+                let packed = scratch[bound_base + b];
+                // Same half-open membership as the per-axis tile test.
+                if coord >= (packed & 0xFFFFu) && coord < (packed >> 16u) {
+                    mask |= 1u << b;
                 }
             }
+            scratch[mask_base + word * line_count + line] = mask;
         }
-        atomicStore(&tile_counts[tile_global], raw_count);
+        workgroupBarrier();
+
+        // tile_lanes lanes split each consumed tile's words; a lane's first slot is
+        // the population of the tile's earlier words, so ascending words and bits
+        // keep polygon order. The part-0 lane stores the uncapped count.
+        let words_per_lane = (used_words + tile_lanes - 1u) / tile_lanes;
+        for (var task = local_idx; task < band_tiles * tile_lanes; task += 512u) {
+            let band_tile = task / tile_lanes;
+            let part = task % tile_lanes;
+            let col = band_tile % cols;
+            let row = band_tile / cols;
+            let tile_id = (first_row + row) * num_tiles_x + first_col + col;
+            let tile_global = offspring_id * num_tiles + tile_id;
+            let col_line = mask_base + col;
+            let row_line = mask_base + cols + row;
+            let word_lo = min(part * words_per_lane, used_words);
+            let word_hi = min(word_lo + words_per_lane, used_words);
+
+            var raw_count = 0u;
+            if chunk > 0u {
+                raw_count = atomicLoad(&tile_counts[tile_global]);
+            }
+            for (var word = 0u; word < word_lo; word++) {
+                let offset = word * line_count;
+                raw_count += countOneBits(scratch[col_line + offset] & scratch[row_line + offset]);
+            }
+            let data_base = offspring_id * num_tiles * TILE_MAX_POLYS + tile_id * TILE_MAX_POLYS;
+            for (var word = word_lo; word < word_hi; word++) {
+                let offset = word * line_count;
+                var mask = scratch[col_line + offset] & scratch[row_line + offset];
+                while mask != 0u {
+                    let pi = chunk_base + word * 32u + countTrailingZeros(mask);
+                    mask &= mask - 1u;
+                    let slot = raw_count;
+                    raw_count += 1u;
+                    if slot < TILE_MAX_POLYS {
+                        tile_data[data_base + slot] = pi;
+                    }
+                }
+            }
+            if part == 0u {
+                for (var word = word_hi; word < used_words; word++) {
+                    let offset = word * line_count;
+                    raw_count += countOneBits(scratch[col_line + offset] & scratch[row_line + offset]);
+                }
+                atomicStore(&tile_counts[tile_global], raw_count);
+            }
+        }
+        // The next chunk overwrites bounds and masks.
+        workgroupBarrier();
     }
 }

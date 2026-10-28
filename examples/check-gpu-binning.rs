@@ -71,7 +71,7 @@ use artgen_backend_rust::{
         buffers::{default_gpu_params, GpuDrawingState, GpuPolygon},
         pipeline::GpuPipeline,
     },
-    settings::TILE_MAX_POLYS,
+    settings::{BIN_ROW_BANDS, TILE_MAX_POLYS},
 };
 use bytemuck::Zeroable;
 use sha2::{Digest, Sha256};
@@ -503,7 +503,9 @@ fn dispatch(
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &bins.bind_group, &[]);
         pass.set_bind_group(1, &p.params_bind_group, &[]);
-        pass.dispatch_workgroups(u32::try_from(OFFSPRING)?, 1, 1);
+        // The frozen reference ignores workgroup y; production bins row bands.
+        let bands = if std::ptr::eq(pipeline, p.bin_polygons_pipeline()) { BIN_ROW_BANDS } else { 1 };
+        pass.dispatch_workgroups(u32::try_from(OFFSPRING)?, bands, 1);
     }
     encoder.copy_buffer_to_buffer(&bins.counts, 0, &bins.staging, 0, bins.counts.size());
     encoder.copy_buffer_to_buffer(

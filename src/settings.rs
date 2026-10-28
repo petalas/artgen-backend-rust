@@ -24,3 +24,6 @@ pub const START_WITH_POLYGONS_PER_IMAGE: usize = 150;
 
 // Tile culling settings
 pub const TILE_MAX_POLYS: u32 = 256; // max polygon indices per tile per offspring
+/// Workgroups per offspring in bin_polygons, each binning one band of tile rows.
+/// Splits full-image (crossover) offspring, which bound the dispatch time.
+pub const BIN_ROW_BANDS: u32 = 4;

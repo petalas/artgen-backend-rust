@@ -35,6 +35,15 @@ program state. Stage-specific policies remain explicit. In particular, historica
 mutation programs retain their initialization default, and raster initialization
 continues to depend on the backend.
 
+The binner writes counts and indices only for tiles that meet each offspring's
+dirty rectangle, the tiles rasterize_error and update_framebuffers read. Other
+tiles keep stale words from earlier iterations, so a new consumer of the tile
+lists must apply the same dirty-tile test. Validate binner changes with
+`check-gpu-binning --scope consumed-only`; `full-buffers` compares stale words
+with the frozen full binner and no longer applies to the production shader.
+Each offspring is dispatched as `BIN_ROW_BANDS` workgroups over bands of tile
+rows, so full-image (crossover) offspring do not bound the dispatch alone.
+
 Bundled programs, historical programs and diagnostic binners are existing reasons
 for the installation seam. A generic cache abstraction or another GPU adapter
 would add no needed variation.

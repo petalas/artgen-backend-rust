@@ -862,9 +862,11 @@ fn validate_benchmark_raster_source(source: &str) -> Result<(), String> {
     Ok(())
 }
 
-// Only the rasterize/error, init-framebuffers, and update-framebuffers shaders
-// use these options. Every shared value they read is explicitly written before
-// a workgroup barrier; unused polygon/reduction slots are never read. Avoid the
+// Only the rasterize/error, bin, init-framebuffers, and update-framebuffers
+// shaders use these options. Every shared value they read is explicitly written
+// before a workgroup barrier; unused polygon/reduction/mask slots are never read.
+// Most bin workgroups return before touching shared memory, so zeroing would be
+// their main cost. Avoid the
 // redundant zeroing code, which is expensive to compile on the WSL Dozen driver.
 // Keep default initialization for mutation: empty-parent crossover reads slot 0.
 // Vulkan provides native subgroup IDs. Naga's DX12 translation infers them from
@@ -903,7 +905,7 @@ fn create_bin_pipeline_from_source(
         layout: Some(layout),
         module: &shader,
         entry_point: Some("main"),
-        compilation_options: PipelineCompilationOptions::default(),
+        compilation_options: rasterize_compilation_options(device),
         cache: Some(cache),
     })
 }

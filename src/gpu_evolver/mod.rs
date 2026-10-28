@@ -12,7 +12,7 @@ use wgpu::*;
 
 use crate::models::drawing::Drawing;
 use crate::mutation_params::MutationParams;
-use crate::settings::{GPU_MAX_CHAIN_COUNT, GPU_DEFAULT_CHAIN_COUNT};
+use crate::settings::{BIN_ROW_BANDS, GPU_MAX_CHAIN_COUNT, GPU_DEFAULT_CHAIN_COUNT};
 
 use buffers::{
     gpu_params_from, default_gpu_params, drawing_to_gpu, gpu_to_drawing, ControlFlags,
@@ -302,7 +302,7 @@ impl GpuEvolver {
                 pass.set_pipeline(p.bin_polygons_pipeline());
                 pass.set_bind_group(0, &p.bin_polygons_bind_group, &[]);
                 pass.set_bind_group(1, &p.params_bind_group, &[]);
-                pass.dispatch_workgroups(offspring, 1, 1);
+                pass.dispatch_workgroups(offspring, BIN_ROW_BANDS, 1);
 
                 pass.set_pipeline(p.rasterize_error_pipeline());
                 pass.set_bind_group(0, &p.rasterize_error_bind_group, &[]);
@@ -357,7 +357,7 @@ impl GpuEvolver {
                 pass.set_pipeline(p.bin_polygons_pipeline());
                 pass.set_bind_group(0, &p.bin_polygons_bind_group, &[]);
                 pass.set_bind_group(1, &p.params_bind_group, &[]);
-                pass.dispatch_workgroups(offspring, 1, 1);
+                pass.dispatch_workgroups(offspring, BIN_ROW_BANDS, 1);
             }
 
             {
@@ -639,7 +639,7 @@ impl GpuEvolver {
             pass.set_pipeline(p.bin_polygons_pipeline());
             pass.set_bind_group(0, &p.bin_polygons_bind_group, &[]);
             pass.set_bind_group(1, &p.params_bind_group, &[]);
-            pass.dispatch_workgroups(active, 1, 1);
+            pass.dispatch_workgroups(active, BIN_ROW_BANDS, 1);
 
             pass.set_pipeline(p.rasterize_error_pipeline());
             pass.set_bind_group(0, &p.rasterize_error_bind_group, &[]);
