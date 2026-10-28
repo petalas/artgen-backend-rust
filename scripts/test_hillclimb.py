@@ -130,7 +130,17 @@ class HillclimbCli(unittest.TestCase):
             code, out, _ = self.run_cli(self.fake(), self.fake())
         self.assertEqual(code, 0)
         self.assertIn("WARNING: other processes used up to 9.0 CPU cores during 12 of 12", out)
+        self.assertIn("re-timed 36 trials", out)
         self.assertEqual(self.log_rows()[0]["host_load"], "9.0")
+
+    def test_pair_disturbed_once_is_retimed_and_scored_clean(self):
+        readings = iter([5.0] + [0.0] * 100)
+        with mock.patch.object(hillclimb, "foreign_cores", lambda *_: next(readings)):
+            code, out, _ = self.run_cli(self.fake(), self.fake(rate=110))
+        self.assertEqual(code, 0, out)
+        self.assertIn("re-timed 2 trials", out)
+        self.assertNotIn("WARNING", out)
+        self.assertEqual(self.log_rows()[0]["host_load"], "0.0")
 
     def test_confirm_runs_both_horizons_and_adopts_only_without_regressions(self):
         code, out, _ = self.run_cli(self.fake(rate=100), self.fake(rate=110),
@@ -229,12 +239,16 @@ class RevertSide(unittest.TestCase):
 
 
 class ForeignCpu(unittest.TestCase):
-    def test_busy_child_counts_as_ours_and_idle_host_is_near_zero(self):
+    def test_own_cpu_time_is_attributed_to_us(self):
+        # Independent of other load on the machine: our busy loop lands in `ours`.
         before = hillclimb.cpu_snapshot([])
         deadline = hillclimb.time.monotonic() + 0.3
         while hillclimb.time.monotonic() < deadline:
             pass
-        self.assertLess(hillclimb.foreign_cores(before, hillclimb.cpu_snapshot([])), 0.9)
+        after = hillclimb.cpu_snapshot([])
+        ours = (after[2] - before[2]) / hillclimb.CLOCK_TICKS
+        self.assertGreater(ours, 0.2)
+        self.assertLessEqual(ours, (after[1] - before[1]) / hillclimb.CLOCK_TICKS + 0.05)
 
 
 class Statistics(unittest.TestCase):

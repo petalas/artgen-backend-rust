@@ -98,7 +98,9 @@ produced a false 3.4% SLOWER in an earlier A/A):
   Builds started by the script wait for timing runs and vice versa; builds you
   start yourself do not, so avoid them while a run times. Each trial measures
   CPU used by processes outside the run (`/proc/stat` minus our own process
-  tree); `host_load` in the log is the peak, and above 1 core the run warns.
+  tree). A pair with a trial above 1 core is discarded and re-timed (up to 3
+  times); `host_load` in the log is the peak among scored trials, and the run
+  warns if busy trials remain.
   The one-minute load average missed short parallel builds.
 - 64-batch trials barely see host-side costs. Driver `finish` cost depends on
   whether the host stays ahead of the GPU, and with chunked submits a trial could

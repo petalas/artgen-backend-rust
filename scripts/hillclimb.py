@@ -79,6 +79,9 @@ LOG_COLUMNS = ("utc", "control", "candidate", "cases", "pairs", "batches", "rati
 # Other processes averaging more CPU cores than this during a timed trial (e.g. a
 # parallel cargo build) biased results; the one-minute load average missed them.
 BUSY_CORES = 1.0
+# A pair with a busy trial is discarded and re-timed up to this many times;
+# parallel agents' builds kept contaminating screens despite the warning.
+BUSY_RETRIES = 3
 
 
 class HillclimbError(Exception):
@@ -349,27 +352,43 @@ def run_case(servers, case, args, evidence, rows):
         order = names[shift:] + names[:shift]
         # A behavior change is judged on several trajectories; sides share each seed.
         seed = args.seed + pair if args.allow_behavior_change else args.seed
-        rates = {}
-        for side in order:
-            output = evidence / case / f"{pair:02d}-{side}"
-            pids = [server.pid for server in servers.values() if server.pid]
-            before = cpu_snapshot(pids)
-            record = servers[side].trial(case, seed, args.batches, args.warmup, output)
-            foreign = foreign_cores(before, cpu_snapshot(pids))
-            rates[side] = check_record(record, case, seed, args.batches)
-            rows.append({"case": case, "pair": pair, "seed": seed, "side": side,
-                         "rate": rates[side], "gpu_share": gpu_share(record),
-                         "foreign_cores": foreign,
-                         "gain_per_s": fitness_gain(record) / record["elapsed_seconds"],
-                         "hash": record["final_state_sha256"],
-                         "stage_ns": [total / max(1, record["timestamp_samples"])
-                                      for total in record["sampled_gpu_stage_totals_ns"]]})
+        for attempt in range(BUSY_RETRIES + 1):
+            pair_rows = run_pair(servers, order, case, (pair, attempt, seed), args, evidence)
+            if attempt == BUSY_RETRIES or all(
+                    row["foreign_cores"] <= BUSY_CORES for row in pair_rows):
+                break
+            # Another process shared the CPU during this pair; time it again.
+            args.discarded.extend(pair_rows)
+            print(f"  {case} pair {pair}: other processes were busy; retrying", file=sys.stderr)
+        rows.extend(pair_rows)
+        rates = {row["side"]: row["rate"] for row in pair_rows}
         for name, values in ratios.items():
             values.append(rates[name] / rates["control"])
         print(f"  {case} pair {pair}: control {rates['control']:,.0f}  " + "  ".join(
             f"{name} {rates[name]:,.0f} ({ratios[name][-1]:.4f})" for name in ratios),
             file=sys.stderr)
     return ratios
+
+
+def run_pair(servers, order, case, position, args, evidence):
+    """Time one trial per side in `order`; return their rows."""
+    pair, attempt, seed = position
+    rows = []
+    for side in order:
+        retry = f"-retry{attempt}" if attempt else ""
+        output = evidence / case / f"{pair:02d}-{side}{retry}"
+        pids = [server.pid for server in servers.values() if server.pid]
+        before = cpu_snapshot(pids)
+        record = servers[side].trial(case, seed, args.batches, args.warmup, output)
+        foreign = foreign_cores(before, cpu_snapshot(pids))
+        rows.append({"case": case, "pair": pair, "seed": seed, "side": side,
+                     "rate": check_record(record, case, seed, args.batches),
+                     "gpu_share": gpu_share(record), "foreign_cores": foreign,
+                     "gain_per_s": fitness_gain(record) / record["elapsed_seconds"],
+                     "hash": record["final_state_sha256"],
+                     "stage_ns": [total / max(1, record["timestamp_samples"])
+                                  for total in record["sampled_gpu_stage_totals_ns"]]})
+    return rows
 
 
 def replay_gate(rows, candidate):
@@ -468,7 +487,7 @@ def median_rate(rows, side):
 
 
 def measure(args, sides, evidence):
-    rows = []
+    rows, args.discarded = [], []
     ratios = {name: {} for name in list(sides)[1:]}
     kinds = {side: Server if supports_serve(executable) else OneShot
              for side, (_, _, executable) in sides.items()}
@@ -497,9 +516,12 @@ def summarize(args, sides, evidence, rows, ratios):
     entries = [summarize_candidate(args, sides, evidence, rows, name, by_case)
                for name, by_case in ratios.items()]
     (evidence / "summary.json").write_text(json.dumps(
-        {"entries": entries, "ratios": ratios, "rows": rows,
+        {"entries": entries, "ratios": ratios, "rows": rows, "discarded": args.discarded,
          "identities": {side: value[1] for side, value in sides.items()},
-         "args": {k: v for k, v in vars(args).items()}}, indent=2, default=str))
+         "args": {k: v for k, v in vars(args).items() if k != "discarded"}},
+        indent=2, default=str))
+    if args.discarded:
+        print(f"re-timed {len(args.discarded)} trials that overlapped other CPU work")
     busy = [row for row in rows if row["foreign_cores"] > BUSY_CORES]
     if busy:
         worst = max(row["foreign_cores"] for row in busy)
