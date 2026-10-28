@@ -21,9 +21,6 @@ use buffers::{
 use pipeline::GpuPipeline;
 use readback::{Readback, SubmittedBatch};
 
-/// Bulk iterations per command buffer within one batch.
-const SUBMIT_CHUNK_ITERATIONS: u32 = 4;
-
 #[derive(Default)]
 pub struct PassTimings {
     pub mutate_ns: f64,
@@ -287,18 +284,11 @@ impl GpuEvolver {
             beginning_of_pass_write_index: Some(6),
             end_of_pass_write_index: None,
         });
-        for iteration in 0..bulk_count {
-            // Submit long batches in chunks so the GPU starts before the whole
-            // batch is translated; Dozen's `finish` costs scale with batch length.
-            if iteration > 0 && iteration % SUBMIT_CHUNK_ITERATIONS == 0 {
-                let chunk = std::mem::replace(
-                    &mut encoder,
-                    p.device.create_command_encoder(&CommandEncoderDescriptor {
-                        label: Some("gpu_evolver_batch"),
-                    }),
-                );
-                p.queue.submit(std::iter::once(chunk.finish()));
-            }
+        // The whole batch goes in one command buffer. With chunked submits the
+        // GPU runs each chunk while the host encodes the next; on Dozen/NVIDIA
+        // that overlap makes `finish` about 3x slower and the host never gets
+        // ahead again (LEARNINGS, "Chunked submits make `finish` 3x slower").
+        for _ in 0..bulk_count {
             {
                 let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
                     label: Some("mutate_bin_rasterize"),

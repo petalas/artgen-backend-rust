@@ -225,10 +225,30 @@ walk inside NVIDIA's D3D12 user-mode driver (`libnvwgf2umx.so`): constant
 instructions, ~1.8x cache and ~6x dTLB misses. RSS, mappings, fds, extra buffers,
 map/unmap, timestamps and fresh encoders do not change it. It grows per batch,
 so the long-running app is affected too (inferred ~15–20% host-side, then flat).
-**Fix**: None in our code. The drift differs between processes, so equal batch
+**Fix**: None in our code for the slow growth (12 to ~14.5 ms per one-buffer
+batch over 4096 batches, measured). The drift differs between processes, so equal batch
 counts are not enough: `scripts/hillclimb.py` starts fresh servers for every
 case. Never compare early trials of one process with late ones, or engines in
-long-lived processes with fresh ones. A throwaway split of each
-batch into several submits cut ff elapsed 2.98–3.24 s to 2.61–2.65 s with an
-unchanged hash. The engine now submits every 4 bulk iterations
-(`SUBMIT_CHUNK_ITERATIONS`, +13.7% across all three cases).
+long-lived processes with fresh ones.
+
+### Chunked submits make `finish` 3x slower once the host falls behind (Dozen/NVIDIA)
+
+**Context**: Splitting one batch into several command buffers so the GPU starts
+early (the engine did this every 4 iterations from 70c9031 until it was removed).
+**Gotcha**: `finish` cost is bistable, not a function of command count. Per-batch
+timing (ff, 64 iterations): when the host is ahead (the GPU still runs batch N
+while N+1 is encoded), `finish` totals 10–13 ms and the host then waits ~19 ms
+for readback. When the queue runs dry and the GPU executes chunk k while the host
+encodes chunk k+1, `finish` grows to 35–42 ms (about the GPU time of the batch)
+and the readback wait drops to 0.2 ms. The slow state sustains itself: the host
+never gets ahead again. Each trial starts drained, so with 4-iteration chunks a
+512-batch trial stayed slow in most trials after the first (ff 335–412k vs
+~500k evals/s); this was the "GPU share falls to 65–82%" at 512 batches.
+Removing redundant `set_bind_group(1, params)` calls changed nothing (12.2 vs
+12.3 ms). Chunks of 8, 16 or 32 still entered the slow state at trial starts.
+**Fix**: One command buffer per batch. With double-buffered readback (f7ec23f)
+the GPU already has a queued batch, so early start buys nothing. hillclimb vs
+4-iteration chunks: 512 batches 1.4185 [1.4084, 1.4279], gpu% 70% to 101%;
+64 batches 1.0236 [1.0186, 1.0290]. Replay identical.
+The original +13.7% from chunking predates double-buffered readback, when every
+third batch drained the queue.

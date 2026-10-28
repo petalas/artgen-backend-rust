@@ -17,11 +17,11 @@ shared control (each candidate gets its own verdict and log row):
 
 ```sh
 for k in 2 4 8; do
-  sed -i "s/^const SUBMIT_CHUNK_ITERATIONS: u32 = .*/const SUBMIT_CHUNK_ITERATIONS: u32 = $k;/" src/gpu_evolver/mod.rs
-  scripts/hillclimb.py --build-only | awk '/^candidate/{print $3}' > /tmp/chunk$k
+  sed -i "s/^const MY_CONSTANT: u32 = .*/const MY_CONSTANT: u32 = $k;/" src/gpu_evolver/mod.rs
+  scripts/hillclimb.py --build-only | awk '/^candidate/{print $3}' > /tmp/variant$k
 done
 git checkout src/gpu_evolver/mod.rs
-scripts/hillclimb.py $(for k in 2 4 8; do echo --candidate "$(cat /tmp/chunk$k)"; done)
+scripts/hillclimb.py $(for k in 2 4 8; do echo --candidate "$(cat /tmp/variant$k)"; done)
 ```
 
 Rounds rotate the side order, so every side runs the same number of batches
@@ -94,10 +94,12 @@ produced a false 3.4% SLOWER in an earlier A/A):
   CPU used by processes outside the run (`/proc/stat` minus our own process
   tree); `host_load` in the log is the peak, and above 1 core the run warns.
   The one-minute load average missed short parallel builds.
-- 64-batch trials are 97–99% GPU-bound, so they barely see host-side costs.
-  Driver submit cost grows within a trial, and at 512 batches GPU share falls to
-  65–82%, which is closer to the long-running app. Judge host-side changes and
-  behavior changes with `--batches 512 --pairs 3` as well.
+- 64-batch trials barely see host-side costs. Driver `finish` cost depends on
+  whether the host stays ahead of the GPU, and with chunked submits a trial could
+  lock into a slow state where GPU share fell to 65–82% at 512 batches (LEARNINGS,
+  "Chunked submits"). One command buffer per batch keeps both horizons near 100%.
+  Judge host-side changes and behavior changes with `--batches 512 --pairs 3` as
+  well; that horizon is closer to the long-running app.
 - Below ~1% effects, rerun before trusting a verdict, and run an A/A when the
   machine state changes.
 
