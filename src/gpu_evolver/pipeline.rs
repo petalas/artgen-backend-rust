@@ -27,7 +27,7 @@ pub struct GpuPipeline {
     pub reference_view: TextureView,
     pub error_accumulators_buf: Buffer,
     pub control_flags_buf: Buffer,
-    pub readback_staging_buf: Buffer,
+    pub readback_staging_bufs: [Buffer; 2], // best-drawing copy, one per staging slot
     pub multi_readback_staging_buf: Buffer,  // persistent staging for batch chain readback
     pub eval_fitness_staging_buf: Buffer,    // persistent staging for evaluate_chain_fitness readback
     pub control_staging_bufs: [Buffer; 2],
@@ -237,12 +237,14 @@ impl GpuPipeline {
             usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
         });
 
-        // Readback staging (one DrawingState)
-        let readback_staging_buf = device.create_buffer(&BufferDescriptor {
-            label: Some("readback_staging"),
-            size: GPU_DRAWING_STATE_SIZE as u64,
-            usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
+        // Readback staging (one DrawingState per staging slot)
+        let readback_staging_bufs = std::array::from_fn(|i| {
+            device.create_buffer(&BufferDescriptor {
+                label: Some(if i == 0 { "readback_staging_0" } else { "readback_staging_1" }),
+                size: GPU_DRAWING_STATE_SIZE as u64,
+                usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
         });
 
         // Multi-chain readback staging (all chains — for readback_chains batch readback)
@@ -837,7 +839,7 @@ impl GpuPipeline {
             reference_view,
             error_accumulators_buf,
             control_flags_buf,
-            readback_staging_buf,
+            readback_staging_bufs,
             multi_readback_staging_buf,
             eval_fitness_staging_buf,
             control_staging_bufs,

@@ -46,11 +46,18 @@ slot, queued winning chain and collected observations. The optional drawing map
 is the authority for whether that batch contains a drawing copy. Batch metadata
 and receivers can no longer be detached or paired with a separate deferred flag.
 
-`GpuEvolver` retains command recording. A conflict on the single drawing staging
-buffer still collects before parameter uploads. Otherwise the new submission
-precedes prior collection, and map registration follows collection. Copy source
-selection remains at the same position in the encoder. Terminal flush still
-prefers a newer synchronous drawing over an older deferred drawing.
+`GpuEvolver` retains command recording. Each staging slot has its own drawing
+staging buffer, so the new submission always precedes prior collection, and map
+registration follows collection. A winning chain reported by batch N-1 is copied
+at the end of batch N+1, because batch N is encoded before N-1 is collected. The
+single-buffer design drained N-1 before encoding N whenever both batches carried
+a drawing (every third batch); removing that drain raised throughput about 2%
+(hillclimb, three cases). The copied drawing is still a real chain state. Against
+a single-buffer reference, `check-gpu-lifecycle` differs only in event `drawing`
+fields: the single-buffer build returned no drawing every third call, because
+its early collection consumed the copy and left the next batch none to copy.
+Copy source selection remains at the same position in the encoder. Terminal
+flush still prefers a newer synchronous drawing over an older deferred drawing.
 
 Ordinary reinitialization preserves staging alternation; seeded preparation resets
 it to zero after the GPU reset. The ownership change preserves existing channel

@@ -211,14 +211,11 @@ impl GpuEvolver {
     }
 
     /// Submit before collecting the previous batch, then register the new maps.
-    /// A conflict on the single drawing staging buffer requires early collection.
     fn run_batch_inner(
         &mut self,
         mutation_params: &MutationParams,
         collect_timestamps: bool,
     ) -> Option<Drawing> {
-        let early_result = self.readback.collect_if_conflicting(&self.pipeline);
-
         let p = &self.pipeline;
         let work = p.workload(mutation_params);
         let iterations = work.iterations;
@@ -442,9 +439,9 @@ impl GpuEvolver {
         );
 
         // Piggyback deferred best-chain readback: if a previous batch detected a
-        // new global best, copy that chain's state to readback_staging_buf now
+        // new global best, copy that chain's state to this slot's readback staging
         // instead of doing a separate synchronous GPU round-trip.
-        let copied_drawing = self.readback.encode_best_copy(p, &mut encoder);
+        let copied_drawing = self.readback.encode_best_copy(p, &mut encoder, write_idx);
 
         // 5. Submit — GPU starts working on this batch IMMEDIATELY
         let submission_index = p.queue.submit(std::iter::once(encoder.finish()));
@@ -455,21 +452,19 @@ impl GpuEvolver {
 
         // Collect the previous batch only after this submission. The readback
         // owner then registers this batch's maps and keeps their metadata together.
-        self.readback
-            .after_submit(
-                p,
-                SubmittedBatch {
-                    staging_idx: write_idx,
-                    collect_timestamps,
-                    batch_envelope,
-                    active_chain_count: active,
-                    submission_index,
-                    iterations,
-                    evaluations,
-                },
-                copied_drawing,
-            )
-            .or(early_result)
+        self.readback.after_submit(
+            p,
+            SubmittedBatch {
+                staging_idx: write_idx,
+                collect_timestamps,
+                batch_envelope,
+                active_chain_count: active,
+                submission_index,
+                iterations,
+                evaluations,
+            },
+            copied_drawing,
+        )
     }
 
     /// Flush any pending batch results immediately. Call this before operations
@@ -854,7 +849,8 @@ fn gpu_memory_bytes(p: &GpuPipeline) -> u64 {
         + p.working_states_buf.size()
         + p.error_accumulators_buf.size()
         + p.control_flags_buf.size()
-        + p.readback_staging_buf.size()
+        + p.readback_staging_bufs[0].size()
+        + p.readback_staging_bufs[1].size()
         + p.multi_readback_staging_buf.size()
         + p.eval_fitness_staging_buf.size()
         + p.control_staging_bufs[0].size()

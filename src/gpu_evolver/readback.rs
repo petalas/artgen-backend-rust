@@ -43,7 +43,7 @@ impl PendingBatch {
         let fitness_rx = map_read(
             p.fitness_staging_bufs[idx].slice(..(u64::from(batch.active_chain_count) * 4)),
         );
-        let drawing_rx = copied_drawing.then(|| map_read(p.readback_staging_buf.slice(..)));
+        let drawing_rx = copied_drawing.then(|| map_read(p.readback_staging_bufs[idx].slice(..)));
         Self {
             batch,
             control_rx,
@@ -102,20 +102,6 @@ impl Readback {
         }
     }
 
-    /// The drawing staging buffer is single-buffered. Resolve its existing map
-    /// before params/control uploads if this batch will need another drawing copy.
-    pub fn collect_if_conflicting(&mut self, p: &GpuPipeline) -> Option<Drawing> {
-        let drawing_mapped = self
-            .pending
-            .as_ref()
-            .is_some_and(|pending| pending.drawing_rx.is_some());
-        if self.pending_best_chain.is_some() && drawing_mapped {
-            self.collect(p)
-        } else {
-            None
-        }
-    }
-
     pub fn next_staging_index(&mut self) -> usize {
         let idx = self.staging_idx;
         debug_assert!(self
@@ -127,15 +113,22 @@ impl Readback {
     }
 
     /// Select the drawing source at the original copy position, before collecting
-    /// the previous batch can replace the queued winning chain.
-    pub fn encode_best_copy(&mut self, p: &GpuPipeline, encoder: &mut CommandEncoder) -> bool {
+    /// the previous batch can replace the queued winning chain. The copy targets
+    /// this batch's staging slot, so a drawing map pending in the other slot
+    /// never forces an early collection.
+    pub fn encode_best_copy(
+        &mut self,
+        p: &GpuPipeline,
+        encoder: &mut CommandEncoder,
+        staging_idx: usize,
+    ) -> bool {
         let Some(chain_id) = self.pending_best_chain.take() else {
             return false;
         };
         encoder.copy_buffer_to_buffer(
             &p.chain_states_buf,
             u64::from(chain_id) * GPU_DRAWING_STATE_SIZE as u64,
-            &p.readback_staging_buf,
+            &p.readback_staging_bufs[staging_idx],
             0,
             GPU_DRAWING_STATE_SIZE as u64,
         );
@@ -168,7 +161,7 @@ impl Readback {
         let drawing = pending
             .drawing_rx
             .as_ref()
-            .map(|rx| mapped_drawing(p, rx, "Failed to access mapped best drawing buffer"));
+            .map(|rx| mapped_drawing(p, idx, rx, "Failed to access mapped best drawing buffer"));
 
         let control_data = p.control_staging_bufs[idx]
             .slice(..)
@@ -264,22 +257,27 @@ fn map_read(slice: BufferSlice<'_>) -> MapReceiver {
     rx
 }
 
-fn mapped_drawing(p: &GpuPipeline, rx: &MapReceiver, access_error: &'static str) -> Drawing {
+fn mapped_drawing(
+    p: &GpuPipeline,
+    idx: usize,
+    rx: &MapReceiver,
+    access_error: &'static str,
+) -> Drawing {
     rx.recv()
         .unwrap()
         .expect("Failed to map readback staging buffer");
-    let data = p
-        .readback_staging_buf
+    let data = p.readback_staging_bufs[idx]
         .slice(..)
         .get_mapped_range()
         .expect(access_error);
     let state: &GpuDrawingState = bytemuck::from_bytes(&data);
     let drawing = gpu_to_drawing(state);
     drop(data);
-    p.readback_staging_buf.unmap();
+    p.readback_staging_bufs[idx].unmap();
     drawing
 }
 
+/// Uses slot 0; callers resolve pending batch readback first (as `flush` does).
 pub(super) fn readback_chain(p: &GpuPipeline, chain_id: u32) -> Drawing {
     let mut encoder = p.device.create_command_encoder(&CommandEncoderDescriptor {
         label: Some("readback"),
@@ -287,17 +285,17 @@ pub(super) fn readback_chain(p: &GpuPipeline, chain_id: u32) -> Drawing {
     encoder.copy_buffer_to_buffer(
         &p.chain_states_buf,
         u64::from(chain_id) * GPU_DRAWING_STATE_SIZE as u64,
-        &p.readback_staging_buf,
+        &p.readback_staging_bufs[0],
         0,
         GPU_DRAWING_STATE_SIZE as u64,
     );
     let submission = p.queue.submit(std::iter::once(encoder.finish()));
-    let rx = map_read(p.readback_staging_buf.slice(..));
+    let rx = map_read(p.readback_staging_bufs[0].slice(..));
     p.device
         .poll(PollType::Wait {
             submission_index: Some(submission),
             timeout: None,
         })
         .unwrap();
-    mapped_drawing(p, &rx, "Failed to access mapped drawing readback buffer")
+    mapped_drawing(p, 0, &rx, "Failed to access mapped drawing readback buffer")
 }
