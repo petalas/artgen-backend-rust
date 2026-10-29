@@ -1,8 +1,7 @@
-use std::num::NonZeroU64;
-
 use wgpu::*;
 use wgpu::util::DeviceExt;
 
+use super::bindings::{self, Resource};
 use super::execution::{AllocationPlan, RasterGrid, ResourceSizes, Workload};
 
 use super::buffers::{
@@ -10,7 +9,6 @@ use super::buffers::{
 };
 use super::changes::{
     pack_dirty_box, ChangedIndices, CHANGED_WORDS_OFFSET, DIRTY_MAX_OFFSET, DIRTY_MIN_OFFSET,
-    GPU_CHAIN_CHANGE_SIZE,
 };
 
 use super::programs::{GpuPrograms, ProgramBindings, RasterSchedule, WorklistStorage};
@@ -137,7 +135,7 @@ impl GpuPipeline {
             max_compute_workgroups_per_dimension: 65535,
             max_compute_invocations_per_workgroup: 512,
             max_compute_workgroup_size_x: 512, // 1D workgroup layout needs up to 512 in x (for 32x16 tile)
-            max_storage_buffers_per_shader_stage: 8, // select uses 8 bindings (chain_states, working_states, error_accum, control, fitness, chain_update_flags, chain_total_errors, chain_changes)
+            max_storage_buffers_per_shader_stage: bindings::MAX_STORAGE_BUFFERS,
             ..Limits::downlevel_defaults()
         };
 
@@ -414,234 +412,7 @@ impl GpuPipeline {
 
         let timestamp_period = queue.get_timestamp_period();
 
-        // --- Bind group layouts ---
-
-        // Mutate: chain_states(read), working_states(rw); params via push constants
-        let mutate_bgl = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-            label: Some("mutate_bgl"),
-            entries: &[
-                BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: NonZeroU64::new(GPU_DRAWING_STATE_SIZE as u64),
-                    },
-                    count: None,
-                },
-                BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: NonZeroU64::new(GPU_DRAWING_STATE_SIZE as u64),
-                    },
-                    count: None,
-                },
-            ],
-        });
-
-        // Rasterize+Error: working_states(read), reference_image(texture), error_accumulators(rw),
-        //                   tile_data(read), tile_counts(read), chain_states(read), chain_framebuffers(read); params via push constants
-        let rasterize_error_bgl = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-            label: Some("rasterize_error_bgl"),
-            entries: &[
-                BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: NonZeroU64::new(GPU_DRAWING_STATE_SIZE as u64),
-                    },
-                    count: None,
-                },
-                BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Texture {
-                        sample_type: TextureSampleType::Float { filterable: false },
-                        view_dimension: TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: NonZeroU64::new(std::mem::size_of::<u32>() as u64),
-                    },
-                    count: None,
-                },
-                BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: NonZeroU64::new(std::mem::size_of::<u32>() as u64),
-                    },
-                    count: None,
-                },
-                BindGroupLayoutEntry {
-                    binding: 4,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: NonZeroU64::new(std::mem::size_of::<u32>() as u64),
-                    },
-                    count: None,
-                },
-                BindGroupLayoutEntry {
-                    binding: 5,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: NonZeroU64::new(GPU_DRAWING_STATE_SIZE as u64),
-                    },
-                    count: None,
-                },
-                BindGroupLayoutEntry {
-                    binding: 6,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: NonZeroU64::new(std::mem::size_of::<u32>() as u64),
-                    },
-                    count: None,
-                },
-                storage_entry(7, true, 4),
-            ],
-        });
-
-        // Bin polygons: working_states(read), tile_data(rw), tile_counts(rw),
-        //               chain_states(read), raster_work(rw); params via push constants
-        let bin_polygons_bgl = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-            label: Some("bin_polygons_bgl"),
-            entries: &[
-                BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: NonZeroU64::new(GPU_DRAWING_STATE_SIZE as u64),
-                    },
-                    count: None,
-                },
-                BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: NonZeroU64::new(std::mem::size_of::<u32>() as u64),
-                    },
-                    count: None,
-                },
-                BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: NonZeroU64::new(std::mem::size_of::<u32>() as u64),
-                    },
-                    count: None,
-                },
-                storage_entry(3, true, GPU_DRAWING_STATE_SIZE as u64),
-                storage_entry(4, false, 4),
-            ],
-        });
-
-        // Select: chain_states(rw), working_states(read), error_accumulators(rw), control(rw), fitness_packed(rw),
-        //         chain_update_flags(rw), chain_total_errors(rw), chain_changes(rw); params via push constants
-        let select_bgl = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-            label: Some("select_bgl"),
-            entries: &[
-                BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: NonZeroU64::new(GPU_DRAWING_STATE_SIZE as u64),
-                    },
-                    count: None,
-                },
-                BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: NonZeroU64::new(GPU_DRAWING_STATE_SIZE as u64),
-                    },
-                    count: None,
-                },
-                BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: NonZeroU64::new(std::mem::size_of::<u32>() as u64),
-                    },
-                    count: None,
-                },
-                BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: NonZeroU64::new(std::mem::size_of::<ControlFlags>() as u64),
-                    },
-                    count: None,
-                },
-                BindGroupLayoutEntry {
-                    binding: 4,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: NonZeroU64::new(std::mem::size_of::<u32>() as u64),
-                    },
-                    count: None,
-                },
-                BindGroupLayoutEntry {
-                    binding: 5,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: NonZeroU64::new(std::mem::size_of::<u32>() as u64),
-                    },
-                    count: None,
-                },
-                BindGroupLayoutEntry {
-                    binding: 6,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: NonZeroU64::new(std::mem::size_of::<u32>() as u64),
-                    },
-                    count: None,
-                },
-                storage_entry(7, false, GPU_CHAIN_CHANGE_SIZE as u64),
-            ],
-        });
-
-        // --- Params uniform buffer + bind group (shared across all pipelines at group(1)) ---
+        // --- Params uniform buffer (shared across all pipelines at group(1)) ---
         let params_buf = device.create_buffer(&BufferDescriptor {
             label: Some("params_uniform"),
             size: std::mem::size_of::<GpuParams>() as u64,
@@ -649,135 +420,38 @@ impl GpuPipeline {
             mapped_at_creation: false,
         });
 
-        let params_bgl = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-            label: Some("params_bgl"),
-            entries: &[BindGroupLayoutEntry {
-                binding: 0,
-                visibility: ShaderStages::COMPUTE,
-                ty: BindingType::Buffer {
-                    ty: BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: NonZeroU64::new(std::mem::size_of::<GpuParams>() as u64),
-                },
-                count: None,
-            }],
-        });
+        // --- Bind group layouts and bind groups, from each stage's bindings ---
+        let resource = |resource| match resource {
+            Resource::ChainStates => chain_states_buf.as_entire_binding(),
+            Resource::WorkingStates => working_states_buf.as_entire_binding(),
+            Resource::ReferenceImage => BindingResource::TextureView(&reference_view),
+            Resource::ErrorAccumulators => error_accumulators_buf.as_entire_binding(),
+            Resource::Control => control_flags_buf.as_entire_binding(),
+            Resource::FitnessPacked => fitness_packed_buf.as_entire_binding(),
+            Resource::TileData => tile_data_buf.as_entire_binding(),
+            Resource::TileCounts => tile_counts_buf.as_entire_binding(),
+            Resource::RasterWork => raster_work_buf.as_entire_binding(),
+            Resource::ChainFramebuffers => chain_framebuffers_buf.as_entire_binding(),
+            Resource::ChainTotalErrors => chain_total_errors_buf.as_entire_binding(),
+            Resource::ChainUpdateFlags => chain_update_flags_buf.as_entire_binding(),
+            Resource::ChainChanges => chain_changes_buf.as_entire_binding(),
+            Resource::Params => params_buf.as_entire_binding(),
+        };
+        let bind = |stage| {
+            let layout = bindings::layout(&device, stage);
+            let group = bindings::bind_group(&device, stage, &layout, resource);
+            (layout, group)
+        };
+        let (params_bgl, params_bind_group) = bind(&bindings::PARAMS);
+        let (mutate_bgl, mutate_bind_group) = bind(&bindings::MUTATE);
+        let (rasterize_error_bgl, rasterize_error_bind_group) = bind(&bindings::RASTERIZE_ERROR);
+        let (bin_polygons_bgl, bin_polygons_bind_group) = bind(&bindings::BIN_POLYGONS);
+        let (select_bgl, select_bind_group) = bind(&bindings::SELECT);
+        let (init_framebuffers_bgl, init_framebuffers_bind_group) =
+            bind(&bindings::INIT_FRAMEBUFFERS);
+        let (update_framebuffers_bgl, update_framebuffers_bind_group) =
+            bind(&bindings::UPDATE_FRAMEBUFFERS);
 
-        let params_bind_group = device.create_bind_group(&BindGroupDescriptor {
-            label: Some("params_bg"),
-            layout: &params_bgl,
-            entries: &[BindGroupEntry {
-                binding: 0,
-                resource: params_buf.as_entire_binding(),
-            }],
-        });
-
-        // Init framebuffers: chain_states(read), reference(texture), chain_framebuffers(rw), chain_total_errors(rw)
-        let init_framebuffers_bgl = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-            label: Some("init_framebuffers_bgl"),
-            entries: &[
-                BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: NonZeroU64::new(GPU_DRAWING_STATE_SIZE as u64),
-                    },
-                    count: None,
-                },
-                BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Texture {
-                        sample_type: TextureSampleType::Float { filterable: false },
-                        view_dimension: TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: NonZeroU64::new(std::mem::size_of::<u32>() as u64),
-                    },
-                    count: None,
-                },
-                BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: NonZeroU64::new(std::mem::size_of::<u32>() as u64),
-                    },
-                    count: None,
-                },
-            ],
-        });
-        // Update framebuffers: chain_states(read), chain_framebuffers(rw), chain_update_flags(read),
-        // tile_data(read), tile_counts(read) — the winning offspring's tile polygon lists —,
-        // raster_work(rw), chain_changes(read)
-        let update_framebuffers_bgl = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-            label: Some("update_framebuffers_bgl"),
-            entries: &[
-                BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: NonZeroU64::new(GPU_DRAWING_STATE_SIZE as u64),
-                    },
-                    count: None,
-                },
-                BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: NonZeroU64::new(std::mem::size_of::<u32>() as u64),
-                    },
-                    count: None,
-                },
-                BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: NonZeroU64::new(std::mem::size_of::<u32>() as u64),
-                    },
-                    count: None,
-                },
-                BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: NonZeroU64::new(std::mem::size_of::<u32>() as u64),
-                    },
-                    count: None,
-                },
-                BindGroupLayoutEntry {
-                    binding: 4,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: NonZeroU64::new(std::mem::size_of::<u32>() as u64),
-                    },
-                    count: None,
-                },
-                storage_entry(5, false, 4),
-                storage_entry(6, true, GPU_CHAIN_CHANGE_SIZE as u64),
-            ],
-        });
         let programs = GpuPrograms::new(
             &device,
             &adapter_info,
@@ -792,83 +466,6 @@ impl GpuPipeline {
             },
             rasterize_wg,
         );
-
-        // --- Bind groups ---
-        let mutate_bind_group = device.create_bind_group(&BindGroupDescriptor {
-            label: Some("mutate_bg"),
-            layout: &mutate_bgl,
-            entries: &[
-                BindGroupEntry { binding: 0, resource: chain_states_buf.as_entire_binding() },
-                BindGroupEntry { binding: 1, resource: working_states_buf.as_entire_binding() },
-            ],
-        });
-
-        let rasterize_error_bind_group = device.create_bind_group(&BindGroupDescriptor {
-            label: Some("rasterize_error_bg"),
-            layout: &rasterize_error_bgl,
-            entries: &[
-                BindGroupEntry { binding: 0, resource: working_states_buf.as_entire_binding() },
-                BindGroupEntry { binding: 1, resource: BindingResource::TextureView(&reference_view) },
-                BindGroupEntry { binding: 2, resource: error_accumulators_buf.as_entire_binding() },
-                BindGroupEntry { binding: 3, resource: tile_data_buf.as_entire_binding() },
-                BindGroupEntry { binding: 4, resource: tile_counts_buf.as_entire_binding() },
-                BindGroupEntry { binding: 5, resource: chain_states_buf.as_entire_binding() },
-                BindGroupEntry { binding: 6, resource: chain_framebuffers_buf.as_entire_binding() },
-                BindGroupEntry { binding: 7, resource: raster_work_buf.as_entire_binding() },
-            ],
-        });
-
-        let bin_polygons_bind_group = device.create_bind_group(&BindGroupDescriptor {
-            label: Some("bin_polygons_bg"),
-            layout: &bin_polygons_bgl,
-            entries: &[
-                BindGroupEntry { binding: 0, resource: working_states_buf.as_entire_binding() },
-                BindGroupEntry { binding: 1, resource: tile_data_buf.as_entire_binding() },
-                BindGroupEntry { binding: 2, resource: tile_counts_buf.as_entire_binding() },
-                BindGroupEntry { binding: 3, resource: chain_states_buf.as_entire_binding() },
-                BindGroupEntry { binding: 4, resource: raster_work_buf.as_entire_binding() },
-            ],
-        });
-
-        let select_bind_group = device.create_bind_group(&BindGroupDescriptor {
-            label: Some("select_bg"),
-            layout: &select_bgl,
-            entries: &[
-                BindGroupEntry { binding: 0, resource: chain_states_buf.as_entire_binding() },
-                BindGroupEntry { binding: 1, resource: working_states_buf.as_entire_binding() },
-                BindGroupEntry { binding: 2, resource: error_accumulators_buf.as_entire_binding() },
-                BindGroupEntry { binding: 3, resource: control_flags_buf.as_entire_binding() },
-                BindGroupEntry { binding: 4, resource: fitness_packed_buf.as_entire_binding() },
-                BindGroupEntry { binding: 5, resource: chain_update_flags_buf.as_entire_binding() },
-                BindGroupEntry { binding: 6, resource: chain_total_errors_buf.as_entire_binding() },
-                BindGroupEntry { binding: 7, resource: chain_changes_buf.as_entire_binding() },
-            ],
-        });
-
-        let update_framebuffers_bind_group = device.create_bind_group(&BindGroupDescriptor {
-            label: Some("update_framebuffers_bg"),
-            layout: &update_framebuffers_bgl,
-            entries: &[
-                BindGroupEntry { binding: 0, resource: chain_states_buf.as_entire_binding() },
-                BindGroupEntry { binding: 1, resource: chain_framebuffers_buf.as_entire_binding() },
-                BindGroupEntry { binding: 2, resource: chain_update_flags_buf.as_entire_binding() },
-                BindGroupEntry { binding: 3, resource: tile_data_buf.as_entire_binding() },
-                BindGroupEntry { binding: 4, resource: tile_counts_buf.as_entire_binding() },
-                BindGroupEntry { binding: 5, resource: raster_work_buf.as_entire_binding() },
-                BindGroupEntry { binding: 6, resource: chain_changes_buf.as_entire_binding() },
-            ],
-        });
-
-        let init_framebuffers_bind_group = device.create_bind_group(&BindGroupDescriptor {
-            label: Some("init_framebuffers_bg"),
-            layout: &init_framebuffers_bgl,
-            entries: &[
-                BindGroupEntry { binding: 0, resource: chain_states_buf.as_entire_binding() },
-                BindGroupEntry { binding: 1, resource: BindingResource::TextureView(&reference_view) },
-                BindGroupEntry { binding: 2, resource: chain_framebuffers_buf.as_entire_binding() },
-                BindGroupEntry { binding: 3, resource: chain_total_errors_buf.as_entire_binding() },
-            ],
-        });
 
         Self {
             device,
@@ -1103,16 +700,3 @@ impl GpuPipeline {
 /// Raster workgroups sharing the worklist. About 6k pairs need raster per
 /// iteration on the v1 fixtures; extra workgroups exit at the loop test.
 const RASTER_WORKGROUPS: u32 = 8192;
-
-fn storage_entry(binding: u32, read_only: bool, min_size: u64) -> BindGroupLayoutEntry {
-    BindGroupLayoutEntry {
-        binding,
-        visibility: ShaderStages::COMPUTE,
-        ty: BindingType::Buffer {
-            ty: BufferBindingType::Storage { read_only },
-            has_dynamic_offset: false,
-            min_binding_size: NonZeroU64::new(min_size),
-        },
-        count: None,
-    }
-}

@@ -56,6 +56,16 @@ program state. Stage-specific policies remain explicit. In particular, historica
 mutation programs retain their initialization default, and raster initialization
 continues to depend on the backend.
 
+`gpu_evolver::bindings` declares what each stage binds, once: an ordered list
+of (resource, access) whose position is the binding number. The list builds the
+stage's bind group layout and bind group, the requested storage-buffer limit and
+the variant seam's `raster_work` slots; the minimum binding size is one element
+of the resource. A CPU test compares every bundled shader's declarations (group,
+number, kind, access, element size) with the lists through naga. Binding an
+existing buffer in another stage is one list entry plus its WGSL declaration; a
+new buffer also needs a `Resource` variant with its element size and its arm in
+`GpuPipeline::new`, besides its field, allocation and `ResourceSizes` entry.
+
 The binner writes counts and indices only for consumed tiles, those that meet
 each offspring's dirty rectangle, the tiles rasterize_error and
 update_framebuffers read. Other tiles keep stale words from earlier iterations,
@@ -213,8 +223,8 @@ comparisons, their limits and the separate longer ff check.
 - Rule 3. Wgpu command encoding, map callbacks and returned drawings allocate
   during ordinary batches. The refactor introduces no new heap allocation in
   that path. Existing chain, offspring, image and batch limits bound live work.
-- Rule 4. The existing pipeline constructor exceeds one page; its cohesive
-  allocation order is preserved. Command recording moved to `schedule`, where
+- Rule 4. The existing pipeline constructor exceeds one page (~350 lines,
+  mostly buffer allocation); its cohesive allocation order is preserved. Command recording moved to `schedule`, where
   the pass boundaries and submit split stay together; `run_batch_inner` (~75
   lines with its readback copies) and `evaluate_chain_fitness` (~70) remain
   slightly over the guide.

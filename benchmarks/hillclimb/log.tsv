@@ -114,3 +114,5 @@ utc	control	candidate	cases	pairs	batches	ratio	low95	high95	verdict	replay	cont
 2026-10-29T12:03:58+00:00	HEAD@5f8db545c7	worktree	ff,mona,darwin	3	512	1.00026	0.99961	1.00085	NOISE	same	1597958	1597285	.cache/hillclimb/runs/20261029T120037Z-0485zuax	C1 chain change record buffer	0.6					same	0
 2026-10-29T12:20:20+00:00	HEAD@ab691f517d	worktree	ff,mona,darwin	5	64	1.00255	0.99910	1.00659	NOISE	same	1486247	1488846	.cache/hillclimb/runs/20261029T121820Z-tvdqvt2j	C3 iteration recorder (64x5 half of confirm)	0.5					same	0
 2026-10-29T12:24:35+00:00	HEAD@ab691f517d	worktree	ff,mona,darwin	3	512	0.99962	0.99897	1.00028	NOISE	same	1603170	1602279	.cache/hillclimb/runs/20261029T122113Z-oamm8umw	C3 iteration recorder (512x3 half of confirm)	0.6					same	0
+2026-10-29T12:39:28+00:00	HEAD@4c71a5cffa	worktree	ff,mona,darwin	5	64	1.00240	0.99978	1.00475	NOISE	same	1480688	1482734	.cache/hillclimb/runs/20261029T123729Z-5i5ptmju	C5 binding tables	0.4					same	0
+2026-10-29T12:43:42+00:00	HEAD@4c71a5cffa	worktree	ff,mona,darwin	3	512	1.00007	0.99960	1.00055	NOISE	same	1600553	1599874	.cache/hillclimb/runs/20261029T124021Z-1yevejp3	C5 binding tables	0.6					same	0

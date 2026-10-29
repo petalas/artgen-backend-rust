@@ -7,21 +7,21 @@
 //! occupancy. A binning variant that does not list raster work gets a separate
 //! worklist pass; a raster variant that does not read the list uses the full grid.
 
-use std::num::NonZeroU64;
 use std::sync::Arc;
 
 use wgpu::naga::{front::wgsl, ResourceBinding};
 use wgpu::{
-    BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
-    BindGroupLayoutEntry, BindingType, Buffer, BufferBindingType, ComputePipeline, Device,
-    PipelineCompilationOptions, PipelineLayout, ShaderStages,
+    BindGroup, BindGroupLayout, Buffer, ComputePipeline, Device, PipelineCompilationOptions,
+    PipelineLayout,
 };
 
 use super::{
     compilation_scopes, create_tile_pipeline, finish_compilation, stage_layout, tile_source,
     GpuPrograms, MutationProgram, ProgramCompiler, RasterSchedule, TileStage, TileStages,
 };
-use crate::gpu_evolver::buffers::GPU_DRAWING_STATE_SIZE;
+use crate::gpu_evolver::bindings::{
+    self, Resource, BIN_POLYGONS, RASTERIZE_ERROR, RASTER_WORKLIST,
+};
 
 // Capacity for 17 lab sources, five supported raster workgroups, and two modes.
 const MAX_BENCHMARK_BIN_PIPELINES: usize = 17 * 5 * 2;
@@ -30,8 +30,9 @@ const MAX_BENCHMARK_RASTER_PIPELINES: usize = 17 * 5;
 const MAX_BENCHMARK_MUTATE_PIPELINES: usize = 17;
 
 // Slots of the raster_work buffer in the binning and raster/error bind groups.
-const BIN_RASTER_WORK_BINDING: u32 = 4;
-const RASTER_RASTER_WORK_BINDING: u32 = 7;
+const BIN_RASTER_WORK_BINDING: u32 = bindings::binding(&BIN_POLYGONS, Resource::RasterWork);
+const RASTER_RASTER_WORK_BINDING: u32 =
+    bindings::binding(&RASTERIZE_ERROR, Resource::RasterWork);
 
 /// Mutation-only compiler policy. Historical benchmark sources require zeroing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
@@ -155,17 +156,7 @@ struct WorklistAdapter {
 
 impl WorklistAdapter {
     fn new(device: &Device, params: &BindGroupLayout) -> Self {
-        // working_states(read), chain_states(read), tile_counts(read), raster_work(rw)
-        let state_size = GPU_DRAWING_STATE_SIZE as u64;
-        let bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-            label: Some("raster_worklist_bgl"),
-            entries: &[
-                storage_entry(0, true, state_size),
-                storage_entry(1, true, state_size),
-                storage_entry(2, true, 4),
-                storage_entry(3, false, 4),
-            ],
-        });
+        let bind_group_layout = bindings::layout(device, &RASTER_WORKLIST);
         let layout = stage_layout(device, "raster_worklist_layout", &bind_group_layout, params);
         Self {
             bind_group_layout,
@@ -179,21 +170,19 @@ impl WorklistAdapter {
         if self.bind_group.is_some() {
             return;
         }
-        let entries = [
-            storage.working_states,
-            storage.chain_states,
-            storage.tile_counts,
-            storage.raster_work,
-        ];
-        let entries = [0, 1, 2, 3].map(|binding| BindGroupEntry {
-            binding,
-            resource: entries[binding as usize].as_entire_binding(),
-        });
-        self.bind_group = Some(device.create_bind_group(&BindGroupDescriptor {
-            label: Some("raster_worklist_bg"),
-            layout: &self.bind_group_layout,
-            entries: &entries,
-        }));
+        let buffer = |resource| match resource {
+            Resource::WorkingStates => storage.working_states,
+            Resource::ChainStates => storage.chain_states,
+            Resource::TileCounts => storage.tile_counts,
+            Resource::RasterWork => storage.raster_work,
+            other => unreachable!("the worklist pass binds no {other:?}"),
+        };
+        self.bind_group = Some(bindings::bind_group(
+            device,
+            &RASTER_WORKLIST,
+            &self.bind_group_layout,
+            |resource| buffer(resource).as_entire_binding(),
+        ));
     }
 
     /// Schedule for the selected raster and binning programs (`None` is bundled).
@@ -234,19 +223,6 @@ impl WorklistAdapter {
             pipeline,
             bind_group,
         })
-    }
-}
-
-fn storage_entry(binding: u32, read_only: bool, min_size: u64) -> BindGroupLayoutEntry {
-    BindGroupLayoutEntry {
-        binding,
-        visibility: ShaderStages::COMPUTE,
-        ty: BindingType::Buffer {
-            ty: BufferBindingType::Storage { read_only },
-            has_dynamic_offset: false,
-            min_binding_size: NonZeroU64::new(min_size),
-        },
-        count: None,
     }
 }
 

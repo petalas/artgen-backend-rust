@@ -2,6 +2,7 @@ pub mod benchmark;
 pub mod buffers;
 pub mod changes;
 pub mod pipeline;
+mod bindings;
 mod execution;
 mod programs;
 mod readback;
