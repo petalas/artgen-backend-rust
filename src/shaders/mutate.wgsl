@@ -82,6 +82,11 @@ var<workgroup> shared_crossover_keep: array<atomic<u32>, CROSSOVER_KEEP_WORDS>;
 // rasterizer shortcut.
 var<workgroup> shared_crossover_changed_count: atomic<u32>;
 var<workgroup> shared_crossover_changed: array<u32, CHANGED_INDICES>;
+// Union of the pixel bounds (polygon_bbox_pixels) of both versions of every
+// changed slot: min x, min y, max x, max y. Unchanged slots cover the same
+// pixels in the same order, so the offspring differs from parent A only inside
+// it, and every changed polygon's binner bounds lie inside it.
+var<workgroup> shared_crossover_box: array<atomic<u32>, 4>;
 
 // --- PCG32 RNG ---
 // 32-bit PCG hash (PCG-RXS-M-XS): ~8 ALU ops per call; the state is rng_state.x
@@ -160,12 +165,24 @@ fn clamp_polygon_alpha(poly_in: Polygon) -> Polygon {
 fn write_crossover_slot(offspring_id: u32, i: u32, parent_a: u32, count_a: u32, source: Polygon) {
     let poly = clamp_polygon_alpha(source);
     working_states[offspring_id].polygons[i] = poly;
-    if i < count_a && any(poly.data != chain_states[parent_a].polygons[i].data) {
+    if i >= count_a {
+        merge_crossover_box(poly);
+    } else if any(poly.data != chain_states[parent_a].polygons[i].data) {
+        merge_crossover_box(poly);
+        merge_crossover_box(chain_states[parent_a].polygons[i]);
         let k = atomicAdd(&shared_crossover_changed_count, 1u);
         if k < CHANGED_INDICES {
             shared_crossover_changed[k] = i;
         }
     }
+}
+
+fn merge_crossover_box(poly: Polygon) {
+    let bb = polygon_bbox_pixels(poly, params.image_width, params.image_height);
+    atomicMin(&shared_crossover_box[0], bb.x);
+    atomicMin(&shared_crossover_box[1], bb.y);
+    atomicMax(&shared_crossover_box[2], bb.z);
+    atomicMax(&shared_crossover_box[3], bb.w);
 }
 
 /// Lane 0 only, after every slot is written. Slots in [min(count_a, count_o),
@@ -255,15 +272,23 @@ fn crossover_uniform_offspring(base_rng: u32, parent_a: u32, parent_b: u32, offs
         }
         write_crossover_slot(offspring_id, min_count + rank, parent_a, count_a, poly);
     }
-    // Publishes every lane's changed-slot notes to lane 0.
+    // Publishes every lane's changed-slot notes and keep bits.
+    workgroupBarrier();
+
+    var out_count = min_count;
+    let last_word = (max_count + 31u) >> 5u;
+    for (var w = first_word; w < last_word; w++) {
+        out_count += countOneBits(atomicLoad(&shared_crossover_keep[w]));
+    }
+    // Parent A's slots past the offspring's count are removed, including any
+    // beyond a search cap lowered below its count.
+    let stored_a = chain_states[parent_a].polygon_count;
+    for (var i = out_count + lane; i < stored_a; i += PHYSICAL_WG_SIZE) {
+        merge_crossover_box(chain_states[parent_a].polygons[i]);
+    }
     workgroupBarrier();
 
     if lane == 0u {
-        var out_count = min_count;
-        let last_word = (max_count + 31u) >> 5u;
-        for (var w = first_word; w < last_word; w++) {
-            out_count += countOneBits(atomicLoad(&shared_crossover_keep[w]));
-        }
         working_states[offspring_id].polygon_count = max(out_count, 1u);
         if out_count == 0u {
             // Slot 0 of an empty parent A: the zero polygon, as a zeroed
@@ -276,9 +301,25 @@ fn crossover_uniform_offspring(base_rng: u32, parent_a: u32, parent_b: u32, offs
             working_states[offspring_id].polygons[0] = clamp_polygon_alpha(first);
         }
         write_changed_words(offspring_id, crossover_changed_words(count_a, out_count));
+        write_dirty_box(offspring_id, crossover_dirty_box(out_count));
     }
     let end = pcg_jump(max_count);
     return end.x * base_rng + end.y;
+}
+
+/// Lane 0, after crossover_uniform_offspring: the changed slots' pixel bounds;
+/// an empty rectangle for an exact copy of parent A (no tile is consumed), and
+/// the full image for the empty-offspring fallback, whose slot 0 is not tracked.
+fn crossover_dirty_box(out_count: u32) -> vec4<u32> {
+    if out_count == 0u {
+        return full_image_bbox();
+    }
+    let bb = vec4<u32>(atomicLoad(&shared_crossover_box[0]), atomicLoad(&shared_crossover_box[1]),
+                       atomicLoad(&shared_crossover_box[2]), atomicLoad(&shared_crossover_box[3]));
+    if bb.x >= bb.z || bb.y >= bb.w {
+        return vec4<u32>(0u);
+    }
+    return bb;
 }
 
 // --- Single-mutation mode (offspring-aware, with adaptive mutation scale) ---
@@ -677,6 +718,10 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
     }
     if lid.x == 0u {
         atomicStore(&shared_crossover_changed_count, 0u);
+        atomicStore(&shared_crossover_box[0], 0xFFFFFFFFu);
+        atomicStore(&shared_crossover_box[1], 0xFFFFFFFFu);
+        atomicStore(&shared_crossover_box[2], 0u);
+        atomicStore(&shared_crossover_box[3], 0u);
         var crossover = 0u;
         if group_valid {
             // Load per-offspring RNG from working_states (persistent across iterations)
@@ -708,8 +753,6 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
         let crossover_rng = crossover_uniform_offspring(
             shared_crossover_rng, chain_id, shared_crossover_parent_b, offspring_id, lid.x);
         if lid.x == 0u {
-            // Crossover dirties the full image
-            write_dirty_box(offspring_id, full_image_bbox());
             working_states[offspring_id].rng_state.x = crossover_rng;
         }
         return;
