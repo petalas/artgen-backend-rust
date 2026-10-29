@@ -259,6 +259,31 @@ class RevertSide(unittest.TestCase):
         self.assertEqual(content.split(), ["a", "c"])
         self.assertEqual(clean, "")
 
+    def test_revert_of_already_removed_change_is_rejected(self):
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        repo = Path(scratch.name) / "repo"
+        repo.mkdir()
+
+        def run(*args):
+            return hillclimb.subprocess.run(args, cwd=repo, check=True, capture_output=True,
+                                            text=True).stdout.strip()
+        run("git", "init", "-q")
+        run("git", "config", "user.email", "t@example.com")
+        run("git", "config", "user.name", "t")
+        (repo / "a").write_text("1")
+        run("git", "add", "a")
+        run("git", "commit", "-qm", "one")
+        (repo / "a").write_text("2")
+        run("git", "commit", "-qam", "two")
+        changed = run("git", "rev-parse", "HEAD")
+        (repo / "a").write_text("1")
+        run("git", "commit", "-qam", "back to one")
+        with mock.patch.object(hillclimb, "REPO", repo), \
+                mock.patch.object(hillclimb, "ROOT", Path(scratch.name) / "hc"), \
+                self.assertRaisesRegex(hillclimb.HillclimbError, "already absent"):
+            hillclimb.revert_commit(changed)
+
 
 class CommitsBehind(unittest.TestCase):
     def test_candidate_missing_control_commits_is_counted(self):

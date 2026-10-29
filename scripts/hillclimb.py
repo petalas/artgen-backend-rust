@@ -149,6 +149,9 @@ def revert_commit(spec):
                               text=True, check=True).stdout.strip()
     finally:
         subprocess.run(["git", "reset", "--hard", "--quiet", base], cwd=source, check=True)
+    # A later change may already have removed the code; measuring that is an A/A.
+    require(tree != git("rev-parse", f"{base}^{{tree}}"),
+            f"reverting {target[:10]} on {base[:10]} changes nothing; the change is already absent")
     commit = git("commit-tree", tree, "-p", base, "-m", f"hillclimb: revert {target[:10]}")
     return commit, f"revert:{target[:10]}@{base[:10]}"
 
