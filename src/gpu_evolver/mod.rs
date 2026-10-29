@@ -618,12 +618,16 @@ impl GpuEvolver {
         // Write full-image dirty bbox into each working state so the always-on
         // tile skip in rasterize_error doesn't cull any tiles.
         // Packing: fitness_bits = (min_x | min_y<<16), stagnation_counter = (max_x | max_y<<16)
+        // Also clear rng_state[1..3]: an accepted chain keeps its winner's
+        // changed indices there, and the binner and raster would then count
+        // only pixels those polygons may cover.
         let bbox_lo = 0u32; // min_x=0, min_y=0
         let bbox_hi = p.image_width | (p.image_height << 16);
         for i in 0..active as u64 {
             let base = i * state_size;
             p.queue.write_buffer(&p.working_states_buf, base + 4, &bbox_lo.to_le_bytes());
             p.queue.write_buffer(&p.working_states_buf, base + 12, &bbox_hi.to_le_bytes());
+            p.queue.write_buffer(&p.working_states_buf, base + 20, &[0u8; 12]);
         }
 
         // Submit 2: bin polygons + rasterize_error

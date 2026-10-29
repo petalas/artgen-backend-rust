@@ -63,6 +63,7 @@ fn main() {
     assert!(evolver.readback_chain(0).polygons.is_empty());
     drop(evolver);
     verify_mixed_reference(&empty);
+    verify_full_recompute_after_evolution();
     println!("GPU rasterization checks passed");
 }
 
@@ -333,5 +334,80 @@ fn verify_workgroup(
         }
         evolver.reinit_chains(empty);
         assert_eq!(evolver.evaluate_chain_fitness(2), 0.0);
+    }
+}
+
+fn scattered_triangles(count: usize) -> Drawing {
+    // Small triangles on a grid, so a changed polygon meets few raster tiles.
+    let side = (count as f32).sqrt().ceil() as usize;
+    let cell = 1.0 / side as f32;
+    Drawing {
+        polygons: (0..count)
+            .map(|i| {
+                let (x, y) = ((i % side) as f32 * cell, (i / side) as f32 * cell);
+                let shade = (i * 37 % 256) as u8;
+                Polygon {
+                    points: vec![
+                        Point { x, y },
+                        Point { x: x + cell, y },
+                        Point { x, y: y + cell },
+                    ],
+                    color: Color {
+                        r: shade,
+                        g: 255 - shade,
+                        b: 128,
+                        a: 160,
+                    },
+                }
+            })
+            .collect(),
+        is_dirty: false,
+        fitness: 0.0,
+    }
+}
+
+fn verify_full_recompute_after_evolution() {
+    // A full recompute after accepted winners must match the incremental
+    // fitness of every chain. Accepted chains keep the winner's change record,
+    // which the batch shortcuts read; the full evaluation must not.
+    const SIDE: u32 = 96;
+    const CHAINS: u32 = 4;
+    let reference: Vec<u8> = (0..SIDE * SIDE)
+        .flat_map(|i| {
+            let (x, y) = (i % SIDE, i / SIDE);
+            [(x * 255 / SIDE) as u8, (y * 255 / SIDE) as u8, 96, 255]
+        })
+        .collect();
+    let drawing = scattered_triangles(64);
+    let params = MutationParams {
+        chain_count: CHAINS,
+        gpu_batch_iters: 16,
+        ..Default::default()
+    };
+    let mut evolver =
+        futures_lite::future::block_on(GpuEvolver::new(&reference, SIDE, SIDE, &drawing));
+    evolver
+        .prepare_seeded_benchmark(&drawing, &params, 11, 0, true)
+        .expect("full-recompute preparation failed");
+    let start = evolver.chain_fitness()[..CHAINS as usize].to_vec();
+    let mut incremental = start.clone();
+    for _ in 0..64 {
+        evolver.run_batch(&params, true);
+        evolver.flush_pending();
+        incremental = evolver.chain_fitness()[..CHAINS as usize].to_vec();
+        if incremental.iter().zip(&start).all(|(now, before)| now > before) {
+            break;
+        }
+    }
+    assert!(
+        incremental.iter().zip(&start).all(|(now, before)| now > before),
+        "every chain must accept a winner: start={start:?}, now={incremental:?}"
+    );
+    evolver.evaluate_chain_fitness(CHAINS);
+    for (chain, (before, after)) in incremental.iter().zip(evolver.chain_fitness()).enumerate() {
+        assert!(
+            (before - after).abs() < 0.001,
+            "chain {chain}: incremental={before}, full={after}"
+        );
     }
 }
