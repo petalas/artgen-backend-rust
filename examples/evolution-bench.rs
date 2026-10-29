@@ -3,6 +3,7 @@
 use anyhow::{bail, ensure, Context, Result};
 use artgen_backend_rust::benchmark::{
     fixtures,
+    quality::QualitySpec,
     trial::{self, ResidentCase, TimestampMode, TrialSpec},
 };
 use std::{
@@ -13,9 +14,9 @@ use std::{
 
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
-    let command = args
-        .next()
-        .context("expected freeze or trial; use scripts/evolution-bench.py --help")?;
+    let command = args.next().context(
+        "expected freeze, trial, quality or serve; use scripts/evolution-bench.py --help",
+    )?;
     let flags: Vec<_> = args.collect();
     let mut values = parse_flags(&flags)?;
     match command.as_str() {
@@ -42,6 +43,7 @@ fn main() -> Result<()> {
                 "trial failed numerical or completion gates"
             );
         }
+        "quality" => quality(values)?,
         "serve" => {
             ensure!(values.len() == 1, "serve expects only --manifest");
             serve(&path(&values, "manifest")?)?;
@@ -51,34 +53,80 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Read one trial request per stdin line, using the `trial` flags without
-/// `--manifest`. Each case's engine is built once on first use, so driver
-/// shader compilation is paid once per case instead of once per trial. Answers
-/// are `@result {json}` lines; other stdout lines are engine logs. Requests that
-/// fail before producing a record end the process, because the engine state is
-/// then unknown.
+/// One blank-start quality run in its own process (the supervisor uses `serve`).
+fn quality(mut values: BTreeMap<String, String>) -> Result<()> {
+    let manifest = path(&values, "manifest")?;
+    values.remove("manifest");
+    let (spec, output) = quality_spec(values)?;
+    let mut case = ResidentCase::open(&manifest, &spec.case_id)?;
+    let record = case.run_quality(&spec, &output)?;
+    println!("{}", serde_json::to_string(&record)?);
+    ensure!(
+        record.errors.is_empty(),
+        "quality run reported device errors"
+    );
+    Ok(())
+}
+
+/// Read one request per stdin line: the `trial` flags without `--manifest`, or
+/// `quality` followed by the `quality` flags without `--manifest`. Each case's
+/// engine is built once on first use, so driver shader compilation is paid once
+/// per case instead of once per request. Answers are `@result {json}` lines;
+/// other stdout lines are engine logs. Requests that fail before producing a
+/// record end the process, because the engine state is then unknown.
 fn serve(manifest: &Path) -> Result<()> {
     let mut cases: BTreeMap<String, ResidentCase> = BTreeMap::new();
     let mut stdout = std::io::stdout();
     for line in std::io::stdin().lock().lines() {
         let line = line?;
-        let words: Vec<String> = line.split_whitespace().map(str::to_owned).collect();
-        let (spec, output) = trial_spec(parse_flags(&words)?)?;
-        ensure!(
-            fixtures::PROJECTS.contains(&spec.case_id.as_str()),
-            "unknown case {}",
-            spec.case_id
-        );
-        if !cases.contains_key(&spec.case_id) {
-            let case = ResidentCase::open(manifest, &spec.case_id)?;
-            cases.insert(spec.case_id.clone(), case);
+        let mut words: Vec<String> = line.split_whitespace().map(str::to_owned).collect();
+        let quality = words.first().is_some_and(|word| word == "quality");
+        if quality {
+            words.remove(0);
         }
-        let case = cases.get_mut(&spec.case_id).context("resident case")?;
-        let record = case.run(&spec, &output)?;
-        writeln!(stdout, "@result {}", serde_json::to_string(&record)?)?;
+        let values = parse_flags(&words)?;
+        let case_id = value(&values, "case")?.to_owned();
+        ensure!(
+            fixtures::PROJECTS.contains(&case_id.as_str()),
+            "unknown case {case_id}"
+        );
+        if !cases.contains_key(&case_id) {
+            let case = ResidentCase::open(manifest, &case_id)?;
+            cases.insert(case_id.clone(), case);
+        }
+        let case = cases.get_mut(&case_id).context("resident case")?;
+        let reply = if quality {
+            let (spec, output) = quality_spec(values)?;
+            serde_json::to_string(&case.run_quality(&spec, &output)?)?
+        } else {
+            let (spec, output) = trial_spec(values)?;
+            serde_json::to_string(&case.run(&spec, &output)?)?
+        };
+        writeln!(stdout, "@result {reply}")?;
         stdout.flush()?;
     }
     Ok(())
+}
+
+/// `--params` is a compact JSON object of camelCase `MutationParams` fields
+/// merged onto the defaults (no whitespace, since requests split on it).
+fn quality_spec(mut values: BTreeMap<String, String>) -> Result<(QualitySpec, PathBuf)> {
+    let overrides = match values.remove("params") {
+        None => serde_json::Map::new(),
+        Some(json) => serde_json::from_str(&json).context("--params must be a JSON object")?,
+    };
+    ensure!(
+        values.len() == 5,
+        "quality expects case, seed, seconds, warmup, output and optional params"
+    );
+    let spec = QualitySpec {
+        case_id: value(&values, "case")?.into(),
+        seed: value(&values, "seed")?.parse()?,
+        seconds: value(&values, "seconds")?.parse()?,
+        warmup_batches: value(&values, "warmup")?.parse()?,
+        overrides,
+    };
+    Ok((spec, path(&values, "output")?))
 }
 
 fn trial_spec(mut values: BTreeMap<String, String>) -> Result<(TrialSpec, PathBuf)> {

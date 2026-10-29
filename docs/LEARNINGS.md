@@ -12,6 +12,12 @@ Project-specific gotchas and hard-won knowledge. Search here when you hit unexpe
 
 -->
 
+### Blank-start darwin overflows the tile bin and reports fake fitness
+
+**Context**: Long-run quality runs (`scripts/quality.py`) evolve a blank drawing on the frozen fixtures.
+**Gotcha**: On darwin (298x384, dark), delivered GPU fitness jumped from 91% to 99.97% around batch 30 (~295 triangles) and then stalled, while batches ran ~10x slower than on ff. The scalar renderer scored the same drawing at 81.4%. Its final drawing had 9 of 240 tiles above `TILE_MAX_POLYS` (256, max 274), so the raster silently drops polygons and its error is wrong. ff and mona agreed with the scalar renderer to 1e-4 at 20 s (829 and 637 triangles). Mature-start trials check overflow, but a blank start piles large dark triangles over a white canvas. The app can hit this too.
+**Fix**: None in the engine yet. The quality recorder scores the final delivered drawing with `reference::evaluate` and records `reference::complexity`; a gap above 0.05 points fails the run. Leave darwin out of quality runs until tile-bin overflow is handled.
+
 ### Comparison wrappers must handle termination around the shared benchmark lock
 
 **Context**: Reusing `scripts/evolution-bench.py` process helpers for paired engine experiments.

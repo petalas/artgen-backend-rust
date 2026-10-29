@@ -12,6 +12,7 @@ use serde::Serialize;
 use super::{
     fixtures::{self, LoadedFixture, PROTOCOL_VERSION},
     qualification::{measure, state_hash, work_is_complete, Measurement, RecordPurpose},
+    quality,
     reference::{self, Complexity},
     uncertainty::{self, PixelAudit},
 };
@@ -216,6 +217,22 @@ impl ResidentCase {
     pub fn run(&mut self, spec: &TrialSpec, output: &Path) -> Result<TrialRecord> {
         validate_budget(spec, output)?;
         self.run_from(spec, output, Instant::now())
+    }
+
+    /// Run one blank-start quality trajectory on the resident engine.
+    ///
+    /// # Errors
+    /// Rejects a mismatched case and everything `quality::run` rejects.
+    pub fn run_quality(
+        &mut self,
+        spec: &quality::QualitySpec,
+        output: &Path,
+    ) -> Result<quality::QualityRecord> {
+        ensure!(
+            spec.case_id == self.input.fixture.id,
+            "quality case differs from resident case"
+        );
+        quality::run(&mut self.evolver, &self.input, spec, output)
     }
 
     fn run_from(&mut self, spec: &TrialSpec, output: &Path, setup: Instant) -> Result<TrialRecord> {

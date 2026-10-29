@@ -5,6 +5,7 @@ pub use artgen_shared::benchmark::{
 
 pub mod fixtures;
 pub mod qualification;
+pub mod quality;
 pub mod reference;
 pub mod trial;
 pub mod uncertainty;

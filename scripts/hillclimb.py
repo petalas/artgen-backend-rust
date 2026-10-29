@@ -242,19 +242,23 @@ class Server:
         self.lines.put(None)
 
     def trial(self, case, seed, batches, warmup, output):
-        request = (f"--case {case} --seed {seed} --batches {batches} --warmup {warmup} "
-                   f"--diagnostic false --output {output}\n")
+        return self.request(f"--case {case} --seed {seed} --batches {batches} "
+                            f"--warmup {warmup} --diagnostic false --output {output}",
+                            self.timeout)
+
+    def request(self, request, timeout):
+        """Send one request line; return its `@result` record (also used by quality.py)."""
         try:
-            self.process.stdin.write(request)
+            self.process.stdin.write(request + "\n")
             self.process.stdin.flush()
         except BrokenPipeError:
             raise HillclimbError(f"{self.name}: server exited; see {self.stderr.name}") from None
-        deadline = time.monotonic() + self.timeout
+        deadline = time.monotonic() + timeout
         while True:
             try:
                 line = self.lines.get(timeout=max(0.0, deadline - time.monotonic()))
             except queue.Empty:
-                raise HillclimbError(f"{self.name}: no result within {self.timeout}s") from None
+                raise HillclimbError(f"{self.name}: no result within {timeout}s") from None
             require(line is not None, f"{self.name}: server exited; see {self.stderr.name}")
             if line.startswith("@result "):
                 return json.loads(line[len("@result "):])
