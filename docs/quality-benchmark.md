@@ -221,3 +221,26 @@ Evidence: `.cache/quality/runs/20261029T164405Z-p_5yl0m9` (ff),
 
 Default cap raised to 2000 after this sweep. Results above and the master
 baseline were measured with the old default of 1000.
+
+## Population shape sweep, 2026-10-29
+
+`62a961c` (cap 2000), 256 offspring per iteration split as chains × λ,
+3 seeds × 300 s. Unpenalized remaining error relative to 4×64 (the
+default), and batches completed in 300 s:
+
+| Shape | T | ff | mona | darwin |
+| --- | --- | --- | --- | --- |
+| 16×16 | 30 s | 1.052 WORSE | 1.017 NOISE | 1.084 NOISE |
+| 16×16 | 300 s | 1.031 NOISE | 1.013 NOISE | 1.053 NOISE |
+| 64×4 | 30 s | 1.320 WORSE | 1.162 WORSE | 1.134 WORSE |
+| 64×4 | 300 s | 1.090 WORSE | 1.082 WORSE | 1.043 WORSE |
+| batches, 4×64 / 16×16 / 64×4 | 300 s | 25k / 23k / 12k | 17k / 14k / 6k | 6–18k / 6–7k / 5–6k |
+
+- The default 4×64 stays best. Larger populations close most of the gap by
+  300 s, but 64×4 completes half as many batches (same evaluations per
+  batch), so part of its deficit is engine cost per chain, not search.
+- Darwin's batch rate varies 3x between seeds of one side; its intervals are
+  wide.
+
+Evidence: `.cache/quality/runs/` for the "population shape sweep" rows in
+`benchmarks/quality/log.tsv`.
