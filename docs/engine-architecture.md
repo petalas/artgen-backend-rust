@@ -21,7 +21,8 @@ Two numbers bound a drawing's triangles:
   what a state can hold: `drawing_to_gpu`, `tile_fit`, snapshot decoding, the
   scalar reference, fixture and benchmark drawing validation.
 - **Search cap** (`MutationParams::max_polygons`, default
-  `settings::DEFAULT_MAX_POLYGONS` = 1000) is a runtime setting passed in
+  `settings::DEFAULT_MAX_POLYGONS` = 2000, raised from 1000 after the
+  cap sweep in docs/quality-benchmark.md) is a runtime setting passed in
   `GpuParams`. Mutation and crossover add no triangle beyond it. `sanitize`
   clamps it to the capacity; the viewer's sliders stop there. The CPU `Engine`
   path has no parameters and keeps the default cap.

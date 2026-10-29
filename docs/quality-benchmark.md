@@ -11,7 +11,7 @@ search changes. Sides can differ by build, by settings, or both.
 scripts/quality.py --side master=master --images ff,mona --seeds 5 --seconds 300   # characterize
 scripts/quality.py --side control=HEAD --side cand=WORKTREE                          # build A/B
 scripts/quality.py --side control=HEAD --side nox=HEAD --params 'nox={"crossover_prob":0}'
-scripts/quality.py --side cap1000=HEAD --side cap2000=HEAD --params 'cap2000={"max_polygons":2000}'
+scripts/quality.py --side cap2000=HEAD --side cap1000=HEAD --params 'cap1000={"max_polygons":1000}'
 scripts/quality.py --side p1=HEAD --side p16=HEAD --params 'p16={"per_point_penalty":3.2e-6}'
 scripts/quality.py --side a=HEAD --side b=HEAD --seconds 20 --seeds 2                # A/A
 ```
@@ -24,7 +24,7 @@ scripts/quality.py --side a=HEAD --side b=HEAD --seconds 20 --seeds 2           
   onto `MutationParams::default()`. Keys may be snake_case or camelCase. The engine
   rejects unknown fields, wrong types and values that `sanitize` would change.
   Two settings shape the late game: `max_polygons`, the search cap (default
-  1000, at most the polygon capacity 2048; see
+  2000 since the cap sweep below; 1000 before, at most the polygon capacity 2048; see
   [engine architecture](engine-architecture.md#polygon-capacity-and-the-search-cap)),
   and `per_point_penalty` (default 2e-7 = 1/5e6, at most 1e-4), the fitness
   factor `1 - penalty * points`. One build serves every cap and penalty, so such
@@ -218,3 +218,6 @@ unpenalized ratios agree within 2%.
 
 Evidence: `.cache/quality/runs/20261029T164405Z-p_5yl0m9` (ff),
 `20261029T174525Z-jf8bdj4a` (mona), `20261029T184656Z-pm8z1wan` (darwin).
+
+Default cap raised to 2000 after this sweep. Results above and the master
+baseline were measured with the old default of 1000.

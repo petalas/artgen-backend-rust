@@ -40,7 +40,7 @@ pub const MAX_ALPHA: u8 = 65;
 pub const POLYGON_CAPACITY: usize = 2048;
 /// The default runtime search cap, `MutationParams::max_polygons`. Mutation adds
 /// no triangle beyond it. At most `POLYGON_CAPACITY`.
-pub const DEFAULT_MAX_POLYGONS: u32 = 1000;
+pub const DEFAULT_MAX_POLYGONS: u32 = 2000;
 pub const MIN_POLYGONS_PER_IMAGE: usize = 1;
 const _: () = assert!(DEFAULT_MAX_POLYGONS as usize <= POLYGON_CAPACITY);
 

@@ -1323,7 +1323,8 @@ mod tests {
                 max_storage_buffer_binding_size: 0,
                 max_buffer_size: 0,
             },
-            params: MutationParams::default(),
+            // The frozen v1 manifest's settings, which predate the 2000 cap.
+            params: MutationParams { max_polygons: 1000, ..MutationParams::default() },
             timestamp_samples: 0,
             sampled_gpu_stage_totals_ns: [0.0; 4],
             timestamp_mode: TimestampMode::Stages,
