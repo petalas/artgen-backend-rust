@@ -64,6 +64,7 @@ fn main() {
     drop(evolver);
     verify_mixed_reference(&empty);
     verify_full_recompute_after_evolution();
+    verify_shortcuts_near_polygon_capacity();
     println!("GPU rasterization checks passed");
 }
 
@@ -266,11 +267,22 @@ fn assert_cached_byte_l1(
     reference: &[u8],
     context: &str,
 ) -> BenchmarkSnapshot {
-    let snapshot = evolver.benchmark_snapshot(2, 1).expect("snapshot failed");
     assert_eq!(reference.len(), 17 * 19 * 4);
-    assert_eq!(snapshot.parent_framebuffers.len(), 2);
+    assert_chains_cached_byte_l1(evolver, reference, [2, 1], context)
+}
+
+/// Every cached parent framebuffer's byte L1 from `reference` equals its cached
+/// total, and its fitness follows. `[chains, lambda]` is the run's workload.
+fn assert_chains_cached_byte_l1(
+    evolver: &mut GpuEvolver,
+    reference: &[u8],
+    [chains, lambda]: [u32; 2],
+    context: &str,
+) -> BenchmarkSnapshot {
+    let snapshot = evolver.benchmark_snapshot(chains, lambda).expect("snapshot failed");
+    assert_eq!(snapshot.parent_framebuffers.len(), chains as usize);
     for (chain, pixels) in snapshot.parent_framebuffers.iter().enumerate() {
-        assert_eq!(pixels.len(), 17 * 19);
+        assert_eq!(pixels.len() * 4, reference.len());
         let raw_error: u32 = pixels
             .iter()
             .zip(reference.chunks_exact(4))
@@ -410,4 +422,55 @@ fn verify_full_recompute_after_evolution() {
             "chain {chain}: incremental={before}, full={after}"
         );
     }
+}
+
+fn verify_shortcuts_near_polygon_capacity() {
+    // Parents of up to 1000 polygons: select's chain change record no longer
+    // lives in polygon slots 996..999, so the framebuffer update keeps its
+    // unchanged-pixel shortcut at capacity. Accepted winners must leave cached
+    // framebuffers, cached totals and a full recompute in exact agreement.
+    const SIDE: u32 = 96;
+    const CHAINS: u32 = 4;
+    let reference: Vec<u8> = (0..SIDE * SIDE)
+        .flat_map(|i| {
+            let (x, y) = (i % SIDE, i / SIDE);
+            let shade = |v: u32| u8::try_from(v * 255 / SIDE).unwrap();
+            [shade(x), 160, shade(y), 255]
+        })
+        .collect();
+    let drawing = scattered_triangles(999);
+    let params = MutationParams {
+        chain_count: CHAINS,
+        gpu_batch_iters: 16,
+        ..Default::default()
+    };
+    assert_eq!(params.max_polygons, 1000);
+    let workload = [CHAINS, params.lambda];
+    let mut evolver =
+        futures_lite::future::block_on(GpuEvolver::new(&reference, SIDE, SIDE, &drawing));
+    evolver
+        .prepare_seeded_benchmark(&drawing, &params, 5, 0, true)
+        .expect("capacity preparation failed");
+    let start = evolver.chain_fitness()[..CHAINS as usize].to_vec();
+    let mut improved = false;
+    for _ in 0..32 {
+        evolver.run_batch(&params, true);
+        evolver.flush_pending();
+        let now = &evolver.chain_fitness()[..CHAINS as usize];
+        improved = now.iter().zip(&start).all(|(now, before)| now > before);
+        if improved {
+            break;
+        }
+    }
+    assert!(improved, "every chain must accept a winner near capacity");
+    let cached = assert_chains_cached_byte_l1(&mut evolver, &reference, workload, "near capacity");
+    let counts: Vec<_> = cached.parents.iter().map(|p| p.polygon_count).collect();
+    assert!(counts.iter().all(|&count| count > 996), "counts {counts:?}");
+    evolver.evaluate_chain_fitness(CHAINS);
+    let full = assert_chains_cached_byte_l1(&mut evolver, &reference, workload, "near capacity, full");
+    assert_eq!(
+        cached.parent_total_errors, full.parent_total_errors,
+        "incremental and full totals near capacity (counts {counts:?})"
+    );
+    println!("near-capacity shortcut check: counts {counts:?}, totals {:?}", full.parent_total_errors);
 }

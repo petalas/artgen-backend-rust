@@ -9,16 +9,17 @@
 // out keeps every offspring's error bit-identical. (Running a tile of the second
 // kind would add each pixel's old error to both sums, which select subtracts
 // again.) Exact copies (NO_CHANGES) list no index and need no tile. The first
-// test is tiles.wgsl's tile_consumed; the second must stay identical to
-// bin_polygons.wgsl's.
+// test is tiles.wgsl's tile_consumed, the second offspring_changes.wgsl's
+// changed_meets_rect, as in bin_polygons.wgsl.
 //
 // raster_work layout (u32 words): [0] entry count, [1 + i] entry i =
 // offspring * num_tiles + tile_id. update_framebuffers resets the count at the
 // end of every iteration; the host resets it around a full evaluation. Entry
 // order is unspecified: raster only adds integer sums.
 //
-// common.wgsl, tiles.wgsl and the generated constants (TILE_W, TILE_H,
-// TILE_MAX_POLYS, WORK_COUNT, WORK_ENTRIES) are appended by programs.rs.
+// common.wgsl, changes.wgsl, offspring_changes.wgsl, tiles.wgsl and the
+// generated constants (TILE_W, TILE_H, TILE_MAX_POLYS, CHANGED_INDICES,
+// WORK_COUNT, WORK_ENTRIES) are appended by programs.rs.
 const LANES: u32 = 64u;
 
 @group(0) @binding(0) var<storage, read>       working_states: array<DrawingState>;
@@ -26,47 +27,6 @@ const LANES: u32 = 64u;
 @group(0) @binding(2) var<storage, read>       tile_counts:    array<u32>;
 @group(0) @binding(3) var<storage, read_write> raster_work:    array<atomic<u32>>;
 @group(1) @binding(0) var<uniform>             params:         Params;
-
-// Must match rasterize_error.wgsl.
-const CHANGED_INDICES: u32 = 4u;
-const COVER_MARGIN: f32 = 1e-5;
-
-// Same box as rasterize_error's decode_changed.
-fn changed_may_meet_tile(poly: Polygon, lo: vec2<f32>, hi: vec2<f32>) -> bool {
-    let pv0 = unpack_vertex(poly.data.y);
-    let pv1 = unpack_vertex(poly.data.z);
-    let pv2 = unpack_vertex(poly.data.w);
-    let bb_min_x = min(pv0.x, min(pv1.x, pv2.x));
-    let bb_max_x = max(pv0.x, max(pv1.x, pv2.x));
-    let bb_min_y = min(pv0.y, min(pv1.y, pv2.y));
-    let bb_max_y = max(pv0.y, max(pv1.y, pv2.y));
-    return hi.x >= bb_min_x - COVER_MARGIN && lo.x <= bb_max_x + COVER_MARGIN &&
-           hi.y >= bb_min_y - COVER_MARGIN && lo.y <= bb_max_y + COVER_MARGIN;
-}
-
-// Whether any parent or offspring version of the listed changed indices may
-// cover a pixel of the tile. Indices at or beyond a drawing's count are empty.
-fn changed_meets_tile(
-    changed: vec2<u32>, parent_chain: u32, chain_id: u32, lo: vec2<f32>, hi: vec2<f32>,
-) -> bool {
-    let parent_count = chain_states[parent_chain].polygon_count;
-    let offspring_count = working_states[chain_id].polygon_count;
-    var meets = false;
-    for (var half = 0u; half < CHANGED_INDICES; half++) {
-        let word = select(changed.x, changed.y, half >= 2u);
-        let encoded = (word >> (16u * (half & 1u))) & 0xFFFFu;
-        if encoded != 0u {
-            let idx = encoded - 1u;
-            if idx < parent_count {
-                meets = meets || changed_may_meet_tile(chain_states[parent_chain].polygons[idx], lo, hi);
-            }
-            if idx < offspring_count {
-                meets = meets || changed_may_meet_tile(working_states[chain_id].polygons[idx], lo, hi);
-            }
-        }
-    }
-    return meets;
-}
 
 // Whether rasterize_error has work in this tile (the negation of its former
 // early returns).
@@ -86,19 +46,14 @@ fn tile_needed(chain_id: u32, parent_chain: u32, tile_x: u32, tile_y: u32,
     let num_tiles = num_tiles_x * grid.y;
     let tile_id = tile_y * num_tiles_x + tile_x;
     let raw_count = tile_counts[chain_id * num_tiles + tile_id];
-    let first = working_states[chain_id].rng_state.y;
-    var second = 0u;
-    if first != 0u {
-        second = working_states[chain_id].rng_state.z;
-    }
-    let listed = select(2u, CHANGED_INDICES, second != 0u);
-    if raw_count + listed > TILE_MAX_POLYS || first == 0u {
+    let changed = changes_shortcut(offspring_changed_words(chain_id), raw_count);
+    if changed.x == 0u {
         // Shortcut disabled: every pixel blends.
         return true;
     }
     let tile_lo = vec2<f32>(f32(tile_min_x) / f32(w), f32(tile_min_y) / f32(h));
     let tile_hi = vec2<f32>(f32(tile_max_x) / f32(w), f32(tile_max_y) / f32(h));
-    return changed_meets_tile(vec2<u32>(first, second), parent_chain, chain_id, tile_lo, tile_hi);
+    return changed_meets_rect(changed, parent_chain, chain_id, tile_lo, tile_hi);
 }
 
 @compute @workgroup_size(LANES, 1, 1)
@@ -119,8 +74,8 @@ fn main(
     let num_tiles_y = grid.y;
     let num_tiles = num_tiles_x * num_tiles_y;
 
-    let dirty_min = unpack_dirty_corner(working_states[chain_id].fitness_bits);
-    let dirty_max = unpack_dirty_corner(working_states[chain_id].stagnation_counter);
+    let dirty_min = offspring_dirty_min(chain_id);
+    let dirty_max = offspring_dirty_max(chain_id);
 
     // Superset of the consumed tiles; tile_needed applies the exact test.
     // Columns before col_lo end at or before dirty_min.x and columns from col_hi

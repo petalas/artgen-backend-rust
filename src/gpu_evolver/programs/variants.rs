@@ -800,7 +800,8 @@ mod benchmark_tests {
     #[test]
     fn mutate_source_boundaries_need_no_specialization_markers() {
         let original = &bundled_shader_source(BundledShader::Mutate);
-        assert!(!original.contains("const TILE_"));
+        assert!(!original.contains("const TILE_W"));
+        assert!(!original.contains("const TILE_H"));
         assert!(!original.contains("const WG_X"));
         assert!(!original.contains("const WG_Y"));
         validate_benchmark_mutate_source(original).unwrap();

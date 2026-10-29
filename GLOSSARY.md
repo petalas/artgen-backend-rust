@@ -23,6 +23,10 @@ from the number of physical lanes in that workgroup.
 A new seeded search starting from an existing drawing, without its previous search
 history.
 
+**Change record**:
+The polygons an evaluated drawing changed relative to the drawing whose pixels
+are cached. An unknown record turns off the shortcuts that skip unchanged pixels.
+
 **Shader variant**:
 An alternative program for an evolution stage that preserves the search's fixed
 evolutionary rules.

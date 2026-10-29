@@ -8,6 +8,10 @@ use super::execution::{AllocationPlan, RasterGrid, ResourceSizes, Workload};
 use super::buffers::{
     ControlFlags, GpuDrawingState, GpuParams, GPU_DRAWING_STATE_SIZE,
 };
+use super::changes::{
+    pack_dirty_box, ChangedIndices, CHANGED_WORDS_OFFSET, DIRTY_MAX_OFFSET, DIRTY_MIN_OFFSET,
+    GPU_CHAIN_CHANGE_SIZE,
+};
 
 use super::programs::{GpuPrograms, ProgramBindings, RasterSchedule, WorklistStorage};
 
@@ -44,6 +48,10 @@ pub struct GpuPipeline {
     pub chain_framebuffers_buf: Buffer,
     pub chain_total_errors_buf: Buffer,
     pub chain_update_flags_buf: Buffer,
+    // One change record per chain (changes::GpuChainChange): select writes it,
+    // update_framebuffers reads it. Only write_chain_states and
+    // forget_chain_changes write it from the host.
+    pub(super) chain_changes_buf: Buffer,
 
     // Selected programs, specialization and compilation caches share one owner.
     pub(super) programs: GpuPrograms,
@@ -129,7 +137,7 @@ impl GpuPipeline {
             max_compute_workgroups_per_dimension: 65535,
             max_compute_invocations_per_workgroup: 512,
             max_compute_workgroup_size_x: 512, // 1D workgroup layout needs up to 512 in x (for 32x16 tile)
-            max_storage_buffers_per_shader_stage: 7, // select uses 7 bindings (chain_states, working_states, error_accum, control, fitness, chain_update_flags, chain_total_errors)
+            max_storage_buffers_per_shader_stage: 8, // select uses 8 bindings (chain_states, working_states, error_accum, control, fitness, chain_update_flags, chain_total_errors, chain_changes)
             ..Limits::downlevel_defaults()
         };
 
@@ -365,6 +373,14 @@ impl GpuPipeline {
             mapped_at_creation: false,
         });
 
+        // Zero-initialized: every chain's change record is unknown.
+        let chain_changes_buf = device.create_buffer(&BufferDescriptor {
+            label: Some("chain_changes"),
+            size: resources.chain_changes,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         let max_incr_chains = chain_framebuffers_size / (pixels_per_chain * 4);
         println!(
             "Incremental eval buffers allocated: framebuffers {:.1} MB ({} chains max), total_errors {} bytes",
@@ -547,7 +563,7 @@ impl GpuPipeline {
         });
 
         // Select: chain_states(rw), working_states(read), error_accumulators(rw), control(rw), fitness_packed(rw),
-        //         chain_update_flags(rw), chain_total_errors(rw); params via push constants
+        //         chain_update_flags(rw), chain_total_errors(rw), chain_changes(rw); params via push constants
         let select_bgl = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some("select_bgl"),
             entries: &[
@@ -621,6 +637,7 @@ impl GpuPipeline {
                     },
                     count: None,
                 },
+                storage_entry(7, false, GPU_CHAIN_CHANGE_SIZE as u64),
             ],
         });
 
@@ -702,7 +719,8 @@ impl GpuPipeline {
             ],
         });
         // Update framebuffers: chain_states(read), chain_framebuffers(rw), chain_update_flags(read),
-        // tile_data(read), tile_counts(read) — the winning offspring's tile polygon lists
+        // tile_data(read), tile_counts(read) — the winning offspring's tile polygon lists —,
+        // raster_work(rw), chain_changes(read)
         let update_framebuffers_bgl = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some("update_framebuffers_bgl"),
             entries: &[
@@ -757,6 +775,7 @@ impl GpuPipeline {
                     count: None,
                 },
                 storage_entry(5, false, 4),
+                storage_entry(6, true, GPU_CHAIN_CHANGE_SIZE as u64),
             ],
         });
         let programs = GpuPrograms::new(
@@ -822,6 +841,7 @@ impl GpuPipeline {
                 BindGroupEntry { binding: 4, resource: fitness_packed_buf.as_entire_binding() },
                 BindGroupEntry { binding: 5, resource: chain_update_flags_buf.as_entire_binding() },
                 BindGroupEntry { binding: 6, resource: chain_total_errors_buf.as_entire_binding() },
+                BindGroupEntry { binding: 7, resource: chain_changes_buf.as_entire_binding() },
             ],
         });
 
@@ -835,6 +855,7 @@ impl GpuPipeline {
                 BindGroupEntry { binding: 3, resource: tile_data_buf.as_entire_binding() },
                 BindGroupEntry { binding: 4, resource: tile_counts_buf.as_entire_binding() },
                 BindGroupEntry { binding: 5, resource: raster_work_buf.as_entire_binding() },
+                BindGroupEntry { binding: 6, resource: chain_changes_buf.as_entire_binding() },
             ],
         });
 
@@ -870,6 +891,7 @@ impl GpuPipeline {
             chain_framebuffers_buf,
             chain_total_errors_buf,
             chain_update_flags_buf,
+            chain_changes_buf,
             programs,
             timestamp_query_set,
             timestamp_resolve_buf,
@@ -906,7 +928,7 @@ impl GpuPipeline {
             tile_counts: self.tile_counts_buf.size(), raster_work: self.raster_work_buf.size(),
             framebuffers: self.chain_framebuffers_buf.size(),
             parent_errors: self.chain_total_errors_buf.size(), updates: self.chain_update_flags_buf.size(),
-            fitness: self.fitness_packed_buf.size(),
+            chain_changes: self.chain_changes_buf.size(), fitness: self.fitness_packed_buf.size(),
         }
     }
 
@@ -954,6 +976,52 @@ impl GpuPipeline {
     /// empties it inside). Takes effect at the next submission.
     pub fn reset_raster_work(&self) {
         self.queue.write_buffer(&self.raster_work_buf, 0, &[0; 4]);
+    }
+
+    /// Replace the first `states.len()` parent states. Takes effect at the next
+    /// submission, and forgets every chain change record with them.
+    ///
+    /// # Panics
+    /// Panics if there are more states than chains.
+    pub fn write_chain_states(&self, states: &[GpuDrawingState]) {
+        assert!(
+            states.len() <= self.chain_count as usize,
+            "{} states for {} chains",
+            states.len(),
+            self.chain_count
+        );
+        self.queue.write_buffer(&self.chain_states_buf, 0, bytemuck::cast_slice(states));
+        self.forget_chain_changes();
+    }
+
+    /// Mark every chain change record unknown, so no shortcut can read one that
+    /// describes an earlier drawing. The sole host writer of `chain_changes`.
+    /// select rewrites a chain's record whenever it accepts a winner, and
+    /// `update_framebuffers` reads it only in that iteration, so the batch loop
+    /// never needs this. Takes effect at the next submission.
+    pub(super) fn forget_chain_changes(&self) {
+        let bytes = usize::try_from(self.chain_changes_buf.size())
+            .expect("chain change records fit host memory");
+        self.queue.write_buffer(&self.chain_changes_buf, 0, &vec![0; bytes]);
+    }
+
+    /// Prepare working states `0..count`, copies of parents, for a full
+    /// evaluation: the whole image is dirty and the changed indices are
+    /// unknown, so binning and raster take no shortcut. Takes effect at the
+    /// next submission.
+    pub(super) fn mark_full_evaluation(&self, count: u32) {
+        assert!(count <= self.offspring_capacity, "{count} exceeds offspring capacity");
+        let [lo, hi] = pack_dirty_box([0, 0, self.image_width, self.image_height]);
+        let [lo, hi] = [lo.to_le_bytes(), hi.to_le_bytes()];
+        let changed: [u8; 8] = bytemuck::cast(ChangedIndices::UNKNOWN.0);
+        let words: [(u64, &[u8]); 3] =
+            [(DIRTY_MIN_OFFSET, &lo), (DIRTY_MAX_OFFSET, &hi), (CHANGED_WORDS_OFFSET, &changed)];
+        for i in 0..u64::from(count) {
+            let base = i * GPU_DRAWING_STATE_SIZE as u64;
+            for (offset, bytes) in words {
+                self.queue.write_buffer(&self.working_states_buf, base + offset, bytes);
+            }
+        }
     }
 
     /// Installed selection handle.

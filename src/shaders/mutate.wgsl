@@ -3,8 +3,8 @@
 // Compact leaders apply the original mutations after both barriers.
 // Single-pass: tries all mutations once, then forces a vertex micro-nudge if none fired.
 
-// common.wgsl and the generated constant POLYGON_CAPACITY are appended by
-// programs.rs.
+// common.wgsl, changes.wgsl and the generated constants (POLYGON_CAPACITY,
+// CHANGED_INDICES, TILE_MAX_POLYS) are appended by programs.rs.
 
 // --- Quantized polygon pack helpers ---
 
@@ -17,8 +17,7 @@ fn pack_vertex(v: vec2<f32>) -> u32 {
 }
 
 // --- Dirty bounding box helpers for incremental evaluation ---
-// Bbox is packed as two u32s: bbox_lo = (min_x | min_y << 16), bbox_hi = (max_x | max_y << 16)
-// Coordinates are in pixel space (u16).
+// vec4<u32>(min_x, min_y, max_x, max_y) in pixels; write_dirty_box packs it.
 
 fn polygon_bbox_pixels(poly: Polygon, w: u32, h: u32) -> vec4<u32> {
     let v0 = unpack_vertex(poly.data.y);
@@ -40,30 +39,23 @@ fn full_image_bbox() -> vec4<u32> {
     return vec4<u32>(0u, 0u, params.image_width, params.image_height);
 }
 
-fn pack_bbox(bb: vec4<u32>) -> vec2<u32> {
-    return vec2<u32>(
-        (bb.x & 0xFFFFu) | ((bb.y & 0xFFFFu) << 16u),
-        (bb.z & 0xFFFFu) | ((bb.w & 0xFFFFu) << 16u),
-    );
-}
+// --- Offspring change record (changes.wgsl) ---
+// mutate is its only writer; offspring_changes.wgsl reads it.
 
-// Changed polygon indices for rasterize_error's unchanged-pixel shortcut, kept in
-// the unhashed rng_state.y and .z words: each holds (first + 1) | (second + 1) << 16.
-// A zero half means "none". A zero .y means unknown, so the rasterizer blends
-// every pixel; .z is read only when .y is non-zero. NO_CHANGES (.y with both
-// halves naming index 0xFFFE, beyond any drawing) means no index changed.
-// Every changed index is listed, so a pixel covered by none of their parent or
-// offspring versions keeps its parent colour.
-const NO_CHANGED_INDEX: u32 = 0xFFFFu;
-const NO_CHANGES: u32 = 0xFFFFFFFFu;
-fn changed_indices(first: u32, second: u32) -> u32 {
-    return (first + 1u) | ((second + 1u) << 16u);
-}
-
-fn write_dirty_bbox(oid: u32, bb: vec4<u32>) {
-    let packed = pack_bbox(bb);
+fn write_dirty_box(oid: u32, bb: vec4<u32>) {
+    let packed = pack_dirty_box(bb);
     working_states[oid].fitness_bits = packed.x;
     working_states[oid].stagnation_counter = packed.y;
+}
+
+fn write_changed_words(oid: u32, words: vec2<u32>) {
+    working_states[oid].rng_state.y = words.x;
+    working_states[oid].rng_state.z = words.y;
+}
+
+// Readers ignore the second word when the first is unknown.
+fn write_changes_unknown(oid: u32) {
+    working_states[oid].rng_state.y = 0u;
 }
 
 @group(0) @binding(0) var<storage, read>       chain_states:   array<DrawingState>;
@@ -86,11 +78,10 @@ var<workgroup> shared_crossover_rng: u32;
 var<workgroup> shared_crossover_flag: u32;
 var<workgroup> shared_crossover_keep: array<atomic<u32>, 32>;
 // Crossover slots below min(count_a, offspring count) that differ from parent A.
-// Only the first CROSSOVER_LISTED_MAX are kept; a larger count disables the
+// Only the first CHANGED_INDICES are kept; a larger count disables the
 // rasterizer shortcut.
-const CROSSOVER_LISTED_MAX: u32 = 4u;
 var<workgroup> shared_crossover_changed_count: atomic<u32>;
-var<workgroup> shared_crossover_changed: array<u32, CROSSOVER_LISTED_MAX>;
+var<workgroup> shared_crossover_changed: array<u32, CHANGED_INDICES>;
 
 // --- PCG32 RNG ---
 // 32-bit PCG hash (PCG-RXS-M-XS): ~8 ALU ops per call; the state is rng_state.x
@@ -171,7 +162,7 @@ fn write_crossover_slot(offspring_id: u32, i: u32, count_a: u32, source: Polygon
     working_states[offspring_id].polygons[i] = poly;
     if i < count_a && any(poly.data != shared_parent_polygons[i].data) {
         let k = atomicAdd(&shared_crossover_changed_count, 1u);
-        if k < CROSSOVER_LISTED_MAX {
+        if k < CHANGED_INDICES {
             shared_crossover_changed[k] = i;
         }
     }
@@ -179,14 +170,14 @@ fn write_crossover_slot(offspring_id: u32, i: u32, count_a: u32, source: Polygon
 
 /// Lane 0 only, after every slot is written. Slots in [min(count_a, count_o),
 /// max(count_a, count_o)) exist in only one of the two drawings and are changed
-/// too. Returns the .y and .z words of changed_indices, or zeros (unknown) when
-/// more than four slots changed or the empty-offspring fallback fired.
+/// too. Returns the changed-index words (changes.wgsl), or unknown when more
+/// than CHANGED_INDICES slots changed or the empty-offspring fallback fired.
 fn crossover_changed_words(count_a: u32, out_count: u32) -> vec2<u32> {
     let listed = atomicLoad(&shared_crossover_changed_count);
     let lo = min(count_a, out_count);
     let hi = max(count_a, out_count);
     let total = listed + (hi - lo);
-    if out_count == 0u || total > CROSSOVER_LISTED_MAX {
+    if out_count == 0u || total > CHANGED_INDICES {
         return vec2<u32>(0u, 0u);
     }
     if total == 0u {
@@ -277,9 +268,7 @@ fn crossover_uniform_offspring(base_rng: u32, parent_b: u32, offspring_id: u32, 
         if out_count == 0u {
             working_states[offspring_id].polygons[0] = clamp_polygon_alpha(shared_parent_polygons[0]);
         }
-        let changed = crossover_changed_words(count_a, out_count);
-        working_states[offspring_id].rng_state.y = changed.x;
-        working_states[offspring_id].rng_state.z = changed.y;
+        write_changed_words(offspring_id, crossover_changed_words(count_a, out_count));
     }
     let end = pcg_jump(max_count);
     return end.x * base_rng + end.y;
@@ -716,7 +705,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
             shared_crossover_rng, shared_crossover_parent_b, offspring_id, lid.x);
         if lid.x == 0u {
             // Crossover dirties the full image
-            write_dirty_bbox(offspring_id, full_image_bbox());
+            write_dirty_box(offspring_id, full_image_bbox());
             working_states[offspring_id].rng_state.x = crossover_rng;
         }
         return;
@@ -741,10 +730,9 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
     if params.single_mutation_mode == 1u {
         var changed = 0u;
         let dirty_bbox = single_mutate_offspring(&rng, offspring_id, &count, mutation_scale, &changed);
-        write_dirty_bbox(offspring_id, dirty_bbox);
+        write_dirty_box(offspring_id, dirty_bbox);
         working_states[offspring_id].rng_state.x = rng;
-        working_states[offspring_id].rng_state.y = changed;
-        working_states[offspring_id].rng_state.z = 0u;
+        write_changed_words(offspring_id, vec2<u32>(changed, 0u));
         return;
     }
 
@@ -1071,9 +1059,9 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
     }
 
     // Multi-mutation mode always dirties the full image
-    write_dirty_bbox(offspring_id, full_image_bbox());
+    write_dirty_box(offspring_id, full_image_bbox());
 
     // Save per-offspring RNG state
     working_states[offspring_id].rng_state.x = rng;
-    working_states[offspring_id].rng_state.y = 0u;
+    write_changes_unknown(offspring_id);
 }

@@ -7,10 +7,12 @@
 //
 // This shader runs between mutate and rasterize_error. It also appends the
 // band's consumed tiles that rasterize_error must run to raster_work (the
-// consumed-tile test is in tiles.wgsl; the changed-polygon test is below).
+// consumed-tile test is in tiles.wgsl; the changed-polygon test is
+// offspring_changes.wgsl's changed_meets_rect).
 
-// common.wgsl, tiles.wgsl and the generated constants (TILE_W, TILE_H,
-// TILE_MAX_POLYS, WORK_COUNT, WORK_ENTRIES) are appended by programs.rs.
+// common.wgsl, changes.wgsl, offspring_changes.wgsl, tiles.wgsl and the
+// generated constants (TILE_W, TILE_H, TILE_MAX_POLYS, CHANGED_INDICES,
+// WORK_COUNT, WORK_ENTRIES) are appended by programs.rs.
 
 @group(0) @binding(0) var<storage, read>       working_states: array<DrawingState>;
 @group(0) @binding(1) var<storage, read_write> tile_data:      array<u32>;
@@ -55,46 +57,6 @@ fn polygon_tile_bounds(poly: Polygon, w: u32, h: u32, num_tiles_x: u32, num_tile
     return vec4<u32>(tile_min_x, tile_max_x, tile_min_y, tile_max_y);
 }
 
-// --- Raster worklist (see raster_worklist.wgsl, which holds the same test for
-// binning sources that do not build the list) ---
-// Must match rasterize_error.wgsl and raster_worklist.wgsl.
-const CHANGED_INDICES: u32 = 4u;
-const COVER_MARGIN: f32 = 1e-5;
-
-fn changed_may_meet_tile(poly: Polygon, lo: vec2<f32>, hi: vec2<f32>) -> bool {
-    let pv0 = unpack_vertex(poly.data.y);
-    let pv1 = unpack_vertex(poly.data.z);
-    let pv2 = unpack_vertex(poly.data.w);
-    let bb_min_x = min(pv0.x, min(pv1.x, pv2.x));
-    let bb_max_x = max(pv0.x, max(pv1.x, pv2.x));
-    let bb_min_y = min(pv0.y, min(pv1.y, pv2.y));
-    let bb_max_y = max(pv0.y, max(pv1.y, pv2.y));
-    return hi.x >= bb_min_x - COVER_MARGIN && lo.x <= bb_max_x + COVER_MARGIN &&
-           hi.y >= bb_min_y - COVER_MARGIN && lo.y <= bb_max_y + COVER_MARGIN;
-}
-
-fn changed_meets_tile(
-    changed: vec2<u32>, parent_chain: u32, chain_id: u32, lo: vec2<f32>, hi: vec2<f32>,
-) -> bool {
-    let parent_count = chain_states[parent_chain].polygon_count;
-    let offspring_count = working_states[chain_id].polygon_count;
-    var meets = false;
-    for (var half = 0u; half < CHANGED_INDICES; half++) {
-        let word = select(changed.x, changed.y, half >= 2u);
-        let encoded = (word >> (16u * (half & 1u))) & 0xFFFFu;
-        if encoded != 0u {
-            let idx = encoded - 1u;
-            if idx < parent_count {
-                meets = meets || changed_may_meet_tile(chain_states[parent_chain].polygons[idx], lo, hi);
-            }
-            if idx < offspring_count {
-                meets = meets || changed_may_meet_tile(working_states[chain_id].polygons[idx], lo, hi);
-            }
-        }
-    }
-    return meets;
-}
-
 @compute @workgroup_size(512, 1, 1)
 fn main(
     @builtin(workgroup_id) wid: vec3<u32>,
@@ -123,8 +85,8 @@ fn main(
     // Consumers read only consumed tiles (tiles.wgsl): rasterize_error, and
     // update_framebuffers for the selected winner. Other tiles keep stale counts
     // and indices.
-    let dirty_min = unpack_dirty_corner(working_states[offspring_id].fitness_bits);
-    let dirty_max = unpack_dirty_corner(working_states[offspring_id].stagnation_counter);
+    let dirty_min = offspring_dirty_min(offspring_id);
+    let dirty_max = offspring_dirty_max(offspring_id);
 
     // Consumed rows and columns are contiguous; narrow the band to them.
     var first_row = row_lo;
@@ -259,13 +221,7 @@ fn main(
     // with all lanes active.
     storageBarrier();
     let parent_chain = offspring_id / params.lambda;
-    let first = working_states[offspring_id].rng_state.y;
-    var second = 0u;
-    if first != 0u {
-        second = working_states[offspring_id].rng_state.z;
-    }
-    let listed = select(2u, CHANGED_INDICES, second != 0u);
-    let changed = vec2<u32>(first, second);
+    let changed = offspring_changed_words(offspring_id);
     for (var round = 0u; round < band_tiles; round += 512u) {
         let band_tile = round + local_idx;
         var needed = false;
@@ -274,8 +230,8 @@ fn main(
             let tile_x = first_col + band_tile % cols;
             let tile_y = first_row + band_tile / cols;
             entry = offspring_id * num_tiles + tile_y * num_tiles_x + tile_x;
-            let raw_count = atomicLoad(&tile_counts[entry]);
-            needed = first == 0u || raw_count + listed > TILE_MAX_POLYS;
+            let shortcut = changes_shortcut(changed, atomicLoad(&tile_counts[entry]));
+            needed = shortcut.x == 0u;
             if !needed {
                 let tile_min_x = tile_x * TILE_W;
                 let tile_min_y = tile_y * TILE_H;
@@ -283,7 +239,7 @@ fn main(
                 let tile_max_y = min(tile_min_y + TILE_H, h);
                 let tile_lo = vec2<f32>(f32(tile_min_x) / f32(w), f32(tile_min_y) / f32(h));
                 let tile_hi = vec2<f32>(f32(tile_max_x) / f32(w), f32(tile_max_y) / f32(h));
-                needed = changed_meets_tile(changed, parent_chain, offspring_id, tile_lo, tile_hi);
+                needed = changed_meets_rect(shortcut, parent_chain, offspring_id, tile_lo, tile_hi);
             }
         }
         let flag = select(0u, 1u, needed);

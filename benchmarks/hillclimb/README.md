@@ -28,10 +28,12 @@ Confirm ratios are 64 batches × 5 pairs / 512 batches × 3 pairs. In crossovers
 between real chains, 38–53% of offspring are exact copies of parent A and
 almost all differ in at most 4 slots, which is why `15519ce` is so large.
 
-`54286cc` keeps the parent versions of a winner's changed polygons in polygon
-slots 996–999 of the chain (past every drawing's count, outside the replay
-hash); the skip turns itself off for drawings above 996 polygons. Code that
-reads past `polygon_count` or raises the polygon limit must account for it.
+`54286cc` kept the parent versions of a winner's changed polygons in polygon
+slots 996–999 of the chain and turned the skip off above 996 polygons. They
+now live in a per-chain `chain_changes` record (`gpu_evolver::changes`, see
+[engine module ownership](../../docs/engine-architecture.md#change-records)),
+so parent states carry nothing past `polygon_count` and the skip works at the
+full polygon limit.
 
 `70c9031` (4-iteration chunked submits, +13.7% when kept) was later shown to
 lock the driver into a slow submit state once readback was double-buffered and

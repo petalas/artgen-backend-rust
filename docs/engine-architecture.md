@@ -26,11 +26,13 @@ that word must fit inside it for a requested workload to qualify.
 `gpu_evolver::programs` owns source specialization, compilation policy and
 compiled handles, and installs the bundled sources. Each stage file in
 `src/shaders/` holds only its own logic. `programs/bundled.rs` appends the shared
-prelude: constants generated from Rust (polygon capacity, and for the tile group
-`TILE_W`/`TILE_H`, `TILE_MAX_POLYS` and the `raster_work` header words), then
-`common.wgsl` (the `Polygon`, `DrawingState` and `Params` structs and unpack
-helpers) and, for the tile group, `tiles.wgsl` (tile geometry, the consumed-tile
-test and `pack_fb_pixel`). The stage body comes first, so compiler line numbers
+prelude: constants generated from Rust (polygon capacity, `TILE_MAX_POLYS`,
+`CHANGED_INDICES`, and for the tile group `TILE_W`/`TILE_H` and the
+`raster_work` header words), then `common.wgsl` (the `Polygon`, `DrawingState`
+and `Params` structs and unpack helpers), `changes.wgsl` (the change-record
+encoding, below), for the stages that read offspring records
+`offspring_changes.wgsl`, and, for the tile group, `tiles.wgsl` (tile geometry,
+the consumed-tile test and `pack_fb_pixel`). The stage body comes first, so compiler line numbers
 match its file. A tile change regenerates the constants; bundled sources have no
 replacement markers. CPU tests validate every assembled program at every
 supported tile through naga and its SPIR-V writer, and compare the reflected
@@ -82,6 +84,41 @@ binner.
 Bundled programs, historical programs and diagnostic binners are existing reasons
 for the installation seam. A generic cache abstraction or another GPU adapter
 would add no needed variation.
+
+## Change records
+
+A change record says which polygons an evaluated drawing changed relative to
+the drawing whose pixels are cached. `gpu_evolver::changes` names it in Rust;
+`src/shaders/changes.wgsl` owns its shader encoding: `CHANGED_INDICES`,
+`COVER_MARGIN`, the changed-index words and their decoding, the coverage tests
+and `changes_shortcut`, the tile-list overflow guard. Every bundled stage uses
+those; no stage repeats them. CPU tests check a Rust reference of the encoding
+and compare the shader constants and the `ChainChange` layout.
+
+- The offspring record lives in a working state: the dirty rectangle in
+  `fitness_bits`/`stagnation_counter` and the changed-index words in
+  `rng_state[1..3]`. mutate writes it; select, the binner, the worklist pass and
+  raster read it through `offspring_changes.wgsl`. Historical shader variants
+  read and write these words in place, so they stay where they are.
+- The chain record is a `GpuChainChange` per chain in `chain_changes`: the
+  accepted winner's changed-index words, a mask and the parent versions of those
+  polygons. select writes it before copying the winner; update_framebuffers
+  reads it in the same iteration. Only those two programs bind it, and neither
+  can be replaced by a shader variant. Parent states carry nothing in
+  `rng_state[1..4]` or past `polygon_count`, so the update shortcut works at the
+  full polygon limit (it used to stash parents in slots 996–999 and stop above
+  996 polygons).
+
+An all-zero record is unknown and turns every shortcut off. The host writes
+records only through two `GpuPipeline` methods. `write_chain_states`, the only
+way chain states are replaced after construction (reinitialization, seeded
+benchmark reset), forgets every chain record with them, through
+`forget_chain_changes`, which `evaluate_chain_fitness` also calls.
+`mark_full_evaluation` gives the parent copies of a full evaluation a
+whole-image dirty rectangle and unknown changed indices. The two stay separate:
+the offspring record is rewritten by mutate every iteration and needs the host
+only when mutate does not run; the chain record is read only in the iteration
+select writes it, so forgetting it is a guard, not a batch-loop step.
 
 ## Pending readback
 

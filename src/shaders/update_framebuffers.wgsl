@@ -10,8 +10,9 @@
 // this tile, so blending the same polygons in the same order is bit-identical to
 // scanning all polygons. An overflowed list falls back to the full scan.
 //
-// common.wgsl, tiles.wgsl and the generated constants (TILE_W, TILE_H,
-// TILE_MAX_POLYS, WORK_COUNT) are appended by programs.rs.
+// common.wgsl, changes.wgsl, tiles.wgsl and the generated constants (TILE_W,
+// TILE_H, TILE_MAX_POLYS, CHANGED_INDICES, WORK_COUNT) are appended by
+// programs.rs.
 
 const THREAD_COUNT: u32 = TILE_W * TILE_H;
 
@@ -23,6 +24,8 @@ const THREAD_COUNT: u32 = TILE_W * TILE_H;
 // The raster worklist's entry count is word WORK_COUNT. This is the last stage
 // of an iteration, so it empties the list for the next one.
 @group(0) @binding(5) var<storage, read_write> raster_work:        array<u32>;
+// Written by select this iteration for every accepted chain.
+@group(0) @binding(6) var<storage, read>       chain_changes:      array<ChainChange>;
 @group(1) @binding(0) var<uniform>             params:             Params;
 
 // Shared memory: acceptance flag + dirty bbox (read by thread 0, broadcast to workgroup)
@@ -39,57 +42,15 @@ const LOADS_PER_THREAD: u32 = 3u;
 var<workgroup> shared_polys: array<Polygon, TILE_CAP>;
 
 // Unchanged-pixel skip, the same argument as rasterize_error's shortcut. select
-// copies the winner's changed indices to the chain's rng_state.y/.z and keeps
-// the parent versions in polygons[CHANGED_STASH_BASE + k] (rng_state.w bit k
-// marks a present one). A pixel that neither version of any changed index can
-// cover has the same covering polygon sequence before and after, so its
-// framebuffer value is already the winner's: it is neither blended nor written.
-// Unknown indices, or a tile list that rasterize_error could not shortcut, keep
-// the full loop.
-const CHANGED_INDICES: u32 = 4u;
-const CHANGED_SLOTS: u32 = 2u * CHANGED_INDICES;
-const CHANGED_STASH_BASE: u32 = 1000u - CHANGED_INDICES;
-// Must match rasterize_error.wgsl.
-const COVER_MARGIN: f32 = 1e-5;
-
-struct ChangedPolygon {
-    pv0: vec2<f32>,
-    pv1: vec2<f32>,
-    pv2: vec2<f32>,
-    bb_min: vec2<f32>,
-    bb_max: vec2<f32>,
-}
-
+// records the winner's changed indices and their parent versions in
+// chain_changes (changes.wgsl). A pixel that neither version of any changed
+// index can cover has the same covering polygon sequence before and after, so
+// its framebuffer value is already the winner's: it is neither blended nor
+// written. Unknown indices, or a tile list that rasterize_error could not
+// shortcut, keep the full loop.
 var<workgroup> shared_changed: array<ChangedPolygon, CHANGED_SLOTS>;
 var<workgroup> shared_touched: atomic<u32>;
 var<workgroup> shared_any_touched: u32;
-
-fn decode_changed(poly: Polygon) -> ChangedPolygon {
-    let pv0 = unpack_vertex(poly.data.y);
-    let pv1 = unpack_vertex(poly.data.z);
-    let pv2 = unpack_vertex(poly.data.w);
-    return ChangedPolygon(pv0, pv1, pv2, min(pv0, min(pv1, pv2)), max(pv0, max(pv1, pv2)));
-}
-
-// Empty slots have an inverted box outside the unit square.
-fn no_changed_polygon() -> ChangedPolygon {
-    return ChangedPolygon(vec2<f32>(0.0), vec2<f32>(0.0), vec2<f32>(0.0), vec2<f32>(2.0), vec2<f32>(-1.0));
-}
-
-// Superset of the blend loop's coverage test: false only when the pixel is
-// outside the polygon by more than COVER_MARGIN.
-fn may_cover(poly: ChangedPolygon, fx: f32, fy: f32) -> bool {
-    if fx < poly.bb_min.x - COVER_MARGIN || fx > poly.bb_max.x + COVER_MARGIN ||
-       fy < poly.bb_min.y - COVER_MARGIN || fy > poly.bb_max.y + COVER_MARGIN {
-        return false;
-    }
-    let e0 = edge_fn(poly.pv0.x, poly.pv0.y, poly.pv1.x, poly.pv1.y, fx, fy);
-    let e1 = edge_fn(poly.pv1.x, poly.pv1.y, poly.pv2.x, poly.pv2.y, fx, fy);
-    let e2 = edge_fn(poly.pv2.x, poly.pv2.y, poly.pv0.x, poly.pv0.y, fx, fy);
-    let all_pos = e0 >= -COVER_MARGIN && e1 >= -COVER_MARGIN && e2 >= -COVER_MARGIN;
-    let all_neg = e0 <= COVER_MARGIN && e1 <= COVER_MARGIN && e2 <= COVER_MARGIN;
-    return all_pos || all_neg;
-}
 
 // Tests the first `slots` entries of shared_changed (workgroup-uniform).
 fn may_change(fx: f32, fy: f32, slots: u32) -> bool {
@@ -168,26 +129,19 @@ fn main(
 
     // Changed-index guards mirror rasterize_error: known indices, and neither the
     // parent's nor the winner's tile list truncated.
-    let first = chain_states[chain_id].rng_state.y;
-    var second = 0u;
-    if first != 0u {
-        second = chain_states[chain_id].rng_state.z;
-    }
-    let listed = select(2u, CHANGED_INDICES, second != 0u);
-    let shortcut = first != 0u && listed_count + listed <= TILE_MAX_POLYS;
-    let shortcut_slots = select(0u, select(4u, CHANGED_SLOTS, second != 0u), shortcut);
+    let changed = changes_shortcut(chain_changes[chain_id].changed, listed_count);
+    let shortcut_slots = changed_slot_count(changed);
 
-    // Slot k holds index half k/2, from the parent stash (even k) or the winner
+    // Slot k holds index half k/2, from the parent copy (even k) or the winner
     // now in chain_states (odd k).
     if local_idx < CHANGED_SLOTS {
         var decoded = no_changed_polygon();
         let half = local_idx >> 1u;
-        let word = select(first, second, half >= 2u);
-        let encoded = (word >> (16u * (half & 1u))) & 0xFFFFu;
-        if shortcut && encoded != 0u {
+        let encoded = changed_half(changed, half);
+        if encoded != 0u {
             if (local_idx & 1u) == 0u {
-                if (chain_states[chain_id].rng_state.w & (1u << half)) != 0u {
-                    decoded = decode_changed(chain_states[chain_id].polygons[CHANGED_STASH_BASE + half]);
+                if (chain_changes[chain_id].parent_mask & (1u << half)) != 0u {
+                    decoded = decode_changed(chain_changes[chain_id].parents[half]);
                 }
             } else if encoded - 1u < chain_states[chain_id].polygon_count {
                 decoded = decode_changed(chain_states[chain_id].polygons[encoded - 1u]);

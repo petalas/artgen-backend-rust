@@ -3,6 +3,7 @@
 use crate::{mutation_params::MutationParams, settings::TILE_MAX_POLYS};
 
 use super::buffers::GPU_DRAWING_STATE_SIZE;
+use super::changes::GPU_CHAIN_CHANGE_SIZE;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct RasterGrid {
@@ -74,6 +75,7 @@ pub(super) struct ResourceSizes {
     pub framebuffers: u64,
     pub parent_errors: u64,
     pub updates: u64,
+    pub chain_changes: u64,
     pub fitness: u64,
 }
 
@@ -92,11 +94,12 @@ impl ResourceSizes {
             framebuffers: chains * pixels * 4,
             parent_errors: chains * 4,
             updates: chains * 16,
+            chain_changes: chains * GPU_CHAIN_CHANGE_SIZE as u64,
             fitness: chains * 4,
         }
     }
 
-    pub fn entries(self) -> [(&'static str, u64); 10] {
+    pub fn entries(self) -> [(&'static str, u64); 11] {
         [
             ("parent states", self.parents),
             ("working states", self.working),
@@ -107,6 +110,7 @@ impl ResourceSizes {
             ("parent framebuffers", self.framebuffers),
             ("parent errors", self.parent_errors),
             ("update flags", self.updates),
+            ("chain change records", self.chain_changes),
             ("fitness", self.fitness),
         ]
     }
@@ -236,6 +240,10 @@ mod tests {
             },
             ResourceSizes {
                 updates: required.updates - 4,
+                ..required
+            },
+            ResourceSizes {
+                chain_changes: required.chain_changes - 4,
                 ..required
             },
             ResourceSizes {

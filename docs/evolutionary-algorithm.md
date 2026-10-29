@@ -179,7 +179,7 @@ The error grid is updated cheaply in the select shader: on acceptance, use the o
 
 ### Lightweight Implementation (4x4 Grid)
 
-The simplest version uses a 4x4 grid (16 cells), requiring only 16 u32s (64 bytes) per chain in the drawing state header. This fits within the existing `GpuDrawingState` by repurposing the unused `rng_state[1..3]` fields or extending the header by one cache line.
+The simplest version uses a 4x4 grid (16 cells), requiring only 16 u32s (64 bytes) per chain in the drawing state header. This fits within the existing `GpuDrawingState` by repurposing a parent state's free `rng_state[1..4]` fields (offspring use `[1..3]` for their change record) or extending the header by one cache line.
 
 In `rasterize_error.wgsl`, each workgroup already knows its tile coordinates and accumulates pixel error. Adding a per-region accumulation is a few lines: each thread 0 also `atomicAdd`s to the chain's grid cell.
 

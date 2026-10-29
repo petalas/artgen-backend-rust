@@ -6,14 +6,14 @@ struct Polygon {
     data: vec4<u32>,   // [color_packed, v0_packed, v1_packed, v2_packed] — 16 bytes
 }
 
-// GpuDrawingState. Offspring reuse fitness_bits and stagnation_counter for the
-// packed dirty rectangle (mutate.wgsl write_dirty_bbox).
+// GpuDrawingState. Offspring reuse fitness_bits, stagnation_counter and
+// rng_state.yz for their change record (changes.wgsl).
 struct DrawingState {
     polygon_count: u32,
     fitness_bits: u32,
     mutation_scale: f32,       // adaptive mutation scale
     stagnation_counter: u32,   // iterations since last improvement
-    rng_state: vec4<u32>,      // .x RNG state; .yz changed indices, .w stashed-parent mask
+    rng_state: vec4<u32>,      // .x RNG state; .yz offspring changed-index words
     polygons: array<Polygon, POLYGON_CAPACITY>,
 }
 

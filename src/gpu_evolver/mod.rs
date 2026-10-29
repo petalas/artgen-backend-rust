@@ -1,5 +1,6 @@
 pub mod benchmark;
 pub mod buffers;
+pub mod changes;
 pub mod pipeline;
 mod execution;
 mod programs;
@@ -553,13 +554,7 @@ impl GpuEvolver {
                 drawing_to_gpu(drawing, seed)
             })
             .collect();
-        let bytes: Vec<u8> = states
-            .iter()
-            .flat_map(|s| bytemuck::bytes_of(s).to_vec())
-            .collect();
-        self.pipeline
-            .queue
-            .write_buffer(&self.pipeline.chain_states_buf, 0, &bytes);
+        self.pipeline.write_chain_states(&states);
 
         // Reset error accumulators so the first batch after reinit starts clean (stride-2)
         let zeros = vec![0u8; self.pipeline.offspring_capacity as usize * 8];
@@ -617,20 +612,12 @@ impl GpuEvolver {
             p.queue.submit(std::iter::once(copy_enc.finish()));
         }
 
-        // Write full-image dirty bbox into each working state so the always-on
-        // tile skip in rasterize_error doesn't cull any tiles.
-        // Packing: fitness_bits = (min_x | min_y<<16), stagnation_counter = (max_x | max_y<<16)
-        // Also clear rng_state[1..3]: an accepted chain keeps its winner's
-        // changed indices there, and the binner and raster would then count
-        // only pixels those polygons may cover.
-        let bbox_lo = 0u32; // min_x=0, min_y=0
-        let bbox_hi = p.image_width | (p.image_height << 16);
-        for i in 0..active as u64 {
-            let base = i * state_size;
-            p.queue.write_buffer(&p.working_states_buf, base + 4, &bbox_lo.to_le_bytes());
-            p.queue.write_buffer(&p.working_states_buf, base + 12, &bbox_hi.to_le_bytes());
-            p.queue.write_buffer(&p.working_states_buf, base + 20, &[0u8; 12]);
-        }
+        // The copies keep the parents' header words, where offspring keep
+        // their change record; replace it so binning and raster cover every
+        // pixel. This evaluation also re-derives each chain's cached baseline,
+        // so the chain records start unknown too.
+        p.mark_full_evaluation(active);
+        p.forget_chain_changes();
 
         // Submit 2: bin polygons + rasterize_error
         let rwg = p.rasterize_wg();
@@ -870,6 +857,7 @@ fn gpu_memory_bytes(p: &GpuPipeline) -> u64 {
         + p.chain_framebuffers_buf.size()
         + p.chain_total_errors_buf.size()
         + p.chain_update_flags_buf.size()
+        + p.chain_changes_buf.size()
         + p.params_buf.size()
         + p.timestamp_resolve_buf.size()
         + p.timestamp_staging_bufs[0].size()
@@ -888,7 +876,8 @@ fn init_offspring_rng(pipeline: &GpuPipeline, iteration: u32) {
             let seed = 0xCAFE_BABE_u64
                 .wrapping_add((i as u64).wrapping_mul(0x9E3779B97F4A7C15))
                 .wrapping_add((iteration as u64).wrapping_mul(0x517CC1B727220A95));
-            // Only [0] is used by the 32-bit PCG hash; [1..3] are unused padding
+            // Only [0] is used by the 32-bit PCG hash; [1..3] start as an unknown
+            // change record, which mutate replaces before any reader runs
             s.rng_state[0] = seed as u32;
             s.mutation_scale_bits = 1.0f32.to_bits();
             s

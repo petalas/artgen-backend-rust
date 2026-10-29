@@ -18,10 +18,13 @@ pub struct GpuPolygon {
     pub data: [u32; 4],   // 16 bytes total
 }
 
-/// Per-chain drawing state on GPU.
+/// Per-chain drawing state on GPU, for parents and offspring alike.
 /// polygon_count + fitness + mutation_scale + stagnation_counter + rng_state = 32 bytes header
 /// polygons: MAX_POLYGONS_PER_IMAGE * 16 = 16000 bytes
 /// Total: 16032 bytes
+/// An offspring keeps its change record in `fitness_bits`, `stagnation_counter`
+/// and `rng_state[1..3]` (see [`super::changes`]); parents carry none there.
+/// Polygons beyond `polygon_count` carry nothing.
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct GpuDrawingState {
@@ -29,7 +32,7 @@ pub struct GpuDrawingState {
     pub fitness_bits: u32,            // offset 4 — bitcast f32 for atomicMax compatibility
     pub mutation_scale_bits: u32,     // offset 8 — bitcast f32, adaptive mutation scale
     pub stagnation_counter: u32,      // offset 12 — iterations since last improvement
-    pub rng_state: [u32; 4],          // offset 16 — [0] RNG state; [1..2] changed polygon indices, [3] stashed-parent mask
+    pub rng_state: [u32; 4],          // offset 16 — [0] RNG state; [1..3] offspring changed-index words; [3] unused
     pub polygons: [GpuPolygon; MAX_POLYGONS_PER_IMAGE], // offset 32
 }
 
@@ -197,7 +200,8 @@ fn pack_vertex_u32(x: f32, y: f32) -> u32 {
 pub fn drawing_to_gpu(drawing: &Drawing, seed: u64) -> GpuDrawingState {
     let mut state = GpuDrawingState::zeroed();
 
-    // Initialize RNG state — only [0] is used by the 32-bit PCG hash; [1..3] are unused padding
+    // Initialize RNG state — only [0] is used by the 32-bit PCG hash; parents
+    // carry nothing in [1..4]
     state.rng_state[0] = seed as u32;
 
     state.fitness_bits = 0; // will be computed on GPU

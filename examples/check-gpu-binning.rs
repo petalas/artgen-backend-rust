@@ -701,10 +701,8 @@ fn consumed(state: &GpuDrawingState, tile: usize, size: [u32; 2], wg: [u32; 2]) 
     let x = tile % columns * wg[0];
     let y = tile / columns * wg[1];
     // Direct rasterizer predicate, independent of the candidate's tile rectangle.
-    (x + wg[0]).min(size[0]) > (state.fitness_bits & 0xFFFF)
-        && x < (state.stagnation_counter & 0xFFFF)
-        && (y + wg[1]).min(size[1]) > (state.fitness_bits >> 16)
-        && y < (state.stagnation_counter >> 16)
+    let [min_x, min_y, max_x, max_y] = state.dirty_box();
+    (x + wg[0]).min(size[0]) > min_x && x < max_x && (y + wg[1]).min(size[1]) > min_y && y < max_y
 }
 
 fn scalar_full_bins(state: &GpuDrawingState, size: [u32; 2], wg: [u32; 2]) -> Vec<Vec<u32>> {
@@ -780,8 +778,7 @@ fn layered_polygons() -> [GpuPolygon; 9] {
 
 fn set_dirty(state: &mut GpuDrawingState, bounds: DirtyBox) {
     assert!(bounds.iter().all(|&v| u16::try_from(v).is_ok()));
-    state.fitness_bits = bounds[0] | (bounds[1] << 16);
-    state.stagnation_counter = bounds[2] | (bounds[3] << 16);
+    state.set_dirty_box(bounds);
 }
 
 fn drawing(polygons: &[GpuPolygon], bounds: DirtyBox) -> GpuDrawingState {

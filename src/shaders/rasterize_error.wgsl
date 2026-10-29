@@ -10,8 +10,9 @@
 // Integer lane totals feed C's unchanged dense actual-subgroup-ID reduction.
 // Cooperative decoded-cache loading uses every physical lane, even at image edges.
 //
-// common.wgsl, tiles.wgsl and the generated constants (TILE_W, TILE_H,
-// TILE_MAX_POLYS, WORK_COUNT, WORK_ENTRIES) are appended by programs.rs.
+// common.wgsl, changes.wgsl, offspring_changes.wgsl, tiles.wgsl and the
+// generated constants (TILE_W, TILE_H, TILE_MAX_POLYS, CHANGED_INDICES,
+// WORK_COUNT, WORK_ENTRIES) are appended by programs.rs.
 // Supported logical tiles: 32x16, 16x16, 32x8, 16x8, 8x8.
 // Shared polygon capacity remains the clamped 256-polygon limit.
 const THREAD_COUNT: u32 = TILE_W * TILE_H;
@@ -47,19 +48,14 @@ var<workgroup> shared_errors: array<u32, 128>;      // only num_subgroups entrie
 var<workgroup> shared_errors_old: array<u32, 128>;  // old errors for incremental eval
 
 // Unchanged-pixel shortcut. mutate.wgsl lists every polygon index a
-// single-mutation or crossover offspring changed in rng_state.y and .z (see
-// changed_indices there). Slots hold the parent and offspring versions of up to
-// four indices. A pixel that none of them can cover has the same covering
-// polygon sequence in parent and offspring, so its offspring colour is the
-// cached parent framebuffer pixel and its new error equals its old error.
-// Multi-mutation offspring, and crossovers with more changed indices, store
-// zero and keep the full blend loop.
-const CHANGED_INDICES: u32 = 4u;
-const CHANGED_SLOTS: u32 = 2u * CHANGED_INDICES;
-// Conservative coverage margin in normalized units (a pixel is ~2.6e-3 at 384 px).
-// It absorbs any rounding difference from the blend loop's own coverage test.
-const COVER_MARGIN: f32 = 1e-5;
-var<workgroup> shared_changed: array<DecodedPolygon, CHANGED_SLOTS>;
+// single-mutation or crossover offspring changed in its change record
+// (changes.wgsl). Slots hold the parent and offspring versions of up to
+// CHANGED_INDICES indices. A pixel that none of them can cover has the same
+// covering polygon sequence in parent and offspring, so its offspring colour is
+// the cached parent framebuffer pixel and its new error equals its old error.
+// Multi-mutation offspring, and crossovers with more changed indices, record
+// unknown and keep the full blend loop.
+var<workgroup> shared_changed: array<ChangedPolygon, CHANGED_SLOTS>;
 
 /// Rasterize a polygon and alpha-blend if pixel is inside.
 fn rasterize_blend(poly: DecodedPolygon, fx: f32, fy: f32, r: ptr<function, f32>, g: ptr<function, f32>, b: ptr<function, f32>) {
@@ -99,37 +95,6 @@ fn rasterize_blend(poly: DecodedPolygon, fx: f32, fy: f32, r: ptr<function, f32>
         *g = *g * inv_alpha + src_g * alpha;
         *b = *b * inv_alpha + src_b * alpha;
     }
-}
-
-fn decode_changed(poly: Polygon) -> DecodedPolygon {
-    let pv0 = unpack_vertex(poly.data.y);
-    let pv1 = unpack_vertex(poly.data.z);
-    let pv2 = unpack_vertex(poly.data.w);
-    return DecodedPolygon(
-        pv0, pv1, pv2,
-        min(pv0.x, min(pv1.x, pv2.x)), max(pv0.x, max(pv1.x, pv2.x)),
-        min(pv0.y, min(pv1.y, pv2.y)), max(pv0.y, max(pv1.y, pv2.y)),
-        poly.data.x);
-}
-
-// Empty slots have an inverted box outside the unit square.
-fn no_changed_polygon() -> DecodedPolygon {
-    return DecodedPolygon(vec2<f32>(0.0), vec2<f32>(0.0), vec2<f32>(0.0), 2.0, -1.0, 2.0, -1.0, 0u);
-}
-
-// Superset of rasterize_blend's coverage test: false only when the pixel is
-// outside the polygon by more than COVER_MARGIN.
-fn may_cover(poly: DecodedPolygon, fx: f32, fy: f32) -> bool {
-    if fx < poly.bb_min_x - COVER_MARGIN || fx > poly.bb_max_x + COVER_MARGIN ||
-       fy < poly.bb_min_y - COVER_MARGIN || fy > poly.bb_max_y + COVER_MARGIN {
-        return false;
-    }
-    let e0 = edge_fn(poly.pv0.x, poly.pv0.y, poly.pv1.x, poly.pv1.y, fx, fy);
-    let e1 = edge_fn(poly.pv1.x, poly.pv1.y, poly.pv2.x, poly.pv2.y, fx, fy);
-    let e2 = edge_fn(poly.pv2.x, poly.pv2.y, poly.pv0.x, poly.pv0.y, fx, fy);
-    let all_pos = e0 >= -COVER_MARGIN && e1 >= -COVER_MARGIN && e2 >= -COVER_MARGIN;
-    let all_neg = e0 <= COVER_MARGIN && e1 <= COVER_MARGIN && e2 <= COVER_MARGIN;
-    return all_pos || all_neg;
 }
 
 // Tests the first `slots` entries of shared_changed (workgroup-uniform).
@@ -381,29 +346,18 @@ fn raster_tile(entry: u32, local_idx: u32, sg_inv_id: u32, sg_idx: u32, num_subg
         let raw_count = tile_counts_buf[tile_global];
         tile_poly_count = min(raw_count, TILE_MAX_POLYS);
         tile_data_base = chain_id * num_tiles * TILE_MAX_POLYS + tile_id * TILE_MAX_POLYS;
-        let first = working_states[chain_id].rng_state.y;
-        var second = 0u;
-        if first != 0u {
-            second = working_states[chain_id].rng_state.z;
-        }
-        // Neither the parent's nor the offspring's list may be truncated: each
-        // changed index moves at most one polygon in or out of this tile.
-        let listed = select(2u, CHANGED_INDICES, second != 0u);
-        if raw_count + listed <= TILE_MAX_POLYS {
-            changed = vec2<u32>(first, second);
-        }
+        // Neither the parent's nor the offspring's list may be truncated.
+        changed = changes_shortcut(offspring_changed_words(chain_id), raw_count);
     }
     // Slots to test per pixel; zero disables the shortcut.
-    let shortcut_slots = select(0u, select(4u, CHANGED_SLOTS, changed.y != 0u), changed.x != 0u);
+    let shortcut_slots = changed_slot_count(changed);
 
     // Slot k holds index half k/2, from the parent (even k) or offspring (odd k).
-    // Halves 0..1 are in .y, 2..3 in .z. An index at or beyond the drawing's
-    // count (including NO_CHANGES's 0xFFFE) leaves the slot empty.
+    // An index at or beyond the drawing's count (including NO_CHANGES's 0xFFFE)
+    // leaves the slot empty.
     if local_idx < CHANGED_SLOTS {
         var decoded = no_changed_polygon();
-        let half = local_idx >> 1u;
-        let word = select(changed.x, changed.y, half >= 2u);
-        let encoded = (word >> (16u * (half & 1u))) & 0xFFFFu;
+        let encoded = changed_half(changed, local_idx >> 1u);
         if encoded != 0u {
             let idx = encoded - 1u;
             if (local_idx & 1u) == 0u {

@@ -456,11 +456,7 @@ impl GpuEvolver {
         let states: Vec<_> = (0..self.pipeline.chain_count)
             .map(|index| drawing_to_gpu(drawing, u64::from(benchmark_seed(seed, index, 0))))
             .collect();
-        self.pipeline.queue.write_buffer(
-            &self.pipeline.chain_states_buf,
-            0,
-            bytemuck::cast_slice(&states),
-        );
+        self.pipeline.write_chain_states(&states);
         self.framebuffers_initialized = false;
         self.iteration = 0;
         self.readback.best_fitness_bits = 0;

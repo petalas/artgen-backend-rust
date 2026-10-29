@@ -1,16 +1,11 @@
 // Shared by the tile-group stages (rasterize_error, bin_polygons,
 // raster_worklist, init_framebuffers, update_framebuffers). programs.rs appends
-// it after common.wgsl. TILE_W x TILE_H is the installed raster tile, from the
-// generated constants.
+// it after common.wgsl and changes.wgsl. TILE_W x TILE_H is the installed raster
+// tile, from the generated constants.
 
 // Tiles across and down a w x h image, counting partial edge tiles.
 fn tile_grid(w: u32, h: u32) -> vec2<u32> {
     return vec2<u32>((w + TILE_W - 1u) / TILE_W, (h + TILE_H - 1u) / TILE_H);
-}
-
-// A dirty-rectangle corner packed as x | y << 16, in pixels.
-fn unpack_dirty_corner(word: u32) -> vec2<u32> {
-    return vec2<u32>(word & 0xFFFFu, word >> 16u);
 }
 
 // --- Consumed tiles ---

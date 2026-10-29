@@ -372,14 +372,17 @@ When crossover fires, load parent B's polygon data into a second shared memory r
 ### Current State
 
 ```rust
-pub rng_state: [u32; 4],  // offset 16 -- only [0] is active RNG state; [1..3] unused padding
+pub rng_state: [u32; 4],  // offset 16 -- [0] RNG state; [1..3] offspring changed-index words; [3] unused
 ```
 
-The PCG-RXS-M-XS RNG uses a single u32 state. The remaining 12 bytes (3 * u32) are padding to maintain `vec4<u32>` alignment.
+The PCG-RXS-M-XS RNG uses a single u32 state. Offspring keep their change
+record's changed-index words in `rng_state[1..3]`, read by binning, raster and
+select (`gpu_evolver::changes`); historical shader variants use those words in
+place. Only `rng_state[3]`, and all three words of a parent state, are free.
 
 ### Optimization: Use Padding for Metadata
 
-The 12 bytes of padding could store useful per-chain metadata without increasing the struct size:
+The free parent words could store useful per-chain metadata without increasing the struct size (the slot names below predate the offspring change record, which now occupies offspring `rng_state[1]` and `[2]`):
 
 - **`rng_state[1]`**: Last mutation type applied (u32 enum). Useful for adaptive operator selection (tracking which mutation types are productive per chain).
 - **`rng_state[2]`**: Acceptance count (u16) + rejection count (u16) since last migration. Useful for per-chain acceptance rate tracking.
