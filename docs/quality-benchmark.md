@@ -158,3 +158,26 @@ images, 5 seeds, 300 s and one side, that is ~52 minutes.
   The recorder keeps only the best one and the preallocated points.
 - Rule 10: `evals_per_second` casts `u64` to `f64`, as trial records do (Clippy
   `cast_precision_loss`). Evaluation counts stay far below 2^53.
+
+## Master baseline, 2026-10-29
+
+Defaults (4 chains, λ 64), 5 seeds × 300 s from blank, fresh server per run
+(`7183161`; evidence `.cache/quality/runs/20261029T133826Z-5nb53zzs`).
+Remaining error r = 100 − fitness%, median [min..max], and median triangles:
+
+| T s | ff r | ff triangles | mona r | mona triangles |
+| --- | --- | --- | --- | --- |
+| 5 | 2.37 [2.24..2.70] | 549 | 3.79 [3.66..5.97] | 336 |
+| 30 | 1.50 [1.47..1.55] | 853 | 2.48 [2.40..2.70] | 713 |
+| 60 | 1.37 [1.36..1.44] | 942 | 2.33 [2.28..2.46] | 842 |
+| 120 | 1.32 [1.28..1.36] | 1000 | 2.20 [2.18..2.32] | 972 |
+| 300 | 1.28 [1.26..1.31] | 1000 | 2.17 [2.16..2.21] | 1000 |
+
+- Both images reach the 1000-triangle cap by 120–180 s; after it, r falls
+  only 3% (ff) and 1.5% (mona) in the next 180 s. The cap, not the search,
+  limits the late game at the current penalty (1000 triangles cost 0.06%).
+- Seed-to-seed spread (sd of ln r) is 0.08–0.20 up to 5 s and 0.01–0.03 from
+  30 s, so 5 seeds resolve about 2–3% differences late; the default
+  `--min-effect 0.02` matches.
+- Batches per run vary between seeds (mona 10k–19k in 300 s), because the
+  raster cost follows the drawing; compare at fixed seconds, not batches.
