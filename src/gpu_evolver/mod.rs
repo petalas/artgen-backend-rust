@@ -634,6 +634,7 @@ fn gpu_memory_bytes(p: &GpuPipeline) -> u64 {
         + p.fitness_staging_bufs[1].size()
         + p.tile_data_buf.size()
         + p.tile_counts_buf.size()
+        + p.raster_work_buf.size()
         + p.chain_framebuffers_buf.size()
         + p.chain_total_errors_buf.size()
         + p.chain_update_flags_buf.size()
