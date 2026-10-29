@@ -260,6 +260,14 @@ class RevertSide(unittest.TestCase):
         self.assertEqual(clean, "")
 
 
+class CommitsBehind(unittest.TestCase):
+    def test_candidate_missing_control_commits_is_counted(self):
+        self.assertEqual(hillclimb.commits_behind("HEAD", {"candidate": "HEAD~2"}),
+                         {"candidate": 2})
+        self.assertEqual(hillclimb.commits_behind("HEAD~2", {"candidate": "HEAD"}),
+                         {"candidate": 0})
+
+
 class ForeignCpu(unittest.TestCase):
     def test_wait_for_quiet_returns_once_settled_and_gives_up_at_the_limit(self):
         with mock.patch.object(hillclimb, "QUIET_SAMPLE_SECONDS", 0.01), \

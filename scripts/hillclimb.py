@@ -76,7 +76,7 @@ BOOTSTRAP_SEED = 20261028
 LOG_COLUMNS = ("utc", "control", "candidate", "cases", "pairs", "batches", "ratio",
                "low95", "high95", "verdict", "replay", "control_evals_per_s",
                "candidate_evals_per_s", "evidence", "note", "host_load", "quality_ratio",
-               "quality_low95", "quality_high95", "quality_verdict", "lifecycle")
+               "quality_low95", "quality_high95", "quality_verdict", "lifecycle", "behind")
 # Other processes averaging more CPU cores than this during a timed trial (e.g. a
 # parallel cargo build) biased results; the one-minute load average missed them.
 BUSY_CORES = 1.0
@@ -574,7 +574,8 @@ def summarize_candidate(args, sides, evidence, rows, name, ratios):
              "candidate_evals_per_s": median_rate(rows, name),
              "evidence": os.path.relpath(evidence, REPO), "note": args.note,
              "host_load": f"{max(row['foreign_cores'] for row in rows):.1f}",
-             "lifecycle": lifecycle_verdict(args.lifecycle_digests, name)}
+             "lifecycle": lifecycle_verdict(args.lifecycle_digests, name),
+             "behind": args.behind.get(name, "")}
     if args.allow_behavior_change:
         q_point, q_low, q_high = aggregate(quality_ratios(rows, name))
         entry.update(quality_ratio=f"{q_point:.5f}", quality_low95=f"{q_low:.5f}",
@@ -640,19 +641,51 @@ def parse_args(argv):
 def resolve_sides(args):
     """Resolve control and candidates; a revert that does not apply is skipped, not fatal."""
     sides = {"control": resolve(args.control)}
-    candidates = []
-    for side in args.candidate:
+    resolved = []
+    for spec in args.candidate:
         try:
-            candidates.append(resolve(side))
+            resolved.append((spec, resolve(spec)))
         except HillclimbError as exc:
-            if not side.startswith(REVERT):
+            if not spec.startswith(REVERT):
                 raise
-            print(f"skipping {side}: {exc}", file=sys.stderr)
-    require(candidates, "no candidate could be built")
-    names = ["candidate"] if len(candidates) == 1 else [
-        f"candidate{index}" for index in range(1, len(candidates) + 1)]
-    sides.update(zip(names, candidates))
+            print(f"skipping {spec}: {exc}", file=sys.stderr)
+    require(resolved, "no candidate could be built")
+    names = ["candidate"] if len(resolved) == 1 else [
+        f"candidate{index}" for index in range(1, len(resolved) + 1)]
+    sides.update((name, side) for name, (_, side) in zip(names, resolved))
+    args.behind = commits_behind(args.control, {
+        name: spec for name, (spec, _) in zip(names, resolved)})
     return sides
+
+
+def base_commit(spec):
+    """The commit a side is built on, or None for a prebuilt executable."""
+    if Path(spec).is_file():
+        return None
+    if spec == WORKTREE:
+        spec = "HEAD"
+    elif spec.startswith(REVERT):
+        spec = spec[len(REVERT):].partition("@")[2] or "HEAD"
+    return git("rev-parse", "--verify", f"{spec}^{{commit}}")
+
+
+def commits_behind(control_spec, specs):
+    """Per candidate: commits in the control's history that the candidate lacks.
+
+    An agent's branch judged against a master that moved on measures the missing
+    commits too: one engine change read NOISE without, and +30% with, a host-side
+    change master had gained meanwhile."""
+    control = base_commit(control_spec)
+    behind = {}
+    for name, spec in specs.items():
+        candidate = base_commit(spec)
+        if control and candidate:
+            count = int(git("rev-list", "--count", f"{candidate}..{control}"))
+            behind[name] = count
+            if count:
+                print(f"WARNING: {name} lacks {count} commit(s) of the control; the result "
+                      "includes their effect. Rebase it onto the control first.", file=sys.stderr)
+    return behind
 
 
 def run_horizon(args, sides):
