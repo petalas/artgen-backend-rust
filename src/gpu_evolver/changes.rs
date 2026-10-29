@@ -101,7 +101,7 @@ const _: () = assert!(GPU_CHAIN_CHANGE_SIZE == 16 + 16 * CHANGED_INDICES);
 mod tests {
     use super::{pack_dirty_box, ChangedIndices, CHANGED_INDICES};
     use crate::gpu_evolver::buffers::GpuDrawingState;
-    use crate::settings::{MAX_POLYGONS_PER_IMAGE, TILE_MAX_POLYS};
+    use crate::settings::{POLYGON_CAPACITY, TILE_MAX_POLYS};
     use bytemuck::Zeroable;
 
     // CPU reference of changes.wgsl, which has no interpreter here. Wrapping
@@ -168,8 +168,8 @@ mod tests {
 
     #[test]
     fn readers_decode_every_listed_index_below_the_drawing_count() {
-        let count = u32::try_from(MAX_POLYGONS_PER_IMAGE).unwrap();
-        for indices in [&[0][..], &[999], &[3, 998], &[4, 0, 999], &[10, 20, 30, 40]] {
+        let count = u32::try_from(POLYGON_CAPACITY).unwrap();
+        for indices in [&[0][..], &[999], &[3, 998], &[4, 0, 999], &[10, 20, 30, 40], &[1998, 1999]] {
             assert_eq!(decode(encode(indices), count).as_deref(), Some(indices));
         }
         // NO_CHANGES names 0xFFFE twice, beyond every drawing.

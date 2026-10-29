@@ -49,7 +49,9 @@ process per trial spends about 80% of its wall time compiling.
 the seeded fixture, and resident trials reproduce the fresh-process replay hash.
 A resident trial takes ~4.7 s of wall time instead of 16–21 s.
 
-- Builds are cached by git tree hash under `.cache/hillclimb/bin` (newest 8 kept).
+- Builds are cached under `.cache/hillclimb/bin` (newest 8 kept), keyed by the
+  git tree hash of their inputs (`BUILD_INPUTS`: `src`, `shared`, the two
+  examples and the build files; `shared` was missing before 2026-10-29).
   Refs build in one reusable worktree (`.cache/hillclimb/ref-src`) with its own
   incremental target dir; `WORKTREE` builds in the normal `target/`.
 - Executables built before `serve` existed fall back to one process per trial.

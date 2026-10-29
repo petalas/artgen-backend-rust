@@ -1,10 +1,13 @@
 //! Main-thread GPU worker. Prefer the supervised scripts/evolution-bench.py CLI,
 //! or scripts/hillclimb.py, which drives the resident `serve` mode.
 use anyhow::{bail, ensure, Context, Result};
-use artgen_backend_rust::benchmark::{
-    fixtures,
-    quality::QualitySpec,
-    trial::{self, ResidentCase, TimestampMode, TrialSpec},
+use artgen_backend_rust::{
+    benchmark::{
+        fixtures,
+        quality::{self, QualitySpec},
+        trial::{self, ResidentCase, TimestampMode, TrialSpec},
+    },
+    gpu_evolver::EngineCapacity,
 };
 use std::{
     collections::BTreeMap,
@@ -58,7 +61,8 @@ fn quality(mut values: BTreeMap<String, String>) -> Result<()> {
     let manifest = path(&values, "manifest")?;
     values.remove("manifest");
     let (spec, output) = quality_spec(values)?;
-    let mut case = ResidentCase::open(&manifest, &spec.case_id)?;
+    let capacity = quality_capacity(&spec)?;
+    let mut case = ResidentCase::open_for(&manifest, &spec.case_id, Some(capacity))?;
     let record = case.run_quality(&spec, &output)?;
     println!("{}", serde_json::to_string(&record)?);
     ensure!(
@@ -73,7 +77,10 @@ fn quality(mut values: BTreeMap<String, String>) -> Result<()> {
 /// engine is built once on first use, so driver shader compilation is paid once
 /// per case instead of once per request. Answers are `@result {json}` lines;
 /// other stdout lines are engine logs. Requests that fail before producing a
-/// record end the process, because the engine state is then unknown.
+/// record end the process, because the engine state is then unknown. A case's
+/// engine is sized for its first request: a trial's fixture parameters or a
+/// quality run's parameters. A later request needing more chains or offspring
+/// fails (scripts/quality.py gives each side its own server).
 fn serve(manifest: &Path) -> Result<()> {
     let mut cases: BTreeMap<String, ResidentCase> = BTreeMap::new();
     let mut stdout = std::io::stdout();
@@ -90,22 +97,40 @@ fn serve(manifest: &Path) -> Result<()> {
             fixtures::PROJECTS.contains(&case_id.as_str()),
             "unknown case {case_id}"
         );
+        let request = if quality {
+            Request::Quality(quality_spec(values)?)
+        } else {
+            Request::Trial(trial_spec(values)?)
+        };
         if !cases.contains_key(&case_id) {
-            let case = ResidentCase::open(manifest, &case_id)?;
+            let capacity = match &request {
+                Request::Quality((spec, _)) => Some(quality_capacity(spec)?),
+                Request::Trial(_) => None,
+            };
+            let case = ResidentCase::open_for(manifest, &case_id, capacity)?;
             cases.insert(case_id.clone(), case);
         }
         let case = cases.get_mut(&case_id).context("resident case")?;
-        let reply = if quality {
-            let (spec, output) = quality_spec(values)?;
-            serde_json::to_string(&case.run_quality(&spec, &output)?)?
-        } else {
-            let (spec, output) = trial_spec(values)?;
-            serde_json::to_string(&case.run(&spec, &output)?)?
+        let reply = match request {
+            Request::Quality((spec, output)) => {
+                serde_json::to_string(&case.run_quality(&spec, &output)?)?
+            }
+            Request::Trial((spec, output)) => serde_json::to_string(&case.run(&spec, &output)?)?,
         };
         writeln!(stdout, "@result {reply}")?;
         stdout.flush()?;
     }
     Ok(())
+}
+
+enum Request {
+    Trial((TrialSpec, PathBuf)),
+    Quality((QualitySpec, PathBuf)),
+}
+
+/// The engine capacity a quality run's parameters need.
+fn quality_capacity(spec: &QualitySpec) -> Result<EngineCapacity> {
+    Ok(EngineCapacity::for_params(&quality::params_with(&spec.overrides)?))
 }
 
 /// `--params` is a compact JSON object of camelCase `MutationParams` fields

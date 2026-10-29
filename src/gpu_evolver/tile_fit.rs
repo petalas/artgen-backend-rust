@@ -14,7 +14,7 @@
 //! polygon it keeps was rendered by the raster in each tile it meets, and every
 //! remaining tile list fits, so the raster scores the trimmed drawing exactly.
 
-use crate::settings::{MAX_POLYGONS_PER_IMAGE, TILE_MAX_POLYS};
+use crate::settings::{POLYGON_CAPACITY, TILE_MAX_POLYS};
 
 use super::buffers::{GpuDrawingState, GpuPolygon};
 
@@ -40,7 +40,7 @@ pub fn fit_tile_lists(state: &mut GpuDrawingState, image: [u32; 2], tile: [u32; 
         "image {image:?} and tile {tile:?} must be nonempty"
     );
     let count = state.polygon_count as usize;
-    assert!(count <= MAX_POLYGONS_PER_IMAGE, "{count} polygons exceed the state");
+    assert!(count <= POLYGON_CAPACITY, "{count} polygons exceed the state");
     let grid = [image[0].div_ceil(tile[0]), image[1].div_ceil(tile[1])];
     // Bounded: grid tiles (at most image pixels) and one flag per polygon.
     let mut occupancy = vec![0_u32; grid[0] as usize * grid[1] as usize];

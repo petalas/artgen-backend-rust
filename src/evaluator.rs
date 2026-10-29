@@ -5,7 +5,7 @@ use tokio::sync::broadcast::Receiver;
 use crate::{
     engine::Rasterizer,
     models::drawing::Drawing,
-    settings::{MAX_ERROR_PER_PIXEL, PER_POINT_MULTIPLIER},
+    settings::{MAX_ERROR_PER_PIXEL, PER_POINT_PENALTY},
 };
 
 #[derive(Default, Debug, Clone)]
@@ -105,7 +105,7 @@ impl Evaluator {
 
             let max_total_error = MAX_ERROR_PER_PIXEL * self.w as f32 * self.h as f32;
             drawing.fitness = 100.0 * (1.0 - error / max_total_error);
-            let penalty = drawing.fitness * PER_POINT_MULTIPLIER * drawing.num_points() as f32;
+            let penalty = drawing.fitness * PER_POINT_PENALTY * drawing.num_points() as f32;
             drawing.fitness -= penalty;
 
             drawing.fitness

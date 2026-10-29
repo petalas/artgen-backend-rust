@@ -20,6 +20,13 @@ fn default_swap_colors_prob() -> f32 { settings::SWAP_COLORS_PROB }
 fn default_medium_move_delta() -> f32 { settings::MEDIUM_MOVE_DELTA }
 fn default_merge_centroid_threshold() -> f32 { settings::MERGE_CENTROID_THRESHOLD }
 fn default_merge_color_threshold() -> f32 { settings::MERGE_COLOR_THRESHOLD }
+fn default_per_point_penalty() -> f32 { settings::PER_POINT_PENALTY }
+// Records and frozen fixtures from before the field omit it; leaving the default
+// out keeps their exact parameter maps (effective-parameter gates compare them).
+#[allow(clippy::trivially_copy_pass_by_ref)] // skip_serializing_if passes a reference
+fn is_default_per_point_penalty(value: &f32) -> bool {
+    value.to_bits() == settings::PER_POINT_PENALTY.to_bits()
+}
 
 /// Runtime-configurable mutation parameters.
 /// Sent over WebSocket as JSON (camelCase) and used to build `GpuParams`.
@@ -70,9 +77,17 @@ pub struct MutationParams {
     pub min_alpha: u8,
     pub max_alpha: u8,
 
-    // Polygon count limits
+    // Polygon count limits. `max_polygons` is the runtime search cap, at most
+    // `settings::POLYGON_CAPACITY` (the GPU state's storage).
     pub min_polygons: u32,
     pub max_polygons: u32,
+
+    // Fitness is multiplied by `1 - per_point_penalty * points` (3 per triangle).
+    #[serde(
+        default = "default_per_point_penalty",
+        skip_serializing_if = "is_default_per_point_penalty"
+    )]
+    pub per_point_penalty: f32,
 
     // Crossover parameters
     pub crossover_prob: f32,
@@ -111,9 +126,16 @@ impl MutationParams {
             self.min_alpha = self.max_alpha;
         }
 
-        // Polygons: min <= max, max capped at buffer limit (1000)
-        self.max_polygons = self.max_polygons.min(settings::MAX_POLYGONS_PER_IMAGE as u32);
+        // Polygons: min <= max, max capped at the GPU state's storage
+        self.max_polygons = self.max_polygons.min(settings::POLYGON_CAPACITY as u32);
         self.min_polygons = self.min_polygons.max(1).min(self.max_polygons);
+
+        // Penalty: [0, MAX_PER_POINT_PENALTY]; NaN becomes no penalty
+        self.per_point_penalty = if self.per_point_penalty.is_nan() {
+            0.0
+        } else {
+            self.per_point_penalty.clamp(0.0, settings::MAX_PER_POINT_PENALTY)
+        };
 
         // Probabilities: clamp to [0, 1]
         self.add_polygon_prob = self.add_polygon_prob.clamp(0.0, 1.0);
@@ -200,7 +222,8 @@ impl Default for MutationParams {
             min_alpha: settings::MIN_ALPHA,
             max_alpha: settings::MAX_ALPHA,
             min_polygons: settings::MIN_POLYGONS_PER_IMAGE as u32,
-            max_polygons: settings::MAX_POLYGONS_PER_IMAGE as u32,
+            max_polygons: settings::DEFAULT_MAX_POLYGONS,
+            per_point_penalty: settings::PER_POINT_PENALTY,
             crossover_prob: settings::CROSSOVER_PROB,
             spatial_crossover_weight: settings::SPATIAL_CROSSOVER_WEIGHT,
             tournament_size: settings::TOURNAMENT_SIZE,

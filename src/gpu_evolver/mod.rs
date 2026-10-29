@@ -9,6 +9,7 @@ mod readback;
 mod schedule;
 mod tile_fit;
 
+pub use execution::EngineCapacity;
 pub use programs::{bundled_shader_source, BundledShader, TileStage};
 
 use std::time::Instant;
@@ -18,7 +19,7 @@ use wgpu::*;
 
 use crate::models::drawing::Drawing;
 use crate::mutation_params::MutationParams;
-use crate::settings::{GPU_MAX_CHAIN_COUNT, GPU_DEFAULT_CHAIN_COUNT, TILE_MAX_POLYS};
+use crate::settings::{GPU_DEFAULT_CHAIN_COUNT, TILE_MAX_POLYS};
 
 use buffers::{
     gpu_params_from, default_gpu_params, drawing_to_gpu, gpu_to_drawing, seed_state,
@@ -85,13 +86,20 @@ pub struct GpuEvolver {
 }
 
 impl GpuEvolver {
+    /// An engine whose storage holds `capacity`: `EngineCapacity::ADJUSTABLE`
+    /// where chain count and λ change at runtime, `EngineCapacity::for_params`
+    /// where they are fixed. A batch beyond it panics.
+    ///
+    /// # Panics
+    /// Panics if no adapter supports the engine (see `GpuPipeline::new`).
     pub async fn new(
         reference_rgba: &[u8],
         image_width: u32,
         image_height: u32,
         initial_drawing: &Drawing,
+        capacity: EngineCapacity,
     ) -> Self {
-        let max_chains = GPU_MAX_CHAIN_COUNT;
+        let max_chains = capacity.chains();
         let active_chains = GPU_DEFAULT_CHAIN_COUNT;
         // Create initial chain states for max capacity — all start from the same drawing but with different RNG seeds
         let initial_states = parent_states(
@@ -104,7 +112,7 @@ impl GpuEvolver {
         );
 
         let pipeline = GpuPipeline::new(
-            max_chains,
+            capacity,
             image_width,
             image_height,
             reference_rgba,
@@ -407,12 +415,13 @@ impl GpuEvolver {
     /// and updates both chain_fitness[] and chain_states[].fitness_bits.
     ///
     /// This is synchronous — blocks until the GPU readback completes.
-    /// Returns the best fitness across all active chains.
-    pub fn evaluate_chain_fitness(&mut self, chain_count: u32) -> f32 {
+    /// Returns the best fitness across `params.chain_count` chains, penalized
+    /// by `params.per_point_penalty` as select.wgsl's compute_fitness does.
+    pub fn evaluate_chain_fitness(&mut self, params: &MutationParams) -> f32 {
         self.flush_pending();
 
         let p = &self.pipeline;
-        let active = chain_count.min(p.chain_count);
+        let active = params.chain_count.min(p.chain_count);
         self.active_chain_count = active;
 
         let state_size = GPU_DRAWING_STATE_SIZE as u64;
@@ -444,7 +453,7 @@ impl GpuEvolver {
         // Compute fitness from errors with point penalty (matching select.wgsl's compute_fitness)
         let max_error = crate::settings::MAX_ERROR_PER_PIXEL
             * (p.image_width * p.image_height) as f32;
-        let per_point_mul = crate::settings::PER_POINT_MULTIPLIER;
+        let per_point_penalty = params.per_point_penalty;
 
         let mut best_fitness = 0.0f32;
         for i in 0..active as usize {
@@ -452,7 +461,7 @@ impl GpuEvolver {
             let polygon_count = polygon_counts[i];
             let mut fitness = 100.0 * (1.0 - total_error as f32 / max_error);
             let num_points = polygon_count * 3;
-            fitness -= fitness * per_point_mul * num_points as f32;
+            fitness -= fitness * per_point_penalty * num_points as f32;
             self.readback.chain_fitness[i] = fitness;
             if fitness > best_fitness {
                 best_fitness = fitness;
@@ -482,6 +491,20 @@ impl GpuEvolver {
         self.readback.best_fitness_bits = best_fitness.to_bits();
 
         best_fitness
+    }
+
+    /// Clamp `params` to what this engine was constructed for: chains and
+    /// offspring per iteration, and the installed programs' polygon limit.
+    /// Returns whether anything changed. `run_batch` panics on settings past
+    /// capacity, so the app applies this to settings it receives.
+    pub fn fit_to_capacity(&self, params: &mut MutationParams) -> bool {
+        let p = &self.pipeline;
+        let before = (params.chain_count, params.max_polygons);
+        let by_offspring = p.offspring_capacity / params.lambda.max(1);
+        params.chain_count = params.chain_count.min(p.chain_count).min(by_offspring).max(1);
+        let limit = u32::try_from(p.programs.polygon_limit()).unwrap_or(u32::MAX);
+        params.max_polygons = params.max_polygons.min(limit);
+        before != (params.chain_count, params.max_polygons)
     }
 
     pub fn chain_fitness(&self) -> &[f32] {
@@ -555,7 +578,7 @@ impl GpuEvolver {
         let chain_count = params.chain_count.min(self.pipeline.chain_count);
 
         // 3. Evaluate fitness so chains have valid fitness_bits for warmup
-        self.evaluate_chain_fitness(chain_count);
+        self.evaluate_chain_fitness(params);
 
         // 4. Pre-initialize framebuffers so warmup exercises the full
         //    incremental pipeline (including update_framebuffers)
@@ -570,7 +593,7 @@ impl GpuEvolver {
 
         // 6. Reinit to original drawing for a clean, deterministic start
         self.reinit_chains(drawing);
-        let start_fitness = self.evaluate_chain_fitness(chain_count);
+        let start_fitness = self.evaluate_chain_fitness(params);
 
         // 7. Pre-initialize framebuffers so this cost is excluded from benchmark timing
         self.dispatch_init_framebuffers(chain_count);

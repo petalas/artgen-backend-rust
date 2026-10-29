@@ -3,7 +3,7 @@ use artgen_backend_rust::{
     benchmark::{BenchmarkExport, BenchmarkRequest, BenchmarkResult, BenchmarkSample, BenchmarkSnapshot, BenchmarkStore, PassTimingsResult},
     engine::{Engine, Rasterizer},
     evaluator::{Evaluator, EvaluatorPayload},
-    gpu_evolver::GpuEvolver,
+    gpu_evolver::{EngineCapacity, GpuEvolver},
     models::drawing::Drawing,
     mutation_params::MutationParams,
     projects,
@@ -268,17 +268,19 @@ fn gpu_main_loop(
     let mut event_pump = sdl_context.event_pump().unwrap();
     let frametime = Duration::from_millis(TARGET_FRAMETIME);
 
-    // Initialize GPU evolver
+    // Initialize GPU evolver; this loop only runs the default parameters.
+    let default_params = MutationParams::default();
     let mut evolver = futures_lite::future::block_on(GpuEvolver::new(
         &engine.ref_image_data,
         engine.w as u32,
         engine.h as u32,
         initial_best,
+        EngineCapacity::for_params(&default_params),
     ));
 
     // Start from the drawing the GPU holds, which drops any triangles that
     // overflow a raster tile list, with its GPU score rather than a saved one.
-    let gpu_fitness = evolver.evaluate_chain_fitness(MutationParams::default().chain_count);
+    let gpu_fitness = evolver.evaluate_chain_fitness(&default_params);
     let mut global_best = evolver.readback_chain(0);
     global_best.fitness = gpu_fitness;
     let mut last_draw_timestamp = Instant::now() - frametime;
@@ -286,7 +288,6 @@ fn gpu_main_loop(
     let mut last_stats_timestamp = Instant::now();
     let mut batches = 0u64;
 
-    let default_params = MutationParams::default();
     loop {
         batches += 1;
         let collect_timestamps = true;
@@ -1564,6 +1565,12 @@ fn run_benchmark(
 
     let mut bench_params = req.params.clone();
     bench_params.sanitize();
+    if evolver.fit_to_capacity(&mut bench_params) {
+        println!(
+            "[Benchmark] Settings clamped to engine capacity: {} chains, max {} polygons",
+            bench_params.chain_count, bench_params.max_polygons
+        );
+    }
 
     // Signal benchmark started
     {
@@ -1853,14 +1860,6 @@ fn run_cli_benchmark(project: &str, gpu_batch_iters_override: Option<u32>) {
     // Start from blank — deterministic baseline, no random variance
     let initial = Drawing { polygons: vec![], is_dirty: false, fitness: 0.0 };
 
-    // Initialize GPU evolver
-    let mut evolver = futures_lite::future::block_on(GpuEvolver::new(
-        &rgba,
-        w as u32,
-        h as u32,
-        &initial,
-    ));
-
     // Configure benchmark params: 4 chains, 64 lambda, single mutation, adaptive scale
     let mut params = MutationParams {
         chain_count: BENCH_CHAINS,
@@ -1873,6 +1872,15 @@ fn run_cli_benchmark(project: &str, gpu_batch_iters_override: Option<u32>) {
         params.gpu_batch_iters = iters;
     }
     params.sanitize();
+
+    // Initialize GPU evolver
+    let mut evolver = futures_lite::future::block_on(GpuEvolver::new(
+        &rgba,
+        w as u32,
+        h as u32,
+        &initial,
+        EngineCapacity::for_params(&params),
+    ));
 
     let evals_per_batch = params.gpu_batch_iters as u64
         * params.chain_count as u64
@@ -2106,13 +2114,14 @@ fn gpu_main_loop_headless(legacy_image: Option<&str>, gpu_batch_iters_override: 
             engine.w as u32,
             engine.h as u32,
             &initial_best,
+            EngineCapacity::ADJUSTABLE,
         ));
 
         // Evaluate initial fitness on GPU so it matches GPU's error metric
         // (important after resolution changes where CPU fitness is stale).
         // The score belongs to the drawing the GPU holds, which drops any
         // triangles that overflow a raster tile list.
-        let gpu_fitness = evolver.evaluate_chain_fitness(mp.chain_count);
+        let gpu_fitness = evolver.evaluate_chain_fitness(&mp);
         initial_best = evolver.readback_chain(0);
         initial_best.fitness = gpu_fitness;
 
@@ -2276,7 +2285,14 @@ fn gpu_main_loop_headless(legacy_image: Option<&str>, gpu_batch_iters_override: 
             }
 
             batches += 1;
-            let mp = ws_state.0.lock().unwrap().mutation_params.clone();
+            let mut mp = ws_state.0.lock().unwrap().mutation_params.clone();
+            if evolver.fit_to_capacity(&mut mp) {
+                println!(
+                    "[GPU] settings clamped to engine capacity: {} chains, max {} polygons",
+                    mp.chain_count, mp.max_polygons
+                );
+                ws_state.0.lock().unwrap().mutation_params = mp.clone();
+            }
             let collect_timestamps = true;
             if let Some(new_best) = evolver.run_batch(&mp, collect_timestamps) {
                 if new_best.fitness > global_best.fitness {

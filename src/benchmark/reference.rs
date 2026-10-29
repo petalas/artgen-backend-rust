@@ -15,7 +15,7 @@ use anyhow::{ensure, Result};
 use serde::{Deserialize, Serialize};
 
 const MAX_DIMENSION: u32 = 1024;
-const MAX_TRIANGLES: usize = 1000;
+const MAX_TRIANGLES: usize = crate::settings::POLYGON_CAPACITY;
 const TILE_CAPACITY: u32 = 256;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -113,8 +113,10 @@ impl Triangle {
     }
 }
 
-/// Render and score packed triangles against exactly width * height RGBA bytes.
-/// Rejects empty/oversized dimensions and drawings exceeding 1000 triangles.
+/// Render and score packed triangles against exactly width * height RGBA bytes,
+/// penalized by `per_point_penalty` as `compute_fitness` is by its params.
+/// Rejects empty/oversized dimensions and drawings exceeding the GPU state's
+/// `POLYGON_CAPACITY` triangles.
 /// # Errors
 /// Rejects dimensions, reference lengths or triangle counts outside the bounds.
 pub fn evaluate(
@@ -122,6 +124,7 @@ pub fn evaluate(
     reference: &[u8],
     width: u32,
     height: u32,
+    per_point_penalty: f32,
 ) -> Result<ReferenceEvaluation> {
     let pixel_count = validate(polygons, width, height)?;
     ensure!(
@@ -131,7 +134,7 @@ pub fn evaluate(
     let triangles: Vec<_> = polygons.iter().map(Triangle::decode).collect();
     let mut pixels = vec![0; pixel_count];
     let mut raw_error = 0_u64;
-    // At most 1024*1024 pixels, each visiting at most 1000 triangles.
+    // At most 1024*1024 pixels, each visiting at most MAX_TRIANGLES triangles.
     for y in 0..height {
         for x in 0..width {
             let p = [
@@ -152,7 +155,7 @@ pub fn evaluate(
     // Preserve compute_fitness's operation order and production parameters.
     let mut fitness = 100.0
         * (1.0 - raw_error as f32 / (crate::settings::MAX_ERROR_PER_PIXEL * pixel_count as f32));
-    fitness -= fitness * crate::settings::PER_POINT_MULTIPLIER * (polygons.len() * 3) as f32;
+    fitness -= fitness * per_point_penalty * (polygons.len() * 3) as f32;
     Ok(ReferenceEvaluation {
         pixels,
         raw_error,
@@ -185,7 +188,7 @@ pub fn complexity(
     let mut overlaps = vec![0_u32; tile_count as usize];
     let mut triangle_areas = Vec::with_capacity(polygons.len());
     let mut bbox_areas = Vec::with_capacity(polygons.len());
-    // Allocate all scratch before visiting at most 1000 * 1024*1024 tile slots.
+    // Allocate all scratch before visiting at most MAX_TRIANGLES * 1024*1024 tile slots.
     for polygon in polygons {
         let triangle = Triangle::decode(polygon);
         let (area, bbox_area) = triangle.areas();
@@ -224,7 +227,7 @@ fn validate(polygons: &[[u32; 4]], width: u32, height: u32) -> Result<usize> {
     );
     ensure!(
         polygons.len() <= MAX_TRIANGLES,
-        "drawing exceeds 1000 triangles"
+        "drawing exceeds {MAX_TRIANGLES} triangles"
     );
     Ok((width * height) as usize)
 }
@@ -299,7 +302,8 @@ fn rank_index(count: usize, percentile: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{complexity, evaluate, AreaDistribution};
+    const PENALTY: f32 = crate::settings::PER_POINT_PENALTY;
+    use super::{complexity, evaluate, AreaDistribution, MAX_TRIANGLES};
 
     fn triangle(color: [u8; 4], vertices: [[u16; 2]; 3]) -> [u32; 4] {
         let packed = vertices.map(|[x, y]| u32::from(x) | (u32::from(y) << 16));
@@ -315,12 +319,12 @@ mod tests {
 
     #[test]
     fn empty_drawing_is_white_and_ignores_reference_alpha() {
-        let black = evaluate(&[], &[0, 0, 0, 0, 0, 0, 0, 255], 2, 1).unwrap();
+        let black = evaluate(&[], &[0, 0, 0, 0, 0, 0, 0, 255], 2, 1, PENALTY).unwrap();
         assert_eq!(black.pixels, [0xffff_ffff; 2]);
         assert_eq!(black.raw_error, 1530);
         assert_eq!(black.raw_similarity, 0.0);
         assert_eq!(black.fitness, 0.0);
-        let white = evaluate(&[], &[255, 255, 255, 0], 1, 1).unwrap();
+        let white = evaluate(&[], &[255, 255, 255, 0], 1, 1, PENALTY).unwrap();
         assert_eq!(white.raw_error, 0);
         assert_eq!(white.raw_similarity, 100.0);
         assert_eq!(white.fitness, 100.0);
@@ -329,11 +333,15 @@ mod tests {
     #[test]
     fn two_opaque_triangles_fill_a_square_and_pay_for_six_vertices() {
         let polygons = square([0, 0, 0, 255]);
-        let result = evaluate(&polygons, &[0; 16], 2, 2).unwrap();
+        let result = evaluate(&polygons, &[0; 16], 2, 2, PENALTY).unwrap();
         assert_eq!(result.pixels, [0xff00_0000; 4]);
         assert_eq!(result.raw_error, 0);
         assert_eq!(result.raw_similarity, 100.0);
         assert_eq!(result.fitness, 99.99988);
+        // The penalty is the caller's: none, or 16 times the default.
+        assert_eq!(evaluate(&polygons, &[0; 16], 2, 2, 0.0).unwrap().fitness, 100.0);
+        let strong = evaluate(&polygons, &[0; 16], 2, 2, 16.0 * PENALTY).unwrap();
+        assert_eq!(strong.fitness, 100.0 - 100.0 * (16.0 * PENALTY) * 6.0);
         let metrics = complexity(&polygons, 2, 2, [8, 8]).unwrap();
         assert_eq!((metrics.triangles, metrics.vertices), (2, 6));
         assert_eq!(
@@ -352,7 +360,7 @@ mod tests {
     #[test]
     fn packed_rgb_channels_and_raw_l1_use_exact_reference_bytes() {
         let polygon = square([17, 34, 51, 255])[0];
-        let result = evaluate(&[polygon], &[16, 36, 50, 0], 1, 1).unwrap();
+        let result = evaluate(&[polygon], &[16, 36, 50, 0], 1, 1, PENALTY).unwrap();
         assert_eq!(result.pixels, [0xff33_2211]);
         assert_eq!(result.raw_error, 4);
         assert_eq!(result.raw_similarity, 99.47712418300654);
@@ -363,11 +371,11 @@ mod tests {
         let left = triangle([0, 0, 0, 255], [[0, 0], [32767, 0], [32767, 65535]]);
         let right = triangle([0, 0, 0, 255], [[0, 0], [32768, 0], [32768, 65535]]);
         assert_eq!(
-            evaluate(&[left], &[0; 4], 1, 1).unwrap().pixels,
+            evaluate(&[left], &[0; 4], 1, 1, PENALTY).unwrap().pixels,
             [0xffff_ffff]
         );
         assert_eq!(
-            evaluate(&[right], &[0; 4], 1, 1).unwrap().pixels,
+            evaluate(&[right], &[0; 4], 1, 1, PENALTY).unwrap().pixels,
             [0xff00_0000]
         );
     }
@@ -377,29 +385,29 @@ mod tests {
         // 128/255 is rounded upward in f32. White*(1-alpha) is 126.99999,
         // so a single layer floors to 126. Two layers floor to 63.
         let polygons = square([0, 0, 0, 128]);
-        let result = evaluate(&polygons, &[0; 16], 2, 2).unwrap();
+        let result = evaluate(&polygons, &[0; 16], 2, 2, PENALTY).unwrap();
         assert_eq!(
             result.pixels,
             [0xff3f_3f3f, 0xff7e_7e7e, 0xff7e_7e7e, 0xff3f_3f3f]
         );
         assert_eq!(result.raw_error, 1134);
         let reversed = polygons.map(|[color, a, b, c]| [color, c, b, a]);
-        assert_eq!(evaluate(&reversed, &[0; 16], 2, 2).unwrap(), result);
+        assert_eq!(evaluate(&reversed, &[0; 16], 2, 2, PENALTY).unwrap(), result);
     }
 
     #[test]
     fn layered_blends_quantize_only_at_the_end_and_keep_order() {
         let mut polygons = [square([0, 0, 0, 64])[0]; 2];
         // This pixel is on the diagonal and each triangle covers it once.
-        let result = evaluate(&polygons, &[0; 4], 1, 1).unwrap();
+        let result = evaluate(&polygons, &[0; 4], 1, 1, PENALTY).unwrap();
         assert_eq!(result.pixels, [0xff8f_8f8f]);
         polygons[1][0] = u32::from_le_bytes([255, 0, 0, 255]);
-        let red_last = evaluate(&polygons, &[255, 0, 0, 9], 1, 1).unwrap();
+        let red_last = evaluate(&polygons, &[255, 0, 0, 9], 1, 1, PENALTY).unwrap();
         assert_eq!(red_last.pixels, [0xff00_00ff]);
         assert_eq!(red_last.raw_error, 0);
         polygons.reverse();
         assert_eq!(
-            evaluate(&polygons, &[0; 4], 1, 1).unwrap().pixels,
+            evaluate(&polygons, &[0; 4], 1, 1, PENALTY).unwrap().pixels,
             [0xff00_00bf]
         );
     }
@@ -408,11 +416,11 @@ mod tests {
     fn transparent_layers_and_layers_after_bin_capacity_remain_visible() {
         let mut polygons = vec![square([0, 255, 0, 0])[0]; 257];
         assert_eq!(
-            evaluate(&polygons, &[0; 4], 1, 1).unwrap().pixels,
+            evaluate(&polygons, &[0; 4], 1, 1, PENALTY).unwrap().pixels,
             [0xffff_ffff]
         );
         polygons[256][0] = u32::from_le_bytes([255, 0, 0, 255]);
-        let result = evaluate(&polygons, &[255, 0, 0, 255], 1, 1).unwrap();
+        let result = evaluate(&polygons, &[255, 0, 0, 255], 1, 1, PENALTY).unwrap();
         assert_eq!(result.pixels, [0xff00_00ff]);
         assert_eq!(result.raw_error, 0);
     }
@@ -473,7 +481,7 @@ mod tests {
             [0, 0, 0, 255],
             [[21845, 21845], [65535, 65535], [65535, 65535]],
         );
-        let result = evaluate(&[line], &[0; 36], 3, 3).unwrap();
+        let result = evaluate(&[line], &[0; 36], 3, 3, PENALTY).unwrap();
         assert_eq!(
             result.pixels,
             [
@@ -501,11 +509,11 @@ mod tests {
         assert_eq!(metrics.bbox_area, AreaDistribution::default());
         assert_eq!(metrics.tile_overlaps.max, 0);
         assert_eq!(metrics.overflowed_tiles, 0);
-        let polygons = vec![square([0; 4])[0]; 1000];
-        assert_eq!(complexity(&polygons, 1, 1, [8, 8]).unwrap().vertices, 3000);
-        assert!(evaluate(&polygons, &[0; 4], 1, 1).is_ok());
-        let excess = vec![square([0; 4])[0]; 1001];
-        assert!(evaluate(&excess, &[0; 4], 1, 1).is_err());
+        let polygons = vec![square([0; 4])[0]; MAX_TRIANGLES];
+        assert_eq!(complexity(&polygons, 1, 1, [8, 8]).unwrap().vertices, u32::try_from(3 * MAX_TRIANGLES).unwrap());
+        assert!(evaluate(&polygons, &[0; 4], 1, 1, PENALTY).is_ok());
+        let excess = vec![square([0; 4])[0]; MAX_TRIANGLES + 1];
+        assert!(evaluate(&excess, &[0; 4], 1, 1, PENALTY).is_err());
         assert!(complexity(&excess, 1, 1, [8, 8]).is_err());
     }
 
@@ -539,11 +547,11 @@ mod tests {
     #[test]
     fn invalid_dimensions_reference_lengths_and_workgroups_are_rejected() {
         for dimensions in [[0, 1], [1, 0], [1025, 1], [1, 1025], [u32::MAX, u32::MAX]] {
-            assert!(evaluate(&[], &[], dimensions[0], dimensions[1]).is_err());
+            assert!(evaluate(&[], &[], dimensions[0], dimensions[1], PENALTY).is_err());
             assert!(complexity(&[], dimensions[0], dimensions[1], [8, 8]).is_err());
         }
         for length in [0, 3, 5, 8] {
-            assert!(evaluate(&[], &vec![0; length], 1, 1).is_err());
+            assert!(evaluate(&[], &vec![0; length], 1, 1, PENALTY).is_err());
         }
         for workgroup in [[0, 8], [8, 0], [1025, 8], [8, u32::MAX]] {
             assert!(complexity(&[], 1, 1, workgroup).is_err());

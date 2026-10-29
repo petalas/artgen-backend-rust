@@ -11,15 +11,73 @@ and benchmark capacity checks use those rules. `GpuPipeline` supplies actual
 buffer sizes to validation. Planning adds no allocation to the batch loop and
 does not change shader bytes or compute-pass separation.
 
-Allocation preserves the existing independent storage clamps. Ordinary evolution
-still clamps requested chains to drawing capacity; benchmark preparation rejects
-configurations that do not fit every required buffer. Reporting a smaller
-framebuffer capacity without enforcing it in ordinary configuration is a separate
-behavior issue, not silently changed by this refactor.
+### Polygon capacity and the search cap
+
+Two numbers bound a drawing's triangles:
+
+- **Polygon capacity** (`settings::POLYGON_CAPACITY`, 2048) is storage, fixed at
+  compile time. It is the stride of `GpuDrawingState` and of WGSL `DrawingState`
+  (the generated `POLYGON_CAPACITY` constant), and bounds every host check of
+  what a state can hold: `drawing_to_gpu`, `tile_fit`, snapshot decoding, the
+  scalar reference, fixture and benchmark drawing validation.
+- **Search cap** (`MutationParams::max_polygons`, default
+  `settings::DEFAULT_MAX_POLYGONS` = 1000) is a runtime setting passed in
+  `GpuParams`. Mutation and crossover add no triangle beyond it. `sanitize`
+  clamps it to the capacity; the viewer's sliders stop there. The CPU `Engine`
+  path has no parameters and keeps the default cap.
+
+Workgroup memory does not grow with the capacity. Mutate used to copy its
+parent into workgroup memory, but each mutate workgroup serves one offspring, so
+the copy was read about once; it now reads the parent from `chain_states`, which
+no stage writes during mutate. At a 32 KB copy, automatic zeroing alone doubled
+mutate's time (see LEARNINGS). Only crossover's keep bits (4 bytes per 32 slots)
+scale with the capacity. The engine requests 32 KiB of workgroup memory
+(`execution::WORKGROUP_STORAGE_BYTES`; init_framebuffers at 32x16 uses 25 KB,
+above the 16 KB downlevel default that was requested before), and a CPU test
+sums every bundled program's workgroup variables through naga against it.
+
+A larger stride does not change replay identity: canonical state and its hash
+cover only the first `polygon_count` polygons of each state.
+
+### Engine capacity
+
+`GpuEvolver::new` takes an `EngineCapacity` (chains, λ) and `AllocationPlan`
+sizes storage for it, each buffer still clamped to the device's binding limit
+(128 MiB on Dozen). The application, whose UI changes chain count and λ, uses
+`EngineCapacity::ADJUSTABLE` (1024 chains x λ 64); benchmarks, quality runs and
+checkers use `EngineCapacity::for_params` of the parameters they run. At
+32800-byte states the binding limit holds 4092 offspring (8371 at the old
+16032), so the application runs at most 4092 offspring per iteration, e.g. 63
+chains at λ 64.
+
+A batch beyond the capacity fails loudly: `Workload::for_batch` panics when the
+chain count or chains x λ exceeds what was allocated (it used to clamp chains
+silently), and benchmark preparation (`benchmark_validate_capacity`) returns an
+error naming the capacity. `evolution-bench serve` sizes a case's engine for its
+first request: the fixture's parameters for a trial, the run's parameters for a
+quality request. `scripts/quality.py` gives each side its own server.
+
+Allocation preserves the existing independent storage clamps. Benchmark
+preparation rejects configurations that do not fit every required buffer.
+Reporting a smaller framebuffer capacity without enforcing it in ordinary
+configuration is a separate behavior issue, not silently changed here.
+
+### Per-point penalty
+
+`MutationParams::per_point_penalty` (default `settings::PER_POINT_PENALTY`,
+1/5e6; `sanitize` bounds it to 0..=`MAX_PER_POINT_PENALTY`, 1e-4) multiplies
+fitness by `1 - penalty * points`, three points per triangle. It reaches the GPU
+as `GpuParams::per_point_penalty` (select.wgsl `compute_fitness`); the host's
+`evaluate_chain_fitness`, the scalar `reference::evaluate`, trial qualification,
+engine-lab and the quality recorder take it from the run's parameters. Serialized
+parameters omit it at its default, so frozen fixtures, trial records and
+effective-parameter gates keep their exact maps.
 
 `ResourceSizes` includes the reserved diagnostic word in required tile-count
-storage. Allocation preserves the existing worst-case tile-count allocation;
-that word must fit inside it for a requested workload to qualify.
+storage, and allocation includes it too, since an engine sized exactly for its
+workload has no unused worst-case slack to hold it. The requested device
+`max_buffer_size` is the adapter's whole binding limit whatever the workload:
+diagnostic snapshots stage several resources in one buffer.
 
 ## Shader installation
 
@@ -44,7 +102,19 @@ pass older binners need) sit behind one seam, `programs/variants.rs`, reached
 through `GpuPipeline::shader_variants()`. Production never installs a variant.
 Variants are complete sources without the prelude, specialized by their
 16x16 tile-size markers: `WG_X`/`WG_Y` or `TILE_W`/`TILE_H` for raster,
-`TILE_W`/`TILE_H` for binning. An emitted bundled raster or binner specializes to
+`TILE_W`/`TILE_H` for binning, and by their polygon storage
+(`specialize_polygon_storage`). Historical sources declare
+`polygons: array<Polygon, 1000>,` in `DrawingState`; only that member is widened
+to the engine's stride, since the buffers hold `POLYGON_CAPACITY` slots and a
+1000-slot struct would address every state but the first at the wrong offset.
+Their own workgroup arrays (mutate's parent copy, the binners' `polygon_bounds`)
+stay at 1000, so such a variant's polygon limit is 1000: `GpuPipeline::workload`
+panics and benchmark preparation errors when `max_polygons` exceeds the
+installed programs' limit. An emitted bundled source declares
+`POLYGON_CAPACITY`; one emitted by a build with a smaller capacity N takes this
+build's, with limit N (its code was written for N). A larger one, or any other
+polygon array declaration, is rejected. `check-gpu-mutation` and `check-gpu-binning` apply the
+same specialization to the frozen sources they compile themselves. An emitted bundled raster or binner specializes to
 exactly the installed source. Mutation's logical group width and initialization
 policy stay attached to its selected program. The raster, binning, initial framebuffer and
 framebuffer-update programs form one installed tile group. A failed change must
@@ -179,7 +249,7 @@ and compare the shader constants and the `ChainChange` layout.
   reads it in the same iteration. Only those two programs bind it, and neither
   can be replaced by a shader variant. Parent states carry nothing in
   `rng_state[1..4]` or past `polygon_count`, so the update shortcut works at the
-  full polygon limit (it used to stash parents in slots 996–999 and stop above
+  full polygon capacity (it used to stash parents in slots 996–999 and stop above
   996 polygons).
 
 An all-zero record is unknown and turns every shortcut off. The host writes
@@ -265,8 +335,9 @@ comparisons, their limits and the separate longer ff check.
 - Rule 3. Wgpu command encoding, map callbacks and returned drawings allocate
   during ordinary batches. The refactor introduces no new heap allocation in
   that path. Existing chain, offspring, image and batch limits bound live work.
-- Rule 4. The existing pipeline constructor exceeds one page (~350 lines,
-  mostly buffer allocation); its cohesive allocation order is preserved. Command recording moved to `schedule`, where
+- Rule 4. The existing pipeline constructor exceeds one page (~340 lines,
+  mostly buffer allocation; the device limits moved to `required_limits`); its
+  cohesive allocation order is preserved. Command recording moved to `schedule`, where
   the pass boundaries and submit split stay together; `run_batch_inner` (~75
   lines with its readback copies) and `evaluate_chain_fitness` (~70) remain
   slightly over the guide.

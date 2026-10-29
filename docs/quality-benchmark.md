@@ -11,6 +11,8 @@ search changes. Sides can differ by build, by settings, or both.
 scripts/quality.py --side master=master --images ff,mona --seeds 5 --seconds 300   # characterize
 scripts/quality.py --side control=HEAD --side cand=WORKTREE                          # build A/B
 scripts/quality.py --side control=HEAD --side nox=HEAD --params 'nox={"crossover_prob":0}'
+scripts/quality.py --side cap1000=HEAD --side cap2000=HEAD --params 'cap2000={"max_polygons":2000}'
+scripts/quality.py --side p1=HEAD --side p16=HEAD --params 'p16={"per_point_penalty":3.2e-6}'
 scripts/quality.py --side a=HEAD --side b=HEAD --seconds 20 --seeds 2                # A/A
 ```
 
@@ -21,6 +23,13 @@ scripts/quality.py --side a=HEAD --side b=HEAD --seconds 20 --seeds 2           
 - `--params NAME=JSON|FILE` gives one side's `MutationParams` overrides, merged
   onto `MutationParams::default()`. Keys may be snake_case or camelCase. The engine
   rejects unknown fields, wrong types and values that `sanitize` would change.
+  Two settings shape the late game: `max_polygons`, the search cap (default
+  1000, at most the polygon capacity 2048; see
+  [engine architecture](engine-architecture.md#polygon-capacity-and-the-search-cap)),
+  and `per_point_penalty` (default 2e-7 = 1/5e6, at most 1e-4), the fitness
+  factor `1 - penalty * points`. One build serves every cap and penalty, so such
+  sides differ by settings only. Each side's engine is allocated for its own
+  chain count and λ.
 - `--images` (default ff,mona,darwin; see darwin under Limits), `--seeds` (default 5),
   `--first-seed`, `--seconds` (default 120, at most 3600), `--min-effect` (default
   0.02), `--server-scope image|run`, `--build-only`, `--note`.
@@ -55,11 +64,13 @@ points`) are recorded:
 - at the end, after the drain.
 
 `batches` and `evaluations` count submitted work, which runs one batch ahead of
-the delivered drawing. `raw_fitness = fitness / (1 - PER_POINT_MULTIPLIER *
-points)` removes the point penalty from `compute_fitness`.
+the delivered drawing. `raw_fitness = fitness / (1 - per_point_penalty *
+points)` removes the run's point penalty from `compute_fitness`, so `raw r`
+compares sides with different penalties on error alone.
 
 After the clock stops, the final delivered drawing is rendered by the scalar
-renderer (`reference::evaluate`) and described by `reference::complexity`. A gap
+renderer (`reference::evaluate`, with the run's `per_point_penalty`) and
+described by `reference::complexity`. A gap
 above 0.05 fitness points, or any wgpu device error, makes the run invalid, and
 the script stops. `DIR` gets `result.json` (the full record) and `best.json`.
 
@@ -176,6 +187,9 @@ Remaining error r = 100 − fitness%, median [min..max], and median triangles:
 - Both images reach the 1000-triangle cap by 120–180 s; after it, r falls
   only 3% (ff) and 1.5% (mona) in the next 180 s. The cap, not the search,
   limits the late game at the current penalty (1000 triangles cost 0.06%).
+  The cap (`max_polygons`, up to 2048) and the penalty (`per_point_penalty`)
+  are parameters since the polygon capacity was raised; this baseline used
+  1000 and 2e-7.
 - Seed-to-seed spread (sd of ln r) is 0.08–0.20 up to 5 s and 0.01–0.03 from
   30 s, so 5 seeds resolve about 2–3% differences late; the default
   `--min-effect 0.02` matches.

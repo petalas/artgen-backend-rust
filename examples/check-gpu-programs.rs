@@ -6,7 +6,9 @@
 //! Dozen teardown crashes in threaded GPU tests, as documented in LEARNINGS.md.
 
 use anyhow::{bail, ensure, Result};
-use artgen_backend_rust::gpu_evolver::{buffers::GpuDrawingState, pipeline::GpuPipeline};
+use artgen_backend_rust::gpu_evolver::{
+    buffers::GpuDrawingState, pipeline::GpuPipeline, EngineCapacity,
+};
 use bytemuck::Zeroable;
 use wgpu::ComputePipeline;
 
@@ -25,11 +27,11 @@ fn main() -> Result<()> {
 
 fn check_installation() -> Result<()> {
     let mut pipeline = futures_lite::future::block_on(GpuPipeline::new(
-        1,
+        EngineCapacity::new(1, 64),
         17,
         19,
         &[0; 17 * 19 * 4],
-        &[GpuDrawingState::zeroed()],
+        &std::iter::once(GpuDrawingState::zeroed()).collect::<Vec<_>>(),
     ));
     ensure!(
         pipeline

@@ -2,7 +2,9 @@ use wgpu::*;
 use wgpu::util::DeviceExt;
 
 use super::bindings::{self, Resource};
-use super::execution::{AllocationPlan, RasterGrid, ResourceSizes, Workload};
+use super::execution::{
+    AllocationPlan, EngineCapacity, RasterGrid, ResourceSizes, Workload, WORKGROUP_STORAGE_BYTES,
+};
 
 use super::buffers::{
     ControlFlags, GpuDrawingState, GpuParams, GPU_DRAWING_STATE_SIZE,
@@ -15,7 +17,8 @@ use super::programs::{GpuPrograms, ProgramBindings, RasterSchedule, WorklistStor
 
 pub use super::programs::{
     benchmark_mutate_compilation_options, benchmark_mutate_group_size_from_source,
-    BenchmarkMutateOptions, ShaderVariantInstaller,
+    specialize_polygon_storage, BenchmarkMutateOptions, ShaderVariantInstaller, VariantStorage,
+    HISTORICAL_POLYGON_CAPACITY,
 };
 
 pub struct GpuPipeline {
@@ -74,9 +77,35 @@ pub struct GpuPipeline {
 
     // Config
     pub chain_count: u32,
-    pub offspring_capacity: u32, // max offspring slots = min(chain_count * GPU_MAX_LAMBDA, ssbo limit)
+    pub offspring_capacity: u32, // max offspring slots = min(chains * capacity lambda, ssbo limit)
     pub image_width: u32,
     pub image_height: u32,
+}
+
+/// The device limits the engine requests, with `max_buffer_size` from its
+/// allocation plan.
+///
+/// # Panics
+/// Panics if the adapter offers less workgroup memory than the bundled
+/// programs use.
+fn required_limits(adapter: &Limits, max_buffer_size: u64) -> Limits {
+    let workgroup_storage = adapter.max_compute_workgroup_storage_size;
+    assert!(
+        workgroup_storage >= WORKGROUP_STORAGE_BYTES,
+        "the adapter offers {workgroup_storage} bytes of workgroup memory; the bundled \
+         programs need {WORKGROUP_STORAGE_BYTES}"
+    );
+    Limits {
+        max_storage_buffer_binding_size: max_buffer_size,
+        max_buffer_size,
+        max_compute_workgroups_per_dimension: 65535,
+        max_compute_invocations_per_workgroup: 512,
+        max_compute_workgroup_size_x: 512, // 1D workgroup layout needs up to 512 in x (for 32x16 tile)
+        max_storage_buffers_per_shader_stage: bindings::MAX_STORAGE_BUFFERS,
+        // The downlevel default, 16352, is below init_framebuffers' 32x16 tile.
+        max_compute_workgroup_storage_size: WORKGROUP_STORAGE_BYTES,
+        ..Limits::downlevel_defaults()
+    }
 }
 
 impl GpuPipeline {
@@ -86,14 +115,19 @@ impl GpuPipeline {
         crate::settings::RASTERIZE_WG_Y_DEFAULT,
     ];
 
+    /// Storage is sized for `capacity`; `initial_states` holds at least its chains.
+    ///
+    /// # Panics
+    /// Panics if no adapter supports the engine, or `initial_states` or the
+    /// reference image is short.
     pub async fn new(
-        chain_count: u32,
+        capacity: EngineCapacity,
         image_width: u32,
         image_height: u32,
         reference_rgba: &[u8],
         initial_states: &[GpuDrawingState],
     ) -> Self {
-        assert!(initial_states.len() >= chain_count as usize);
+        assert!(initial_states.len() >= capacity.chains() as usize);
         assert_eq!(reference_rgba.len(), (image_width * image_height * 4) as usize);
 
         // --- Device + Queue ---
@@ -129,21 +163,12 @@ impl GpuPipeline {
         println!("Selected GPU adapter: {:?}", adapter_info.name);
 
         let allocation = AllocationPlan::new(
-            chain_count, [image_width, image_height],
+            capacity, [image_width, image_height],
             adapter.limits().max_storage_buffer_binding_size,
         );
         let chain_count = allocation.chain_count;
         let max_buffer_size = allocation.max_buffer_size;
-
-        let required_limits = Limits {
-            max_storage_buffer_binding_size: max_buffer_size,
-            max_buffer_size,
-            max_compute_workgroups_per_dimension: 65535,
-            max_compute_invocations_per_workgroup: 512,
-            max_compute_workgroup_size_x: 512, // 1D workgroup layout needs up to 512 in x (for 32x16 tile)
-            max_storage_buffers_per_shader_stage: bindings::MAX_STORAGE_BUFFERS,
-            ..Limits::downlevel_defaults()
-        };
+        let required_limits = required_limits(&adapter.limits(), max_buffer_size);
 
         let adapter_features = adapter.features();
         let subgroup_supported = adapter_features.contains(Features::SUBGROUP);
@@ -186,7 +211,7 @@ impl GpuPipeline {
             usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
         });
 
-        // Working states (mutated candidates) — sized for offspring_capacity (chain_count * max_lambda)
+        // Working states (mutated candidates) — sized for offspring_capacity
         let working_states_buf = device.create_buffer(&BufferDescriptor {
             label: Some("working_states"),
             size: working_states_size as u64,
@@ -516,7 +541,13 @@ impl GpuPipeline {
         RasterGrid::new([self.image_width, self.image_height], tile)
     }
 
+    /// # Panics
+    /// Panics beyond the engine's capacity or the installed programs' polygon limit.
     pub(super) fn workload(&self, params: &crate::mutation_params::MutationParams) -> Workload {
+        let limit = self.programs.polygon_limit();
+        assert!(params.max_polygons as usize <= limit,
+            "max_polygons {} exceeds the installed programs' polygon limit {limit}",
+            params.max_polygons);
         Workload::for_batch(params, [self.image_width, self.image_height],
             self.chain_count, self.offspring_capacity, self.programs.mutation().group_size())
     }

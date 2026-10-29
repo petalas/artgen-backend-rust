@@ -64,7 +64,7 @@ REVERT = "revert:"
 KEEP_BUILDS = 8
 # Everything the evolution-bench executable is built from; script and doc commits
 # leave this key, and therefore the cached build, unchanged.
-BUILD_INPUTS = ("src", "examples/evolution-bench.rs", "examples/check-gpu-lifecycle.rs",
+BUILD_INPUTS = ("src", "shared", "examples/evolution-bench.rs", "examples/check-gpu-lifecycle.rs",
                 "Cargo.toml", "Cargo.lock", "rust-toolchain.toml")
 LIFECYCLE = "check-gpu-lifecycle"
 MAX_CANDIDATES = 6

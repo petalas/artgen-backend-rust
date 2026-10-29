@@ -9,7 +9,7 @@
 
 use crate::gpu_evolver::changes::CHANGED_INDICES;
 use crate::gpu_evolver::execution::{RASTER_WORK_HEADER_BYTES, TILE_OVERFLOW_ERROR};
-use crate::settings::{MAX_POLYGONS_PER_IMAGE, TILE_MAX_POLYS};
+use crate::settings::{POLYGON_CAPACITY, TILE_MAX_POLYS};
 
 const COMMON: &str = include_str!("../../shaders/common.wgsl");
 const CHANGES: &str = include_str!("../../shaders/changes.wgsl");
@@ -17,7 +17,7 @@ const OFFSPRING_CHANGES: &str = include_str!("../../shaders/offspring_changes.wg
 const TILES: &str = include_str!("../../shaders/tiles.wgsl");
 
 const _: () = assert!(RASTER_WORK_HEADER_BYTES % 4 == 0 && RASTER_WORK_HEADER_BYTES >= 4);
-const _: () = assert!(MAX_POLYGONS_PER_IMAGE <= u32::MAX as usize);
+const _: () = assert!(POLYGON_CAPACITY <= u32::MAX as usize);
 
 /// A stage of the installed tile group. Its source depends on the raster tile.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -143,7 +143,7 @@ fn push_part(source: &mut String, name: &str, part: &str) {
 /// installs as a shader variant and specializes like a historical source.
 fn generated_constants(tile: Option<[u32; 2]>) -> String {
     let common = format!(
-        "const POLYGON_CAPACITY: u32 = {MAX_POLYGONS_PER_IMAGE}u; // settings::MAX_POLYGONS_PER_IMAGE\n\
+        "const POLYGON_CAPACITY: u32 = {POLYGON_CAPACITY}u; // settings::POLYGON_CAPACITY\n\
          const TILE_MAX_POLYS: u32 = {TILE_MAX_POLYS}u; // settings::TILE_MAX_POLYS\n\
          const CHANGED_INDICES: u32 = {CHANGED_INDICES}u; // changes::CHANGED_INDICES\n\
          const TILE_OVERFLOW_ERROR: u32 = {TILE_OVERFLOW_ERROR}u; // execution::TILE_OVERFLOW_ERROR\n"
@@ -207,6 +207,36 @@ mod tests {
             spv::write_vec(&module, &info, &options, Some(&pipeline))
                 .unwrap_or_else(|error| panic!("{shader:?}: {error}"));
         }
+    }
+
+    /// Bytes of workgroup memory a program declares, as naga lays it out.
+    fn workgroup_bytes(module: &Module) -> u32 {
+        let mut layouter = naga::proc::Layouter::default();
+        layouter.update(module.to_ctx()).expect("layout");
+        module
+            .global_variables
+            .iter()
+            .filter(|(_, global)| global.space == naga::AddressSpace::WorkGroup)
+            .map(|(_, global)| layouter[global.ty].size)
+            .sum()
+    }
+
+    /// Every program fits the engine's request. Mutate keeps no copy of a
+    /// parent there: only its crossover keep bits, 4 bytes per 32 polygon
+    /// slots, grow with the polygon capacity.
+    #[test]
+    fn every_bundled_shader_fits_the_requested_workgroup_memory() {
+        use crate::gpu_evolver::execution::WORKGROUP_STORAGE_BYTES;
+        use crate::settings::POLYGON_CAPACITY;
+        let requested = WORKGROUP_STORAGE_BYTES;
+        for shader in all_shaders() {
+            let (module, _) = validated(shader);
+            let bytes = workgroup_bytes(&module);
+            assert!(bytes <= requested, "{shader:?}: {bytes} bytes");
+        }
+        let (mutate, _) = validated(BundledShader::Mutate);
+        let keep_bits = u32::try_from(POLYGON_CAPACITY.div_ceil(32) * 4).unwrap();
+        assert!(workgroup_bytes(&mutate) < keep_bits + 256, "{}", workgroup_bytes(&mutate));
     }
 
     #[test]
@@ -294,7 +324,7 @@ mod tests {
             "Params",
             &rust_layout!(GpuParams {
                 image_width, image_height, max_polygons, min_polygons,
-                max_error_per_pixel, per_point_multiplier, iteration_number, _pad0,
+                max_error_per_pixel, per_point_penalty, iteration_number, _pad0,
                 add_polygon_prob, remove_polygon_prob, reorder_polygon_prob, offset_polygon_prob,
                 move_point_prob, micro_adjust_prob, change_color_prob, adjust_brightness_prob,
                 adjust_saturation_prob, move_point_max_delta, micro_adjust_delta,

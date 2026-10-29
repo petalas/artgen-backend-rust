@@ -5,8 +5,11 @@
 use std::{path::PathBuf, time::Instant};
 
 use artgen_backend_rust::{
-    engine::Rasterizer, gpu_evolver::GpuEvolver, models::drawing::Drawing,
-    mutation_params::MutationParams, projects, settings::GPU_DEFAULT_CHAIN_COUNT,
+    engine::Rasterizer,
+    gpu_evolver::{EngineCapacity, GpuEvolver},
+    models::drawing::Drawing,
+    mutation_params::MutationParams,
+    projects,
 };
 
 fn main() -> anyhow::Result<()> {
@@ -27,10 +30,12 @@ fn main() -> anyhow::Result<()> {
         width as u32,
         height as u32,
         &drawing,
+        // As the application constructs it.
+        EngineCapacity::ADJUSTABLE,
     ));
     let created = start.elapsed();
     eprintln!("startup: GPU created");
-    let fitness = evolver.evaluate_chain_fitness(GPU_DEFAULT_CHAIN_COUNT);
+    let fitness = evolver.evaluate_chain_fitness(&MutationParams::default());
     let evaluated = start.elapsed();
     let mut preview = vec![0; width * height * 4];
     drawing.draw(&mut preview, width, height, Rasterizer::HalfSpace);

@@ -39,11 +39,11 @@ use artgen_backend_rust::{
     gpu_evolver::{
         benchmark::{BenchmarkCounters, BenchmarkPackedState, BenchmarkSnapshot},
         buffers::{gpu_to_drawing, GpuDrawingState, GpuPolygon},
-        GpuEvolver,
+        EngineCapacity, GpuEvolver,
     },
     models::drawing::Drawing,
     mutation_params::MutationParams,
-    settings::MAX_POLYGONS_PER_IMAGE,
+    settings::POLYGON_CAPACITY,
 };
 use bytemuck::Zeroable;
 use serde::Serialize;
@@ -133,7 +133,7 @@ struct DrawingObservation {
 impl DrawingObservation {
     fn new(drawing: &Drawing) -> Result<Self> {
         ensure!(
-            drawing.polygons.len() <= MAX_POLYGONS_PER_IMAGE,
+            drawing.polygons.len() <= POLYGON_CAPACITY,
             "oversized returned drawing"
         );
         ensure!(
@@ -293,6 +293,7 @@ fn run_checks(input: &LoadedFixture, report: &mut Report) -> Result<()> {
         input.fixture.width,
         input.fixture.height,
         &input.drawing,
+        EngineCapacity::for_params(&input.manifest.params),
     ));
     evolver
         .benchmark_validate_capacity(&input.manifest.params)
@@ -556,7 +557,7 @@ fn maximum_drawings(snapshot: &BenchmarkSnapshot) -> Result<Vec<DrawingObservati
 
 fn observe_parent(parent: &BenchmarkPackedState) -> Result<DrawingObservation> {
     ensure!(
-        parent.polygons.len() <= MAX_POLYGONS_PER_IMAGE
+        parent.polygons.len() <= POLYGON_CAPACITY
             && parent.polygon_count as usize == parent.polygons.len(),
         "invalid packed parent count"
     );

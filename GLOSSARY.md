@@ -15,6 +15,18 @@ One offspring's rasterization and fitness comparison in the evolutionary search.
 A rectangular image region evaluated together. Its pixel dimensions do not specify
 how many physical GPU lanes execute it.
 
+**Polygon capacity**:
+The triangles one GPU drawing state can store, fixed at compile time. It is
+storage, not a search setting.
+
+**Search cap**:
+The most triangles mutation may give a drawing (`max_polygons`), a runtime
+setting no larger than the polygon capacity.
+
+**Engine capacity**:
+The largest chain count and offspring per chain an engine is constructed for;
+its storage is allocated for that workload.
+
 **Mutation group**:
 The number of logical offspring assigned to one mutation workgroup. It is distinct
 from the number of physical lanes in that workgroup.

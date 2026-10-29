@@ -16,7 +16,7 @@ use super::execution::ResourceSizes;
 use crate::models::drawing::Drawing;
 use crate::mutation_params::MutationParams;
 use crate::settings::{
-    GPU_MAX_BATCH_ITERS, GPU_MAX_LAMBDA, MAX_POLYGONS_PER_IMAGE,
+    GPU_MAX_BATCH_ITERS, GPU_MAX_LAMBDA, MAX_PER_POINT_PENALTY, POLYGON_CAPACITY,
 };
 
 pub use super::pipeline::{
@@ -109,7 +109,7 @@ pub struct BenchmarkPackedState {
 
 impl BenchmarkPackedState {
     fn from_gpu(state: &GpuDrawingState) -> Result<Self, String> {
-        if state.polygon_count as usize > MAX_POLYGONS_PER_IMAGE {
+        if state.polygon_count as usize > POLYGON_CAPACITY {
             return Err(format!("invalid GPU polygon count {}", state.polygon_count));
         }
         Ok(Self {
@@ -217,12 +217,12 @@ impl GpuEvolver {
         }
         self.flush_pending();
         self.pipeline.try_set_rasterize_wg(params.rasterize_wg)?;
-        self.reset_seeded_benchmark(drawing, params.chain_count, seed)?;
+        self.reset_seeded_benchmark(drawing, params, seed)?;
         for _ in 0..warmup_batches {
             self.run_batch(params, profile);
         }
         self.benchmark_drain()?;
-        self.reset_seeded_benchmark(drawing, params.chain_count, seed)
+        self.reset_seeded_benchmark(drawing, params, seed)
     }
 
     /// Reject configurations that production would silently clamp or address past
@@ -237,7 +237,18 @@ impl GpuEvolver {
         let active = u64::from(params.chain_count);
         let offspring = active * u64::from(params.lambda);
         if active > u64::from(p.chain_count) || offspring > u64::from(p.offspring_capacity) {
-            return Err("active chains/lambda exceed allocated drawing slots".into());
+            return Err(format!(
+                "{active} chains x {} offspring exceed the engine's capacity of {} chains and \
+                 {} offspring; construct it with a larger EngineCapacity",
+                params.lambda, p.chain_count, p.offspring_capacity
+            ));
+        }
+        let limit = p.programs.polygon_limit();
+        if params.max_polygons as usize > limit {
+            return Err(format!(
+                "max_polygons {} exceeds the installed shader variants' polygon limit {limit}",
+                params.max_polygons
+            ));
         }
         validate_dispatch(p, params)?;
         validate_resources(p, params)
@@ -449,9 +460,10 @@ impl GpuEvolver {
     fn reset_seeded_benchmark(
         &mut self,
         drawing: &Drawing,
-        active: u32,
+        params: &MutationParams,
         seed: u64,
     ) -> Result<f32, String> {
+        let active = params.chain_count;
         self.benchmark_drain()?;
         let states = self.parent_states(
             drawing,
@@ -465,7 +477,7 @@ impl GpuEvolver {
         let p = &self.pipeline;
         p.queue
             .write_buffer(&p.tile_counts_buf, p.tile_counts_buf.size() - 4, &[0; 4]);
-        let fitness = self.evaluate_chain_fitness(active);
+        let fitness = self.evaluate_chain_fitness(params);
         self.dispatch_init_framebuffers(active);
         self.reset_benchmark_gpu_buffers(active, seed, fitness)?;
         self.readback.reset_staging();
@@ -585,23 +597,26 @@ fn validate_shape(params: &MutationParams) -> Result<(), String> {
     }
     if params.min_polygons == 0
         || params.min_polygons > params.max_polygons
-        || params.max_polygons as usize > MAX_POLYGONS_PER_IMAGE
+        || params.max_polygons as usize > POLYGON_CAPACITY
         || !(1..=16).contains(&params.tournament_size)
         || params.min_alpha > params.max_alpha
     {
         return Err("polygon/tournament/alpha bounds are invalid".into());
     }
+    if !(0.0..=MAX_PER_POINT_PENALTY).contains(&params.per_point_penalty) {
+        return Err(format!("per_point_penalty is outside 0..={MAX_PER_POINT_PENALTY}"));
+    }
     Ok(())
 }
 
 fn validate_drawing(drawing: &Drawing, max_polygons: u32) -> Result<(), String> {
-    if drawing.polygons.len() > MAX_POLYGONS_PER_IMAGE {
+    if drawing.polygons.len() > POLYGON_CAPACITY {
         return Err("drawing exceeds source polygon capacity".into());
     }
     let mut triangles = 0;
     for polygon in &drawing.polygons {
         let points = polygon.points.len();
-        if !(3..=MAX_POLYGONS_PER_IMAGE + 2).contains(&points) {
+        if !(3..=POLYGON_CAPACITY + 2).contains(&points) {
             return Err("drawing contains an invalid or oversized polygon".into());
         }
         triangles += points - 2;
@@ -864,7 +879,7 @@ mod tests {
         assert_eq!(before, BenchmarkPackedState::from_gpu(&state).unwrap());
         state.polygons[0].data[3] += 1;
         assert_ne!(before, BenchmarkPackedState::from_gpu(&state).unwrap());
-        state.polygon_count = u32::try_from(MAX_POLYGONS_PER_IMAGE).unwrap() + 1;
+        state.polygon_count = u32::try_from(POLYGON_CAPACITY).unwrap() + 1;
         assert!(BenchmarkPackedState::from_gpu(&state).is_err());
     }
 

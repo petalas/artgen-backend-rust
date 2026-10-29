@@ -19,7 +19,7 @@ use crate::{
     gpu_evolver::{benchmark::BenchmarkProvenance, buffers::drawing_to_gpu, GpuEvolver},
     models::drawing::Drawing,
     mutation_params::MutationParams,
-    settings::{PER_POINT_MULTIPLIER, TILE_MAX_POLYS},
+    settings::TILE_MAX_POLYS,
 };
 
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -69,7 +69,7 @@ pub struct Point {
     pub evaluations: u64,
     /// GPU fitness percent as delivered, including the point penalty.
     pub fitness: f64,
-    /// `fitness / (1 - PER_POINT_MULTIPLIER * points)`: the error-only fitness.
+    /// `fitness / (1 - per_point_penalty * points)`: the error-only fitness.
     pub raw_fitness: f64,
     pub polygons: u32,
     pub points: u32,
@@ -109,13 +109,21 @@ pub struct QualityRecord {
 /// Rejects unknown keys, ill-typed values and values that production's
 /// `sanitize` would silently change.
 pub fn params_with(overrides: &Map<String, Value>) -> Result<MutationParams> {
+    // `per_point_penalty` is serialized only away from its default, so name it
+    // from parameters that hold another value.
+    let every_field = MutationParams {
+        per_point_penalty: 0.0,
+        ..MutationParams::default()
+    };
+    let known = serde_json::to_value(every_field)?;
+    let known = known.as_object().context("MutationParams is an object")?;
     let mut value = serde_json::to_value(MutationParams::default())?;
     let fields = value
         .as_object_mut()
         .context("MutationParams is an object")?;
     for (key, override_value) in overrides {
         ensure!(
-            fields.contains_key(key),
+            known.contains_key(key),
             "unknown MutationParams field {key} (fields are camelCase)"
         );
         fields.insert(key.clone(), override_value.clone());
@@ -191,22 +199,25 @@ struct Recorder {
     best: Drawing,
     schedule: Schedule,
     points: Vec<Point>,
+    /// The run's `per_point_penalty`, removed for `raw_fitness`.
+    per_point_penalty: f32,
 }
 
 impl Recorder {
-    fn new(initial_fitness: f32) -> Self {
+    fn new(initial_fitness: f32, per_point_penalty: f32) -> Self {
         let best = Drawing {
             polygons: Vec::new(),
             is_dirty: false,
             fitness: initial_fitness,
         };
         let mut points = Vec::with_capacity(MAX_POINTS);
-        points.push(point_of(&best, 0.0, 0, 0));
+        points.push(point_of(&best, per_point_penalty, 0.0, 0, 0));
         let schedule = Schedule::new(100.0 - f64::from(initial_fitness));
         Self {
             best,
             schedule,
             points,
+            per_point_penalty,
         }
     }
 
@@ -221,9 +232,13 @@ impl Recorder {
     fn observe(&mut self, batches: u64, evaluations: u64, seconds: f64) -> Result<()> {
         let remaining = 100.0 - f64::from(self.best.fitness);
         if self.schedule.due(batches, seconds, remaining) {
-            self.push(point_of(&self.best, seconds, batches, evaluations))?;
+            self.push(self.point(seconds, batches, evaluations))?;
         }
         Ok(())
+    }
+
+    fn point(&self, seconds: f64, batches: u64, evaluations: u64) -> Point {
+        point_of(&self.best, self.per_point_penalty, seconds, batches, evaluations)
     }
 
     fn push(&mut self, point: Point) -> Result<()> {
@@ -245,7 +260,13 @@ impl Recorder {
     }
 }
 
-fn point_of(best: &Drawing, seconds: f64, batches: u64, evaluations: u64) -> Point {
+fn point_of(
+    best: &Drawing,
+    per_point_penalty: f32,
+    seconds: f64,
+    batches: u64,
+    evaluations: u64,
+) -> Point {
     let polygons = u32::try_from(best.polygons.len()).unwrap_or(u32::MAX);
     let points = best
         .polygons
@@ -253,7 +274,7 @@ fn point_of(best: &Drawing, seconds: f64, batches: u64, evaluations: u64) -> Poi
         .map(|polygon| u32::try_from(polygon.points.len()).unwrap_or(u32::MAX))
         .fold(0u32, u32::saturating_add);
     let fitness = f64::from(best.fitness);
-    let penalty = 1.0 - f64::from(PER_POINT_MULTIPLIER) * f64::from(points);
+    let penalty = 1.0 - f64::from(per_point_penalty) * f64::from(points);
     Point {
         seconds,
         batches,
@@ -350,7 +371,8 @@ fn final_check(
     let count = usize::try_from(state.polygon_count)?;
     let polygons: Vec<[u32; 4]> = state.polygons[..count].iter().map(|p| p.data).collect();
     let (width, height) = (input.fixture.width, input.fixture.height);
-    let scalar = f64::from(reference::evaluate(&polygons, &input.rgba, width, height)?.fitness);
+    let scalar = reference::evaluate(&polygons, &input.rgba, width, height, params.per_point_penalty)?;
+    let scalar = f64::from(scalar.fitness);
     let complexity = reference::complexity(&polygons, width, height, params.rasterize_wg)?;
     let delivered = f64::from(best.fitness);
     if (scalar - delivered).abs() > MAX_SCALAR_GAP {
@@ -383,7 +405,7 @@ fn evolve(
     let initial = evolver
         .prepare_seeded_benchmark(&blank, params, spec.seed, spec.warmup_batches, true)
         .map_err(anyhow::Error::msg)?;
-    let mut recorder = Recorder::new(initial);
+    let mut recorder = Recorder::new(initial, params.per_point_penalty);
     let start = Instant::now();
     let mut batches = 0u64;
     while batches < MAX_BATCHES {
@@ -403,12 +425,7 @@ fn evolve(
         counters.completed_batches == batches,
         "completed batches differ from submitted batches"
     );
-    let final_point = point_of(
-        &recorder.best,
-        seconds,
-        batches,
-        evolver.total_evaluations(),
-    );
+    let final_point = recorder.point(seconds, batches, evolver.total_evaluations());
     recorder.push(final_point)?;
     Ok((recorder, initial, seconds))
 }
@@ -431,6 +448,15 @@ mod tests {
             .to_string()
             .contains("sanitize"));
         assert!(set(r#"{"lambda":"64"}"#).is_err());
+        // A field omitted at its default is still known.
+        let strong = set(r#"{"perPointPenalty":3.2e-6}"#).unwrap();
+        assert_eq!(strong.per_point_penalty, 3.2e-6);
+        assert_eq!(set(r#"{"maxPolygons":2048}"#).unwrap().max_polygons, 2048);
+        assert!(set(r#"{"maxPolygons":2049}"#)
+            .unwrap_err()
+            .to_string()
+            .contains("sanitize"));
+        assert!(set(r#"{"perPointPenalty":1.0}"#).is_err());
     }
 
     #[test]
@@ -468,9 +494,14 @@ mod tests {
             is_dirty: false,
             fitness: 99.0,
         };
-        let point = point_of(&best, 1.0, 1, 1);
+        let point = point_of(&best, crate::settings::PER_POINT_PENALTY, 1.0, 1, 1);
         assert_eq!((point.polygons, point.points), (1000, 3000));
         let expected = 99.0 / (1.0 - 3000.0 / 5_000_000.0);
+        assert!((point.raw_fitness - expected).abs() < 1e-9);
+        // The run's own penalty is removed.
+        let strong = 16.0 * crate::settings::PER_POINT_PENALTY;
+        let point = point_of(&best, strong, 1.0, 1, 1);
+        let expected = 99.0 / (1.0 - f64::from(strong) * 3000.0);
         assert!((point.raw_fitness - expected).abs() < 1e-9);
     }
 }

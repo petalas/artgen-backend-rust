@@ -2,6 +2,9 @@ use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
 use crate::mutation_params::MutationParams;
+
+/// The GPU state's storage; `max_polygons` may not exceed it.
+const POLYGON_CAPACITY: i64 = artgen_shared::settings::POLYGON_CAPACITY as i64;
 use crate::ws::{send_ws_json, send_ws_loading, ViewerState};
 
 /// Format a probability as a decimal string with adaptive precision.
@@ -194,8 +197,8 @@ pub fn ParamsEditor(
         </div>
         <div class="mutation-section">
             <div class="mutation-section-title">"Polygons"</div>
-            <IntSlider params={params} on_change={on_change} label="Min polygons" get={|mp| mp.min_polygons as i64} set={|mp, v| { mp.min_polygons = v as u32; if mp.max_polygons < mp.min_polygons { mp.max_polygons = mp.min_polygons; } }} min=1 max=1000 step=1/>
-            <IntSlider params={params} on_change={on_change} label="Max polygons" get={|mp| mp.max_polygons as i64} set={|mp, v| { mp.max_polygons = v as u32; if mp.min_polygons > mp.max_polygons { mp.min_polygons = mp.max_polygons; } }} min=1 max=1000 step=1/>
+            <IntSlider params={params} on_change={on_change} label="Min polygons" get={|mp| mp.min_polygons as i64} set={|mp, v| { mp.min_polygons = v as u32; if mp.max_polygons < mp.min_polygons { mp.max_polygons = mp.min_polygons; } }} min=1 max={POLYGON_CAPACITY} step=1/>
+            <IntSlider params={params} on_change={on_change} label="Max polygons" get={|mp| mp.max_polygons as i64} set={|mp, v| { mp.max_polygons = v as u32; if mp.min_polygons > mp.max_polygons { mp.min_polygons = mp.max_polygons; } }} min=1 max={POLYGON_CAPACITY} step=1/>
         </div>
         <div class="mutation-section">
             <div class="mutation-section-title">"Structure"</div>

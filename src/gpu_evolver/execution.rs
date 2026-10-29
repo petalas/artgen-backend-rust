@@ -1,6 +1,9 @@
 //! Capacity, storage and dispatch rules shared by allocation and execution.
 //! Logical raster tiles and logical mutation groups are independent of lanes.
-use crate::{mutation_params::MutationParams, settings::TILE_MAX_POLYS};
+use crate::{
+    mutation_params::MutationParams,
+    settings::{GPU_MAX_CHAIN_COUNT, GPU_MAX_LAMBDA, TILE_MAX_POLYS},
+};
 
 use super::buffers::GPU_DRAWING_STATE_SIZE;
 use super::changes::GPU_CHAIN_CHANGE_SIZE;
@@ -24,6 +27,63 @@ impl RasterGrid {
     }
 }
 
+/// The largest workload an engine is constructed for: chains, and offspring per
+/// chain. Storage is allocated for it (then clamped to the device's binding
+/// limit, see [`AllocationPlan`]); a batch asking for more panics in
+/// [`Workload::for_batch`], and benchmark preparation returns an error.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EngineCapacity {
+    chains: u32,
+    lambda: u32,
+}
+
+impl EngineCapacity {
+    /// Every chain count and λ that `MutationParams::sanitize` accepts, as far as
+    /// storage allows: the application, whose settings change at runtime.
+    pub const ADJUSTABLE: Self = Self {
+        chains: GPU_MAX_CHAIN_COUNT,
+        lambda: GPU_MAX_LAMBDA,
+    };
+
+    /// # Panics
+    /// Panics unless `1 <= chains <= GPU_MAX_CHAIN_COUNT` and
+    /// `1 <= lambda <= GPU_MAX_LAMBDA`.
+    #[must_use]
+    pub fn new(chains: u32, lambda: u32) -> Self {
+        assert!(
+            (1..=GPU_MAX_CHAIN_COUNT).contains(&chains) && (1..=GPU_MAX_LAMBDA).contains(&lambda),
+            "engine capacity {chains} chains x {lambda} offspring is outside 1..={GPU_MAX_CHAIN_COUNT} x 1..={GPU_MAX_LAMBDA}"
+        );
+        Self { chains, lambda }
+    }
+
+    /// Exactly the workload of `params`, whose chain count and λ stay fixed.
+    ///
+    /// # Panics
+    /// Panics for parameters that `sanitize` would change.
+    #[must_use]
+    pub fn for_params(params: &MutationParams) -> Self {
+        Self::new(params.chain_count, params.lambda)
+    }
+
+    #[must_use]
+    pub fn chains(self) -> u32 {
+        self.chains
+    }
+
+    #[must_use]
+    pub fn lambda(self) -> u32 {
+        self.lambda
+    }
+}
+
+/// Workgroup memory the engine requests from the device; every bundled program
+/// fits (a CPU test sums each program's workgroup variables through naga). The
+/// largest is `init_framebuffers` at a 32x16 tile, 25088 bytes. Dozen/D3D12
+/// offers exactly 32 KiB. The polygon capacity does not enter it: mutate keeps
+/// no copy of a parent there.
+pub(super) const WORKGROUP_STORAGE_BYTES: u32 = 32 * 1024;
+
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Workload {
     pub active: u32,
@@ -42,12 +102,16 @@ impl Workload {
         offspring_capacity: u32,
         mutation_group: u32,
     ) -> Self {
-        let active = params.chain_count.min(chain_capacity);
+        assert!(params.chain_count <= chain_capacity,
+            "{} chains exceed the engine's chain capacity ({chain_capacity}); construct it \
+             with a larger EngineCapacity", params.chain_count);
+        let active = params.chain_count;
         let offspring = active
             .checked_mul(params.lambda)
             .expect("offspring count overflow");
         assert!(offspring <= offspring_capacity,
-            "active({active}) * lambda({}) = {offspring} exceeds offspring_capacity({offspring_capacity})",
+            "active({active}) * lambda({}) = {offspring} exceeds the engine's offspring capacity \
+             ({offspring_capacity}); construct it with a larger EngineCapacity",
             params.lambda);
         let iterations = params.gpu_batch_iters.max(1);
         Self {
@@ -148,7 +212,8 @@ pub(super) struct AllocationPlan {
 }
 
 impl AllocationPlan {
-    pub fn new(requested_chains: u32, image: [u32; 2], max_storage: u64) -> Self {
+    /// Storage for `capacity`, each buffer clamped to `max_storage`.
+    pub fn new(capacity: EngineCapacity, image: [u32; 2], max_storage: u64) -> Self {
         assert!(
             error_sum_fits(image),
             "a {}x{} image's error sum reaches the tile-overflow flag",
@@ -156,19 +221,21 @@ impl AllocationPlan {
             image[1]
         );
         let states = max_storage / GPU_DRAWING_STATE_SIZE as u64;
-        let chains = u64::from(requested_chains).min(states);
-        let offspring = states.min(chains * u64::from(crate::settings::GPU_MAX_LAMBDA));
+        let chains = u64::from(capacity.chains).min(states);
+        let offspring = states.min(chains * u64::from(capacity.lambda));
         let mut resources =
             ResourceSizes::new(chains, offspring, image, RasterGrid::new(image, [8, 8]));
-        // Preserve the existing requested device limit and independent clamps.
-        // Usable capacities are checked against actual storage before qualification.
-        let max_buffer_size =
-            (chains * u64::from(crate::settings::GPU_MAX_LAMBDA) * GPU_DRAWING_STATE_SIZE as u64)
-                .min(max_storage)
-                .max(resources.tile_data.min(max_storage))
-                .max((resources.tile_counts - 4).min(max_storage));
+        // The device may create buffers up to the whole binding limit, whatever
+        // the workload: requesting a limit allocates nothing, and diagnostic
+        // snapshots stage several resources in one buffer. (A limit derived from
+        // the states would refuse small engines their snapshots.) Each resource
+        // keeps its independent clamp; usable capacities are checked against
+        // actual storage before qualification.
+        let max_buffer_size = max_storage;
         resources.tile_data = resources.tile_data.min(max_buffer_size);
-        resources.tile_counts = (resources.tile_counts - 4).min(max_buffer_size);
+        // The diagnostic word is allocated too: an engine sized exactly for its
+        // workload has no unused worst-case slack to hold it.
+        resources.tile_counts = resources.tile_counts.min(max_buffer_size);
         resources.raster_work = resources.raster_work.min(max_buffer_size);
         resources.framebuffers = resources.framebuffers.min(max_buffer_size);
         Self {
@@ -193,18 +260,57 @@ mod tests {
 
     #[test]
     fn allocation_preserves_independent_storage_clamps() {
-        let plan = AllocationPlan::new(1024, [384, 384], 128 * 1024 * 1024);
+        let plan = AllocationPlan::new(EngineCapacity::ADJUSTABLE, [384, 384], 128 * 1024 * 1024);
         assert_eq!(plan.chain_count, 1024);
-        assert_eq!(plan.offspring_capacity, 8371);
+        // 128 MiB of 32800-byte states.
+        assert_eq!(plan.offspring_capacity, 4092);
         assert_eq!(plan.max_buffer_size, 134_217_728);
         assert_eq!(plan.resources.framebuffers, 134_217_728);
         assert_eq!(plan.resources.tile_data, 134_217_728);
-        assert_eq!(plan.resources.tile_counts, 77_147_136);
-        assert_eq!(plan.resources.raster_work, 77_147_140);
-        let smaller = AllocationPlan::new(1, [17, 19], 128 * 1024 * 1024);
+        assert_eq!(plan.resources.tile_counts, 37_711_876);
+        assert_eq!(plan.resources.raster_work, 37_711_876);
+        let smaller = AllocationPlan::new(EngineCapacity::new(1, 64), [17, 19], 128 * 1024 * 1024);
         assert_eq!(smaller.chain_count, 1);
         assert_eq!(smaller.offspring_capacity, 64);
         assert_eq!(smaller.resources.framebuffers, 1292);
+    }
+
+    #[test]
+    fn allocation_follows_the_constructed_workload() {
+        let params = MutationParams::default();
+        let plan = AllocationPlan::new(
+            EngineCapacity::for_params(&params),
+            [384, 384],
+            128 * 1024 * 1024,
+        );
+        assert_eq!((plan.chain_count, plan.offspring_capacity), (4, 256));
+        assert_eq!(plan.max_buffer_size, 128 * 1024 * 1024);
+        assert_eq!(plan.resources.parents, 4 * GPU_DRAWING_STATE_SIZE as u64);
+        assert_eq!(plan.resources.working, 256 * GPU_DRAWING_STATE_SIZE as u64);
+        assert_eq!(plan.resources.framebuffers, 4 * 384 * 384 * 4);
+        let work = Workload::for_batch(&params, [384, 384], plan.chain_count,
+            plan.offspring_capacity, 1);
+        assert_eq!(work.offspring, 256);
+    }
+
+    #[test]
+    #[should_panic(expected = "offspring capacity")]
+    fn a_batch_beyond_the_offspring_capacity_fails_loudly() {
+        let params = MutationParams { chain_count: 4, lambda: 64, ..MutationParams::default() };
+        let _ = Workload::for_batch(&params, [384, 384], 4, 128, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "chain capacity")]
+    fn a_batch_beyond_the_chain_capacity_fails_loudly() {
+        let params = MutationParams { chain_count: 8, lambda: 1, ..MutationParams::default() };
+        let _ = Workload::for_batch(&params, [384, 384], 4, 256, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "outside")]
+    fn capacity_rejects_workloads_sanitize_rejects() {
+        let _ = EngineCapacity::new(1, GPU_MAX_LAMBDA + 1);
     }
 
     #[test]

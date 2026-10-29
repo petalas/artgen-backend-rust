@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use super::reference::{self, Complexity};
 use crate::{
     gpu_evolver::buffers::drawing_to_gpu, models::drawing::Drawing,
-    mutation_params::MutationParams, projects, settings::MAX_POLYGONS_PER_IMAGE,
+    mutation_params::MutationParams, projects, settings::POLYGON_CAPACITY,
 };
 
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -146,7 +146,13 @@ fn import(root: &Path, id: &str, resolution: u32) -> Result<(Fixture, Vec<u8>, V
         height,
         MutationParams::default().rasterize_wg,
     )?;
-    let evaluation = reference::evaluate(&polygons, &rgba, width, height)?;
+    let evaluation = reference::evaluate(
+        &polygons,
+        &rgba,
+        width,
+        height,
+        MutationParams::default().per_point_penalty,
+    )?;
     let fixture = Fixture {
         id: id.into(),
         width,
@@ -258,18 +264,18 @@ fn validate_manifest(manifest: &Manifest) -> Result<()> {
 
 fn validate_drawing(drawing: &Drawing) -> Result<()> {
     ensure!(
-        drawing.polygons.len() <= MAX_POLYGONS_PER_IMAGE,
+        drawing.polygons.len() <= POLYGON_CAPACITY,
         "too many polygons"
     );
     let mut triangles = 0;
     for polygon in &drawing.polygons {
         ensure!(
-            (3..=MAX_POLYGONS_PER_IMAGE + 2).contains(&polygon.points.len()),
+            (3..=POLYGON_CAPACITY + 2).contains(&polygon.points.len()),
             "invalid polygon vertex count"
         );
         triangles += polygon.points.len() - 2;
         ensure!(
-            triangles <= MAX_POLYGONS_PER_IMAGE,
+            triangles <= POLYGON_CAPACITY,
             "packing would truncate triangles"
         );
         for point in &polygon.points {

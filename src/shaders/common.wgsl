@@ -25,7 +25,7 @@ struct Params {
     min_polygons: u32,
 
     max_error_per_pixel: f32,
-    per_point_multiplier: f32,
+    per_point_penalty: f32,
     iteration_number: u32,
     _pad0: u32,
 

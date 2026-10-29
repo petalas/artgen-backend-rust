@@ -34,8 +34,23 @@ pub const MIN_ALPHA: u8 = 10;
 pub const MAX_ALPHA: u8 = 65;
 
 // Polygon count limits
-pub const MAX_POLYGONS_PER_IMAGE: usize = 1000;
+/// Triangles one GPU drawing state can store: the compile-time stride of
+/// `GpuDrawingState` and WGSL `DrawingState` (16 bytes per triangle), and the
+/// largest `max_polygons` that `MutationParams::sanitize` accepts.
+pub const POLYGON_CAPACITY: usize = 2048;
+/// The default runtime search cap, `MutationParams::max_polygons`. Mutation adds
+/// no triangle beyond it. At most `POLYGON_CAPACITY`.
+pub const DEFAULT_MAX_POLYGONS: u32 = 1000;
 pub const MIN_POLYGONS_PER_IMAGE: usize = 1;
+const _: () = assert!(DEFAULT_MAX_POLYGONS as usize <= POLYGON_CAPACITY);
+
+// Fitness penalty
+/// Default `MutationParams::per_point_penalty`: fitness is multiplied by
+/// `1 - penalty * points`, three points per triangle.
+pub const PER_POINT_PENALTY: f32 = 1.0 / 5_000_000.0;
+/// Largest accepted `per_point_penalty`. At `POLYGON_CAPACITY` triangles it
+/// removes 61% of the fitness, so fitness stays positive.
+pub const MAX_PER_POINT_PENALTY: f32 = 1.0e-4;
 
 // GPU evolution settings
 pub const GPU_MAX_CHAIN_COUNT: u32 = 1024;

@@ -17,7 +17,7 @@ use artgen_backend_rust::{
     },
     gpu_evolver::{
         benchmark::{BenchmarkPackedState, BenchmarkSnapshot},
-        GpuEvolver,
+        EngineCapacity, GpuEvolver,
     },
 };
 use serde::Serialize;
@@ -116,6 +116,7 @@ fn main() -> Result<()> {
         input.fixture.width,
         input.fixture.height,
         &input.drawing,
+        EngineCapacity::for_params(&input.manifest.params),
     ));
     let scopes = evolver.benchmark_error_scopes();
     let result = trace(&mut evolver, &input, &config);
@@ -331,12 +332,14 @@ fn forensic(
             &input.rgba,
             input.fixture.width,
             input.fixture.height,
+            input.manifest.params.per_point_penalty,
         )?;
         let before_scalar = reference::evaluate(
             &before.parents[chain].polygons,
             &input.rgba,
             input.fixture.width,
             input.fixture.height,
+            input.manifest.params.per_point_penalty,
         )?;
         chains.push(json!({
             "chain": chain, "stored_error": after.parent_total_errors[chain],
@@ -351,7 +354,7 @@ fn forensic(
     }
     // Destructive diagnostic AFTER all pre-recompute state has been captured.
     // This overwrites working slots and cached totals, so never resume evolution.
-    let _best_fitness = evolver.evaluate_chain_fitness(input.manifest.params.chain_count);
+    let _best_fitness = evolver.evaluate_chain_fitness(&input.manifest.params);
     let full = snapshot(evolver, input)?;
     Ok(json!({
         "before_iteration": before.counters.completed_iterations,
@@ -384,6 +387,7 @@ fn matching_candidates(
             &input.rgba,
             input.fixture.width,
             input.fixture.height,
+            input.manifest.params.per_point_penalty,
         )?;
         matches.push(json!({
             "offspring_id": id, "exact_polygon_match": candidate.polygons == parent.polygons,

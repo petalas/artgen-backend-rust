@@ -25,10 +25,9 @@ use artgen_backend_rust::{
             benchmark_mutate_group_size_from_source, BenchmarkCounters, BenchmarkMutateOptions,
             BenchmarkProvenance, BenchmarkSnapshot,
         },
-        GpuEvolver,
+        EngineCapacity, GpuEvolver,
     },
     mutation_params::MutationParams,
-    settings::PER_POINT_MULTIPLIER,
 };
 use serde::Serialize;
 
@@ -521,6 +520,7 @@ fn run_cases(summary: &mut Summary<'_>, rows: &mut File) -> Result<()> {
             input.fixture.width,
             input.fixture.height,
             &input.drawing,
+            EngineCapacity::for_params(&input.manifest.params),
         ));
         precompile_sources(&mut evolver, &input, summary)?;
         let (initial, endpoint) = qualify(&mut evolver, &input, summary)?;
@@ -894,7 +894,7 @@ fn execute_trial(
     row.initial_state_sha256 = state_hash(&initial)?;
     record_diagnostic_state(config, row, &initial, "initial")?;
     compare_state(&initial, baseline.0, "initial", &mut row.errors);
-    check_pixels(&initial, &input.rgba, true, &mut row.errors)?;
+    check_pixels(&initial, &input.rgba, &input.manifest.params, true, &mut row.errors)?;
     ensure!(row.errors.is_empty(), "initial trial state failed");
     if row.timing_eligible {
         let measurement = measure(evolver, params, config.batches)?;
@@ -915,7 +915,7 @@ fn execute_trial(
     row.final_state_sha256 = state_hash(&endpoint)?;
     record_diagnostic_state(config, row, &endpoint, "final")?;
     compare_state(&endpoint, baseline.1, "final", &mut row.errors);
-    check_pixels(&endpoint, &input.rgba, false, &mut row.errors)?;
+    check_pixels(&endpoint, &input.rgba, &input.manifest.params, false, &mut row.errors)?;
     check_work(
         row.counters,
         params,
@@ -954,6 +954,7 @@ fn check_work(
 fn check_pixels(
     state: &BenchmarkSnapshot,
     rgba: &[u8],
+    params: &MutationParams,
     initial: bool,
     errors: &mut Vec<String>,
 ) -> Result<()> {
@@ -983,7 +984,7 @@ fn check_pixels(
         let mut expected = 100.0
             * (1.0
                 - rounded_f32(stored_error) / (765.0 * rounded_f32(u32::try_from(pixels.len())?)));
-        expected -= expected * PER_POINT_MULTIPLIER * rounded_f32(parent.polygon_count * 3);
+        expected -= expected * params.per_point_penalty * rounded_f32(parent.polygon_count * 3);
         let fitness = f32::from_bits(parent.fitness_bits);
         if error != u64::from(stored_error)
             || !fitness.is_finite()
@@ -1439,7 +1440,7 @@ mod tests {
     fn raw_pixel_and_fitness_checks_reject_stale_associations() -> Result<()> {
         let state = white();
         let mut errors = Vec::new();
-        check_pixels(&state, &[255; 4], true, &mut errors)?;
+        check_pixels(&state, &[255; 4], &MutationParams::default(), true, &mut errors)?;
         assert!(errors.is_empty());
         for field in 0..4 {
             let mut changed = state.clone();
@@ -1450,7 +1451,7 @@ mod tests {
                 _ => changed.fitness_packed[0] = 99.0f32.to_bits(),
             }
             errors.clear();
-            check_pixels(&changed, &[255; 4], true, &mut errors)?;
+            check_pixels(&changed, &[255; 4], &MutationParams::default(), true, &mut errors)?;
             assert!(!errors.is_empty());
         }
         Ok(())

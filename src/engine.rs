@@ -24,7 +24,7 @@ pub use vertex::Vertex;
 use crate::{
     buffer_dimensions::BufferDimensions,
     models::{drawing::Drawing, point::Point, polygon::Polygon},
-    settings::{MAX_ERROR_PER_PIXEL, PER_POINT_MULTIPLIER},
+    settings::{MAX_ERROR_PER_PIXEL, PER_POINT_PENALTY},
     texture_wrapper::TextureWrapper,
     // utils::{to_color_vec, to_u8_vec},
 };
@@ -209,7 +209,7 @@ impl Engine {
 
             let max_total_error = MAX_ERROR_PER_PIXEL * self.w as f32 * self.h as f32;
             drawing.fitness = 100.0 * (1.0 - error / max_total_error);
-            let penalty = drawing.fitness * PER_POINT_MULTIPLIER * drawing.num_points() as f32;
+            let penalty = drawing.fitness * PER_POINT_PENALTY * drawing.num_points() as f32;
             drawing.fitness -= penalty;
         }
     }
@@ -407,7 +407,7 @@ impl Engine {
         let (error, error_heatmap) = calculate_error_from_gpu(&error_buffer);
         let max_total_error: f32 = MAX_ERROR_PER_PIXEL * self.w as f32 * self.h as f32;
         let mut fitness: f32 = 100.0 * (1.0 - error / max_total_error);
-        let penalty = fitness * PER_POINT_MULTIPLIER * drawing.num_points() as f32;
+        let penalty = fitness * PER_POINT_PENALTY * drawing.num_points() as f32;
         fitness -= penalty;
         drawing.fitness = fitness;
 

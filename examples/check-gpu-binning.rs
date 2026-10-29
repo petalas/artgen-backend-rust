@@ -69,7 +69,8 @@ use anyhow::{bail, ensure, Context, Result};
 use artgen_backend_rust::{
     gpu_evolver::{
         buffers::{default_gpu_params, GpuDrawingState, GpuPolygon},
-        pipeline::GpuPipeline,
+        pipeline::{specialize_polygon_storage, GpuPipeline, HISTORICAL_POLYGON_CAPACITY},
+        EngineCapacity,
     },
     settings::{BIN_ROW_BANDS, TILE_MAX_POLYS},
 };
@@ -148,7 +149,13 @@ fn main() -> Result<()> {
     let reference = [0, 0, 0, 255].repeat(65 * 51);
     let initial = vec![GpuDrawingState::zeroed()];
     let mut pipeline =
-        futures_lite::future::block_on(GpuPipeline::new(1, 65, 51, &reference, &initial));
+        futures_lite::future::block_on(GpuPipeline::new(
+            EngineCapacity::new(1, 64),
+            65,
+            51,
+            &reference,
+            &initial,
+        ));
     ensure!(usize::try_from(pipeline.offspring_capacity)? >= OFFSPRING);
     let evidence = if let Some(source) = &config.shader {
         pipeline
@@ -359,7 +366,15 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 fn reference_pipeline(p: &GpuPipeline) -> wgpu::ComputePipeline {
-    let source = include_str!("../benchmarks/evolution/v1/experiments/reference-bin-dd52d50.wgsl")
+    // The frozen binner's drawing state takes the engine's stride; its own
+    // bounds array keeps 1000 polygons, the most any fixture here holds.
+    let storage = specialize_polygon_storage(include_str!(
+        "../benchmarks/evolution/v1/experiments/reference-bin-dd52d50.wgsl"
+    ))
+    .expect("the frozen binner declares a historical drawing state");
+    assert_eq!(storage.polygon_limit, HISTORICAL_POLYGON_CAPACITY);
+    let source = storage
+        .source
         .replace(
             "const TILE_W: u32 = 16;",
             &format!("const TILE_W: u32 = {};", p.rasterize_wg()[0]),

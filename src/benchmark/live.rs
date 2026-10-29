@@ -27,7 +27,7 @@ use artgen_backend_rust::{
     gpu_evolver::{
         benchmark::{BenchmarkCounters, BenchmarkSnapshot},
         buffers::{drawing_to_gpu, gpu_to_drawing},
-        GpuEvolver,
+        EngineCapacity, GpuEvolver,
     },
     models::drawing::Drawing,
     mutation_params::MutationParams,
@@ -1019,6 +1019,7 @@ impl Run {
             input.fixture.width,
             input.fixture.height,
             &input.drawing,
+            EngineCapacity::for_params(params),
         ));
         let scopes = evolver.benchmark_error_scopes();
         let result = self.prepared_run(&mut evolver, &input, setup);

@@ -5,7 +5,7 @@ use crate::models::drawing::Drawing;
 use crate::models::point::Point;
 use crate::models::polygon::Polygon;
 use crate::mutation_params::MutationParams;
-use crate::settings::MAX_POLYGONS_PER_IMAGE;
+use crate::settings::POLYGON_CAPACITY;
 
 /// GPU polygon: a single triangle with color, quantized to 16 bytes.
 /// Word 0: RGBA color packed as 4x u8 via pack4x8unorm convention
@@ -20,8 +20,9 @@ pub struct GpuPolygon {
 
 /// Per-chain drawing state on GPU, for parents and offspring alike.
 /// polygon_count + fitness + mutation_scale + stagnation_counter + rng_state = 32 bytes header
-/// polygons: MAX_POLYGONS_PER_IMAGE * 16 = 16000 bytes
-/// Total: 16032 bytes
+/// polygons: `POLYGON_CAPACITY` * 16 = 32768 bytes
+/// Total: 32800 bytes. The stride is storage capacity; the runtime search cap is
+/// `GpuParams::max_polygons`.
 /// An offspring keeps its change record in `fitness_bits`, `stagnation_counter`
 /// and `rng_state[1..3]` (see [`super::changes`]); parents carry none there.
 /// Polygons beyond `polygon_count` carry nothing.
@@ -33,7 +34,7 @@ pub struct GpuDrawingState {
     pub mutation_scale_bits: u32,     // offset 8 — bitcast f32, adaptive mutation scale
     pub stagnation_counter: u32,      // offset 12 — iterations since last improvement
     pub rng_state: [u32; 4],          // offset 16 — [0] RNG state; [1..3] offspring changed-index words; [3] unused
-    pub polygons: [GpuPolygon; MAX_POLYGONS_PER_IMAGE], // offset 32
+    pub polygons: [GpuPolygon; POLYGON_CAPACITY], // offset 32
 }
 
 // Manual Pod/Zeroable impl because bytemuck derive doesn't support arrays > 256
@@ -52,7 +53,7 @@ pub struct GpuParams {
     pub min_polygons: u32,
 
     pub max_error_per_pixel: f32,
-    pub per_point_multiplier: f32,
+    pub per_point_penalty: f32,
     pub iteration_number: u32,
     pub _pad0: u32,
 
@@ -130,10 +131,10 @@ pub fn gpu_params_from(mp: &MutationParams, w: u32, h: u32, chain_count: u32) ->
     GpuParams {
         image_width: w,
         image_height: h,
-        max_polygons: mp.max_polygons.min(MAX_POLYGONS_PER_IMAGE as u32),
+        max_polygons: mp.max_polygons.min(POLYGON_CAPACITY as u32),
         min_polygons: mp.min_polygons,
         max_error_per_pixel: MAX_ERROR_PER_PIXEL,
-        per_point_multiplier: PER_POINT_MULTIPLIER,
+        per_point_penalty: mp.per_point_penalty,
         iteration_number: 0,
         _pad0: 0,
         add_polygon_prob: mp.add_polygon_prob,
@@ -195,7 +196,8 @@ fn pack_vertex_u32(x: f32, y: f32) -> u32 {
 }
 
 /// Convert a CPU Drawing to GPU bytes for a single chain's DrawingState.
-/// Multi-vertex polygons are fan-triangulated.
+/// Multi-vertex polygons are fan-triangulated; triangles past the state's
+/// `POLYGON_CAPACITY` are dropped.
 /// `seed` is used to initialize the PCG RNG state for this chain.
 pub fn drawing_to_gpu(drawing: &Drawing, seed: u64) -> GpuDrawingState {
     let mut state = GpuDrawingState::zeroed();
@@ -221,7 +223,7 @@ pub fn drawing_to_gpu(drawing: &Drawing, seed: u64) -> GpuDrawingState {
 
         // Fan triangulation: (0,1,2), (0,2,3), (0,3,4), ...
         for i in 1..pts.len() - 1 {
-            if gpu_idx >= MAX_POLYGONS_PER_IMAGE {
+            if gpu_idx >= POLYGON_CAPACITY {
                 break;
             }
             state.polygons[gpu_idx] = GpuPolygon {
@@ -235,7 +237,7 @@ pub fn drawing_to_gpu(drawing: &Drawing, seed: u64) -> GpuDrawingState {
             gpu_idx += 1;
         }
 
-        if gpu_idx >= MAX_POLYGONS_PER_IMAGE {
+        if gpu_idx >= POLYGON_CAPACITY {
             break;
         }
     }
@@ -302,7 +304,8 @@ mod tests {
 
     #[test]
     fn test_gpu_drawing_state_size() {
-        assert_eq!(GPU_DRAWING_STATE_SIZE, 16032);
+        assert_eq!(GPU_DRAWING_STATE_SIZE, 32 + 16 * POLYGON_CAPACITY);
+        assert_eq!(GPU_DRAWING_STATE_SIZE, 32800);
     }
 
     #[test]

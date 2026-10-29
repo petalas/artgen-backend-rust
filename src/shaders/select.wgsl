@@ -61,7 +61,7 @@ fn compute_fitness(total_error: u32, polygon_count: u32) -> f32 {
     let max_total_error = params.max_error_per_pixel * f32(w * h);
     var fitness = 100.0 * (1.0 - f32(total_error) / max_total_error);
     let num_points = polygon_count * 3u;
-    fitness -= fitness * params.per_point_multiplier * f32(num_points);
+    fitness -= fitness * params.per_point_penalty * f32(num_points);
     return fitness;
 }
 

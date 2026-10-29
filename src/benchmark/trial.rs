@@ -23,11 +23,11 @@ use crate::{
             BenchmarkSnapshot,
         },
         buffers::{gpu_to_drawing, GpuDrawingState, GpuPolygon},
-        GpuEvolver,
+        EngineCapacity, GpuEvolver,
     },
     models::drawing::Drawing,
     mutation_params::MutationParams,
-    settings::{PER_POINT_MULTIPLIER, TILE_MAX_POLYS},
+    settings::TILE_MAX_POLYS,
 };
 
 #[derive(Clone, Debug)]
@@ -193,19 +193,37 @@ pub struct ResidentCase {
 }
 
 impl ResidentCase {
+    /// A case whose engine is sized for the fixture's parameters, which trials run.
+    ///
     /// # Errors
     /// Rejects invalid fixtures and initial tile-bin overflow.
     pub fn open(manifest: &Path, case_id: &str) -> Result<Self> {
+        Self::open_for(manifest, case_id, None)
+    }
+
+    /// A case whose engine holds `capacity`, or the fixture's parameters when
+    /// `None`. A later trial or quality run beyond it is rejected at preparation.
+    ///
+    /// # Errors
+    /// Rejects invalid fixtures and initial tile-bin overflow.
+    pub fn open_for(
+        manifest: &Path,
+        case_id: &str,
+        capacity: Option<EngineCapacity>,
+    ) -> Result<Self> {
         let input = fixtures::load(manifest, case_id)?;
         ensure!(
             input.fixture.complexity.overflowed_tiles == 0,
             "initial tile-bin overflow"
         );
+        let capacity =
+            capacity.unwrap_or_else(|| EngineCapacity::for_params(&input.manifest.params));
         let evolver = futures_lite::future::block_on(GpuEvolver::new(
             &input.rgba,
             input.fixture.width,
             input.fixture.height,
             &input.drawing,
+            capacity,
         ));
         Ok(Self { input, evolver })
     }
@@ -470,11 +488,14 @@ fn compare_chain(
     stored_error: u32,
     input: &LoadedFixture,
 ) -> Result<ChainQuality> {
+    // Trials run the fixture's parameters.
+    let penalty = input.manifest.params.per_point_penalty;
     let reference = reference::evaluate(
         &parent.polygons,
         &input.rgba,
         input.fixture.width,
         input.fixture.height,
+        penalty,
     )?;
     ensure!(
         framebuffer.len() == reference.pixels.len(),
@@ -496,7 +517,7 @@ fn compare_chain(
         framebuffer_error: image_error(framebuffer, &input.rgba),
         scalar_error: reference.raw_error,
         stored_fitness: f32::from_bits(parent.fitness_bits),
-        expected_stored_fitness: fitness(stored_error, parent.polygon_count, framebuffer.len()),
+        expected_stored_fitness: fitness(stored_error, parent.polygon_count, framebuffer.len(), penalty),
         scalar_fitness: reference.fitness,
         differing_pixels,
         max_channel_delta,
@@ -572,9 +593,9 @@ fn pixel_difference(actual: &[u32], expected: &[u32]) -> (u32, u32, u64) {
     (count, maximum, total)
 }
 
-fn fitness(error: u32, triangles: u32, pixels: usize) -> f32 {
+fn fitness(error: u32, triangles: u32, pixels: usize, per_point_penalty: f32) -> f32 {
     let mut result = 100.0 * (1.0 - error as f32 / (765.0 * pixels as f32));
-    result -= result * PER_POINT_MULTIPLIER * (triangles * 3) as f32;
+    result -= result * per_point_penalty * (triangles * 3) as f32;
     result
 }
 

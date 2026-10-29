@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     engine::{Rasterizer, Vertex},
     settings::{
-        ADD_POLYGON_PROB, ADJACENT_SWAP_PROB, CLONE_POLYGON_PROB, MAX_POLYGONS_PER_IMAGE,
+        ADD_POLYGON_PROB, ADJACENT_SWAP_PROB, CLONE_POLYGON_PROB, DEFAULT_MAX_POLYGONS,
         MERGE_POLYGON_PROB, MIN_POLYGONS_PER_IMAGE, NEW_POINT_MAX_DISTANCE, REMOVE_POLYGON_PROB,
         REORDER_POLYGON_PROB, START_WITH_POLYGONS_PER_IMAGE, SWAP_COLORS_PROB,
     },
@@ -109,7 +109,8 @@ impl Drawing {
     }
 
     pub fn add_polygon(&mut self) -> bool {
-        if self.polygons.len() >= MAX_POLYGONS_PER_IMAGE {
+        // The CPU search has no MutationParams; it keeps the default cap.
+        if self.polygons.len() >= DEFAULT_MAX_POLYGONS as usize {
             return false;
         }
         let polygon = Polygon::new_random();
@@ -192,7 +193,7 @@ impl Drawing {
     }
 
     pub fn clone_jitter(&mut self) -> bool {
-        if self.polygons.is_empty() || self.polygons.len() >= MAX_POLYGONS_PER_IMAGE {
+        if self.polygons.is_empty() || self.polygons.len() >= DEFAULT_MAX_POLYGONS as usize {
             return false;
         }
         let src = rand::rng().random_range(0..self.polygons.len());

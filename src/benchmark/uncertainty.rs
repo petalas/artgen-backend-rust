@@ -172,7 +172,10 @@ pub fn audit(
         (1..=1024).contains(&width) && (1..=1024).contains(&height),
         "invalid dimensions"
     );
-    ensure!(polygons.len() <= 1000, "too many triangles");
+    ensure!(
+        polygons.len() <= crate::settings::POLYGON_CAPACITY,
+        "too many triangles"
+    );
     ensure!(
         actual.len() == (width * height) as usize && actual.len() == nominal.len(),
         "framebuffer length mismatch"

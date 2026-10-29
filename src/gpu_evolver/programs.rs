@@ -22,7 +22,8 @@ use variants::{BenchmarkMutateKey, ShaderVariants};
 pub(super) use variants::WorklistStorage;
 pub use variants::{
     benchmark_mutate_compilation_options, benchmark_mutate_group_size_from_source,
-    BenchmarkMutateOptions, ShaderVariantInstaller,
+    specialize_polygon_storage, BenchmarkMutateOptions, ShaderVariantInstaller, VariantStorage,
+    HISTORICAL_POLYGON_CAPACITY,
 };
 
 // Bundled policy is separate from the historical-source default.
@@ -34,6 +35,8 @@ const BUNDLED_MUTATE_OPTIONS: BenchmarkMutateOptions = BenchmarkMutateOptions {
 pub(super) struct MutationProgram {
     key: BenchmarkMutateKey,
     pub(super) pipeline: ComputePipeline,
+    /// The largest `max_polygons` its source supports (`specialize_polygon_storage`).
+    polygon_limit: usize,
 }
 
 impl MutationProgram {
@@ -268,6 +271,7 @@ impl GpuPrograms {
         let mutation = MutationProgram {
             pipeline: compiler.mutate(&key.source, key.options),
             key,
+            polygon_limit: crate::settings::POLYGON_CAPACITY,
         };
         let tiles = compiler.tiles(wg, compiler.bundled_stages(wg));
         Self {
@@ -400,7 +404,8 @@ fn tile_source(stage: TileStage, wg: [u32; 2]) -> String {
 // Most bin workgroups return before touching shared memory, so zeroing would be
 // their main cost. Avoid the
 // redundant zeroing code, which is expensive to compile on the WSL Dozen driver.
-// Keep default initialization for mutation: empty-parent crossover reads slot 0.
+// Mutation has its own policy (BUNDLED_MUTATE_OPTIONS); it holds no polygon
+// array in workgroup memory, so zeroing costs it little.
 // Vulkan provides native subgroup IDs. Naga's DX12 translation infers them from
 // local indices, so retain default initialization on that backend.
 fn rasterize_compilation_options(device: &Device) -> PipelineCompilationOptions<'static> {

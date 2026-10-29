@@ -7,10 +7,13 @@
 //! --candidate copy8=COPY8.wgsl --output NEW_DIRECTORY`.
 //! `--help` parses no sources, creates no files, and initializes no GPU.
 //!
-//! Sources are compiled once, verbatim, through the public mutation pipeline's
+//! Sources are compiled once through the public mutation pipeline's
 //! actual bind-group layouts, with mutation-only compilation options. Reference zeroing stays true; candidate
-//! zeroing defaults to true and can be disabled explicitly. No engine API,
-//! solver, source rewriting, or scored campaign is involved. In particular,
+//! zeroing defaults to true and can be disabled explicitly. The only rewrite is
+//! the engine's `specialize_polygon_storage`, which gives a historical source's
+//! `DrawingState` the engine's `POLYGON_CAPACITY` stride; every source must
+//! support the fixtures' 1000-polygon cap. No other engine API, solver, source
+//! rewriting, or scored campaign is involved. In particular,
 //! marker-free physical workgroups of 128/256/512 lanes retain dispatch(4, 1, 1).
 //! An exact `OFFSPRING_GROUP_SIZE` declaration changes only dispatch Y to
 //! `ceil(fixture.lambda / source_group_size)`, using the engine's checked parser.
@@ -26,12 +29,13 @@
 //! 36 immediate small-parent history probes. Three candidates mean 1472 GPU
 //! dispatches; four mean 1840. All 1024 parents remain bound because tournament
 //! selection uses arrayLength, although only four chains produce children.
-//! The maximum is 256 offspring, each with 1000 physical polygon slots.
+//! The maximum is 256 offspring, each with `POLYGON_CAPACITY` (2048) physical
+//! polygon slots; fixtures cap drawings at 1000 polygons.
 //!
 //! Resource/checkpoint decisions: only this example is owned. Device setup and
 //! shader compilation block the main thread; buffer reuse and comparison form
-//! one serial workstream. One 16,416,768-byte parent buffer, one 4,104,192-byte
-//! output, and one 4,106,240-byte staging buffer are reused. Each variant keeps
+//! one serial workstream. One 33,587,200-byte parent buffer, one 8,396,800-byte
+//! output, and one 8,398,848-byte staging buffer are reused. Each variant keeps
 //! its own full CPU history, including padding and RNG, so untouched slots are
 //! checked against that variant's prior bytes. Histories are never normalized.
 //! The normal pipeline is created for 16 chains at 17x19 solely to request the
@@ -79,9 +83,10 @@ use artgen_backend_rust::{
             BenchmarkMutateOptions,
         },
         buffers::{default_gpu_params, GpuDrawingState, GpuParams, GPU_DRAWING_STATE_SIZE},
-        pipeline::GpuPipeline,
+        pipeline::{specialize_polygon_storage, GpuPipeline},
+        EngineCapacity,
     },
-    settings::MAX_POLYGONS_PER_IMAGE,
+    settings::POLYGON_CAPACITY,
 };
 use bytemuck::Zeroable;
 use serde::Serialize;
@@ -92,10 +97,13 @@ const ACTIVE_CHAINS: usize = 4;
 const PARENTS: usize = 1024;
 const MAX_LAMBDA: usize = 64;
 const OFFSPRING: usize = ACTIVE_CHAINS * MAX_LAMBDA;
+// The fixtures' polygon cap and largest drawing, the historical reference's limit.
 const POLYGONS: usize = 1000;
+// Physical polygon slots per state: the engine's storage stride.
+const SLOTS: usize = POLYGON_CAPACITY;
 const HEADER_WORDS: usize = 8;
 const POLYGON_WORDS: usize = 4;
-const STATE_WORDS: usize = HEADER_WORDS + POLYGONS * POLYGON_WORDS;
+const STATE_WORDS: usize = HEADER_WORDS + SLOTS * POLYGON_WORDS;
 const OUTPUT_WORDS: usize = OFFSPRING * STATE_WORDS;
 const ERROR_WORDS: usize = OFFSPRING * 2;
 const SNAPSHOT_WORDS: usize = OUTPUT_WORDS + ERROR_WORDS;
@@ -134,7 +142,9 @@ struct Options {
 
 struct Source {
     name: String,
-    text: String,
+    /// The source text with the engine's drawing-state stride; what is compiled.
+    /// Evidence keeps the original text and its hash.
+    compiled: String,
     sha256: String,
     mutate_group_size: u32,
     options: BenchmarkMutateOptions,
@@ -406,6 +416,15 @@ fn load_sources(options: &Options, evidence: &mut Evidence) -> Result<Vec<Source
         let mutate_group_size = benchmark_mutate_group_size_from_source(&text)
             .map_err(anyhow::Error::msg)
             .with_context(|| format!("mutation group metadata for {}", arg.name))?;
+        let storage = specialize_polygon_storage(&text)
+            .map_err(anyhow::Error::msg)
+            .with_context(|| format!("polygon storage of {}", arg.name))?;
+        ensure!(
+            storage.polygon_limit >= POLYGONS,
+            "{} supports {} polygons; the fixtures need {POLYGONS}",
+            arg.name,
+            storage.polygon_limit
+        );
         let copy = format!("{}.wgsl", arg.name);
         let mut destination = OpenOptions::new()
             .write(true)
@@ -415,11 +434,12 @@ fn load_sources(options: &Options, evidence: &mut Evidence) -> Result<Vec<Source
         destination.flush()?;
         evidence.event(&json!({"event":"source", "name":arg.name, "path":path_text,
             "copy":copy, "sha256":sha256, "bytes":text.len(),
-            "mutate_group_size":mutate_group_size, "constants":benchmark_mutate_compilation_options(compilation_options).constants,
+            "mutate_group_size":mutate_group_size, "polygon_limit":storage.polygon_limit,
+            "constants":benchmark_mutate_compilation_options(compilation_options).constants,
             "zero_initialize_workgroup_memory":compilation_options.zero_initialize_workgroup_memory}))?;
         sources.push(Source {
             name: arg.name.clone(),
-            text,
+            compiled: storage.source,
             sha256,
             mutate_group_size,
             options: compilation_options,
@@ -471,7 +491,7 @@ fn run(options: &Options, evidence: &mut Evidence, deadline: Instant) -> Result<
         &json!({"event":"begin", "schema":1, "fixtures":fixtures.len(),
         "variants":options.sources.len(), "dispatch_rule":"[4,ceil(lambda/mutate_group_size),1]",
         "parents":PARENTS,
-        "offspring_capacity":OFFSPRING, "polygons_per_slot":POLYGONS,
+        "offspring_capacity":OFFSPRING, "polygons_per_slot":SLOTS, "max_polygons":POLYGONS,
         "parent_bytes":PARENT_BYTES, "output_bytes":OUTPUT_BYTES, "staging_bytes":SNAPSHOT_BYTES,
         "seed":SEED, "outer_process_timeout_seconds":600, "poll_map_timeout_seconds":120,
         "semantics":"all header bits and active polygon prefix; padding differences logged",
@@ -486,8 +506,13 @@ fn run(options: &Options, evidence: &mut Evidence, deadline: Instant) -> Result<
     evidence.event(&json!({"event":"device_initialization_started"}))?;
     let initial = vec![GpuDrawingState::zeroed(); 16];
     let image = [0u8, 0, 0, 255].repeat((IMAGE[0] * IMAGE[1]) as usize);
-    let p =
-        futures_lite::future::block_on(GpuPipeline::new(16, IMAGE[0], IMAGE[1], &image, &initial));
+    let p = futures_lite::future::block_on(GpuPipeline::new(
+        EngineCapacity::new(16, 64),
+        IMAGE[0],
+        IMAGE[1],
+        &image,
+        &initial,
+    ));
     evidence
         .event(&json!({"event":"device_ready", "limits":format!("{:?}", p.device.limits())}))?;
     remaining(deadline)?;
@@ -509,8 +534,8 @@ fn run(options: &Options, evidence: &mut Evidence, deadline: Instant) -> Result<
 
 fn check_abi() -> Result<()> {
     ensure!(
-        MAX_POLYGONS_PER_IMAGE == POLYGONS,
-        "engine polygon capacity changed"
+        POLYGONS <= SLOTS,
+        "engine polygon capacity is below the fixtures' cap"
     );
     ensure!(
         GPU_DRAWING_STATE_SIZE == STATE_WORDS * 4,
@@ -529,8 +554,8 @@ fn check_abi() -> Result<()> {
         "RNG offset changed"
     );
     const {
-        assert!(PARENT_BYTES <= 16 * 1024 * 1024);
-        assert!(OUTPUT_BYTES < 4 * 1024 * 1024 && SNAPSHOT_BYTES < 4 * 1024 * 1024);
+        assert!(PARENT_BYTES <= 33 * 1024 * 1024);
+        assert!(OUTPUT_BYTES < 9 * 1024 * 1024 && SNAPSHOT_BYTES < 9 * 1024 * 1024);
         assert!(MAX_VARIANTS * FIXTURES <= MAX_DISPATCHES);
     }
     Ok(())
@@ -708,7 +733,7 @@ fn compile_variants(
         });
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some(&source.name),
-            source: wgpu::ShaderSource::Wgsl(source.text.as_str().into()),
+            source: wgpu::ShaderSource::Wgsl(source.compiled.as_str().into()),
         });
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some(&source.name),
@@ -753,7 +778,7 @@ fn initial_working_state() -> Vec<u32> {
     {
         let slot_seed = u32::try_from(slot).expect("offspring slot < 256");
         for (word, value) in state.iter_mut().enumerate() {
-            let word = u32::try_from(word).expect("state word < 4008");
+            let word = u32::try_from(word).expect("state word < STATE_WORDS");
             *value = mix(SEED ^ slot_seed.wrapping_mul(0x9e37_79b9) ^ word);
         }
         state[0] = 1000;
@@ -807,7 +832,7 @@ fn fill_parents(words: &mut [u32], counts: [u32; 4]) {
             .iter_mut()
             .enumerate()
         {
-            let i = u32::try_from(i).expect("polygon index < 1000");
+            let i = u32::try_from(i).expect("polygon slot < POLYGON_CAPACITY");
             let p = key ^ i.wrapping_mul(0x85eb_ca6b);
             polygon.copy_from_slice(&[mix(p), mix(p ^ 1), mix(p ^ 2), mix(p ^ 3)]);
         }
@@ -1392,7 +1417,7 @@ mod tests {
         line: &str,
         output: &Path,
     ) -> Result<()> {
-        assert_eq!(source.text, text);
+        assert_eq!(source.compiled, specialize_polygon_storage(text).unwrap().source);
         assert_eq!(source.sha256, hash(text.as_bytes()));
         assert_eq!(source.mutate_group_size, group);
         assert_eq!(

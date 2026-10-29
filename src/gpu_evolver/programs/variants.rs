@@ -22,6 +22,75 @@ use super::{
 use crate::gpu_evolver::bindings::{
     self, Resource, BIN_POLYGONS, RASTERIZE_ERROR, RASTER_WORKLIST,
 };
+use crate::settings::POLYGON_CAPACITY;
+
+/// Polygons a historical variant's drawing state declares, as a literal.
+pub const HISTORICAL_POLYGON_CAPACITY: usize = 1000;
+const HISTORICAL_STATE_MEMBER: &str = "polygons: array<Polygon, 1000>,";
+const BUNDLED_STATE_MEMBER: &str = "polygons: array<Polygon, POLYGON_CAPACITY>,";
+const CAPACITY_DECLARATION: &str = "const POLYGON_CAPACITY: u32 = ";
+
+/// A variant source whose drawing-state stride is the engine's, and the largest
+/// `max_polygons` its own logic was written for.
+#[derive(Debug, PartialEq, Eq)]
+pub struct VariantStorage {
+    pub source: String,
+    pub polygon_limit: usize,
+}
+
+/// Give a variant the engine's `DrawingState` stride. Historical sources declare
+/// `polygons: array<Polygon, 1000>,`; only that member is widened to
+/// `POLYGON_CAPACITY`, and their workgroup arrays and loops keep the 1000-polygon
+/// semantics, so their limit is 1000. Emitted bundled sources declare
+/// `const POLYGON_CAPACITY: u32 = Nu;`; one emitted by a build with a smaller
+/// capacity N takes this build's, and its limit is N, the capacity its code was
+/// written for. A source with no `Polygon` array binds no drawing state. Anything
+/// else would address states at a stride other than the buffers', so it is
+/// rejected.
+///
+/// # Errors
+/// Rejects any other polygon storage declaration.
+pub fn specialize_polygon_storage(source: &str) -> Result<VariantStorage, String> {
+    let counts = [HISTORICAL_STATE_MEMBER, BUNDLED_STATE_MEMBER, CAPACITY_DECLARATION]
+        .map(|marker| source.matches(marker).count());
+    let capacity = POLYGON_CAPACITY;
+    match counts {
+        [1, 0, 0] => Ok(VariantStorage {
+            source: source.replace(
+                HISTORICAL_STATE_MEMBER,
+                &format!("polygons: array<Polygon, {POLYGON_CAPACITY}>,"),
+            ),
+            polygon_limit: HISTORICAL_POLYGON_CAPACITY,
+        }),
+        [0, 1, 1] => {
+            let declared = source
+                .split_once(CAPACITY_DECLARATION)
+                .and_then(|(_, rest)| rest.split_once("u;"))
+                .and_then(|(literal, _)| literal.parse::<usize>().ok());
+            match declared {
+                Some(declared) if (1..=capacity).contains(&declared) => Ok(VariantStorage {
+                    source: source.replace(
+                        &format!("{CAPACITY_DECLARATION}{declared}u;"),
+                        &format!("{CAPACITY_DECLARATION}{capacity}u;"),
+                    ),
+                    polygon_limit: declared,
+                }),
+                _ => Err(format!(
+                    "the variant's POLYGON_CAPACITY is {}, outside this build's 1..={capacity}",
+                    declared.map_or_else(|| "not a u32 literal".to_owned(), |value| value.to_string())
+                )),
+            }
+        }
+        [0, 0, 0] if !source.contains("array<Polygon") => Ok(VariantStorage {
+            source: source.to_owned(),
+            polygon_limit: capacity,
+        }),
+        _ => Err(format!(
+            "a variant's drawing state must declare `{HISTORICAL_STATE_MEMBER}` once, or \
+             `{BUNDLED_STATE_MEMBER}` with `{CAPACITY_DECLARATION}{capacity}u;`"
+        )),
+    }
+}
 
 // Capacity for 17 lab sources, five supported raster workgroups, and two modes.
 const MAX_BENCHMARK_BIN_PIPELINES: usize = 17 * 5 * 2;
@@ -117,12 +186,14 @@ struct BenchmarkBinPipeline {
 struct TileVariant {
     source: Arc<str>,
     raster_work: bool,
+    polygon_limit: usize,
 }
 
 impl TileVariant {
     /// Older binners declare no `raster_work` binding and list nothing; older
     /// rasters declare none and index tiles by workgroup id.
     fn new(source: Arc<str>, binding: u32) -> Result<Self, String> {
+        let polygon_limit = specialize_polygon_storage(&source)?.polygon_limit;
         let module = wgsl::parse_str(&source).map_err(|error| error.emit_to_string(&source))?;
         let slot = Some(ResourceBinding { group: 0, binding });
         let raster_work = module
@@ -132,6 +203,7 @@ impl TileVariant {
         Ok(Self {
             source,
             raster_work,
+            polygon_limit,
         })
     }
 }
@@ -311,7 +383,7 @@ impl ShaderVariants {
         if self.raster.len() == MAX_BENCHMARK_RASTER_PIPELINES {
             return Err("benchmark raster pipeline cache is full".into());
         }
-        let specialized = specialize_raster_source(&key.source, wg);
+        let specialized = specialize_raster_source(&specialize_polygon_storage(&key.source)?.source, wg);
         let pipeline = checked(&compiler.device, || compiler.raster(&specialized))?;
         self.raster.push(BenchmarkRasterPipeline {
             key,
@@ -369,6 +441,17 @@ impl GpuPrograms {
     pub(in crate::gpu_evolver) fn benchmark_validation(&self) -> bool {
         self.variants.validation
     }
+
+    /// The largest `max_polygons` every installed program supports: the
+    /// polygon capacity, or a historical variant's 1000.
+    pub(in crate::gpu_evolver) fn polygon_limit(&self) -> usize {
+        let variants = [&self.variants.raster_variant, &self.variants.bin_variant];
+        variants
+            .into_iter()
+            .flatten()
+            .map(|variant| variant.polygon_limit)
+            .fold(self.mutation.polygon_limit, usize::min)
+    }
 }
 
 /// Installs shader variants through the engine's specialization and pipeline
@@ -391,6 +474,7 @@ impl ShaderVariantInstaller<'_> {
         options: BenchmarkMutateOptions,
     ) -> Result<(), String> {
         let key = BenchmarkMutateKey::new(source, options)?;
+        let storage = specialize_polygon_storage(source)?;
         let p = &mut *self.programs;
         let cache = &mut p.variants.mutate;
         if let Some(entry) = cache.iter().find(|entry| entry.key == key) {
@@ -403,9 +487,13 @@ impl ShaderVariantInstaller<'_> {
         let pipeline = if cache.is_empty() && p.mutation.matches(source, options) {
             p.mutation.pipeline.clone()
         } else {
-            checked(&p.compiler.device, || p.compiler.mutate(source, options))?
+            checked(&p.compiler.device, || p.compiler.mutate(&storage.source, options))?
         };
-        let selected = MutationProgram { key, pipeline };
+        let selected = MutationProgram {
+            key,
+            pipeline,
+            polygon_limit: storage.polygon_limit,
+        };
         cache.push(selected.clone());
         p.mutation = selected;
         Ok(())
@@ -613,6 +701,7 @@ fn validate_benchmark_raster_source(source: &str) -> Result<(), String> {
     if source.is_empty() || source.len() > MAX_BENCHMARK_SOURCE_BYTES {
         return Err("raster shader must contain 1..262144 bytes".into());
     }
+    specialize_polygon_storage(source)?;
     let counts = RASTER_TILE_MARKERS.map(|pair| pair.map(|marker| source.matches(marker).count()));
     match counts {
         [[1, 1], [0, 0]] | [[0, 0], [1, 1]] => Ok(()),
@@ -626,6 +715,7 @@ fn validate_benchmark_bin_source(source: &str) -> Result<(), String> {
     if source.is_empty() || source.len() > MAX_BENCHMARK_SOURCE_BYTES {
         return Err("bin shader must contain 1..262144 bytes".into());
     }
+    specialize_polygon_storage(source)?;
     for marker in BIN_TILE_MARKERS {
         if source.matches(marker).count() != 1 {
             return Err(format!(
@@ -668,7 +758,9 @@ fn specialize_benchmark_bin_source(
 ) -> Result<String, String> {
     let specialized = match source {
         BinSource::Bundled => tile_source(TileStage::BinPolygons, wg),
-        BinSource::Variant(source) => specialize_bin_source(source, wg),
+        BinSource::Variant(source) => {
+            specialize_bin_source(&specialize_polygon_storage(source)?.source, wg)
+        }
     };
     if validation {
         benchmark_bin_source(&specialized)
@@ -715,11 +807,14 @@ mod benchmark_tests {
     use super::{
         benchmark_bin_source, benchmark_mutate_compilation_options,
         benchmark_mutate_group_size_from_source, specialize_benchmark_bin_source,
-        specialize_bin_source, specialize_raster_source, validate_benchmark_bin_source,
-        validate_benchmark_mutate_source, validate_benchmark_raster_source, BenchmarkMutateKey,
-        BenchmarkMutateOptions, BenchmarkRasterKey, BinSource, TileVariant,
-        BIN_RASTER_WORK_BINDING, MAX_BENCHMARK_SOURCE_BYTES, RASTER_RASTER_WORK_BINDING,
+        specialize_bin_source, specialize_polygon_storage, specialize_raster_source,
+        validate_benchmark_bin_source, validate_benchmark_mutate_source,
+        validate_benchmark_raster_source, BenchmarkMutateKey, BenchmarkMutateOptions,
+        BenchmarkRasterKey, BinSource, TileVariant, BIN_RASTER_WORK_BINDING,
+        HISTORICAL_POLYGON_CAPACITY, MAX_BENCHMARK_SOURCE_BYTES, POLYGON_CAPACITY,
+        RASTER_RASTER_WORK_BINDING,
     };
+    use wgpu::naga::front::wgsl;
 
     const TILES: [[u32; 2]; 5] = [[32, 16], [16, 16], [32, 8], [16, 8], [8, 8]];
     const HISTORICAL_RASTER: &str = include_str!(
@@ -735,6 +830,71 @@ mod benchmark_tests {
     // Metadata/cache fixture only; this empty kernel does not test mutation equivalence.
     const GROUPED_MUTATE_G64: &str = "const OFFSPRING_GROUP_SIZE: u32 = 64u;\n\
         @compute @workgroup_size(64) fn main() {}";
+
+    /// Every historical source takes the engine's state stride, validates, and
+    /// keeps its 1000-polygon limit; the change touches only the state member.
+    #[test]
+    fn historical_sources_take_the_engine_state_stride() {
+        use crate::gpu_evolver::buffers::GPU_DRAWING_STATE_SIZE;
+        use wgpu::naga::{valid, TypeInner};
+        const FIXTURES: [&str; 8] = [
+            include_str!("../../../benchmarks/evolution/v1/experiments/reference-bin-dd52d50.wgsl"),
+            include_str!("../../../benchmarks/evolution/overnight-20261024/fixtures/raster-direct-t2.wgsl"),
+            include_str!("../../../benchmarks/evolution/overnight-20261024/fixtures/raster-direct-t4.wgsl"),
+            include_str!("../../../benchmarks/evolution/overnight-20261024/fixtures/raster-ae1-reference.wgsl"),
+            include_str!("../../../benchmarks/evolution/overnight-20261024/fixtures/bin-tile32-reference.wgsl"),
+            include_str!("../../../benchmarks/evolution/overnight-20261024/fixtures/bin-plain-count-reference.wgsl"),
+            HISTORICAL_MUTATE,
+            GROUPED_MUTATE_G1,
+        ];
+        for source in FIXTURES {
+            let storage = specialize_polygon_storage(source).unwrap();
+            assert_eq!(storage.polygon_limit, HISTORICAL_POLYGON_CAPACITY);
+            let changed: Vec<_> = source
+                .lines()
+                .zip(storage.source.lines())
+                .filter(|(before, after)| before != after)
+                .collect();
+            assert_eq!(changed.len(), 1, "{changed:?}");
+            let module = wgsl::parse_str(&storage.source).unwrap();
+            valid::Validator::new(valid::ValidationFlags::all(), valid::Capabilities::all())
+                .validate(&module)
+                .unwrap();
+            let state = module
+                .types
+                .iter()
+                .find(|(_, ty)| ty.name.as_deref() == Some("DrawingState"))
+                .map(|(_, ty)| ty.inner.clone())
+                .unwrap();
+            let TypeInner::Struct { span, .. } = state else { panic!("DrawingState") };
+            assert_eq!(span as usize, GPU_DRAWING_STATE_SIZE);
+        }
+    }
+
+    #[test]
+    fn polygon_storage_accepts_this_builds_emitted_sources_and_rejects_others() {
+        let capacity = POLYGON_CAPACITY;
+        for shader in [BundledShader::Mutate, BundledShader::Tile(TileStage::BinPolygons, [16, 16])] {
+            let source = bundled_shader_source(shader);
+            let storage = specialize_polygon_storage(&source).unwrap();
+            assert_eq!((storage.source.as_str(), storage.polygon_limit), (source.as_str(), capacity));
+            // Emitted by a build with a smaller capacity: this build's stride,
+            // and the limit its code was written for.
+            let declaration = format!("const POLYGON_CAPACITY: u32 = {capacity}u;");
+            let older = source.replace(&declaration, "const POLYGON_CAPACITY: u32 = 1000u;");
+            let storage = specialize_polygon_storage(&older).unwrap();
+            assert_eq!((storage.source.as_str(), storage.polygon_limit), (source.as_str(), 1000));
+            let larger = source.replace(&declaration, "const POLYGON_CAPACITY: u32 = 4096u;");
+            assert!(specialize_polygon_storage(&larger).unwrap_err().contains("4096"));
+        }
+        let unknown = HISTORICAL_RASTER.replace("array<Polygon, 1000>,", "array<Polygon, 512>,");
+        assert!(specialize_polygon_storage(&unknown).is_err());
+        let twice = format!("{HISTORICAL_RASTER}\nstruct Again {{ polygons: array<Polygon, 1000>, }}");
+        assert!(specialize_polygon_storage(&twice).is_err());
+        // A program that binds no drawing state needs no specialization.
+        let storage = specialize_polygon_storage(GROUPED_MUTATE_G64).unwrap();
+        assert_eq!(storage.source, GROUPED_MUTATE_G64);
+    }
 
     #[test]
     fn mutate_fixtures_pin_historical_and_grouped_valid_wgsl() {
@@ -1220,6 +1380,8 @@ fn main() {
         let candidate = plain_count_candidate();
         validate_benchmark_bin_source(&candidate).unwrap();
         let variant = BinSource::Variant(candidate.as_str().into());
+        // Its drawing state takes the engine's stride (see specialize_polygon_storage).
+        let stored = specialize_polygon_storage(&candidate).unwrap().source;
         for wg in TILES {
             let normal = specialize_benchmark_bin_source(&variant, wg, false).unwrap();
             for (axis, size) in [("W", wg[0]), ("H", wg[1])] {
@@ -1241,10 +1403,10 @@ fn main() {
                         &format!("const TILE_H: u32 = {};", wg[1]),
                         "const TILE_H: u32 = 16;"
                     ),
-                candidate
+                stored
             );
             if wg == [16, 16] {
-                assert_eq!(normal.as_bytes(), candidate.as_bytes());
+                assert_eq!(normal.as_bytes(), stored.as_bytes());
             }
             validated_bin_module(&normal);
             let diagnostic = specialize_benchmark_bin_source(&variant, wg, true).unwrap();

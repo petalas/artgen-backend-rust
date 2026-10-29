@@ -54,11 +54,17 @@ Project-specific gotchas and hard-won knowledge. Search here when you hit unexpe
 **Gotcha**: Selection used to remove triangles whose normalized cross magnitude was at most `1e-5` after caching error and exporting fitness. Such triangles can still cover pixels. At iteration 2997, candidate 97 improved one pixel by 118 error units, then cleanup removed that triangle while retaining the improved total. A tiny two-layer regression reproduced cached error 0 versus actual framebuffer error 765 after neutral acceptance.
 **Fix**: Preserve the evaluated candidate's geometry and polygon count through selection. The unscored post-selection cleanup is removed. Any future cleanup must form part of a proposal before evaluation, with its cost and quality measured separately.
 
+### Workgroup memory that grows with the polygon capacity costs mutate time
+
+**Context**: Raising the polygon capacity (state stride) from 1000 to 2000 triangles.
+**Gotcha**: Replay and lifecycle stayed identical, but mutate went from 9 to 20 µs per iteration (ff; 5% slower overall). Its workgroup copy of the parent grew from 16 to 32 KB, and the pipeline zeroes workgroup memory automatically, once per workgroup, for every offspring. Without zeroing it still cost 2 µs more than at 1000. Each mutate workgroup serves one offspring, so the copy was read about once.
+**Fix**: Mutate reads the parent from `chain_states` (read-only during mutate) and keeps no polygon array in workgroup memory; empty-parent crossover writes the zero polygon a zeroed copy held. Mutate fell to 8 µs at either capacity. Before sizing any workgroup array by `POLYGON_CAPACITY`, check its cost with hillclimb's per-stage µs.
+
 ### Automatic workgroup zeroing makes Dozen shader compilation slow
 
 **Context**: Project loading waits for `GpuEvolver::new`, initial fitness evaluation, and the first preview.
 **Gotcha**: Loading a pipeline cache does not skip all compilation. On the WSL Dozen driver, automatic initialization of the large shared polygon arrays dominates compilation of the rasterize/error and framebuffer pipelines.
-**Fix**: These three shaders explicitly initialize every shared value they consume before a barrier. Their Vulkan pipelines disable redundant automatic zeroing. The reductions use `subgroup_id` and `num_subgroups`, since WGSL does not guarantee a mapping from local invocation indices to subgroup IDs. Keep automatic zeroing for mutation, whose empty-parent crossover reads polygon slot zero, and for DX12, where Naga emulates subgroup IDs using local indices.
+**Fix**: These three shaders explicitly initialize every shared value they consume before a barrier. Their Vulkan pipelines disable redundant automatic zeroing. The reductions use `subgroup_id` and `num_subgroups`, since WGSL does not guarantee a mapping from local invocation indices to subgroup IDs. Mutation keeps automatic zeroing (it holds no polygon array in workgroup memory, so it is cheap), and so does DX12, where Naga emulates subgroup IDs using local indices.
 
 **Benchmark trap**: Matching WGSL bytes does not match compilation policy. The
 rejected compact-raster prototypes compiled their raster with default zeroing

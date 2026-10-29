@@ -1,5 +1,5 @@
 // Mutation compute shader — split each chain across logical offspring groups.
-// Physical lanes load the parent and cooperatively copy child prefixes.
+// Physical lanes cooperatively copy the parent's polygons into the child.
 // Compact leaders apply the original mutations after both barriers.
 // Single-pass: tries all mutations once, then forces a vertex micro-nudge if none fired.
 
@@ -62,21 +62,21 @@ fn write_changes_unknown(oid: u32) {
 @group(0) @binding(1) var<storage, read_write>  working_states: array<DrawingState>;
 @group(1) @binding(0) var<uniform>              params:         Params;
 
-// Shared memory for cooperative parent loading.
-// All threads in a workgroup collaboratively load the parent chain's polygon data
-// here, then copy roles stripe each offspring prefix from shared memory.
-// Each offspring group loads one parent prefix; groups do not share memory.
+// The parent's header, broadcast to the workgroup. Its polygons are read from
+// chain_states, which no stage writes during mutate: each workgroup serves one
+// offspring, so a workgroup copy of the parent (16 bytes per POLYGON_CAPACITY
+// slot) would be read about once and cost more to fill than it saves.
 var<workgroup> shared_parent_poly_count: u32;
 var<workgroup> shared_parent_fitness_bits: u32;
 var<workgroup> shared_parent_mutation_scale: f32;
-var<workgroup> shared_parent_polygons: array<Polygon, POLYGON_CAPACITY>;
 
 // Cooperative crossover: lane 0 decides and broadcasts; tail keep bits (one per
 // polygon slot) give each kept tail slot its output rank.
+const CROSSOVER_KEEP_WORDS: u32 = (POLYGON_CAPACITY + 31u) / 32u;
 var<workgroup> shared_crossover_parent_b: u32;
 var<workgroup> shared_crossover_rng: u32;
 var<workgroup> shared_crossover_flag: u32;
-var<workgroup> shared_crossover_keep: array<atomic<u32>, 32>;
+var<workgroup> shared_crossover_keep: array<atomic<u32>, CROSSOVER_KEEP_WORDS>;
 // Crossover slots below min(count_a, offspring count) that differ from parent A.
 // Only the first CHANGED_INDICES are kept; a larger count disables the
 // rasterizer shortcut.
@@ -157,10 +157,10 @@ fn clamp_polygon_alpha(poly_in: Polygon) -> Polygon {
 
 /// Write crossover slot `i` and note it if it differs from parent A's slot `i`.
 /// Chains descend from one seed, so most slots equal parent A's.
-fn write_crossover_slot(offspring_id: u32, i: u32, count_a: u32, source: Polygon) {
+fn write_crossover_slot(offspring_id: u32, i: u32, parent_a: u32, count_a: u32, source: Polygon) {
     let poly = clamp_polygon_alpha(source);
     working_states[offspring_id].polygons[i] = poly;
-    if i < count_a && any(poly.data != shared_parent_polygons[i].data) {
+    if i < count_a && any(poly.data != chain_states[parent_a].polygons[i].data) {
         let k = atomicAdd(&shared_crossover_changed_count, 1u);
         if k < CHANGED_INDICES {
             shared_crossover_changed[k] = i;
@@ -196,7 +196,7 @@ fn crossover_changed_words(count_a: u32, out_count: u32) -> vec2<u32> {
 
 /// Uniform crossover: walk both parents in lockstep by layer index, coin-flip each slot.
 /// Preserves z-ordering (alpha compositing order) — no centroid math needed.
-/// Parent A from shared memory, parent B from global.
+/// Parent A is the offspring's own chain.
 ///
 /// Cooperative: every lane of the offspring's workgroup calls this in uniform
 /// control flow. Slot i consumes exactly the i-th draw after `base_rng` (one
@@ -207,7 +207,7 @@ fn crossover_changed_words(count_a: u32, out_count: u32) -> vec2<u32> {
 /// Tail slots emit at min_count + (number of kept tail slots before them),
 /// found from a workgroup bitmask after a barrier. Alpha clamping is fused into
 /// each write. Returns the RNG state after max_count draws (valid on lane 0).
-fn crossover_uniform_offspring(base_rng: u32, parent_b: u32, offspring_id: u32, lane: u32) -> u32 {
+fn crossover_uniform_offspring(base_rng: u32, parent_a: u32, parent_b: u32, offspring_id: u32, lane: u32) -> u32 {
     let count_a = min(shared_parent_poly_count, params.max_polygons);
     let count_b = min(chain_states[parent_b].polygon_count, params.max_polygons);
     let max_count = max(count_a, count_b);
@@ -224,11 +224,11 @@ fn crossover_uniform_offspring(base_rng: u32, parent_b: u32, offspring_id: u32, 
         if i < min_count {
             var poly: Polygon;
             if pick_a {
-                poly = shared_parent_polygons[i];
+                poly = chain_states[parent_a].polygons[i];
             } else {
                 poly = chain_states[parent_b].polygons[i];
             }
-            write_crossover_slot(offspring_id, i, count_a, poly);
+            write_crossover_slot(offspring_id, i, parent_a, count_a, poly);
         } else if pick_a == a_is_longer {
             atomicOr(&shared_crossover_keep[i >> 5u], 1u << (i & 31u));
         }
@@ -249,11 +249,11 @@ fn crossover_uniform_offspring(base_rng: u32, parent_b: u32, offspring_id: u32, 
         }
         var poly: Polygon;
         if a_is_longer {
-            poly = shared_parent_polygons[i];
+            poly = chain_states[parent_a].polygons[i];
         } else {
             poly = chain_states[parent_b].polygons[i];
         }
-        write_crossover_slot(offspring_id, min_count + rank, count_a, poly);
+        write_crossover_slot(offspring_id, min_count + rank, parent_a, count_a, poly);
     }
     // Publishes every lane's changed-slot notes to lane 0.
     workgroupBarrier();
@@ -266,7 +266,14 @@ fn crossover_uniform_offspring(base_rng: u32, parent_b: u32, offspring_id: u32, 
         }
         working_states[offspring_id].polygon_count = max(out_count, 1u);
         if out_count == 0u {
-            working_states[offspring_id].polygons[0] = clamp_polygon_alpha(shared_parent_polygons[0]);
+            // Slot 0 of an empty parent A: the zero polygon, as a zeroed
+            // workgroup copy of the parent used to hold (slots past a drawing's
+            // count may hold stale polygons).
+            var first = Polygon(vec4<u32>(0u));
+            if count_a > 0u {
+                first = chain_states[parent_a].polygons[0];
+            }
+            working_states[offspring_id].polygons[0] = clamp_polygon_alpha(first);
         }
         write_changed_words(offspring_id, crossover_changed_words(count_a, out_count));
     }
@@ -625,7 +632,7 @@ fn copy_parent_prefix(chain_id: u32, group_base: u32, local_idx: u32,
     if copy_child < OFFSPRING_GROUP_SIZE && logical_child < lambda {
         let copy_oid = chain_id * lambda + logical_child;
         for (var i = copy_rank; i < poly_count; i += COPY_LANES) {
-            working_states[copy_oid].polygons[i] = shared_parent_polygons[i];
+            working_states[copy_oid].polygons[i] = chain_states[chain_id].polygons[i];
         }
     }
 }
@@ -648,9 +655,6 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
             shared_parent_fitness_bits = chain_states[chain_id].fitness_bits;
             shared_parent_mutation_scale = chain_states[chain_id].mutation_scale;
         }
-        for (var i = lid.x; i < poly_count; i += PHYSICAL_WG_SIZE) {
-            shared_parent_polygons[i] = chain_states[chain_id].polygons[i];
-        }
     }
 
     workgroupBarrier();
@@ -668,8 +672,8 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
 
     var rng = 0u;
     var mutation_scale = 1.0;
-    if lid.x < 32u {
-        atomicStore(&shared_crossover_keep[lid.x], 0u);
+    for (var w = lid.x; w < CROSSOVER_KEEP_WORDS; w += PHYSICAL_WG_SIZE) {
+        atomicStore(&shared_crossover_keep[w], 0u);
     }
     if lid.x == 0u {
         atomicStore(&shared_crossover_changed_count, 0u);
@@ -689,7 +693,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
                 shared_crossover_rng = rng;
                 crossover = 1u;
 
-                // Initialize working state header from shared memory
+                // Initialize working state header from the broadcast parent header
                 working_states[offspring_id].fitness_bits = shared_parent_fitness_bits;
                 working_states[offspring_id].mutation_scale = mutation_scale;
                 working_states[offspring_id].stagnation_counter = 0u;
@@ -700,9 +704,9 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
 
     // --- Crossover path (all lanes; the uniform load also publishes the keep-bit reset) ---
     if workgroupUniformLoad(&shared_crossover_flag) != 0u {
-        // Uniform crossover: parent A from shared memory, parent B from global
+        // Uniform crossover: parent A is this chain, parent B its tournament winner
         let crossover_rng = crossover_uniform_offspring(
-            shared_crossover_rng, shared_crossover_parent_b, offspring_id, lid.x);
+            shared_crossover_rng, chain_id, shared_crossover_parent_b, offspring_id, lid.x);
         if lid.x == 0u {
             // Crossover dirties the full image
             write_dirty_box(offspring_id, full_image_bbox());
@@ -718,7 +722,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
 
     // --- Normal mutation path ---
 
-    // Copy parent to offspring slot from shared memory (not global)
+    // The parent's header; copy_parent_prefix copied its polygons
     working_states[offspring_id].polygon_count = poly_count;
     working_states[offspring_id].fitness_bits = shared_parent_fitness_bits;
     working_states[offspring_id].mutation_scale = mutation_scale;
