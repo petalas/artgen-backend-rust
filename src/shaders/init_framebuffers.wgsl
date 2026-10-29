@@ -2,7 +2,7 @@
 // Dispatch: (W/WG_X, H/WG_Y, active_chains) — one thread per pixel per chain.
 // Uses 1D workgroup layout for subgroup intrinsics (naga constraint).
 //
-// Workgroup size is configurable — pipeline.rs uses string replacement on WG_X/WG_Y.
+// Workgroup size is configurable — programs.rs uses string replacement on WG_X/WG_Y.
 
 const WG_X: u32 = 16;
 const WG_Y: u32 = 16;

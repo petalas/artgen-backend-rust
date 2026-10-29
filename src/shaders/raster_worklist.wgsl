@@ -16,7 +16,7 @@
 // end of every iteration; the host resets it around a full evaluation. Entry
 // order is unspecified: raster only adds integer sums.
 //
-// pipeline.rs specializes the exact WG_X/WG_Y markers below.
+// programs/variants.rs specializes the exact WG_X/WG_Y markers below.
 const WG_X: u32 = 16;
 const WG_Y: u32 = 16;
 const TILE_MAX_POLYS: u32 = 256u;

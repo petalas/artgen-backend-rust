@@ -1,5 +1,5 @@
 // Paired pixels per physical lane, same logical raster tile.
-// Dispatch: (n, 1, 1) for a fixed n (pipeline.rs). raster_worklist.wgsl lists the
+// Dispatch: (n, 1, 1) for a fixed n (pipeline.rs). bin_polygons lists the
 // (offspring, tile) pairs that have work; workgroup g rasterizes entries g,
 // g + n, g + 2n, ... The list omits tiles outside the dirty rectangle and tiles no
 // changed polygon meets, which added nothing to the error sums, so far fewer
@@ -10,7 +10,7 @@
 // Integer lane totals feed C's unchanged dense actual-subgroup-ID reduction.
 // Cooperative decoded-cache loading uses every physical lane, even at image edges.
 //
-// pipeline.rs specializes the exact WG_X/WG_Y markers below.
+// programs.rs specializes the exact WG_X/WG_Y markers below.
 // Supported logical tiles: 32x16, 16x16, 32x8, 16x8, 8x8.
 // Shared polygon capacity remains the clamped 256-polygon limit.
 const WG_X: u32 = 16;

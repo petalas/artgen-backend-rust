@@ -264,7 +264,7 @@ impl GpuEvolver {
         options: BenchmarkMutateOptions,
     ) -> Result<(), String> {
         self.benchmark_drain()?;
-        self.pipeline.programs.set_benchmark_mutate_shader(source, options)
+        self.pipeline.shader_variants().set_mutate_shader(source, options)
     }
 
     /// Actual zero-initialization policy retained with the mutation pipeline.
@@ -299,7 +299,7 @@ impl GpuEvolver {
     /// Rejects a failed drain, oversized/malformed source, full cache or GPU errors.
     pub fn benchmark_set_bin_shader(&mut self, source: &str) -> Result<(), String> {
         self.benchmark_drain()?;
-        self.pipeline.set_benchmark_bin_shader(source)
+        self.pipeline.shader_variants().set_bin_shader(source)
     }
 
     /// Install and cache the actual raster source, retaining it across prepares
@@ -309,7 +309,7 @@ impl GpuEvolver {
     /// Rejects a failed drain, invalid source, exhausted cache or GPU errors.
     pub fn benchmark_set_raster_shader(&mut self, source: &str) -> Result<(), String> {
         self.benchmark_drain()?;
-        self.pipeline.programs.set_benchmark_raster_shader(source)
+        self.pipeline.shader_variants().set_raster_shader(source)
     }
 
     /// Replace binning only for an untimed replay. Prepare resets the persistent
@@ -319,7 +319,7 @@ impl GpuEvolver {
     /// Returns an error if the preceding GPU work cannot be fully drained.
     pub fn benchmark_set_validation(&mut self, enabled: bool) -> Result<(), String> {
         self.benchmark_drain()?;
-        self.pipeline.programs.set_benchmark_validation(enabled)?;
+        self.pipeline.shader_variants().set_validation(enabled)?;
         let p = &self.pipeline;
         p.queue
             .write_buffer(&p.tile_counts_buf, p.tile_counts_buf.size() - 4, &[0; 4]);
@@ -395,7 +395,8 @@ impl GpuEvolver {
     }
 
     /// Copies active states and cached pixels in one submission. No padding words
-    /// are exposed, including the fourth update flag and three unused RNG words.
+    /// are exposed, including the fourth update flag. Of the RNG words only the
+    /// state is; the other three hold transient change records.
     ///
     /// # Errors
     /// Rejects invalid counts, exhausted capacity, failed mapping or malformed GPU state.
@@ -441,7 +442,7 @@ impl GpuEvolver {
             usize::try_from(offspring).map_err(|error| error.to_string())?,
             usize::try_from(pixels).map_err(|error| error.to_string())?,
             counters,
-            p.programs.tiles().bin.validation,
+            p.programs.benchmark_validation(),
         )
     }
 

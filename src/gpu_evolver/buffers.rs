@@ -29,7 +29,7 @@ pub struct GpuDrawingState {
     pub fitness_bits: u32,            // offset 4 — bitcast f32 for atomicMax compatibility
     pub mutation_scale_bits: u32,     // offset 8 — bitcast f32, adaptive mutation scale
     pub stagnation_counter: u32,      // offset 12 — iterations since last improvement
-    pub rng_state: [u32; 4],          // offset 16 — only [0] is active RNG state; [1..3] unused padding
+    pub rng_state: [u32; 4],          // offset 16 — [0] RNG state; [1..2] changed polygon indices, [3] stashed-parent mask
     pub polygons: [GpuPolygon; MAX_POLYGONS_PER_IMAGE], // offset 32
 }
 

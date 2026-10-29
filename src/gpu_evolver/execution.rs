@@ -60,7 +60,7 @@ impl Workload {
     }
 }
 
-/// raster_worklist.wgsl's header: the entry count.
+/// The raster worklist's header: the entry count.
 pub(super) const RASTER_WORK_HEADER_BYTES: u64 = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

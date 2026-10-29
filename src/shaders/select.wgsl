@@ -82,21 +82,6 @@ struct Params {
     _reserved4: vec4<u32>,
 }
 
-fn unpack_color(p: Polygon) -> vec4<f32> {
-    return unpack4x8unorm(p.data.x);
-}
-
-fn edge_fn(ax: f32, ay: f32, bx: f32, by: f32, px: f32, py: f32) -> f32 {
-    return (bx - ax) * (py - ay) - (by - ay) * (px - ax);
-}
-
-fn pack_fb_pixel(r: f32, g: f32, b: f32) -> u32 {
-    let ri = u32(clamp(r, 0.0, 255.0));
-    let gi = u32(clamp(g, 0.0, 255.0));
-    let bi = u32(clamp(b, 0.0, 255.0));
-    return ri | (gi << 8u) | (bi << 16u) | (255u << 24u);
-}
-
 struct ControlFlags {
     new_best_found: atomic<u32>,
     best_chain_id: atomic<u32>,

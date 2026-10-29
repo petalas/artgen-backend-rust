@@ -152,7 +152,8 @@ fn main() -> Result<()> {
     ensure!(usize::try_from(pipeline.offspring_capacity)? >= OFFSPRING);
     let evidence = if let Some(source) = &config.shader {
         pipeline
-            .set_benchmark_bin_shader(&source.text)
+            .shader_variants()
+            .set_bin_shader(&source.text)
             .map_err(anyhow::Error::msg)
             .context("invalid bin shader for the actual GPU factory")?;
         Some((retain_source(source, scope)?, source))

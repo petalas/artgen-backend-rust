@@ -12,7 +12,7 @@ struct DrawingState {
     fitness_bits: u32,
     mutation_scale: f32,       // adaptive mutation scale
     stagnation_counter: u32,   // iterations since last improvement
-    rng_state: vec4<u32>,      // only .x is active RNG state; .yzw unused padding
+    rng_state: vec4<u32>,      // .x RNG state; .yz changed indices, .w stashed-parent mask
     polygons: array<Polygon, 1000>,
 }
 
@@ -179,7 +179,7 @@ var<workgroup> shared_crossover_changed_count: atomic<u32>;
 var<workgroup> shared_crossover_changed: array<u32, CROSSOVER_LISTED_MAX>;
 
 // --- PCG32 RNG ---
-// 32-bit PCG hash (PCG-RXS-M-XS): ~8 ALU ops per call, only .x of rng_state used
+// 32-bit PCG hash (PCG-RXS-M-XS): ~8 ALU ops per call; the state is rng_state.x
 fn pcg_step(state: ptr<function, u32>) -> u32 {
     let old = *state;
     *state = old * 747796405u + 2891336453u;

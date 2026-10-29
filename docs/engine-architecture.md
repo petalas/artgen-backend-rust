@@ -23,11 +23,15 @@ that word must fit inside it for a requested workload to qualify.
 
 ## Shader installation
 
-`gpu_evolver::programs` owns shader variant identity, source specialization,
-compilation policy and compiled handles. Mutation's logical group width and
-initialization policy stay attached to its selected program. The raster, binning,
-initial framebuffer and framebuffer-update programs form one installed tile
-group. A failed change must preserve the entire preceding group.
+`gpu_evolver::programs` owns source specialization, compilation policy and
+compiled handles, and installs the bundled sources. Shader variants (historical
+and candidate sources, diagnostic instrumentation, their caches and the worklist
+pass older binners need) sit behind one seam, `programs/variants.rs`, reached
+through `GpuPipeline::shader_variants()`. Production never installs a variant.
+Mutation's logical group width and initialization policy stay attached to its
+selected program. The raster, binning, initial framebuffer and
+framebuffer-update programs form one installed tile group. A failed change must
+preserve the entire preceding group.
 
 `GpuPipeline` owns storage, binding and the concrete device. Its program accessors
 borrow the installed handles; ordinary batches do not look up caches or allocate
@@ -51,9 +55,11 @@ over the list. On the v1 fixtures, about 7–10% of the former 73.7k-workgroup g
 had work. The test must match the raster shortcut exactly, because skipped tiles
 used to return before adding to the error sums. update_framebuffers empties the
 list at the end of every iteration, and `evaluate_chain_fitness` resets it from
-the host because it runs no update. A benchmark binning source without
-`raster_work` gets a separate `raster_worklist.wgsl` pass with the same test.
-A benchmark raster source without it keeps the full grid. That extra pass made
+the host because it runs no update. A binning variant that declares no
+`raster_work` binding gets a separate `raster_worklist.wgsl` pass with the same
+test. A raster variant without that binding keeps the full grid. The variant
+seam decides this `RasterSchedule` from the declared bindings when a variant is
+installed; command recording only matches on it. That extra pass made
 512-batch runs host-bound and 5% slower, so production keeps the list in the
 binner.
 

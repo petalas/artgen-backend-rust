@@ -96,7 +96,7 @@ fn unpack_vertex(word: u32) -> vec2<f32> {
 }
 
 // Tile size must match rasterize_error workgroup size.
-// These are replaced by pipeline.rs at pipeline creation time (same as rasterize shader).
+// These are replaced by programs.rs at pipeline creation time (same as rasterize shader).
 const TILE_W: u32 = 16;
 const TILE_H: u32 = 16;
 const TILE_MAX_POLYS: u32 = 256u;

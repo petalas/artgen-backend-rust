@@ -10,7 +10,7 @@
 // this tile, so blending the same polygons in the same order is bit-identical to
 // scanning all polygons. An overflowed list falls back to the full scan.
 //
-// Workgroup size is configurable — pipeline.rs uses string replacement on WG_X/WG_Y.
+// Workgroup size is configurable — programs.rs uses string replacement on WG_X/WG_Y.
 
 const WG_X: u32 = 16;
 const WG_Y: u32 = 16;

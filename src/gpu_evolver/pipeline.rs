@@ -9,11 +9,11 @@ use super::buffers::{
     ControlFlags, GpuDrawingState, GpuParams, GPU_DRAWING_STATE_SIZE,
 };
 
-use super::programs::{GpuPrograms, ProgramBindings};
+use super::programs::{GpuPrograms, ProgramBindings, RasterSchedule, WorklistStorage};
 
 pub use super::programs::{
     benchmark_mutate_compilation_options, benchmark_mutate_group_size_from_source,
-    BenchmarkMutateOptions,
+    BenchmarkMutateOptions, ShaderVariantInstaller,
 };
 
 pub struct GpuPipeline {
@@ -55,7 +55,6 @@ pub struct GpuPipeline {
     // Bind groups
     pub mutate_bind_group: BindGroup,
     pub rasterize_error_bind_group: BindGroup,
-    raster_worklist_bind_group: BindGroup,
     pub select_bind_group: BindGroup,
     pub bin_polygons_bind_group: BindGroup,
     pub init_framebuffers_bind_group: BindGroup,
@@ -507,18 +506,6 @@ impl GpuPipeline {
             ],
         });
 
-        // Raster worklist: working_states(read), chain_states(read), tile_counts(read),
-        //                  raster_work(rw)
-        let raster_worklist_bgl = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-            label: Some("raster_worklist_bgl"),
-            entries: &[
-                storage_entry(0, true, GPU_DRAWING_STATE_SIZE as u64),
-                storage_entry(1, true, GPU_DRAWING_STATE_SIZE as u64),
-                storage_entry(2, true, 4),
-                storage_entry(3, false, 4),
-            ],
-        });
-
         // Bin polygons: working_states(read), tile_data(rw), tile_counts(rw),
         //               chain_states(read), raster_work(rw); params via push constants
         let bin_polygons_bgl = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
@@ -779,7 +766,6 @@ impl GpuPipeline {
                 params: &params_bgl,
                 mutate: &mutate_bgl,
                 raster: &rasterize_error_bgl,
-                worklist: &raster_worklist_bgl,
                 bin: &bin_polygons_bgl,
                 select: &select_bgl,
                 init: &init_framebuffers_bgl,
@@ -810,17 +796,6 @@ impl GpuPipeline {
                 BindGroupEntry { binding: 5, resource: chain_states_buf.as_entire_binding() },
                 BindGroupEntry { binding: 6, resource: chain_framebuffers_buf.as_entire_binding() },
                 BindGroupEntry { binding: 7, resource: raster_work_buf.as_entire_binding() },
-            ],
-        });
-
-        let raster_worklist_bind_group = device.create_bind_group(&BindGroupDescriptor {
-            label: Some("raster_worklist_bg"),
-            layout: &raster_worklist_bgl,
-            entries: &[
-                BindGroupEntry { binding: 0, resource: working_states_buf.as_entire_binding() },
-                BindGroupEntry { binding: 1, resource: chain_states_buf.as_entire_binding() },
-                BindGroupEntry { binding: 2, resource: tile_counts_buf.as_entire_binding() },
-                BindGroupEntry { binding: 3, resource: raster_work_buf.as_entire_binding() },
             ],
         });
 
@@ -904,7 +879,6 @@ impl GpuPipeline {
             params_bind_group,
             mutate_bind_group,
             rasterize_error_bind_group,
-            raster_worklist_bind_group,
             select_bind_group,
             bin_polygons_bind_group,
             init_framebuffers_bind_group,
@@ -945,36 +919,34 @@ impl GpuPipeline {
     /// Installed raster/error handle for the current tile geometry.
     #[must_use]
     pub fn rasterize_error_pipeline(&self) -> &ComputePipeline {
-        &self.programs.tiles().raster.pipeline
+        &self.programs.tiles().raster
     }
 
     /// Record raster/error for `offspring` offspring over `grid` tiles.
     ///
     /// The bundled raster program runs a fixed number of raster workgroups
     /// that share the (offspring, tile) pairs listed by the bundled binner, or
-    /// by a separate worklist pass after a benchmark binner that lists none.
+    /// by a separate worklist pass after a shader-variant binner that lists none.
     /// An indirect dispatch sized to the list cut throughput about 6x on Dozen
-    /// (the host fell behind; see LEARNINGS). Benchmark raster sources without
-    /// the worklist binding keep
-    /// the full grid. The pass must already have the params bind group at 1.
+    /// (the host fell behind; see LEARNINGS). Raster variants that do not read
+    /// the list keep the full grid. The pass must already have the params bind
+    /// group at 1.
     pub fn record_raster(&self, pass: &mut ComputePass<'_>, grid: [u32; 2], offspring: u32) {
         let tiles = self.programs.tiles();
-        if tiles.raster.worklist {
-            if !tiles.bin.worklist {
-                pass.set_pipeline(&tiles.worklist_pipeline);
-                pass.set_bind_group(0, &self.raster_worklist_bind_group, &[]);
-                pass.dispatch_workgroups(offspring, 1, 1);
-            }
-            pass.set_pipeline(&tiles.raster.pipeline);
-            pass.set_bind_group(0, &self.rasterize_error_bind_group, &[]);
+        if let RasterSchedule::ListedByPass { pipeline, bind_group } = &tiles.schedule {
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, bind_group, &[]);
+            pass.dispatch_workgroups(offspring, 1, 1);
+        }
+        pass.set_pipeline(&tiles.raster);
+        pass.set_bind_group(0, &self.rasterize_error_bind_group, &[]);
+        if let RasterSchedule::FullGrid = tiles.schedule {
+            pass.dispatch_workgroups(grid[0], grid[1], offspring);
+        } else {
             let pairs = u64::from(grid[0]) * u64::from(grid[1]) * u64::from(offspring);
             let groups = u32::try_from(pairs.min(u64::from(RASTER_WORKGROUPS)))
                 .expect("raster workgroups fit u32");
             pass.dispatch_workgroups(groups, 1, 1);
-        } else {
-            pass.set_pipeline(&tiles.raster.pipeline);
-            pass.set_bind_group(0, &self.rasterize_error_bind_group, &[]);
-            pass.dispatch_workgroups(grid[0], grid[1], offspring);
         }
     }
 
@@ -993,7 +965,7 @@ impl GpuPipeline {
     /// Installed binning handle for the current tile geometry and diagnostic mode.
     #[must_use]
     pub fn bin_polygons_pipeline(&self) -> &ComputePipeline {
-        &self.programs.tiles().bin.pipeline
+        &self.programs.tiles().bin
     }
 
     /// Installed framebuffer initialization handle for the current tile geometry.
@@ -1043,16 +1015,15 @@ impl GpuPipeline {
         self.programs.try_set_rasterize_wg(wg)
     }
 
-    /// Install a binning source through the engine's specialization and pipeline cache.
-    ///
-    /// The caller must own this pipeline exclusively and drain submitted GPU work
-    /// before calling. The source survives tile changes and diagnostic toggles.
-    ///
-    /// # Errors
-    /// Rejects invalid sources, exhausted caches or compilation failures. The
-    /// installed source and programs remain unchanged on error.
-    pub fn set_benchmark_bin_shader(&mut self, source: &str) -> Result<(), String> {
-        self.programs.set_benchmark_bin_shader(source)
+    /// Install benchmark shader variants in place of the bundled programs.
+    /// Supplies the storage of the worklist pass that older binners need.
+    pub fn shader_variants(&mut self) -> ShaderVariantInstaller<'_> {
+        self.programs.shader_variants(&WorklistStorage {
+            working_states: &self.working_states_buf,
+            chain_states: &self.chain_states_buf,
+            tile_counts: &self.tile_counts_buf,
+            raster_work: &self.raster_work_buf,
+        })
     }
 
     /// Save pipeline cache data to disk for faster startup next time.
