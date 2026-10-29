@@ -8,7 +8,7 @@
 //! the prelude.
 
 use crate::gpu_evolver::changes::CHANGED_INDICES;
-use crate::gpu_evolver::execution::RASTER_WORK_HEADER_BYTES;
+use crate::gpu_evolver::execution::{RASTER_WORK_HEADER_BYTES, TILE_OVERFLOW_ERROR};
 use crate::settings::{MAX_POLYGONS_PER_IMAGE, TILE_MAX_POLYS};
 
 const COMMON: &str = include_str!("../../shaders/common.wgsl");
@@ -145,7 +145,8 @@ fn generated_constants(tile: Option<[u32; 2]>) -> String {
     let common = format!(
         "const POLYGON_CAPACITY: u32 = {MAX_POLYGONS_PER_IMAGE}u; // settings::MAX_POLYGONS_PER_IMAGE\n\
          const TILE_MAX_POLYS: u32 = {TILE_MAX_POLYS}u; // settings::TILE_MAX_POLYS\n\
-         const CHANGED_INDICES: u32 = {CHANGED_INDICES}u; // changes::CHANGED_INDICES\n"
+         const CHANGED_INDICES: u32 = {CHANGED_INDICES}u; // changes::CHANGED_INDICES\n\
+         const TILE_OVERFLOW_ERROR: u32 = {TILE_OVERFLOW_ERROR}u; // execution::TILE_OVERFLOW_ERROR\n"
     );
     let Some([width, height]) = tile else {
         return common;

@@ -12,7 +12,7 @@
 //
 // common.wgsl, changes.wgsl, offspring_changes.wgsl, tiles.wgsl and the
 // generated constants (TILE_W, TILE_H, TILE_MAX_POLYS, CHANGED_INDICES,
-// WORK_COUNT, WORK_ENTRIES) are appended by programs.rs.
+// TILE_OVERFLOW_ERROR, WORK_COUNT, WORK_ENTRIES) are appended by programs.rs.
 // Supported logical tiles: 32x16, 16x16, 32x8, 16x8, 8x8.
 // Shared polygon capacity remains the clamped 256-polygon limit.
 const THREAD_COUNT: u32 = TILE_W * TILE_H;
@@ -341,9 +341,14 @@ fn raster_tile(entry: u32, local_idx: u32, sg_inv_id: u32, sg_idx: u32, num_subg
     var tile_poly_count = 0u;
     var tile_data_base = 0u;
     var changed = vec2<u32>(0u, 0u);
+    // A list longer than TILE_MAX_POLYS lost its last polygons, so this tile's
+    // error is not the offspring's. Such a tile is always listed: its shortcut
+    // is off (changes_shortcut). Flagging it makes select reject the offspring.
+    var overflowed = false;
     if chain_id < chain_count {
         let tile_global = chain_id * num_tiles + tile_id;
         let raw_count = tile_counts_buf[tile_global];
+        overflowed = raw_count > TILE_MAX_POLYS;
         tile_poly_count = min(raw_count, TILE_MAX_POLYS);
         tile_data_base = chain_id * num_tiles * TILE_MAX_POLYS + tile_id * TILE_MAX_POLYS;
         // Neither the parent's nor the offspring's list may be truncated.
@@ -434,5 +439,10 @@ fn raster_tile(entry: u32, local_idx: u32, sg_inv_id: u32, sg_idx: u32, num_subg
         }
         atomicAdd(&error_accumulators[chain_id * 2u], total);
         atomicAdd(&error_accumulators[chain_id * 2u + 1u], total_old);
+        // The sums stay below the flag bit (execution::error_sum_fits), so the
+        // order of these atomics does not matter.
+        if overflowed {
+            atomicOr(&error_accumulators[chain_id * 2u], TILE_OVERFLOW_ERROR);
+        }
     }
 }

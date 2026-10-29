@@ -199,10 +199,7 @@ fn pack_vertex_u32(x: f32, y: f32) -> u32 {
 /// `seed` is used to initialize the PCG RNG state for this chain.
 pub fn drawing_to_gpu(drawing: &Drawing, seed: u64) -> GpuDrawingState {
     let mut state = GpuDrawingState::zeroed();
-
-    // Initialize RNG state — only [0] is used by the 32-bit PCG hash; parents
-    // carry nothing in [1..4]
-    state.rng_state[0] = seed as u32;
+    seed_state(&mut state, seed);
 
     state.fitness_bits = 0; // will be computed on GPU
     state.mutation_scale_bits = 1.0f32.to_bits(); // start at scale 1.0
@@ -245,6 +242,12 @@ pub fn drawing_to_gpu(drawing: &Drawing, seed: u64) -> GpuDrawingState {
 
     state.polygon_count = gpu_idx as u32;
     state
+}
+
+/// Set the chain's RNG seed, as `drawing_to_gpu` does. Only [0] is used by the
+/// 32-bit PCG hash; parents carry nothing in [1..4].
+pub(super) fn seed_state(state: &mut GpuDrawingState, seed: u64) {
+    state.rng_state[0] = seed as u32;
 }
 
 /// Unpack RGBA color from a packed u32 (matching WGSL unpack4x8unorm layout).

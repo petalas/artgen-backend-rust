@@ -2,8 +2,13 @@
 // Entry point: `select_main`
 
 // common.wgsl, changes.wgsl, offspring_changes.wgsl and the generated constants
-// (POLYGON_CAPACITY, CHANGED_INDICES, TILE_MAX_POLYS) are appended by
-// programs.rs.
+// (POLYGON_CAPACITY, CHANGED_INDICES, TILE_MAX_POLYS, TILE_OVERFLOW_ERROR) are
+// appended by programs.rs.
+
+// Reduction value of an offspring that must not be accepted: rasterize_error
+// set TILE_OVERFLOW_ERROR because a tile list it evaluated was truncated. Real
+// totals stay below 2^32 - 1, so it also loses to every evaluated offspring.
+const REJECTED_ERROR: u32 = 0xFFFFFFFFu;
 
 struct ControlFlags {
     new_best_found: atomic<u32>,
@@ -76,7 +81,7 @@ fn select_main(@builtin(global_invocation_id) gid: vec3<u32>,
 
     // Phase 1: Each thread loads its error value (or sentinel if beyond lambda)
     // Threads 0..lambda-1 each read one error accumulator via atomicExchange (resets to 0)
-    // Threads lambda..63 load MAX_U32 sentinel so they lose all comparisons
+    // Threads lambda..63 load the REJECTED_ERROR sentinel so they lose all comparisons
     // Error accumulators are stride-2: [new_error, old_error] per offspring
     // Incremental: final_error = parent_total - old_dirty + new_dirty
     if local_id < lambda {
@@ -86,10 +91,11 @@ fn select_main(@builtin(global_invocation_id) gid: vec3<u32>,
         let parent_total = atomicLoad(&chain_total_errors[chain_id]);
         // Saturating subtraction to avoid underflow
         let base = select(parent_total - old_err, 0u, old_err > parent_total);
-        reduction_err[local_id] = base + new_err;
+        let overflowed = (new_err & TILE_OVERFLOW_ERROR) != 0u;
+        reduction_err[local_id] = select(base + new_err, REJECTED_ERROR, overflowed);
         reduction_idx[local_id] = local_id;
     } else {
-        reduction_err[local_id] = 0xFFFFFFFFu;
+        reduction_err[local_id] = REJECTED_ERROR;
         reduction_idx[local_id] = 0xFFFFFFFFu;
     }
 
@@ -130,7 +136,8 @@ fn select_main(@builtin(global_invocation_id) gid: vec3<u32>,
         // Use the best offspring's RNG for neutral acceptance
         let dominated = fitness > current_fitness;
         let neutral = fitness == current_fitness && (working_states[best_offspring_id].rng_state.x & 1u) == 1u;
-        let should_accept = dominated || neutral;
+        // Every offspring was rejected when the minimum is REJECTED_ERROR.
+        let should_accept = best_error != REJECTED_ERROR && (dominated || neutral);
 
         if should_accept {
             record_chain_change(chain_id, best_offspring_id, chain_states[chain_id].polygon_count);

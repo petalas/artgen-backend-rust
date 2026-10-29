@@ -3,10 +3,11 @@
 //! Keep GPU checks on the main thread, as in the application.
 
 use artgen_backend_rust::{
-    gpu_evolver::{benchmark::BenchmarkSnapshot, GpuEvolver},
+    benchmark::reference,
+    gpu_evolver::{benchmark::BenchmarkSnapshot, buffers::drawing_to_gpu, GpuEvolver},
     models::{color::Color, drawing::Drawing, point::Point, polygon::Polygon},
     mutation_params::MutationParams,
-    settings::{MAX_ERROR_PER_PIXEL, PER_POINT_MULTIPLIER},
+    settings::{MAX_ERROR_PER_PIXEL, PER_POINT_MULTIPLIER, TILE_MAX_POLYS},
 };
 
 fn layered_drawing() -> Drawing {
@@ -65,6 +66,7 @@ fn main() {
     verify_mixed_reference(&empty);
     verify_full_recompute_after_evolution();
     verify_shortcuts_near_polygon_capacity();
+    verify_tile_list_overflow();
     println!("GPU rasterization checks passed");
 }
 
@@ -473,4 +475,113 @@ fn verify_shortcuts_near_polygon_capacity() {
         "incremental and full totals near capacity (counts {counts:?})"
     );
     println!("near-capacity shortcut check: counts {counts:?}, totals {:?}", full.parent_total_errors);
+}
+
+/// A triangle covering normalized x in [x0, x1] over the full image height.
+fn column_triangle(x0: f32, x1: f32, color: Color) -> Polygon {
+    Polygon {
+        points: vec![
+            Point { x: x0, y: 0.0 },
+            Point { x: x1, y: 0.0 },
+            Point { x: x0, y: 1.0 },
+        ],
+        color,
+    }
+}
+
+/// The scalar renderer's fitness for packed polygons.
+fn reference_fitness(polygons: &[[u32; 4]], reference: &[u8], [w, h]: [u32; 2]) -> f32 {
+    reference::evaluate(polygons, reference, w, h).expect("reference evaluation").fitness
+}
+
+fn packed(drawing: &Drawing) -> Vec<[u32; 4]> {
+    let state = drawing_to_gpu(drawing, 0);
+    state.polygons[..state.polygon_count as usize].iter().map(|p| p.data).collect()
+}
+
+fn verify_tile_list_overflow() {
+    // The first column of 16x16 tiles must stay white; the rest of the
+    // reference is black. 300 triangles lie in that column: 256 transparent,
+    // then 44 opaque black. Its tile lists hold 300 entries, so the raster
+    // would drop the black ones and score white. The uploaded parents must
+    // hold only the 256 triangles it renders.
+    const IMAGE: [u32; 2] = [64, 32];
+    const TILE: [u32; 2] = [16, 16];
+    const CHAINS: u32 = 2;
+    let reference: Vec<u8> = (0..IMAGE[0] * IMAGE[1])
+        .flat_map(|i| if i % IMAGE[0] < TILE[0] { [255, 255, 255, 255] } else { [0, 0, 0, 255] })
+        .collect();
+    let clear = Color { r: 0, g: 0, b: 0, a: 0 };
+    let black = Color { r: 0, g: 0, b: 0, a: 255 };
+    let drawing = Drawing {
+        polygons: (0..300)
+            .map(|i| column_triangle(0.0, 0.2, if i < 256 { clear } else { black }))
+            .collect(),
+        is_dirty: false,
+        fitness: 0.0,
+    };
+    let full = packed(&drawing);
+    let overflow = reference::complexity(&full, IMAGE[0], IMAGE[1], TILE).unwrap();
+    assert_eq!((overflow.overflowed_tiles, overflow.tile_overlaps.max), (2, 300));
+
+    // Only additions of larger triangles, so offspring keep landing in the full
+    // column. Each must be rejected; the others may darken the black area.
+    let params = MutationParams {
+        add_polygon_prob: 1.0,
+        new_point_max_distance: 0.3,
+        min_polygons: 1,
+        max_polygons: 1000,
+        chain_count: CHAINS,
+        lambda: 64,
+        gpu_batch_iters: 16,
+        single_mutation_mode: true,
+        rasterize_wg: TILE,
+        ..no_op_params()
+    };
+    let workload = [CHAINS, params.lambda];
+    let mut evolver =
+        futures_lite::future::block_on(GpuEvolver::new(&reference, IMAGE[0], IMAGE[1], &drawing));
+    let start = evolver
+        .prepare_seeded_benchmark(&drawing, &params, 3, 0, true)
+        .expect("overflow preparation failed");
+    let initial = assert_chains_cached_byte_l1(&mut evolver, &reference, workload, "fitted start");
+    for parent in &initial.parents {
+        assert_eq!(parent.polygons, full[..TILE_MAX_POLYS as usize], "fitted parent");
+    }
+    let fitted_score = reference_fitness(&full[..TILE_MAX_POLYS as usize], &reference, IMAGE);
+    assert!((start - fitted_score).abs() < 1e-4, "start {start}, scalar {fitted_score}");
+    assert!(reference_fitness(&full, &reference, IMAGE) < fitted_score - 10.0);
+
+    let mut delivered = None;
+    for _ in 0..32 {
+        delivered = evolver.run_batch(&params, true).or(delivered);
+    }
+    delivered = evolver.flush_pending().or(delivered);
+    let after = assert_chains_cached_byte_l1(&mut evolver, &reference, workload, "evolved");
+    for (chain, parent) in after.parents.iter().enumerate() {
+        assert!(parent.polygon_count > TILE_MAX_POLYS, "chain {chain} accepted no addition");
+        let lists = reference::complexity(&parent.polygons, IMAGE[0], IMAGE[1], TILE).unwrap();
+        assert_eq!(lists.overflowed_tiles, 0, "chain {chain} accepted an overflowing offspring");
+        let scalar = reference_fitness(&parent.polygons, &reference, IMAGE);
+        let gpu = f32::from_bits(parent.fitness_bits);
+        assert!((gpu - scalar).abs() < 1e-4, "chain {chain}: GPU {gpu}, scalar {scalar}");
+    }
+    let delivered = delivered.expect("an improvement was delivered");
+    let scalar = reference_fitness(&packed(&delivered), &reference, IMAGE);
+    assert!(
+        (delivered.fitness - scalar).abs() < 1e-4,
+        "delivered {}, scalar {scalar}",
+        delivered.fitness
+    );
+    let incremental = evolver.chain_fitness().to_vec();
+    evolver.evaluate_chain_fitness(CHAINS);
+    for (before, after) in incremental.iter().zip(evolver.chain_fitness()) {
+        assert!((before - after).abs() < 1e-4, "incremental={before}, full={after}");
+    }
+    println!(
+        "tile-list overflow check: counts {:?}, delivered {:.4} ({} triangles)",
+        after.parents.iter().map(|p| p.polygon_count).collect::<Vec<_>>(),
+        delivered.fitness,
+        delivered.polygons.len()
+    );
 }

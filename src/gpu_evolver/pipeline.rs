@@ -80,6 +80,12 @@ pub struct GpuPipeline {
 }
 
 impl GpuPipeline {
+    /// The raster tile a new pipeline installs, before any `set_rasterize_wg`.
+    pub const INITIAL_RASTER_TILE: [u32; 2] = [
+        crate::settings::RASTERIZE_WG_X_DEFAULT,
+        crate::settings::RASTERIZE_WG_Y_DEFAULT,
+    ];
+
     pub async fn new(
         chain_count: u32,
         image_width: u32,
@@ -302,10 +308,7 @@ impl GpuPipeline {
 
         // --- Tile culling buffers ---
         // Sized for offspring_capacity * num_tiles (worst-case WG) * TILE_MAX_POLYS
-        let rasterize_wg = [
-            crate::settings::RASTERIZE_WG_X_DEFAULT,
-            crate::settings::RASTERIZE_WG_Y_DEFAULT,
-        ];
+        let rasterize_wg = Self::INITIAL_RASTER_TILE;
 
         let max_num_tiles = RasterGrid::new([image_width, image_height], [8, 8]).tiles();
         let tile_data_buf_size = resources.tile_data;

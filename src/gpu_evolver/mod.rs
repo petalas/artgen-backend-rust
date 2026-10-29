@@ -7,6 +7,7 @@ mod execution;
 mod programs;
 mod readback;
 mod schedule;
+mod tile_fit;
 
 pub use programs::{bundled_shader_source, BundledShader, TileStage};
 
@@ -17,12 +18,13 @@ use wgpu::*;
 
 use crate::models::drawing::Drawing;
 use crate::mutation_params::MutationParams;
-use crate::settings::{GPU_MAX_CHAIN_COUNT, GPU_DEFAULT_CHAIN_COUNT};
+use crate::settings::{GPU_MAX_CHAIN_COUNT, GPU_DEFAULT_CHAIN_COUNT, TILE_MAX_POLYS};
 
 use buffers::{
-    gpu_params_from, default_gpu_params, drawing_to_gpu, gpu_to_drawing, ControlFlags,
-    GpuDrawingState, GPU_DRAWING_STATE_SIZE,
+    gpu_params_from, default_gpu_params, drawing_to_gpu, gpu_to_drawing, seed_state,
+    ControlFlags, GpuDrawingState, GPU_DRAWING_STATE_SIZE,
 };
+use execution::TILE_OVERFLOW_ERROR;
 use pipeline::GpuPipeline;
 use readback::{Readback, SubmittedBatch};
 use schedule::BatchTimestamps;
@@ -92,12 +94,14 @@ impl GpuEvolver {
         let max_chains = GPU_MAX_CHAIN_COUNT;
         let active_chains = GPU_DEFAULT_CHAIN_COUNT;
         // Create initial chain states for max capacity — all start from the same drawing but with different RNG seeds
-        let initial_states: Vec<GpuDrawingState> = (0..max_chains)
-            .map(|i| {
-                let seed = 0xDEAD_BEEF_u64.wrapping_add((i as u64).wrapping_mul(0x9E3779B97F4A7C15));
-                drawing_to_gpu(initial_drawing, seed)
-            })
-            .collect();
+        let initial_states = parent_states(
+            initial_drawing,
+            [image_width, image_height],
+            GpuPipeline::INITIAL_RASTER_TILE,
+            (0..max_chains).map(|i| {
+                0xDEAD_BEEF_u64.wrapping_add((i as u64).wrapping_mul(0x9E3779B97F4A7C15))
+            }),
+        );
 
         let pipeline = GpuPipeline::new(
             max_chains,
@@ -107,6 +111,8 @@ impl GpuEvolver {
             &initial_states,
         )
         .await;
+        // The initial states were fitted to this tile's lists.
+        assert_eq!(pipeline.rasterize_wg(), GpuPipeline::INITIAL_RASTER_TILE);
 
         let actual_max = pipeline.chain_count;
         if actual_max < max_chains {
@@ -345,6 +351,16 @@ impl GpuEvolver {
         drawings
     }
 
+    /// `parent_states` for the installed raster tile.
+    pub(super) fn parent_states(
+        &self,
+        drawing: &Drawing,
+        seeds: impl Iterator<Item = u64>,
+    ) -> Vec<GpuDrawingState> {
+        let p = &self.pipeline;
+        parent_states(drawing, [p.image_width, p.image_height], p.rasterize_wg(), seeds)
+    }
+
     /// Reinitialize all chains from a given drawing (for benchmarks).
     /// Resets iteration counters, timings, and fitness tracking.
     /// Flushes any pending batch results first to ensure clean GPU state.
@@ -353,14 +369,15 @@ impl GpuEvolver {
         self.flush_pending();
 
         let chain_count = self.pipeline.chain_count;
-        let states: Vec<GpuDrawingState> = (0..chain_count)
-            .map(|i| {
-                let seed = 0xDEAD_BEEF_u64
-                    .wrapping_add((i as u64).wrapping_mul(0x9E3779B97F4A7C15))
-                    .wrapping_add((self.iteration as u64).wrapping_mul(0x517CC1B727220A95));
-                drawing_to_gpu(drawing, seed)
-            })
-            .collect();
+        let iteration = u64::from(self.iteration);
+        let states = self.parent_states(
+            drawing,
+            (0..chain_count).map(|i| {
+                0xDEAD_BEEF_u64
+                    .wrapping_add(u64::from(i).wrapping_mul(0x9E3779B97F4A7C15))
+                    .wrapping_add(iteration.wrapping_mul(0x517CC1B727220A95))
+            }),
+        );
         self.pipeline.write_chain_states(&states);
 
         // Reset error accumulators so the first batch after reinit starts clean (stride-2)
@@ -414,6 +431,14 @@ impl GpuEvolver {
         // Errors are at stride-2 (slot 0 = new error, slot 1 = old error); pick slot 0 for each
         let error_u32s = &all_u32s[..active as usize * 2];
         let errors: Vec<u32> = (0..active as usize).map(|i| error_u32s[i * 2]).collect();
+        // Parents are fitted to the installed tile's lists when uploaded
+        // (`parent_states`), and select accepts no offspring that overflows
+        // one, so no list can have been truncated.
+        assert!(
+            errors.iter().all(|error| error & TILE_OVERFLOW_ERROR == 0),
+            "a parent overflows a {TILE_MAX_POLYS}-polygon tile list of the {:?} raster",
+            p.rasterize_wg()
+        );
         let polygon_counts = &all_u32s[active as usize * 2..];
 
         // Compute fitness from errors with point penalty (matching select.wgsl's compute_fitness)
@@ -522,10 +547,10 @@ impl GpuEvolver {
         //    across sequential benchmark runs (reinit_chains uses self.iteration
         //    to seed chain and offspring RNG states).
         self.iteration = 0;
-        self.reinit_chains(drawing);
-
-        // 2. Trigger pipeline recreation before timing starts
+        // 2. Trigger pipeline recreation before timing starts, and before the
+        //    chains are fitted to the raster tile's lists.
         self.pipeline.set_rasterize_wg(params.rasterize_wg);
+        self.reinit_chains(drawing);
 
         let chain_count = params.chain_count.min(self.pipeline.chain_count);
 
@@ -564,6 +589,34 @@ impl Drop for GpuEvolver {
     fn drop(&mut self) {
         self.pipeline.save_pipeline_cache();
     }
+}
+
+/// Parent states for `drawing`, one per seed, holding only the polygons a raster
+/// with `tile`-pixel tiles evaluates (`tile_fit`), so the GPU's score is the
+/// stored drawing's. Every host drawing becomes chain states here.
+fn parent_states(
+    drawing: &Drawing,
+    image: [u32; 2],
+    tile: [u32; 2],
+    seeds: impl Iterator<Item = u64>,
+) -> Vec<GpuDrawingState> {
+    let mut fitted = drawing_to_gpu(drawing, 0);
+    let uploaded = fitted.polygon_count;
+    let removed = tile_fit::fit_tile_lists(&mut fitted, image, tile);
+    if removed > 0 {
+        println!(
+            "Removed {removed} of {uploaded} triangles that overflow a {TILE_MAX_POLYS}-polygon \
+             tile list of the {}x{} raster",
+            tile[0], tile[1]
+        );
+    }
+    seeds
+        .map(|seed| {
+            let mut state = fitted;
+            seed_state(&mut state, seed);
+            state
+        })
+        .collect()
 }
 
 /// Evaluate parents `0..active` in full and stage their errors (stride 2) and

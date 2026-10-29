@@ -10,7 +10,7 @@ use bytemuck::Zeroable;
 use serde::Serialize;
 use wgpu::{Buffer, BufferDescriptor, BufferUsages, CommandEncoderDescriptor, MapMode, PollType};
 
-use super::buffers::{drawing_to_gpu, ControlFlags, GpuDrawingState, GPU_DRAWING_STATE_SIZE};
+use super::buffers::{ControlFlags, GpuDrawingState, GPU_DRAWING_STATE_SIZE};
 use super::{GpuEvolver, PassTimings};
 use super::execution::ResourceSizes;
 use crate::models::drawing::Drawing;
@@ -453,9 +453,10 @@ impl GpuEvolver {
         seed: u64,
     ) -> Result<f32, String> {
         self.benchmark_drain()?;
-        let states: Vec<_> = (0..self.pipeline.chain_count)
-            .map(|index| drawing_to_gpu(drawing, u64::from(benchmark_seed(seed, index, 0))))
-            .collect();
+        let states = self.parent_states(
+            drawing,
+            (0..self.pipeline.chain_count).map(|index| u64::from(benchmark_seed(seed, index, 0))),
+        );
         self.pipeline.write_chain_states(&states);
         self.framebuffers_initialized = false;
         self.iteration = 0;

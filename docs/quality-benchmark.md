@@ -21,7 +21,7 @@ scripts/quality.py --side a=HEAD --side b=HEAD --seconds 20 --seeds 2           
 - `--params NAME=JSON|FILE` gives one side's `MutationParams` overrides, merged
   onto `MutationParams::default()`. Keys may be snake_case or camelCase. The engine
   rejects unknown fields, wrong types and values that `sanitize` would change.
-- `--images` (default ff,mona,darwin; see darwin below), `--seeds` (default 5),
+- `--images` (default ff,mona,darwin; see darwin under Limits), `--seeds` (default 5),
   `--first-seed`, `--seconds` (default 120, at most 3600), `--min-effect` (default
   0.02), `--server-scope image|run`, `--build-only`, `--note`.
 
@@ -133,10 +133,14 @@ images, 5 seeds, 300 s and one side, that is ~52 minutes.
 
 ## Limits
 
-- **darwin is not usable yet.** From a blank start, its tile bins overflow
-  (`TILE_MAX_POLYS` = 256) within ~3 s. The GPU then reports 99.97% for a drawing
-  the scalar renderer scores at 81%, and the run fails its scalar check (see
-  LEARNINGS). Pass `--images ff,mona` until the engine handles overflow.
+- **darwin builds full tile lists.** From a blank start it reaches the
+  256-polygon tile lists (`TILE_MAX_POLYS`) within ~3 s. Builds before the
+  overflow rejection reported 99.97% for a drawing the scalar renderer scores at
+  81% and fail its scalar check (see LEARNINGS); use `--images ff,mona` with such
+  a side. Current builds reject offspring that overflow a list, so darwin is
+  scored honestly. On 2026-10-29 (seeds 1–2, 30 s) darwin reached 98.54 and
+  98.37%, equal to the scalar rescore, with 920 and 782 triangles and at most
+  233 polygons in a tile. It ran 667–1503 batches against ff's ~2400.
 - Only the frozen v1 fixture references at 384 px are available (ff, mona,
   darwin). milkshakes has no fixture, and other resolutions are not supported.
 - Logs: one row per scored run goes to `benchmarks/quality/log.tsv`, with the

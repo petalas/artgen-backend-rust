@@ -64,6 +64,18 @@ impl Workload {
 /// The raster worklist's header: the entry count.
 pub(super) const RASTER_WORK_HEADER_BYTES: u64 = 4;
 
+/// Set in an offspring's new-error accumulator by `rasterize_error` when one of
+/// its evaluated tiles holds more than `TILE_MAX_POLYS` polygons, so its list
+/// was truncated and its error is not the drawing's. `select` never accepts such
+/// an offspring. The flag shares the word with the error sum, so every image's
+/// largest error, 765 per pixel, must stay below it (`error_sum_fits`).
+pub(super) const TILE_OVERFLOW_ERROR: u32 = 1 << 31;
+
+/// Whether a whole image's byte-L1 error stays below `TILE_OVERFLOW_ERROR`.
+pub(super) fn error_sum_fits(image: [u32; 2]) -> bool {
+    765 * u64::from(image[0]) * u64::from(image[1]) < u64::from(TILE_OVERFLOW_ERROR)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct ResourceSizes {
     pub parents: u64,
@@ -137,6 +149,12 @@ pub(super) struct AllocationPlan {
 
 impl AllocationPlan {
     pub fn new(requested_chains: u32, image: [u32; 2], max_storage: u64) -> Self {
+        assert!(
+            error_sum_fits(image),
+            "a {}x{} image's error sum reaches the tile-overflow flag",
+            image[0],
+            image[1]
+        );
         let states = max_storage / GPU_DRAWING_STATE_SIZE as u64;
         let chains = u64::from(requested_chains).min(states);
         let offspring = states.min(chains * u64::from(crate::settings::GPU_MAX_LAMBDA));
@@ -165,6 +183,13 @@ impl AllocationPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_overflow_flag_lies_above_every_supported_error_sum() {
+        assert!(error_sum_fits([1024, 1024]));
+        assert!(error_sum_fits([1, 2_807_168]));
+        assert!(!error_sum_fits([1, 2_807_169]));
+    }
 
     #[test]
     fn allocation_preserves_independent_storage_clamps() {

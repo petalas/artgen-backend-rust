@@ -27,7 +27,7 @@ that word must fit inside it for a requested workload to qualify.
 compiled handles, and installs the bundled sources. Each stage file in
 `src/shaders/` holds only its own logic. `programs/bundled.rs` appends the shared
 prelude: constants generated from Rust (polygon capacity, `TILE_MAX_POLYS`,
-`CHANGED_INDICES`, and for the tile group `TILE_W`/`TILE_H` and the
+`CHANGED_INDICES`, `TILE_OVERFLOW_ERROR`, and for the tile group `TILE_W`/`TILE_H` and the
 `raster_work` header words), then `common.wgsl` (the `Polygon`, `DrawingState`
 and `Params` structs and unpack helpers), `changes.wgsl` (the change-record
 encoding, below), for the stages that read offspring records
@@ -94,6 +94,48 @@ binner.
 Bundled programs, historical programs and diagnostic binners are existing reasons
 for the installation seam. A generic cache abstraction or another GPU adapter
 would add no needed variation.
+
+## Tile-list capacity
+
+The binner stores each consumed tile's uncapped count but at most
+`TILE_MAX_POLYS` (256) polygon indices, in ascending polygon order. rasterize_error
+blends only those, so an offspring evaluated over a longer list would be scored
+without its last polygons there. Three rules keep every accepted score honest:
+
+- **Rejection.** rasterize_error ORs `TILE_OVERFLOW_ERROR` (bit 31,
+  `execution::TILE_OVERFLOW_ERROR`) into the offspring's new-error word when the
+  tile's count exceeds 256. select maps that word to `REJECTED_ERROR`, which
+  loses to every evaluated offspring and is never accepted. No new binding: the
+  flag rides in `error_accumulators`. Image size is limited so that 765 per
+  pixel stays below bit 31 (`error_sum_fits`, asserted at allocation).
+- **Every overflow is seen.** An overflowing consumed tile is always on the
+  raster worklist: `changes_shortcut` turns the shortcut off when
+  `raw + listed > TILE_MAX_POLYS`, and the worklist lists every consumed tile
+  whose shortcut is off. Tiles an offspring does not consume keep the parent's
+  list counts: the dirty rectangle covers the binner's pixel bounds of every
+  changed polygon (mutate's `polygon_bbox_pixels` uses the same floor/ceil plus
+  one), so a count changes only in consumed tiles. A parent has no overflowing
+  list at its installed tile, so neither has the offspring outside them.
+- **Uploaded parents fit.** The host turns drawings into chain states in one
+  place, `parent_states` (application start, `reinit_chains`, seeded benchmark
+  preparation). It removes, with `tile_fit::fit_tile_lists`, every polygon that
+  lies past entry 256 of some tile's list at the installed tile, and logs the
+  count. Each kept polygon was rendered by the raster in every tile it meets and
+  every list fits afterwards, so the GPU's score of the uploaded drawing is the
+  scalar renderer's. The fit widens each polygon's pixel bounds by 1e-3 px, so
+  its lists contain the binner's despite f32 decoding; it can remove a polygon
+  within that slack of a full tile. `prepare_for_benchmark` installs the tile
+  before reinitializing. `evaluate_chain_fitness` asserts that no flag is set.
+
+A drawing evolved at one tile can overflow at a larger one after
+`set_rasterize_wg`. Rejection keeps that honest (framebuffers and totals are
+exact), but offspring changing those tiles are rejected until the chain is
+re-uploaded. init_framebuffers scans every polygon, and update_framebuffers
+keeps its full-scan fallback for an overflowed list.
+
+Shader variants (`programs/variants.rs`) predate the flag: a historical raster
+variant never sets it, so its runs keep the old truncating behavior. select is
+always bundled; the flag needs a bundled raster.
 
 ## Stage schedule
 

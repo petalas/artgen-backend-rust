@@ -190,7 +190,7 @@ fn main() {
             &mut texture,
             &mut canvas,
             &engine,
-            best,
+            &best,
             &json_filename,
         );
     } else {
@@ -262,7 +262,7 @@ fn gpu_main_loop(
     texture: &mut sdl2::render::Texture,
     canvas: &mut sdl2::render::WindowCanvas,
     engine: &Engine,
-    initial_best: Drawing,
+    initial_best: &Drawing,
     json_filename: &str,
 ) {
     let mut event_pump = sdl_context.event_pump().unwrap();
@@ -273,10 +273,14 @@ fn gpu_main_loop(
         &engine.ref_image_data,
         engine.w as u32,
         engine.h as u32,
-        &initial_best,
+        initial_best,
     ));
 
-    let mut global_best = initial_best;
+    // Start from the drawing the GPU holds, which drops any triangles that
+    // overflow a raster tile list, with its GPU score rather than a saved one.
+    let gpu_fitness = evolver.evaluate_chain_fitness(MutationParams::default().chain_count);
+    let mut global_best = evolver.readback_chain(0);
+    global_best.fitness = gpu_fitness;
     let mut last_draw_timestamp = Instant::now() - frametime;
     let mut last_save_timestamp = Instant::now();
     let mut last_stats_timestamp = Instant::now();
@@ -2105,8 +2109,11 @@ fn gpu_main_loop_headless(legacy_image: Option<&str>, gpu_batch_iters_override: 
         ));
 
         // Evaluate initial fitness on GPU so it matches GPU's error metric
-        // (important after resolution changes where CPU fitness is stale)
+        // (important after resolution changes where CPU fitness is stale).
+        // The score belongs to the drawing the GPU holds, which drops any
+        // triangles that overflow a raster tile list.
         let gpu_fitness = evolver.evaluate_chain_fitness(mp.chain_count);
+        initial_best = evolver.readback_chain(0);
         initial_best.fitness = gpu_fitness;
 
         let mut render_buf = vec![0u8; w * h * 4];
