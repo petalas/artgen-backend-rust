@@ -1,9 +1,11 @@
 //! Own shader identity, stage-specific compilation and compatible installed programs.
 //! Storage, binding resources and command scheduling stay in `GpuPipeline`.
 //! Callers drain submitted work before installing a different program variant.
-//! Production installs the bundled sources; benchmarks install shader variants
-//! through the `variants` seam, which is empty in production.
+//! Production installs the bundled sources, assembled with their shared prelude
+//! by `bundled`; benchmarks install shader variants through the `variants` seam,
+//! which is empty in production.
 
+mod bundled;
 mod variants;
 
 use std::path::PathBuf;
@@ -15,16 +17,13 @@ use wgpu::{
     PipelineLayoutDescriptor, ShaderModuleDescriptor, ShaderSource,
 };
 
+pub use bundled::{bundled_shader_source, BundledShader, TileStage};
 use variants::{BenchmarkMutateKey, ShaderVariants};
 pub(super) use variants::WorklistStorage;
 pub use variants::{
     benchmark_mutate_compilation_options, benchmark_mutate_group_size_from_source,
     BenchmarkMutateOptions, ShaderVariantInstaller,
 };
-
-const MUTATE_SOURCE: &str = include_str!("../shaders/mutate.wgsl");
-const RASTER_SOURCE: &str = include_str!("../shaders/rasterize_error.wgsl");
-const BIN_SOURCE: &str = include_str!("../shaders/bin_polygons.wgsl");
 
 // Bundled policy is separate from the historical-source default.
 const BUNDLED_MUTATE_OPTIONS: BenchmarkMutateOptions = BenchmarkMutateOptions {
@@ -149,7 +148,7 @@ impl ProgramCompiler {
     fn select(&self) -> ComputePipeline {
         let shader = self.device.create_shader_module(ShaderModuleDescriptor {
             label: Some("select_shader"),
-            source: ShaderSource::Wgsl(include_str!("../shaders/select.wgsl").into()),
+            source: ShaderSource::Wgsl(bundled_shader_source(BundledShader::Select).into()),
         });
         self.device
             .create_compute_pipeline(&ComputePipelineDescriptor {
@@ -172,10 +171,18 @@ impl ProgramCompiler {
         self.tile_stage("bin_polygons", &self.layouts.bin, source)
     }
 
+    fn bundled_raster(&self, wg: [u32; 2]) -> ComputePipeline {
+        self.raster(&tile_source(TileStage::RasterizeError, wg))
+    }
+
+    fn bundled_bin(&self, wg: [u32; 2]) -> ComputePipeline {
+        self.bin(&tile_source(TileStage::BinPolygons, wg))
+    }
+
     fn bundled_stages(&self, wg: [u32; 2]) -> TileStages {
         TileStages {
-            bin: self.bin(&specialize_bin_source(BIN_SOURCE, wg)),
-            raster: self.raster(&specialize_raster_source(RASTER_SOURCE, wg)),
+            bin: self.bundled_bin(wg),
+            raster: self.bundled_raster(wg),
             schedule: RasterSchedule::ListedByBinner,
         }
     }
@@ -190,12 +197,12 @@ impl ProgramCompiler {
             init_framebuffers_pipeline: self.tile_stage(
                 "init_framebuffers",
                 &self.layouts.init,
-                &specialize_raster_source(include_str!("../shaders/init_framebuffers.wgsl"), wg),
+                &tile_source(TileStage::InitFramebuffers, wg),
             ),
             update_framebuffers_pipeline: self.tile_stage(
                 "update_framebuffers",
                 &self.layouts.update,
-                &specialize_raster_source(include_str!("../shaders/update_framebuffers.wgsl"), wg),
+                &tile_source(TileStage::UpdateFramebuffers, wg),
             ),
         }
     }
@@ -255,7 +262,8 @@ impl GpuPrograms {
         wg: [u32; 2],
     ) -> Self {
         let compiler = ProgramCompiler::new(device, adapter, bindings);
-        let key = BenchmarkMutateKey::new(MUTATE_SOURCE, BUNDLED_MUTATE_OPTIONS)
+        let source = bundled_shader_source(BundledShader::Mutate);
+        let key = BenchmarkMutateKey::new(&source, BUNDLED_MUTATE_OPTIONS)
             .expect("bundled mutation source must have valid group metadata");
         let mutation = MutationProgram {
             pipeline: compiler.mutate(&key.source, key.options),
@@ -381,32 +389,9 @@ fn create_tile_pipeline(
     })
 }
 
-/// Specialize the raster tile size of raster, worklist and framebuffer sources.
-/// Uses string replacement on the shader source since naga does not support
-/// override constants in `@workgroup_size` or const expressions.
-fn specialize_raster_source(source: &str, wg: [u32; 2]) -> String {
-    source
-        .replace(
-            "const WG_X: u32 = 16;",
-            &format!("const WG_X: u32 = {};", wg[0]),
-        )
-        .replace(
-            "const WG_Y: u32 = 16;",
-            &format!("const WG_Y: u32 = {};", wg[1]),
-        )
-}
-
-/// Specialize binning tiles to match the rasterize workgroup.
-fn specialize_bin_source(source: &str, wg: [u32; 2]) -> String {
-    source
-        .replace(
-            "const TILE_W: u32 = 16;",
-            &format!("const TILE_W: u32 = {};", wg[0]),
-        )
-        .replace(
-            "const TILE_H: u32 = 16;",
-            &format!("const TILE_H: u32 = {};", wg[1]),
-        )
+/// A bundled tile-group stage with the generated constants for tile `wg`.
+fn tile_source(stage: TileStage, wg: [u32; 2]) -> String {
+    bundled_shader_source(BundledShader::Tile(stage, wg))
 }
 
 // Only the rasterize/error, bin, init-framebuffers, and update-framebuffers

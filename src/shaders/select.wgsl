@@ -1,86 +1,8 @@
 // Selection compute shader — 64 threads per chain (parallel polygon copy)
 // Entry point: `select_main`
 
-struct Polygon {
-    data: vec4<u32>,   // [color_packed, v0_packed, v1_packed, v2_packed] — 16 bytes
-}
-
-struct DrawingState {
-    polygon_count: u32,
-    fitness_bits: u32,
-    mutation_scale: f32,
-    stagnation_counter: u32,
-    rng_state: vec4<u32>,
-    polygons: array<Polygon, 1000>,
-}
-
-struct Params {
-    image_width: u32,
-    image_height: u32,
-    max_polygons: u32,
-    min_polygons: u32,
-
-    max_error_per_pixel: f32,
-    per_point_multiplier: f32,
-    iteration_number: u32,
-    _pad0: u32,
-
-    add_polygon_prob: f32,
-    remove_polygon_prob: f32,
-    reorder_polygon_prob: f32,
-    offset_polygon_prob: f32,
-
-    move_point_prob: f32,
-    micro_adjust_prob: f32,
-    change_color_prob: f32,
-    adjust_brightness_prob: f32,
-
-    adjust_saturation_prob: f32,
-    move_point_max_delta: f32,
-    micro_adjust_delta: f32,
-    new_point_max_distance: f32,
-
-    offset_polygon_magnitude: f32,
-    min_alpha_norm: f32,
-    max_alpha_norm: f32,
-    crossover_prob: f32,
-
-    // Crossover params
-    spatial_crossover_weight: f32,
-    tournament_size: u32,
-    _pad_ie: u32,
-    _pad_tc: u32,
-
-    // Chain count + lambda + padding
-    chain_count_param: u32,
-    single_mutation_mode: u32,
-    lambda: u32,
-    adaptive_mutation: u32,
-
-    // New mutation probabilities
-    scale_polygon_prob: f32,
-    rotate_polygon_prob: f32,
-    adjacent_swap_prob: f32,
-    merge_polygon_prob: f32,
-
-    clone_polygon_prob: f32,
-    medium_move_prob: f32,
-    medium_move_delta: f32,
-    swap_colors_prob: f32,
-
-    // Merge thresholds + padding
-    merge_centroid_threshold: f32,
-    merge_color_threshold: f32,
-    _pad2: u32,
-    _pad3: u32,
-
-    // Reserved padding (vec4[11-15])
-    _reserved0: vec4<u32>,
-    _reserved1: vec4<u32>,
-    _reserved2: vec4<u32>,
-    _reserved3: vec4<u32>,
-    _reserved4: vec4<u32>,
-}
+// common.wgsl and the generated constant POLYGON_CAPACITY are appended by
+// programs.rs.
 
 struct ControlFlags {
     new_best_found: atomic<u32>,

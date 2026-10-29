@@ -35,7 +35,7 @@ This project uses a routing table (below) to map file patterns to docs you must 
 | `src/gpu_evolver/**` | Read [engine module ownership](docs/engine-architecture.md) before changing capacity, shader installation, command scheduling or readback. |
 | `src/benchmark/**`, `examples/engine-lab.rs`, `scripts/evolution-bench.py` | Read [trial qualification](docs/trial-qualification.md) before changing record purpose, canonical identity or timed work. |
 | Engine performance work, `scripts/hillclimb.py`, `examples/evolution-bench.rs` | Read [hill-climbing](docs/hillclimb.md). Screen every engine change with `scripts/hillclimb.py` before and after; it logs to `benchmarks/hillclimb/log.tsv`. |
-| `src/shaders/*.wgsl` | GPU compute shaders — `mutate.wgsl` (PCG RNG + all mutations), `rasterize.wgsl` (half-space triangle per pixel), `error_reduce.wgsl` (error + workgroup reduction), `select.wgsl` (selection + migration) |
+| `src/shaders/*.wgsl` | GPU compute shaders — `mutate.wgsl` (PCG RNG + all mutations), `rasterize_error.wgsl` (half-space triangle per pixel + error reduction), `select.wgsl` (selection + migration). Stage files are not complete WGSL: `common.wgsl`, `tiles.wgsl` and Rust-generated constants are appended (see "Shader installation" in [engine module ownership](docs/engine-architecture.md)) |
 | `src/texture_wrapper.rs`, `src/buffer_dimensions.rs` | wgpu texture/buffer helpers (row alignment padding) |
 | `benches/**` | Benchmarks use `divan` crate, not `criterion` |
 | `Cargo.toml`, `build.sh`, `rust-toolchain.toml` | Build config — uses nightly (`portable_simd` feature) |

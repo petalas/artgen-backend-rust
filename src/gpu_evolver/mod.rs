@@ -5,6 +5,8 @@ mod execution;
 mod programs;
 mod readback;
 
+pub use programs::{bundled_shader_source, BundledShader, TileStage};
+
 use std::time::Instant;
 
 use bytemuck::Zeroable;

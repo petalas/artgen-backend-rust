@@ -1332,7 +1332,9 @@ mod tests {
         ));
         fs::create_dir(&directory)?;
         let result = (|| -> Result<()> {
-            let bundled = include_str!("../src/shaders/mutate.wgsl");
+            let bundled: &str = &artgen_backend_rust::gpu_evolver::bundled_shader_source(
+                artgen_backend_rust::gpu_evolver::BundledShader::Mutate,
+            );
             let bundled_group =
                 benchmark_mutate_group_size_from_source(bundled).map_err(anyhow::Error::msg)?;
             let inputs = [

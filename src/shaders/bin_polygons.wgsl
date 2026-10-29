@@ -7,99 +7,10 @@
 //
 // This shader runs between mutate and rasterize_error. It also appends the
 // band's consumed tiles that rasterize_error must run to raster_work (the
-// consumed-tile test is raster's dirty-rectangle test; the changed-polygon test
-// is below).
+// consumed-tile test is in tiles.wgsl; the changed-polygon test is below).
 
-struct Polygon {
-    data: vec4<u32>,   // [color_packed, v0_packed, v1_packed, v2_packed] — 16 bytes
-}
-
-struct DrawingState {
-    polygon_count: u32,
-    fitness_bits: u32,
-    mutation_scale: f32,
-    stagnation_counter: u32,
-    rng_state: vec4<u32>,
-    polygons: array<Polygon, 1000>,
-}
-
-struct Params {
-    image_width: u32,
-    image_height: u32,
-    max_polygons: u32,
-    min_polygons: u32,
-
-    max_error_per_pixel: f32,
-    per_point_multiplier: f32,
-    iteration_number: u32,
-    _pad0: u32,
-
-    add_polygon_prob: f32,
-    remove_polygon_prob: f32,
-    reorder_polygon_prob: f32,
-    offset_polygon_prob: f32,
-
-    move_point_prob: f32,
-    micro_adjust_prob: f32,
-    change_color_prob: f32,
-    adjust_brightness_prob: f32,
-
-    adjust_saturation_prob: f32,
-    move_point_max_delta: f32,
-    micro_adjust_delta: f32,
-    new_point_max_distance: f32,
-
-    offset_polygon_magnitude: f32,
-    min_alpha_norm: f32,
-    max_alpha_norm: f32,
-    crossover_prob: f32,
-
-    // Crossover params
-    spatial_crossover_weight: f32,
-    tournament_size: u32,
-    _pad_ie: u32,
-    _pad_tc: u32,
-
-    // Chain count + lambda + padding
-    chain_count_param: u32,
-    single_mutation_mode: u32,
-    lambda: u32,
-    adaptive_mutation: u32,
-
-    // New mutation probabilities
-    scale_polygon_prob: f32,
-    rotate_polygon_prob: f32,
-    adjacent_swap_prob: f32,
-    merge_polygon_prob: f32,
-
-    clone_polygon_prob: f32,
-    medium_move_prob: f32,
-    medium_move_delta: f32,
-    swap_colors_prob: f32,
-
-    // Merge thresholds + padding
-    merge_centroid_threshold: f32,
-    merge_color_threshold: f32,
-    _pad2: u32,
-    _pad3: u32,
-
-    // Reserved padding (vec4[11-15])
-    _reserved0: vec4<u32>,
-    _reserved1: vec4<u32>,
-    _reserved2: vec4<u32>,
-    _reserved3: vec4<u32>,
-    _reserved4: vec4<u32>,
-}
-
-fn unpack_vertex(word: u32) -> vec2<f32> {
-    return vec2<f32>(f32(word & 0xFFFFu) / 65535.0, f32(word >> 16u) / 65535.0);
-}
-
-// Tile size must match rasterize_error workgroup size.
-// These are replaced by programs.rs at pipeline creation time (same as rasterize shader).
-const TILE_W: u32 = 16;
-const TILE_H: u32 = 16;
-const TILE_MAX_POLYS: u32 = 256u;
+// common.wgsl, tiles.wgsl and the generated constants (TILE_W, TILE_H,
+// TILE_MAX_POLYS, WORK_COUNT, WORK_ENTRIES) are appended by programs.rs.
 
 @group(0) @binding(0) var<storage, read>       working_states: array<DrawingState>;
 @group(0) @binding(1) var<storage, read_write> tile_data:      array<u32>;
@@ -144,25 +55,11 @@ fn polygon_tile_bounds(poly: Polygon, w: u32, h: u32, num_tiles_x: u32, num_tile
     return vec4<u32>(tile_min_x, tile_max_x, tile_min_y, tile_max_y);
 }
 
-// Whether a tile column (or row) meets the dirty rectangle, using the
-// rasterizer's tile skip test on that axis.
-fn line_consumed(coord: u32, is_row: bool, w: u32, h: u32, dirty_min: vec2<u32>, dirty_max: vec2<u32>) -> bool {
-    let size = select(TILE_W, TILE_H, is_row);
-    let extent = select(w, h, is_row);
-    let lo = select(dirty_min.x, dirty_min.y, is_row);
-    let hi = select(dirty_max.x, dirty_max.y, is_row);
-    let tile_min = coord * size;
-    let tile_max = min(tile_min + size, extent);
-    return tile_max > lo && tile_min < hi;
-}
-
 // --- Raster worklist (see raster_worklist.wgsl, which holds the same test for
 // binning sources that do not build the list) ---
 // Must match rasterize_error.wgsl and raster_worklist.wgsl.
 const CHANGED_INDICES: u32 = 4u;
 const COVER_MARGIN: f32 = 1e-5;
-const WORK_COUNT: u32 = 0u;
-const WORK_ENTRIES: u32 = 1u;
 
 fn changed_may_meet_tile(poly: Polygon, lo: vec2<f32>, hi: vec2<f32>) -> bool {
     let pv0 = unpack_vertex(poly.data.y);
@@ -213,8 +110,9 @@ fn main(
 
     let w = params.image_width;
     let h = params.image_height;
-    let num_tiles_x = (w + TILE_W - 1u) / TILE_W;
-    let num_tiles_y = (h + TILE_H - 1u) / TILE_H;
+    let grid = tile_grid(w, h);
+    let num_tiles_x = grid.x;
+    let num_tiles_y = grid.y;
     let num_tiles = num_tiles_x * num_tiles_y;
 
     // Workgroup y owns one band of whole tile rows; any y count is valid.
@@ -222,29 +120,27 @@ fn main(
     let row_lo = wid.y * band_rows;
     let row_hi = min(row_lo + band_rows, num_tiles_y);
 
-    // Consumers read only tiles meeting this offspring's dirty rectangle
-    // (rasterize_error, and update_framebuffers for the selected winner). Other
-    // tiles keep stale counts and indices. Same predicate as both consumers.
-    let dirty_lo = working_states[offspring_id].fitness_bits;
-    let dirty_hi = working_states[offspring_id].stagnation_counter;
-    let dirty_min = vec2<u32>(dirty_lo & 0xFFFFu, dirty_lo >> 16u);
-    let dirty_max = vec2<u32>(dirty_hi & 0xFFFFu, dirty_hi >> 16u);
+    // Consumers read only consumed tiles (tiles.wgsl): rasterize_error, and
+    // update_framebuffers for the selected winner. Other tiles keep stale counts
+    // and indices.
+    let dirty_min = unpack_dirty_corner(working_states[offspring_id].fitness_bits);
+    let dirty_max = unpack_dirty_corner(working_states[offspring_id].stagnation_counter);
 
     // Consumed rows and columns are contiguous; narrow the band to them.
     var first_row = row_lo;
-    while first_row < row_hi && !line_consumed(first_row, true, w, h, dirty_min, dirty_max) {
+    while first_row < row_hi && !tile_row_consumed(first_row, h, dirty_min, dirty_max) {
         first_row++;
     }
     var last_row = first_row;
-    while last_row < row_hi && line_consumed(last_row, true, w, h, dirty_min, dirty_max) {
+    while last_row < row_hi && tile_row_consumed(last_row, h, dirty_min, dirty_max) {
         last_row++;
     }
     var first_col = 0u;
-    while first_col < num_tiles_x && !line_consumed(first_col, false, w, h, dirty_min, dirty_max) {
+    while first_col < num_tiles_x && !tile_column_consumed(first_col, w, dirty_min, dirty_max) {
         first_col++;
     }
     var last_col = first_col;
-    while last_col < num_tiles_x && line_consumed(last_col, false, w, h, dirty_min, dirty_max) {
+    while last_col < num_tiles_x && tile_column_consumed(last_col, w, dirty_min, dirty_max) {
         last_col++;
     }
     let rows = last_row - first_row;

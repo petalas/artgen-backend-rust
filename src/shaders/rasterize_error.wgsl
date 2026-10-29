@@ -5,23 +5,17 @@
 // changed polygon meets, which added nothing to the error sums, so far fewer
 // workgroups launch than the former (tiles_x, tiles_y, offspring) grid.
 // 1D workgroup layout is retained for subgroup intrinsics.
-// Each lane owns ordinal local_idx + k*PHYSICAL_LANES, within WG_X*WG_Y.
+// Each lane owns ordinal local_idx + k*PHYSICAL_LANES, within TILE_W*TILE_H.
 // Each pixel retains C's f32 rasterization followed by integer byte-L1.
 // Integer lane totals feed C's unchanged dense actual-subgroup-ID reduction.
 // Cooperative decoded-cache loading uses every physical lane, even at image edges.
 //
-// programs.rs specializes the exact WG_X/WG_Y markers below.
+// common.wgsl, tiles.wgsl and the generated constants (TILE_W, TILE_H,
+// TILE_MAX_POLYS, WORK_COUNT, WORK_ENTRIES) are appended by programs.rs.
 // Supported logical tiles: 32x16, 16x16, 32x8, 16x8, 8x8.
 // Shared polygon capacity remains the clamped 256-polygon limit.
-const WG_X: u32 = 16;
-const WG_Y: u32 = 16;
-const THREAD_COUNT: u32 = WG_X * WG_Y;
+const THREAD_COUNT: u32 = TILE_W * TILE_H;
 const PHYSICAL_LANES: u32 = min(256u, THREAD_COUNT);
-const TILE_MAX_POLYS: u32 = 256u;
-
-struct Polygon {
-    data: vec4<u32>,   // [color_packed, v0_packed, v1_packed, v2_packed] — 16 bytes
-}
 
 // Decoded cache layout: vec2<f32> alignment 8, scalar alignment 4.
 struct DecodedPolygon {
@@ -33,93 +27,6 @@ struct DecodedPolygon {
     bb_min_y: f32,   // offset 32
     bb_max_y: f32,   // offset 36
     color_packed: u32, // offset 40; trailing padding 44..47; stride 48
-}
-
-struct DrawingState {
-    polygon_count: u32,
-    fitness_bits: u32,
-    mutation_scale: f32,
-    stagnation_counter: u32,
-    rng_state: vec4<u32>,
-    polygons: array<Polygon, 1000>,
-}
-
-// --- Quantized polygon unpack helpers ---
-
-fn unpack_color(p: Polygon) -> vec4<f32> {
-    return unpack4x8unorm(p.data.x);
-}
-
-fn unpack_vertex(word: u32) -> vec2<f32> {
-    return vec2<f32>(f32(word & 0xFFFFu) / 65535.0, f32(word >> 16u) / 65535.0);
-}
-
-struct Params {
-    image_width: u32,
-    image_height: u32,
-    max_polygons: u32,
-    min_polygons: u32,
-
-    max_error_per_pixel: f32,
-    per_point_multiplier: f32,
-    iteration_number: u32,
-    _pad0: u32,
-
-    add_polygon_prob: f32,
-    remove_polygon_prob: f32,
-    reorder_polygon_prob: f32,
-    offset_polygon_prob: f32,
-
-    move_point_prob: f32,
-    micro_adjust_prob: f32,
-    change_color_prob: f32,
-    adjust_brightness_prob: f32,
-
-    adjust_saturation_prob: f32,
-    move_point_max_delta: f32,
-    micro_adjust_delta: f32,
-    new_point_max_distance: f32,
-
-    offset_polygon_magnitude: f32,
-    min_alpha_norm: f32,
-    max_alpha_norm: f32,
-    crossover_prob: f32,
-
-    // Crossover params
-    spatial_crossover_weight: f32,
-    tournament_size: u32,
-    _pad_ie: u32,
-    _pad_tc: u32,
-
-    // Chain count + lambda + padding
-    chain_count_param: u32,
-    single_mutation_mode: u32,
-    lambda: u32,
-    adaptive_mutation: u32,
-
-    // New mutation probabilities
-    scale_polygon_prob: f32,
-    rotate_polygon_prob: f32,
-    adjacent_swap_prob: f32,
-    merge_polygon_prob: f32,
-
-    clone_polygon_prob: f32,
-    medium_move_prob: f32,
-    medium_move_delta: f32,
-    swap_colors_prob: f32,
-
-    // Merge thresholds + padding
-    merge_centroid_threshold: f32,
-    merge_color_threshold: f32,
-    _pad2: u32,
-    _pad3: u32,
-
-    // Reserved padding (vec4[11-15])
-    _reserved0: vec4<u32>,
-    _reserved1: vec4<u32>,
-    _reserved2: vec4<u32>,
-    _reserved3: vec4<u32>,
-    _reserved4: vec4<u32>,
 }
 
 @group(0) @binding(0) var<storage, read>       working_states:     array<DrawingState>;
@@ -153,11 +60,6 @@ const CHANGED_SLOTS: u32 = 2u * CHANGED_INDICES;
 // It absorbs any rounding difference from the blend loop's own coverage test.
 const COVER_MARGIN: f32 = 1e-5;
 var<workgroup> shared_changed: array<DecodedPolygon, CHANGED_SLOTS>;
-
-// Half-space edge function: positive if point (px,py) is on the left side of edge (ax,ay)->(bx,by)
-fn edge_fn(ax: f32, ay: f32, bx: f32, by: f32, px: f32, py: f32) -> f32 {
-    return (bx - ax) * (py - ay) - (by - ay) * (px - ax);
-}
 
 /// Rasterize a polygon and alpha-blend if pixel is inside.
 fn rasterize_blend(poly: DecodedPolygon, fx: f32, fy: f32, r: ptr<function, f32>, g: ptr<function, f32>, b: ptr<function, f32>) {
@@ -386,10 +288,10 @@ fn pixel_pair_errors(
 ) -> vec2<u32> {
     let ordinal0 = local_idx;
     let ordinal1 = local_idx + PHYSICAL_LANES;
-    let px0 = wid.x * WG_X + ordinal0 % WG_X;
-    let py0 = wid.y * WG_Y + ordinal0 / WG_X;
-    let px1 = wid.x * WG_X + ordinal1 % WG_X;
-    let py1 = wid.y * WG_Y + ordinal1 / WG_X;
+    let px0 = wid.x * TILE_W + ordinal0 % TILE_W;
+    let py0 = wid.y * TILE_H + ordinal0 / TILE_W;
+    let px1 = wid.x * TILE_W + ordinal1 % TILE_W;
+    let py1 = wid.y * TILE_H + ordinal1 / TILE_W;
     let valid0 = ordinal0 < THREAD_COUNT && px0 < w && py0 < h && valid_chain;
     let valid1 = ordinal1 < THREAD_COUNT && px1 < w && py1 < h && valid_chain;
     var pixel0 = paired_pixel_state(px0, py0, w, h, parent_chain, valid0);
@@ -430,10 +332,6 @@ fn pixel_pair_errors(
     return kept_or_blended_errors(pixel0, blend0) + kept_or_blended_errors(pixel1, blend1);
 }
 
-// Worklist words; must match raster_worklist.wgsl.
-const WORK_COUNT: u32 = 0u;
-const WORK_ENTRIES: u32 = 1u;
-
 @compute @workgroup_size(PHYSICAL_LANES, 1, 1)
 fn main(
     @builtin(workgroup_id) group_id: vec3<u32>,
@@ -459,9 +357,9 @@ fn main(
 fn raster_tile(entry: u32, local_idx: u32, sg_inv_id: u32, sg_idx: u32, num_subgroups: u32) {
     let w = params.image_width;
     let h = params.image_height;
-    let num_tiles_x = (w + WG_X - 1u) / WG_X;
-    let num_tiles_y = (h + WG_Y - 1u) / WG_Y;
-    let num_tiles = num_tiles_x * num_tiles_y;
+    let grid = tile_grid(w, h);
+    let num_tiles_x = grid.x;
+    let num_tiles = num_tiles_x * grid.y;
     let tile_id = entry % num_tiles;
     // (tile x, tile y, offspring) as in the former direct dispatch.
     let wid = vec3<u32>(tile_id % num_tiles_x, tile_id / num_tiles_x, entry / num_tiles);
@@ -543,8 +441,8 @@ fn raster_tile(entry: u32, local_idx: u32, sg_inv_id: u32, sg_idx: u32, num_subg
     var pixel_error_old = 0u;
     if THREAD_COUNT == PHYSICAL_LANES {
         for (var ordinal = local_idx; ordinal < THREAD_COUNT; ordinal += PHYSICAL_LANES) {
-            let px = wid.x * WG_X + ordinal % WG_X;
-            let py = wid.y * WG_Y + ordinal / WG_X;
+            let px = wid.x * TILE_W + ordinal % TILE_W;
+            let py = wid.y * TILE_H + ordinal / TILE_W;
             let valid_pixel = px < w && py < h && chain_id < chain_count;
             let errors = pixel_errors(
                 px, py, w, h, parent_chain, tile_poly_count, valid_pixel, shortcut_slots);

@@ -1,7 +1,7 @@
 // Update chain framebuffers after select acceptance: re-rasterize dirty bbox region.
-// Dispatch: (W/WG_X, H/WG_Y, active_chains) — same parallelism as init_framebuffers.
+// Dispatch: (W/TILE_W, H/TILE_H, active_chains) — same parallelism as init_framebuffers.
 // Chains that didn't accept → all workgroups early-exit (reading 1 flag from global memory).
-// Workgroups outside dirty bbox → early-exit (tile-level skip).
+// Workgroups on tiles that are not consumed (tiles.wgsl) → early-exit.
 // Remaining workgroups: parallel rasterize into chain_framebuffers.
 // No error computation — total_error was already set by select.
 // Polygons come from the winning offspring's tile list built by bin_polygons this
@@ -10,119 +10,18 @@
 // this tile, so blending the same polygons in the same order is bit-identical to
 // scanning all polygons. An overflowed list falls back to the full scan.
 //
-// Workgroup size is configurable — programs.rs uses string replacement on WG_X/WG_Y.
+// common.wgsl, tiles.wgsl and the generated constants (TILE_W, TILE_H,
+// TILE_MAX_POLYS, WORK_COUNT) are appended by programs.rs.
 
-const WG_X: u32 = 16;
-const WG_Y: u32 = 16;
-const THREAD_COUNT: u32 = WG_X * WG_Y;
-
-struct Polygon {
-    data: vec4<u32>,   // [color_packed, v0_packed, v1_packed, v2_packed] — 16 bytes
-}
-
-struct DrawingState {
-    polygon_count: u32,
-    fitness_bits: u32,
-    mutation_scale: f32,
-    stagnation_counter: u32,
-    rng_state: vec4<u32>,
-    polygons: array<Polygon, 1000>,
-}
-
-struct Params {
-    image_width: u32,
-    image_height: u32,
-    max_polygons: u32,
-    min_polygons: u32,
-
-    max_error_per_pixel: f32,
-    per_point_multiplier: f32,
-    iteration_number: u32,
-    _pad0: u32,
-
-    add_polygon_prob: f32,
-    remove_polygon_prob: f32,
-    reorder_polygon_prob: f32,
-    offset_polygon_prob: f32,
-
-    move_point_prob: f32,
-    micro_adjust_prob: f32,
-    change_color_prob: f32,
-    adjust_brightness_prob: f32,
-
-    adjust_saturation_prob: f32,
-    move_point_max_delta: f32,
-    micro_adjust_delta: f32,
-    new_point_max_distance: f32,
-
-    offset_polygon_magnitude: f32,
-    min_alpha_norm: f32,
-    max_alpha_norm: f32,
-    crossover_prob: f32,
-
-    // Crossover params
-    spatial_crossover_weight: f32,
-    tournament_size: u32,
-    _pad_ie: u32,
-    _pad_tc: u32,
-
-    // Chain count + lambda + padding
-    chain_count_param: u32,
-    single_mutation_mode: u32,
-    lambda: u32,
-    adaptive_mutation: u32,
-
-    // New mutation probabilities
-    scale_polygon_prob: f32,
-    rotate_polygon_prob: f32,
-    adjacent_swap_prob: f32,
-    merge_polygon_prob: f32,
-
-    clone_polygon_prob: f32,
-    medium_move_prob: f32,
-    medium_move_delta: f32,
-    swap_colors_prob: f32,
-
-    // Merge thresholds + padding
-    merge_centroid_threshold: f32,
-    merge_color_threshold: f32,
-    _pad2: u32,
-    _pad3: u32,
-
-    // Reserved padding (vec4[11-15])
-    _reserved0: vec4<u32>,
-    _reserved1: vec4<u32>,
-    _reserved2: vec4<u32>,
-    _reserved3: vec4<u32>,
-    _reserved4: vec4<u32>,
-}
-
-fn unpack_color(p: Polygon) -> vec4<f32> {
-    return unpack4x8unorm(p.data.x);
-}
-
-fn unpack_vertex(word: u32) -> vec2<f32> {
-    return vec2<f32>(f32(word & 0xFFFFu) / 65535.0, f32(word >> 16u) / 65535.0);
-}
-
-fn edge_fn(ax: f32, ay: f32, bx: f32, by: f32, px: f32, py: f32) -> f32 {
-    return (bx - ax) * (py - ay) - (by - ay) * (px - ax);
-}
-
-fn pack_fb_pixel(r: f32, g: f32, b: f32) -> u32 {
-    let ri = u32(clamp(r, 0.0, 255.0));
-    let gi = u32(clamp(g, 0.0, 255.0));
-    let bi = u32(clamp(b, 0.0, 255.0));
-    return ri | (gi << 8u) | (bi << 16u) | (255u << 24u);
-}
+const THREAD_COUNT: u32 = TILE_W * TILE_H;
 
 @group(0) @binding(0) var<storage, read>       chain_states:       array<DrawingState>;
 @group(0) @binding(1) var<storage, read_write> chain_framebuffers: array<u32>;
 @group(0) @binding(2) var<storage, read>       chain_update_flags: array<u32>;
 @group(0) @binding(3) var<storage, read>       tile_data:          array<u32>;
 @group(0) @binding(4) var<storage, read>       tile_counts:        array<u32>;
-// raster_worklist.wgsl's entry count is word 0. This is the last stage of an
-// iteration, so it empties the list for the next one.
+// The raster worklist's entry count is word WORK_COUNT. This is the last stage
+// of an iteration, so it empties the list for the next one.
 @group(0) @binding(5) var<storage, read_write> raster_work:        array<u32>;
 @group(1) @binding(0) var<uniform>             params:             Params;
 
@@ -133,9 +32,6 @@ var<workgroup> shared_dirty_min_y: u32;
 var<workgroup> shared_dirty_max_x: u32;
 var<workgroup> shared_dirty_max_y: u32;
 var<workgroup> shared_offspring_id: u32;
-
-// Must match bin_polygons.wgsl and settings::TILE_MAX_POLYS.
-const TILE_MAX_POLYS: u32 = 256u;
 
 // Shared memory for polygon tiling (same approach as init_framebuffers)
 const TILE_CAP: u32 = THREAD_COUNT * 3u;
@@ -210,7 +106,7 @@ fn main(
     @builtin(local_invocation_index) local_idx: u32,
 ) {
     if all(wid == vec3<u32>(0u)) && local_idx == 0u {
-        raster_work[0] = 0u;
+        raster_work[WORK_COUNT] = 0u;
     }
 
     let chain_id = wid.z;
@@ -224,12 +120,12 @@ fn main(
         atomicStore(&shared_touched, 0u);
         shared_accepted = chain_update_flags[chain_id * 4u];
         if shared_accepted == 1u {
-            let bbox_lo = chain_update_flags[chain_id * 4u + 1u];
-            let bbox_hi = chain_update_flags[chain_id * 4u + 2u];
-            shared_dirty_min_x = bbox_lo & 0xFFFFu;
-            shared_dirty_min_y = (bbox_lo >> 16u) & 0xFFFFu;
-            shared_dirty_max_x = bbox_hi & 0xFFFFu;
-            shared_dirty_max_y = (bbox_hi >> 16u) & 0xFFFFu;
+            let dirty_min = unpack_dirty_corner(chain_update_flags[chain_id * 4u + 1u]);
+            let dirty_max = unpack_dirty_corner(chain_update_flags[chain_id * 4u + 2u]);
+            shared_dirty_min_x = dirty_min.x;
+            shared_dirty_min_y = dirty_min.y;
+            shared_dirty_max_x = dirty_max.x;
+            shared_dirty_max_y = dirty_max.y;
             shared_offspring_id = chain_update_flags[chain_id * 4u + 3u];
         }
     }
@@ -243,33 +139,29 @@ fn main(
     let w = params.image_width;
     let h = params.image_height;
 
-    // Tile-level dirty bbox skip (uniform across workgroup → all threads exit together)
-    let tile_min_x = wid.x * WG_X;
-    let tile_min_y = wid.y * WG_Y;
-    let tile_max_x = min(tile_min_x + WG_X, w);
-    let tile_max_y = min(tile_min_y + WG_Y, h);
-
     let dmin_x = shared_dirty_min_x;
     let dmin_y = shared_dirty_min_y;
     let dmax_x = min(shared_dirty_max_x, w);
     let dmax_y = min(shared_dirty_max_y, h);
 
-    if tile_max_x <= dmin_x || tile_min_x >= dmax_x || tile_max_y <= dmin_y || tile_min_y >= dmax_y {
+    // Consumed-tile skip (uniform across workgroup → all threads exit together)
+    if !tile_consumed(wid.xy, w, h, vec2<u32>(dmin_x, dmin_y), vec2<u32>(dmax_x, dmax_y)) {
         return;
     }
 
-    let local_x = local_idx % WG_X;
-    let local_y = local_idx / WG_X;
-    let px = tile_min_x + local_x;
-    let py = tile_min_y + local_y;
+    let local_x = local_idx % TILE_W;
+    let local_y = local_idx / TILE_W;
+    let px = wid.x * TILE_W + local_x;
+    let py = wid.y * TILE_H + local_y;
 
     let fx = (f32(px) + 0.5) / f32(w);
     let fy = (f32(py) + 0.5) / f32(h);
 
     // Workgroup-uniform polygon source: the winner's tile list, or every polygon
     // when the list overflowed TILE_MAX_POLYS.
-    let num_tiles_x = (w + WG_X - 1u) / WG_X;
-    let num_tiles = num_tiles_x * ((h + WG_Y - 1u) / WG_Y);
+    let grid = tile_grid(w, h);
+    let num_tiles_x = grid.x;
+    let num_tiles = num_tiles_x * grid.y;
     let bin_tile = shared_offspring_id * num_tiles + wid.y * num_tiles_x + wid.x;
     let listed_count = tile_counts[bin_tile];
     let use_list = listed_count <= TILE_MAX_POLYS;

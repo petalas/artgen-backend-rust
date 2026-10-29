@@ -8,102 +8,18 @@
 // A tile that returned early added nothing to either error sum, so leaving it
 // out keeps every offspring's error bit-identical. (Running a tile of the second
 // kind would add each pixel's old error to both sums, which select subtracts
-// again.) Exact copies (NO_CHANGES) list no index and need no tile. Both tests
-// are copied from the former rasterize_error code and must stay identical.
+// again.) Exact copies (NO_CHANGES) list no index and need no tile. The first
+// test is tiles.wgsl's tile_consumed; the second must stay identical to
+// bin_polygons.wgsl's.
 //
 // raster_work layout (u32 words): [0] entry count, [1 + i] entry i =
 // offspring * num_tiles + tile_id. update_framebuffers resets the count at the
 // end of every iteration; the host resets it around a full evaluation. Entry
 // order is unspecified: raster only adds integer sums.
 //
-// programs/variants.rs specializes the exact WG_X/WG_Y markers below.
-const WG_X: u32 = 16;
-const WG_Y: u32 = 16;
-const TILE_MAX_POLYS: u32 = 256u;
+// common.wgsl, tiles.wgsl and the generated constants (TILE_W, TILE_H,
+// TILE_MAX_POLYS, WORK_COUNT, WORK_ENTRIES) are appended by programs.rs.
 const LANES: u32 = 64u;
-const WORK_COUNT: u32 = 0u;
-const WORK_ENTRIES: u32 = 1u;
-
-struct Polygon {
-    data: vec4<u32>,   // [color_packed, v0_packed, v1_packed, v2_packed] — 16 bytes
-}
-
-struct DrawingState {
-    polygon_count: u32,
-    fitness_bits: u32,
-    mutation_scale: f32,
-    stagnation_counter: u32,
-    rng_state: vec4<u32>,
-    polygons: array<Polygon, 1000>,
-}
-
-struct Params {
-    image_width: u32,
-    image_height: u32,
-    max_polygons: u32,
-    min_polygons: u32,
-
-    max_error_per_pixel: f32,
-    per_point_multiplier: f32,
-    iteration_number: u32,
-    _pad0: u32,
-
-    add_polygon_prob: f32,
-    remove_polygon_prob: f32,
-    reorder_polygon_prob: f32,
-    offset_polygon_prob: f32,
-
-    move_point_prob: f32,
-    micro_adjust_prob: f32,
-    change_color_prob: f32,
-    adjust_brightness_prob: f32,
-
-    adjust_saturation_prob: f32,
-    move_point_max_delta: f32,
-    micro_adjust_delta: f32,
-    new_point_max_distance: f32,
-
-    offset_polygon_magnitude: f32,
-    min_alpha_norm: f32,
-    max_alpha_norm: f32,
-    crossover_prob: f32,
-
-    // Crossover params
-    spatial_crossover_weight: f32,
-    tournament_size: u32,
-    _pad_ie: u32,
-    _pad_tc: u32,
-
-    // Chain count + lambda + padding
-    chain_count_param: u32,
-    single_mutation_mode: u32,
-    lambda: u32,
-    adaptive_mutation: u32,
-
-    // New mutation probabilities
-    scale_polygon_prob: f32,
-    rotate_polygon_prob: f32,
-    adjacent_swap_prob: f32,
-    merge_polygon_prob: f32,
-
-    clone_polygon_prob: f32,
-    medium_move_prob: f32,
-    medium_move_delta: f32,
-    swap_colors_prob: f32,
-
-    // Merge thresholds + padding
-    merge_centroid_threshold: f32,
-    merge_color_threshold: f32,
-    _pad2: u32,
-    _pad3: u32,
-
-    // Reserved padding (vec4[11-15])
-    _reserved0: vec4<u32>,
-    _reserved1: vec4<u32>,
-    _reserved2: vec4<u32>,
-    _reserved3: vec4<u32>,
-    _reserved4: vec4<u32>,
-}
 
 @group(0) @binding(0) var<storage, read>       working_states: array<DrawingState>;
 @group(0) @binding(1) var<storage, read>       chain_states:   array<DrawingState>;
@@ -114,10 +30,6 @@ struct Params {
 // Must match rasterize_error.wgsl.
 const CHANGED_INDICES: u32 = 4u;
 const COVER_MARGIN: f32 = 1e-5;
-
-fn unpack_vertex(word: u32) -> vec2<f32> {
-    return vec2<f32>(f32(word & 0xFFFFu) / 65535.0, f32(word >> 16u) / 65535.0);
-}
 
 // Same box as rasterize_error's decode_changed.
 fn changed_may_meet_tile(poly: Polygon, lo: vec2<f32>, hi: vec2<f32>) -> bool {
@@ -162,17 +74,16 @@ fn tile_needed(chain_id: u32, parent_chain: u32, tile_x: u32, tile_y: u32,
                dirty_min: vec2<u32>, dirty_max: vec2<u32>) -> bool {
     let w = params.image_width;
     let h = params.image_height;
-    let tile_min_x = tile_x * WG_X;
-    let tile_min_y = tile_y * WG_Y;
-    let tile_max_x = min(tile_min_x + WG_X, w);
-    let tile_max_y = min(tile_min_y + WG_Y, h);
-    if tile_max_x <= dirty_min.x || tile_min_x >= dirty_max.x ||
-       tile_max_y <= dirty_min.y || tile_min_y >= dirty_max.y {
+    if !tile_consumed(vec2<u32>(tile_x, tile_y), w, h, dirty_min, dirty_max) {
         return false;
     }
-    let num_tiles_x = (w + WG_X - 1u) / WG_X;
-    let num_tiles_y = (h + WG_Y - 1u) / WG_Y;
-    let num_tiles = num_tiles_x * num_tiles_y;
+    let tile_min_x = tile_x * TILE_W;
+    let tile_min_y = tile_y * TILE_H;
+    let tile_max_x = min(tile_min_x + TILE_W, w);
+    let tile_max_y = min(tile_min_y + TILE_H, h);
+    let grid = tile_grid(w, h);
+    let num_tiles_x = grid.x;
+    let num_tiles = num_tiles_x * grid.y;
     let tile_id = tile_y * num_tiles_x + tile_x;
     let raw_count = tile_counts[chain_id * num_tiles + tile_id];
     let first = working_states[chain_id].rng_state.y;
@@ -203,22 +114,21 @@ fn main(
     let w = params.image_width;
     let h = params.image_height;
     let parent_chain = chain_id / params.lambda;
-    let num_tiles_x = (w + WG_X - 1u) / WG_X;
-    let num_tiles_y = (h + WG_Y - 1u) / WG_Y;
+    let grid = tile_grid(w, h);
+    let num_tiles_x = grid.x;
+    let num_tiles_y = grid.y;
     let num_tiles = num_tiles_x * num_tiles_y;
 
-    let bbox_lo = working_states[chain_id].fitness_bits;
-    let bbox_hi = working_states[chain_id].stagnation_counter;
-    let dirty_min = vec2<u32>(bbox_lo & 0xFFFFu, (bbox_lo >> 16u) & 0xFFFFu);
-    let dirty_max = vec2<u32>(bbox_hi & 0xFFFFu, (bbox_hi >> 16u) & 0xFFFFu);
+    let dirty_min = unpack_dirty_corner(working_states[chain_id].fitness_bits);
+    let dirty_max = unpack_dirty_corner(working_states[chain_id].stagnation_counter);
 
-    // Superset of the tiles meeting the dirty rectangle; tile_needed applies
-    // the exact test. Columns before col_lo end at or before dirty_min.x and
-    // columns from col_hi start at or after dirty_max.x (same for rows).
-    let col_lo = dirty_min.x / WG_X;
-    let col_hi = min((dirty_max.x + WG_X - 1u) / WG_X, num_tiles_x);
-    let row_lo = dirty_min.y / WG_Y;
-    let row_hi = min((dirty_max.y + WG_Y - 1u) / WG_Y, num_tiles_y);
+    // Superset of the consumed tiles; tile_needed applies the exact test.
+    // Columns before col_lo end at or before dirty_min.x and columns from col_hi
+    // start at or after dirty_max.x (same for rows).
+    let col_lo = dirty_min.x / TILE_W;
+    let col_hi = min((dirty_max.x + TILE_W - 1u) / TILE_W, num_tiles_x);
+    let row_lo = dirty_min.y / TILE_H;
+    let row_hi = min((dirty_max.y + TILE_H - 1u) / TILE_H, num_tiles_y);
     if col_hi <= col_lo || row_hi <= row_lo {
         return;
     }

@@ -2,7 +2,8 @@
 //! place of the bundled ones. Production never installs one; the state is empty.
 //!
 //! Variants keep their exact source, tile and policy identities in bounded caches
-//! and survive tile changes. Binning variants can be instrumented for diagnostic
+//! and survive tile changes. They are complete sources without the bundled
+//! prelude; raster and binning variants mark their tile size for specialization. Binning variants can be instrumented for diagnostic
 //! occupancy. A binning variant that does not list raster work gets a separate
 //! worklist pass; a raster variant that does not read the list uses the full grid.
 
@@ -17,9 +18,8 @@ use wgpu::{
 };
 
 use super::{
-    compilation_scopes, create_tile_pipeline, finish_compilation, specialize_bin_source,
-    specialize_raster_source, stage_layout, GpuPrograms, MutationProgram, ProgramCompiler,
-    RasterSchedule, TileStages, BIN_SOURCE, RASTER_SOURCE,
+    compilation_scopes, create_tile_pipeline, finish_compilation, stage_layout, tile_source,
+    GpuPrograms, MutationProgram, ProgramCompiler, RasterSchedule, TileStage, TileStages,
 };
 use crate::gpu_evolver::buffers::GPU_DRAWING_STATE_SIZE;
 
@@ -96,8 +96,16 @@ struct BenchmarkRasterPipeline {
     pipeline: ComputePipeline,
 }
 
+/// The source of a binning program: the bundled stage, which diagnostic
+/// validation can instrument, or an installed variant.
+#[derive(Clone, PartialEq, Eq)]
+enum BinSource {
+    Bundled,
+    Variant(Arc<str>),
+}
+
 struct BenchmarkBinPipeline {
-    source: Arc<str>,
+    source: BinSource,
     wg: [u32; 2],
     validation: bool,
     pipeline: ComputePipeline,
@@ -209,8 +217,7 @@ impl WorklistAdapter {
         let pipeline = match &self.compiled {
             Some((compiled_wg, pipeline)) if *compiled_wg == wg => pipeline.clone(),
             _ => {
-                let source =
-                    specialize_raster_source(include_str!("../../shaders/raster_worklist.wgsl"), wg);
+                let source = tile_source(TileStage::RasterWorklist, wg);
                 checked(&compiler.device, || {
                     create_tile_pipeline(
                         &compiler.device,
@@ -288,19 +295,19 @@ impl ShaderVariants {
     ) -> Result<TileStages, String> {
         let bin_source = self.bin_variant.as_ref().map(|variant| Arc::clone(&variant.source));
         let bin = match bin_source {
-            Some(source) => self.cached_bin(compiler, source, wg, self.validation, None)?,
-            None if self.validation => {
-                self.cached_bin(compiler, Arc::from(BIN_SOURCE), wg, true, None)?
+            Some(source) => {
+                self.cached_bin(compiler, BinSource::Variant(source), wg, self.validation)?
             }
-            None => compiler.bin(&specialize_bin_source(BIN_SOURCE, wg)),
+            None if self.validation => self.cached_bin(compiler, BinSource::Bundled, wg, true)?,
+            None => compiler.bundled_bin(wg),
         };
         let raster_source = self
             .raster_variant
             .as_ref()
             .map(|variant| Arc::clone(&variant.source));
         let raster = match raster_source {
-            Some(source) => self.cached_raster(compiler, source, wg, None)?,
-            None => compiler.raster(&specialize_raster_source(RASTER_SOURCE, wg)),
+            Some(source) => self.cached_raster(compiler, source, wg)?,
+            None => compiler.bundled_raster(wg),
         };
         let schedule = self.worklist.schedule(
             compiler,
@@ -315,13 +322,11 @@ impl ShaderVariants {
         })
     }
 
-    /// `installed` is the bundled raster at `wg`; the first entry reuses it.
     fn cached_raster(
         &mut self,
         compiler: &ProgramCompiler,
         source: Arc<str>,
         wg: [u32; 2],
-        installed: Option<&ComputePipeline>,
     ) -> Result<ComputePipeline, String> {
         let key = BenchmarkRasterKey { source, wg };
         if let Some(entry) = self.raster.iter().find(|entry| entry.key == key) {
@@ -330,15 +335,8 @@ impl ShaderVariants {
         if self.raster.len() == MAX_BENCHMARK_RASTER_PIPELINES {
             return Err("benchmark raster pipeline cache is full".into());
         }
-        let pipeline = match installed {
-            Some(installed) if self.raster.is_empty() && key.source.as_ref() == RASTER_SOURCE => {
-                installed.clone()
-            }
-            _ => {
-                let specialized = specialize_raster_source(&key.source, wg);
-                checked(&compiler.device, || compiler.raster(&specialized))?
-            }
-        };
+        let specialized = specialize_raster_source(&key.source, wg);
+        let pipeline = checked(&compiler.device, || compiler.raster(&specialized))?;
         self.raster.push(BenchmarkRasterPipeline {
             key,
             pipeline: pipeline.clone(),
@@ -346,15 +344,12 @@ impl ShaderVariants {
         Ok(pipeline)
     }
 
-    /// `installed` is the uninstrumented bundled binner at `wg`; the first
-    /// uninstrumented entry reuses it.
     fn cached_bin(
         &mut self,
         compiler: &ProgramCompiler,
-        source: Arc<str>,
+        source: BinSource,
         wg: [u32; 2],
         validation: bool,
-        installed: Option<&ComputePipeline>,
     ) -> Result<ComputePipeline, String> {
         if let Some(entry) = self.bin.iter().find(|entry| {
             entry.source == source && entry.wg == wg && entry.validation == validation
@@ -364,17 +359,8 @@ impl ShaderVariants {
         if self.bin.len() == MAX_BENCHMARK_BIN_PIPELINES {
             return Err("benchmark bin pipeline cache is full".into());
         }
-        let pipeline = match installed {
-            Some(installed)
-                if self.bin.is_empty() && !validation && source.as_ref() == BIN_SOURCE =>
-            {
-                installed.clone()
-            }
-            _ => {
-                let specialized = specialize_benchmark_bin_source(&source, wg, validation)?;
-                checked(&compiler.device, || compiler.bin(&specialized))?
-            }
-        };
+        let specialized = specialize_benchmark_bin_source(&source, wg, validation)?;
+        let pipeline = checked(&compiler.device, || compiler.bin(&specialized))?;
         self.bin.push(BenchmarkBinPipeline {
             source,
             wg,
@@ -463,9 +449,7 @@ impl ShaderVariantInstaller<'_> {
             .iter()
             .find(|entry| entry.key.source.as_ref() == source)
             .map_or_else(|| Arc::from(source), |entry| Arc::clone(&entry.key.source));
-        let installed = variants.raster_variant.is_none().then_some(&p.tiles.raster);
-        let pipeline =
-            variants.cached_raster(&p.compiler, Arc::clone(&source), p.tiles.wg, installed)?;
+        let pipeline = variants.cached_raster(&p.compiler, Arc::clone(&source), p.tiles.wg)?;
         let variant = TileVariant::new(source, RASTER_RASTER_WORK_BINDING)?;
         let schedule = variants.worklist.schedule(
             &p.compiler,
@@ -491,17 +475,16 @@ impl ShaderVariantInstaller<'_> {
         let source = variants
             .bin
             .iter()
-            .find(|entry| entry.source.as_ref() == source)
-            .map_or_else(|| Arc::from(source), |entry| Arc::clone(&entry.source));
-        let validation = variants.validation;
-        let installed =
-            (variants.bin_variant.is_none() && !validation).then_some(&p.tiles.bin);
+            .find_map(|entry| match &entry.source {
+                BinSource::Variant(cached) if cached.as_ref() == source => Some(Arc::clone(cached)),
+                _ => None,
+            })
+            .unwrap_or_else(|| Arc::from(source));
         let pipeline = variants.cached_bin(
             &p.compiler,
-            Arc::clone(&source),
+            BinSource::Variant(Arc::clone(&source)),
             p.tiles.wg,
-            validation,
-            installed,
+            variants.validation,
         )?;
         let variant = TileVariant::new(source, BIN_RASTER_WORK_BINDING)?;
         let schedule = variants.worklist.schedule(
@@ -526,11 +509,10 @@ impl ShaderVariantInstaller<'_> {
         if enabled == variants.validation {
             return Ok(());
         }
-        let source = variants.bin_variant.as_ref().map_or_else(
-            || Arc::from(BIN_SOURCE),
-            |variant| Arc::clone(&variant.source),
-        );
-        p.tiles.bin = variants.cached_bin(&p.compiler, source, p.tiles.wg, enabled, None)?;
+        let source = variants.bin_variant.as_ref().map_or(BinSource::Bundled, |variant| {
+            BinSource::Variant(Arc::clone(&variant.source))
+        });
+        p.tiles.bin = variants.cached_bin(&p.compiler, source, p.tiles.wg, enabled)?;
         variants.validation = enabled;
         Ok(())
     }
@@ -643,25 +625,32 @@ fn next_mutate_source_token<'a>(
     Ok(None)
 }
 
+// Tile-size markers. Historical rasters use the first pair; historical binners
+// and bundled sources emitted at 16x16 (programs::bundled) use the second.
+const RASTER_TILE_MARKERS: [[&str; 2]; 2] = [
+    ["const WG_X: u32 = 16;", "const WG_Y: u32 = 16;"],
+    BIN_TILE_MARKERS,
+];
+const BIN_TILE_MARKERS: [&str; 2] = ["const TILE_W: u32 = 16;", "const TILE_H: u32 = 16;"];
+
 fn validate_benchmark_raster_source(source: &str) -> Result<(), String> {
     if source.is_empty() || source.len() > MAX_BENCHMARK_SOURCE_BYTES {
         return Err("raster shader must contain 1..262144 bytes".into());
     }
-    for marker in ["const WG_X: u32 = 16;", "const WG_Y: u32 = 16;"] {
-        if source.matches(marker).count() != 1 {
-            return Err(format!(
-                "raster specialization must match {marker:?} exactly once"
-            ));
-        }
+    let counts = RASTER_TILE_MARKERS.map(|pair| pair.map(|marker| source.matches(marker).count()));
+    match counts {
+        [[1, 1], [0, 0]] | [[0, 0], [1, 1]] => Ok(()),
+        _ => Err(format!(
+            "raster specialization must match one marker pair of {RASTER_TILE_MARKERS:?} exactly once"
+        )),
     }
-    Ok(())
 }
 
 fn validate_benchmark_bin_source(source: &str) -> Result<(), String> {
     if source.is_empty() || source.len() > MAX_BENCHMARK_SOURCE_BYTES {
         return Err("bin shader must contain 1..262144 bytes".into());
     }
-    for marker in ["const TILE_W: u32 = 16;", "const TILE_H: u32 = 16;"] {
+    for marker in BIN_TILE_MARKERS {
         if source.matches(marker).count() != 1 {
             return Err(format!(
                 "bin specialization must match {marker:?} exactly once"
@@ -671,12 +660,40 @@ fn validate_benchmark_bin_source(source: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Specialize a validated raster variant's tile-size markers for `wg`. Naga
+/// supports no override constants in `@workgroup_size` or const expressions.
+fn specialize_raster_source(source: &str, wg: [u32; 2]) -> String {
+    let [wg_markers, tile_markers] = RASTER_TILE_MARKERS;
+    replace_tile_markers(&replace_tile_markers(source, wg_markers, wg), tile_markers, wg)
+}
+
+/// Specialize a validated binning variant's tile-size markers for `wg`.
+fn specialize_bin_source(source: &str, wg: [u32; 2]) -> String {
+    replace_tile_markers(source, BIN_TILE_MARKERS, wg)
+}
+
+/// Replace `const NAME: u32 = 16;` markers with the tile's width and height.
+fn replace_tile_markers(source: &str, markers: [&str; 2], wg: [u32; 2]) -> String {
+    let [width, height] = markers.map(|marker| {
+        marker
+            .strip_suffix("16;")
+            .expect("tile markers end with their 16 default")
+    });
+    source
+        .replace(markers[0], &format!("{width}{};", wg[0]))
+        .replace(markers[1], &format!("{height}{};", wg[1]))
+}
+
+/// The binning program for `wg`, instrumented when `validation` is set.
 fn specialize_benchmark_bin_source(
-    source: &str,
+    source: &BinSource,
     wg: [u32; 2],
     validation: bool,
 ) -> Result<String, String> {
-    let specialized = specialize_bin_source(source, wg);
+    let specialized = match source {
+        BinSource::Bundled => tile_source(TileStage::BinPolygons, wg),
+        BinSource::Variant(source) => specialize_bin_source(source, wg),
+    };
     if validation {
         benchmark_bin_source(&specialized)
     } else {
@@ -717,17 +734,21 @@ mod benchmark_tests {
     use sha2::{Digest, Sha256};
 
     use super::super::{
-        specialize_bin_source, specialize_raster_source, BIN_SOURCE, BUNDLED_MUTATE_OPTIONS,
-        MUTATE_SOURCE, RASTER_SOURCE,
+        bundled_shader_source, tile_source, BundledShader, TileStage, BUNDLED_MUTATE_OPTIONS,
     };
     use super::{
         benchmark_bin_source, benchmark_mutate_compilation_options,
         benchmark_mutate_group_size_from_source, specialize_benchmark_bin_source,
-        validate_benchmark_bin_source, validate_benchmark_mutate_source,
-        validate_benchmark_raster_source, BenchmarkMutateKey, BenchmarkMutateOptions,
-        BenchmarkRasterKey, TileVariant, BIN_RASTER_WORK_BINDING, MAX_BENCHMARK_SOURCE_BYTES,
-        RASTER_RASTER_WORK_BINDING,
+        specialize_bin_source, specialize_raster_source, validate_benchmark_bin_source,
+        validate_benchmark_mutate_source, validate_benchmark_raster_source, BenchmarkMutateKey,
+        BenchmarkMutateOptions, BenchmarkRasterKey, BinSource, TileVariant,
+        BIN_RASTER_WORK_BINDING, MAX_BENCHMARK_SOURCE_BYTES, RASTER_RASTER_WORK_BINDING,
     };
+
+    const TILES: [[u32; 2]; 5] = [[32, 16], [16, 16], [32, 8], [16, 8], [8, 8]];
+    const HISTORICAL_RASTER: &str = include_str!(
+        "../../../benchmarks/evolution/overnight-20261024/fixtures/raster-ae1-reference.wgsl"
+    );
 
     const HISTORICAL_MUTATE: &str = include_str!(
         "../../../benchmarks/evolution/overnight-20261024/fixtures/mutate-e133-reference.wgsl"
@@ -778,7 +799,7 @@ mod benchmark_tests {
 
     #[test]
     fn mutate_source_boundaries_need_no_specialization_markers() {
-        let original = MUTATE_SOURCE;
+        let original = &bundled_shader_source(BundledShader::Mutate);
         assert!(!original.contains("const TILE_"));
         assert!(!original.contains("const WG_X"));
         assert!(!original.contains("const WG_Y"));
@@ -793,7 +814,7 @@ mod benchmark_tests {
 
     #[test]
     fn mutate_cache_keys_couple_exact_source_and_checked_group_width() {
-        let bundled = MUTATE_SOURCE;
+        let bundled = &bundled_shader_source(BundledShader::Mutate);
         let bundled_group = benchmark_mutate_group_size_from_source(bundled).unwrap();
         for (original, group) in [
             (HISTORICAL_MUTATE, 64),
@@ -863,7 +884,7 @@ mod benchmark_tests {
 
     #[test]
     fn mutate_cache_invalidates_on_policy_including_bundled_source() {
-        let bundled = MUTATE_SOURCE;
+        let bundled = &bundled_shader_source(BundledShader::Mutate);
         let installed = BenchmarkMutateKey::new(bundled, BUNDLED_MUTATE_OPTIONS).unwrap();
         assert_eq!(
             installed.group_size,
@@ -899,7 +920,7 @@ mod benchmark_tests {
 
     #[test]
     fn future_bundled_false_policy_cannot_reuse_initial_pipeline_for_historical_true() {
-        let bundled = MUTATE_SOURCE;
+        let bundled = &bundled_shader_source(BundledShader::Mutate);
         let future_options = BenchmarkMutateOptions {
             zero_initialize_workgroup_memory: false,
         };
@@ -992,10 +1013,10 @@ mod benchmark_tests {
 
     #[test]
     fn raster_source_specialization_preserves_candidate_and_cache_identity() {
-        let original = RASTER_SOURCE;
+        let original = HISTORICAL_RASTER;
         let candidate = format!("{original}\n// actual candidate");
         validate_benchmark_raster_source(&candidate).unwrap();
-        for wg in [[32, 16], [16, 16], [32, 8], [16, 8], [8, 8]] {
+        for wg in TILES {
             let source = specialize_raster_source(&candidate, wg);
             assert!(source.ends_with("// actual candidate"));
             assert!(source.contains(&format!("const WG_X: u32 = {};", wg[0])));
@@ -1037,23 +1058,56 @@ mod benchmark_tests {
 
     #[test]
     fn raster_source_boundaries_and_marker_cardinality_fail_closed() {
-        let original = RASTER_SOURCE;
+        let emitted = tile_source(TileStage::RasterizeError, [16, 16]);
         assert!(validate_benchmark_raster_source("").is_err());
         assert!(
             validate_benchmark_raster_source(&" ".repeat(MAX_BENCHMARK_SOURCE_BYTES + 1)).is_err()
         );
-        for marker in ["const WG_X: u32 = 16;", "const WG_Y: u32 = 16;"] {
-            assert!(validate_benchmark_raster_source(&original.replace(marker, "")).is_err());
-            assert!(validate_benchmark_raster_source(&format!("{original}\n{marker}")).is_err());
+        for (original, markers) in [
+            (HISTORICAL_RASTER, ["const WG_X: u32 = 16;", "const WG_Y: u32 = 16;"]),
+            (&emitted, ["const TILE_W: u32 = 16;", "const TILE_H: u32 = 16;"]),
+        ] {
+            validate_benchmark_raster_source(original).unwrap();
+            for marker in markers {
+                assert!(validate_benchmark_raster_source(&original.replace(marker, "")).is_err());
+                assert!(
+                    validate_benchmark_raster_source(&format!("{original}\n{marker}")).is_err()
+                );
+            }
+        }
+        // A source may not mark its tile with both pairs.
+        let both = format!("{HISTORICAL_RASTER}\nconst TILE_W: u32 = 16;\nconst TILE_H: u32 = 16;");
+        assert!(validate_benchmark_raster_source(&both).is_err());
+        // The installed bundled source is not a variant.
+        let installed = tile_source(TileStage::RasterizeError, [32, 16]);
+        assert!(validate_benchmark_raster_source(&installed).is_err());
+    }
+
+    /// Bundled raster and binning sources emitted at 16x16 install as variants
+    /// and specialize to exactly the installed bundled source at every tile.
+    #[test]
+    fn emitted_bundled_sources_specialize_like_installed_ones() {
+        let raster = tile_source(TileStage::RasterizeError, [16, 16]);
+        let bin = tile_source(TileStage::BinPolygons, [16, 16]);
+        validate_benchmark_raster_source(&raster).unwrap();
+        validate_benchmark_bin_source(&bin).unwrap();
+        for wg in TILES {
+            assert_eq!(
+                specialize_raster_source(&raster, wg),
+                tile_source(TileStage::RasterizeError, wg)
+            );
+            assert_eq!(specialize_bin_source(&bin, wg), tile_source(TileStage::BinPolygons, wg));
         }
     }
 
     #[test]
     fn benchmark_bin_variants_validate_without_a_gpu() {
-        for wg in [[32, 16], [16, 16], [32, 8], [16, 8], [8, 8]] {
-            let normal = specialize_bin_source(BIN_SOURCE, wg);
+        for wg in TILES {
+            let normal = specialize_benchmark_bin_source(&BinSource::Bundled, wg, false).unwrap();
+            assert_eq!(normal, tile_source(TileStage::BinPolygons, wg));
             assert!(!normal.contains("atomicMax"));
-            let source = benchmark_bin_source(&normal).unwrap();
+            let source = specialize_benchmark_bin_source(&BinSource::Bundled, wg, true).unwrap();
+            assert_eq!(source, benchmark_bin_source(&normal).unwrap());
             let module = wgpu::naga::front::wgsl::parse_str(&source).unwrap();
             wgpu::naga::valid::Validator::new(
                 wgpu::naga::valid::ValidationFlags::all(),
@@ -1083,7 +1137,7 @@ mod benchmark_tests {
                 )
                 .replace("+= 32u", &format!("+= {internal_wg}u"));
             validate_benchmark_bin_source(&candidate).unwrap();
-            for wg in [[32, 16], [16, 16], [32, 8], [16, 8], [8, 8]] {
+            for wg in TILES {
                 let specialized = specialize_bin_source(&candidate, wg);
                 assert!(specialized.contains(&format!("@workgroup_size({internal_wg}, 1, 1)")));
                 assert!(specialized.contains(&format!("const TILE_W: u32 = {};", wg[0])));
@@ -1105,7 +1159,7 @@ mod benchmark_tests {
 
     #[test]
     fn candidate_source_boundaries_and_instrumentation_fail_closed() {
-        let original = BIN_SOURCE;
+        let original = &tile_source(TileStage::BinPolygons, [16, 16]);
         assert!(validate_benchmark_bin_source("").is_err());
         assert!(
             validate_benchmark_bin_source(&" ".repeat(MAX_BENCHMARK_SOURCE_BYTES + 1)).is_err()
@@ -1188,8 +1242,9 @@ fn main() {
     fn plain_count_candidate_preserves_normal_source_and_validates_all_tile_shapes() {
         let candidate = plain_count_candidate();
         validate_benchmark_bin_source(&candidate).unwrap();
-        for wg in [[32, 16], [16, 16], [32, 8], [16, 8], [8, 8]] {
-            let normal = specialize_benchmark_bin_source(&candidate, wg, false).unwrap();
+        let variant = BinSource::Variant(candidate.as_str().into());
+        for wg in TILES {
+            let normal = specialize_benchmark_bin_source(&variant, wg, false).unwrap();
             for (axis, size) in [("W", wg[0]), ("H", wg[1])] {
                 assert_eq!(
                     normal
@@ -1215,7 +1270,7 @@ fn main() {
                 assert_eq!(normal.as_bytes(), candidate.as_bytes());
             }
             validated_bin_module(&normal);
-            let diagnostic = specialize_benchmark_bin_source(&candidate, wg, true).unwrap();
+            let diagnostic = specialize_benchmark_bin_source(&variant, wg, true).unwrap();
             assert_eq!(
                 diagnostic,
                 normal
@@ -1325,8 +1380,10 @@ fn main() {{
         let role = |source: &str, binding| {
             TileVariant::new(source.into(), binding).unwrap().raster_work
         };
-        assert!(role(BIN_SOURCE, BIN_RASTER_WORK_BINDING));
-        assert!(role(RASTER_SOURCE, RASTER_RASTER_WORK_BINDING));
+        let bin = tile_source(TileStage::BinPolygons, [16, 16]);
+        let raster = tile_source(TileStage::RasterizeError, [16, 16]);
+        assert!(role(&bin, BIN_RASTER_WORK_BINDING));
+        assert!(role(&raster, RASTER_RASTER_WORK_BINDING));
         for name in ["bin-tile32-reference.wgsl", "bin-plain-count-reference.wgsl"] {
             assert!(!role(&fixture(name), BIN_RASTER_WORK_BINDING), "{name}");
         }

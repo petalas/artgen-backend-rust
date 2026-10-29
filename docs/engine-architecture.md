@@ -24,12 +24,27 @@ that word must fit inside it for a requested workload to qualify.
 ## Shader installation
 
 `gpu_evolver::programs` owns source specialization, compilation policy and
-compiled handles, and installs the bundled sources. Shader variants (historical
+compiled handles, and installs the bundled sources. Each stage file in
+`src/shaders/` holds only its own logic. `programs/bundled.rs` appends the shared
+prelude: constants generated from Rust (polygon capacity, and for the tile group
+`TILE_W`/`TILE_H`, `TILE_MAX_POLYS` and the `raster_work` header words), then
+`common.wgsl` (the `Polygon`, `DrawingState` and `Params` structs and unpack
+helpers) and, for the tile group, `tiles.wgsl` (tile geometry, the consumed-tile
+test and `pack_fb_pixel`). The stage body comes first, so compiler line numbers
+match its file. A tile change regenerates the constants; bundled sources have no
+replacement markers. CPU tests validate every assembled program at every
+supported tile through naga and its SPIR-V writer, and compare the reflected
+struct layouts with `gpu_evolver::buffers`. `examples/emit-bundled-shaders`
+writes the complete sources for tools that read a shader file; it emits tile
+stages at 16x16, the variants' marker form. Shader variants (historical
 and candidate sources, diagnostic instrumentation, their caches and the worklist
 pass older binners need) sit behind one seam, `programs/variants.rs`, reached
 through `GpuPipeline::shader_variants()`. Production never installs a variant.
-Mutation's logical group width and initialization policy stay attached to its
-selected program. The raster, binning, initial framebuffer and
+Variants are complete sources without the prelude, specialized by their
+16x16 tile-size markers: `WG_X`/`WG_Y` or `TILE_W`/`TILE_H` for raster,
+`TILE_W`/`TILE_H` for binning. An emitted bundled raster or binner specializes to
+exactly the installed source. Mutation's logical group width and initialization
+policy stay attached to its selected program. The raster, binning, initial framebuffer and
 framebuffer-update programs form one installed tile group. A failed change must
 preserve the entire preceding group.
 
@@ -39,11 +54,12 @@ program state. Stage-specific policies remain explicit. In particular, historica
 mutation programs retain their initialization default, and raster initialization
 continues to depend on the backend.
 
-The binner writes counts and indices only for tiles that meet each offspring's
-dirty rectangle, the tiles rasterize_error and update_framebuffers read. Other
-tiles keep stale words from earlier iterations, so a new consumer of the tile
-lists must apply the same dirty-tile test. Validate binner changes with
-`check-gpu-binning --scope consumed-only`; `full-buffers` compares stale words
+The binner writes counts and indices only for consumed tiles, those that meet
+each offspring's dirty rectangle, the tiles rasterize_error and
+update_framebuffers read. Other tiles keep stale words from earlier iterations,
+so a new consumer of the tile lists must use `tile_consumed` (or its per-axis
+forms) from `tiles.wgsl`, which the binner, worklist pass and framebuffer update
+share. Validate binner changes with `check-gpu-binning --scope consumed-only`; `full-buffers` compares stale words
 with the frozen full binner and no longer applies to the production shader.
 Each offspring is dispatched as `BIN_ROW_BANDS` workgroups over bands of tile
 rows, so full-image (crossover) offspring do not bound the dispatch alone.
