@@ -20,7 +20,9 @@ Every row of [`log.tsv`](log.tsv) is one `scripts/hillclimb.py` run; see
 | `3f8e9e4` | Delivered chain chosen from fitness readback (determinism fix) | 512 batches 1.0002 | — |
 | `dd7e1ad` | Bitmask binning of dirty tiles, 4 row bands per offspring | confirm 1.0530 / 1.0630 | — |
 | `15519ce` | Unchanged-pixel skip for crossover offspring (≤4 changed slots) | confirm 1.7380 / 1.8355, lifecycle same | — |
-| `54286cc` + `50854a0` | Unchanged-pixel skip in framebuffer updates; raster tiles no changed polygon meets exit early | stacked confirm 1.2257 / 1.2027, lifecycle same | — |
+| `54286cc` + `50854a0` | Unchanged-pixel skip in framebuffer updates; raster tiles no changed polygon meets exit early | stacked confirm 1.2257 / 1.2027, lifecycle same | `54286cc` revert 0.8994 (512 batches, after round 7); `50854a0` code already removed by `c93ba70` |
+| `8e383a9` | Each batch finished as 4 command buffers on parallel threads, one submit | confirm 1.0354 / 1.1339; gpu% 82–89% to 97–99% | — |
+| `c93ba70` | Raster loops over a worklist of tiles with work, built by the binner; fixed 8192-workgroup grid | confirm on top of `8e383a9` 1.2575 / 1.3018 | — |
 
 Confirm ratios are 64 batches × 5 pairs / 512 batches × 3 pairs. In crossovers
 between real chains, 38–53% of offspring are exact copies of parent A and
@@ -45,9 +47,13 @@ quality mode because evolution changed:
 | round 4 | 512 batches × 3 pairs | 1.4362 [1.4283, 1.4448] | 1.7340 [1.7015, 1.7666] |
 | round 5 | 64 batches × 5 pairs | 2.9726 [2.9622, 2.9826] | 4.1490 [4.0023, 4.3110] |
 | round 5 | 512 batches × 3 pairs | 3.3511 [3.3249, 3.3761] | 4.0459 [3.9685, 4.1222] |
+| round 7 | 64 batches × 5 pairs | 4.5272 [4.4536, 4.5938] | 6.3187 [6.0869, 6.5563] |
+| round 7 | 512 batches × 3 pairs | 5.3296 [5.3044, 5.3512] | 6.4346 [6.3089, 6.5534] |
 
-Master runs at about 972k / 895k / 887k evals/s (ff / mona / darwin) at 64
-batches, against 344k / 291k / 294k at the start.
+Master runs at about 1.63M / 1.48M / 1.30M evals/s (ff / mona / darwin) at 64
+batches and 1.81M / 1.60M / 1.50M at 512, against 340–359k / 293–301k /
+291–303k at the start. A16 alone read NOISE at 512 batches because its branch
+predated `8e383a9`: the faster GPU made the single-threaded `finish` the limiter.
 
 ## Rejected
 
@@ -81,11 +87,22 @@ batches, against 344k / 291k / 294k at the start.
     runs: disturbed pairs are re-timed automatically.
 14. Returned-drawing delivery had become racy (fixed in `3f8e9e4`); agents ran the
     lifecycle checker by hand: `--lifecycle`, implied by `--confirm`.
+15. Immediate retries landed inside the same multi-minute build: retries wait
+    for a quiet host.
+16. Agents' tables showed only candidate stage times: control→candidate columns.
+17. An agent judged a branch that lacked a newer master commit and the verdict
+    flipped: candidates missing control commits are warned about and logged.
+18. A revert whose code a later change had already removed silently ran an A/A:
+    no-op reverts are skipped.
 
 ## Remaining ideas
 
-- Raster is still ~70% of GPU time (~180–200 µs of ~260 µs per iteration), now
-  mostly pixels a changed polygon covers.
+- Per iteration at 512 batches: mutate ~10, bin ~28–30, raster ~80–107,
+  select+update ~22–25 µs. Raster is still the largest stage, now almost only
+  pixels a changed polygon covers. Bin rose by ~4 µs to build the worklist.
+- At ~1.8M evals/s, `finish` on 4 threads (~4.5 ms per batch) leaves the host
+  ~6 ms ahead of a ~9 ms GPU batch; further GPU gains will bring the host back
+  as the limiter.
 - `src/auto_tune.rs` tunes mutation parameters at runtime. Its tuning predates
   the crossover fix, so crossover probability and tournament size may now have
   better values.
