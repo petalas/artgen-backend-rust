@@ -5,6 +5,7 @@ pub mod pipeline;
 mod execution;
 mod programs;
 mod readback;
+mod schedule;
 
 pub use programs::{bundled_shader_source, BundledShader, TileStage};
 
@@ -15,7 +16,7 @@ use wgpu::*;
 
 use crate::models::drawing::Drawing;
 use crate::mutation_params::MutationParams;
-use crate::settings::{BIN_ROW_BANDS, GPU_MAX_CHAIN_COUNT, GPU_DEFAULT_CHAIN_COUNT};
+use crate::settings::{GPU_MAX_CHAIN_COUNT, GPU_DEFAULT_CHAIN_COUNT};
 
 use buffers::{
     gpu_params_from, default_gpu_params, drawing_to_gpu, gpu_to_drawing, ControlFlags,
@@ -23,6 +24,7 @@ use buffers::{
 };
 use pipeline::GpuPipeline;
 use readback::{Readback, SubmittedBatch};
+use schedule::BatchTimestamps;
 
 #[derive(Default)]
 pub struct PassTimings {
@@ -151,9 +153,6 @@ impl GpuEvolver {
     /// Blocks until the GPU work completes.
     fn dispatch_init_framebuffers(&mut self, active_chains: u32) {
         let p = &self.pipeline;
-        let rwg = p.rasterize_wg();
-        let grid = p.raster_grid(rwg);
-        let (wg_x, wg_y) = (grid.x, grid.y);
 
         // Zero chain_total_errors before init
         let zeros = vec![0u8; p.chain_count as usize * 4];
@@ -166,16 +165,7 @@ impl GpuEvolver {
         let mut encoder = p.device.create_command_encoder(&CommandEncoderDescriptor {
             label: Some("init_framebuffers"),
         });
-        {
-            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                label: Some("init_framebuffers"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(p.init_framebuffers_pipeline());
-            pass.set_bind_group(0, &p.init_framebuffers_bind_group, &[]);
-            pass.set_bind_group(1, &p.params_bind_group, &[]);
-            pass.dispatch_workgroups(wg_x, wg_y, active_chains);
-        }
+        schedule::record_framebuffer_init(p, &mut encoder, active_chains);
         let si = p.queue.submit(std::iter::once(encoder.finish()));
         p.device.poll(PollType::Wait { submission_index: Some(si), timeout: None }).unwrap();
 
@@ -218,22 +208,17 @@ impl GpuEvolver {
     ) -> Option<Drawing> {
         let p = &self.pipeline;
         let work = p.workload(mutation_params);
-        let iterations = work.iterations;
-        let batch_envelope = self.benchmark_batch_envelope && collect_timestamps;
+        let timestamps = BatchTimestamps::new(collect_timestamps, self.benchmark_batch_envelope);
         let active = work.active;
         self.active_chain_count = active;
 
-        // 1. Pick which staging set to use for THIS batch's copies.
-        //    The previous batch (if any) uses the OTHER staging set,
-        //    so there's no conflict between the new submission's copy
-        //    destinations and the previous batch's mapped-for-read buffers.
+        // This batch copies into one staging set while the previous batch's
+        // maps may still hold the other.
         let write_idx = self.readback.next_staging_index();
 
-        // 2. Build params and upload to uniform buffer
         let mut params = gpu_params_from(mutation_params, p.image_width, p.image_height, active);
         params.iteration_number = self.iteration;
-        let params_bytes: &[u8] = bytemuck::bytes_of(&params);
-        p.queue.write_buffer(&p.params_buf, 0, params_bytes);
+        p.queue.write_buffer(&p.params_buf, 0, bytemuck::bytes_of(&params));
 
         // Reset control flags before batch — preserve best_fitness_bits so atomicMax
         // only triggers new_best_found when fitness actually improves over last known best.
@@ -247,210 +232,31 @@ impl GpuEvolver {
             _pad: 0,
         };
         p.queue.write_buffer(&p.control_flags_buf, 0, bytemuck::bytes_of(&control_reset));
+        // Error accumulators are not reset here: select zeroes them with
+        // atomicExchange after each iteration.
 
-        // Note: error accumulators are NOT reset here — the select shader
-        // resets them via atomicExchange after each iteration. They're
-        // zero-initialized once at buffer creation and in reinit_chains().
-
-        // 3. Encode N iterations into FINISH_THREADS command buffers
-        let mut encoder = p.device.create_command_encoder(&CommandEncoderDescriptor {
-            label: Some("gpu_evolver_batch"),
-        });
-
-        let (wg_x, wg_y) = (work.raster.x, work.raster.y);
-        let offspring = work.offspring;
-        let mutate_dispatch_y = work.mutate_y;
-
-        // Bulk iterations use two passes. The sampled final iteration uses four
-        // separate passes for the original per-stage timestamp pairs.
-        //
-        // SAFETY: wgpu's resource tracker inserts vkCmdPipelineBarrier between dispatches
-        // within a single compute pass when buffer usage changes (e.g. STORAGE_READ_WRITE
-        // -> STORAGE_READ). See flush_states() in wgpu-core/src/command/compute.rs which
-        // calls drain_barriers() before every dispatch.
-
-        // Bulk iterations: split into two passes per iteration.
-        // Pass A: mutate → bin → rasterize_error (internal barriers OK via usage changes)
-        // Pass B: select → update_framebuffers (internal barriers OK via usage changes)
-        //
-        // The pass boundary between A and B provides the critical memory barrier for
-        // error_accumulators: rasterize_error (atomicAdd, RW) → select (atomicExchange, RW).
-        // Without this barrier, select can read incomplete sums — wgpu's resource tracker
-        // only inserts barriers on usage *changes*, and RW→RW is not a change.
-        // The pass boundary between B(N) and A(N+1) similarly ensures select's
-        // atomicExchange (zeroing) is visible to the next rasterize_error's atomicAdd.
-        let bulk_count = if collect_timestamps { iterations.saturating_sub(1) } else { iterations };
-        // Consume this marker at the first bulk pass without a per-iteration branch.
-        // Query 7 still marks the end of the final select/update pass.
-        let mut bulk_timestamp_writes = batch_envelope.then_some(ComputePassTimestampWrites {
-            query_set: &p.timestamp_query_set,
-            beginning_of_pass_write_index: Some(6),
-            end_of_pass_write_index: None,
-        });
-        // The batch is recorded into FINISH_THREADS command buffers that are
-        // finished in parallel and submitted together in one call. `finish`
-        // does the driver-side encoding (~11 ms per batch on Dozen), so one
-        // thread made the host the limiter. Submitting them separately would
-        // let the GPU run one part while the host still encodes the next; on
-        // Dozen/NVIDIA that overlap makes `finish` about 3x slower and the host
-        // never gets ahead again (LEARNINGS, "Chunked submits make `finish` 3x
-        // slower").
-        let chunk_iterations = bulk_count.div_ceil(FINISH_THREADS).max(1);
-        let mut finished_elsewhere: Vec<CommandEncoder> = Vec::with_capacity(FINISH_THREADS as usize);
-        for bulk_index in 0..bulk_count {
-            if bulk_index > 0 && bulk_index % chunk_iterations == 0 {
-                let next = p.device.create_command_encoder(&CommandEncoderDescriptor {
-                    label: Some("gpu_evolver_batch"),
-                });
-                finished_elsewhere.push(std::mem::replace(&mut encoder, next));
-            }
-            {
-                let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                    label: Some("mutate_bin_rasterize"),
-                    timestamp_writes: bulk_timestamp_writes.take(),
-                });
-                pass.set_pipeline(p.mutate_pipeline());
-                pass.set_bind_group(0, &p.mutate_bind_group, &[]);
-                pass.set_bind_group(1, &p.params_bind_group, &[]);
-                pass.dispatch_workgroups(active, mutate_dispatch_y, 1);
-
-                pass.set_pipeline(p.bin_polygons_pipeline());
-                pass.set_bind_group(0, &p.bin_polygons_bind_group, &[]);
-                pass.set_bind_group(1, &p.params_bind_group, &[]);
-                pass.dispatch_workgroups(offspring, BIN_ROW_BANDS, 1);
-
-                pass.set_bind_group(1, &p.params_bind_group, &[]);
-                p.record_raster(&mut pass, [wg_x, wg_y], offspring);
-            }
-            {
-                let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                    label: Some("select_update"),
-                    timestamp_writes: None,
-                });
-                pass.set_pipeline(p.select_pipeline());
-                pass.set_bind_group(0, &p.select_bind_group, &[]);
-                pass.set_bind_group(1, &p.params_bind_group, &[]);
-                pass.dispatch_workgroups(active, 1, 1);
-
-                pass.set_pipeline(p.update_framebuffers_pipeline());
-                pass.set_bind_group(0, &p.update_framebuffers_bind_group, &[]);
-                pass.set_bind_group(1, &p.params_bind_group, &[]);
-                pass.dispatch_workgroups(wg_x, wg_y, active);
-            }
-        }
-
-        // Last iteration with timestamps: separate passes for per-stage profiling.
-        if collect_timestamps {
-            let qs = &p.timestamp_query_set;
-
-            {
-                let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                    label: Some("mutate"),
-                    timestamp_writes: Some(ComputePassTimestampWrites {
-                        query_set: qs,
-                        beginning_of_pass_write_index: Some(0),
-                        end_of_pass_write_index: Some(1),
-                    }),
-                });
-                pass.set_pipeline(p.mutate_pipeline());
-                pass.set_bind_group(0, &p.mutate_bind_group, &[]);
-                pass.set_bind_group(1, &p.params_bind_group, &[]);
-                pass.dispatch_workgroups(active, mutate_dispatch_y, 1);
-            }
-
-            {
-                let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                    label: Some("bin_polygons"),
-                    timestamp_writes: Some(ComputePassTimestampWrites {
-                        query_set: qs,
-                        beginning_of_pass_write_index: Some(2),
-                        end_of_pass_write_index: Some(3),
-                    }),
-                });
-                pass.set_pipeline(p.bin_polygons_pipeline());
-                pass.set_bind_group(0, &p.bin_polygons_bind_group, &[]);
-                pass.set_bind_group(1, &p.params_bind_group, &[]);
-                pass.dispatch_workgroups(offspring, BIN_ROW_BANDS, 1);
-            }
-
-            {
-                let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                    label: Some("rasterize_error"),
-                    timestamp_writes: Some(ComputePassTimestampWrites {
-                        query_set: qs,
-                        beginning_of_pass_write_index: Some(4),
-                        end_of_pass_write_index: Some(5),
-                    }),
-                });
-                pass.set_bind_group(1, &p.params_bind_group, &[]);
-                p.record_raster(&mut pass, [wg_x, wg_y], offspring);
-            }
-
-            {
-                let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                    label: Some("select"),
-                    timestamp_writes: Some(ComputePassTimestampWrites {
-                        query_set: qs,
-                        beginning_of_pass_write_index: if batch_envelope { None } else { Some(6) },
-                        end_of_pass_write_index: Some(7),
-                    }),
-                });
-                pass.set_pipeline(p.select_pipeline());
-                pass.set_bind_group(0, &p.select_bind_group, &[]);
-                pass.set_bind_group(1, &p.params_bind_group, &[]);
-                pass.dispatch_workgroups(active, 1, 1);
-
-                // Update framebuffers in same pass (timestamps cover both)
-                pass.set_pipeline(p.update_framebuffers_pipeline());
-                pass.set_bind_group(0, &p.update_framebuffers_bind_group, &[]);
-                pass.set_bind_group(1, &p.params_bind_group, &[]);
-                pass.dispatch_workgroups(wg_x, wg_y, active);
-            }
-        }
-
-        // 4. Resolve timestamp queries into resolve buffer, then copy to staging[write_idx]
-        if collect_timestamps {
-            encoder.resolve_query_set(&p.timestamp_query_set, 0..8, &p.timestamp_resolve_buf, 0);
+        let mut commands = schedule::record_batch(p, &work, timestamps);
+        let encoder = commands.last();
+        if timestamps.collected() {
+            let size = p.timestamp_resolve_buf.size();
             encoder.copy_buffer_to_buffer(
-                &p.timestamp_resolve_buf,
-                0,
-                &p.timestamp_staging_bufs[write_idx],
-                0,
-                8 * 8,
-            );
+                &p.timestamp_resolve_buf, 0, &p.timestamp_staging_bufs[write_idx], 0, size);
         }
-
-        // Copy control flags to staging[write_idx] for readback
+        let control_size = std::mem::size_of::<ControlFlags>() as u64;
         encoder.copy_buffer_to_buffer(
-            &p.control_flags_buf,
-            0,
-            &p.control_staging_bufs[write_idx],
-            0,
-            std::mem::size_of::<ControlFlags>() as u64,
-        );
-
-        // Copy fitness_packed to staging[write_idx] for readback (only active chains)
-        let fitness_size = (active as u64) * 4;
+            &p.control_flags_buf, 0, &p.control_staging_bufs[write_idx], 0, control_size);
+        let fitness_size = u64::from(active) * 4;
         encoder.copy_buffer_to_buffer(
-            &p.fitness_packed_buf,
-            0,
-            &p.fitness_staging_bufs[write_idx],
-            0,
-            fitness_size,
-        );
+            &p.fitness_packed_buf, 0, &p.fitness_staging_bufs[write_idx], 0, fitness_size);
+        // A best chain reported by an earlier batch is copied here, instead of
+        // in a separate synchronous round-trip.
+        let copied_drawing = self.readback.encode_best_copy(p, encoder, write_idx);
 
-        // Piggyback deferred best-chain readback: if a previous batch detected a
-        // new global best, copy that chain's state to this slot's readback staging
-        // instead of doing a separate synchronous GPU round-trip.
-        let copied_drawing = self.readback.encode_best_copy(p, &mut encoder, write_idx);
+        // One submit for the whole batch; see `BatchCommands::finish`.
+        let submission_index = p.queue.submit(commands.finish());
 
-        // 5. Submit — GPU starts working on this batch IMMEDIATELY
-        let command_buffers = finish_in_parallel(finished_elsewhere, encoder);
-        let submission_index = p.queue.submit(command_buffers);
-
-        self.iteration += iterations;
-        let evaluations = work.evaluations;
-        self.total_evaluations += evaluations;
+        self.iteration += work.iterations;
+        self.total_evaluations += work.evaluations;
 
         // Collect the previous batch only after this submission. The readback
         // owner then registers this batch's maps and keeps their metadata together.
@@ -458,12 +264,12 @@ impl GpuEvolver {
             p,
             SubmittedBatch {
                 staging_idx: write_idx,
-                collect_timestamps,
-                batch_envelope,
+                collect_timestamps: timestamps.collected(),
+                batch_envelope: timestamps.envelope(),
                 active_chain_count: active,
                 submission_index,
-                iterations,
-                evaluations,
+                iterations: work.iterations,
+                evaluations: work.evaluations,
             },
             copied_drawing,
         )
@@ -592,85 +398,7 @@ impl GpuEvolver {
         self.active_chain_count = active;
 
         let state_size = GPU_DRAWING_STATE_SIZE as u64;
-        let copy_bytes = active as u64 * state_size;
-
-        // Zero error accumulators for the active chains (stride-2)
-        let zeros = vec![0u8; active as usize * 8];
-        p.queue.write_buffer(&p.error_accumulators_buf, 0, &zeros);
-
-        // Submit 1: copy chain_states → working_states
-        // (must be a separate submit so the write_buffer calls below land AFTER the copy)
-        {
-            let mut copy_enc = p.device.create_command_encoder(&CommandEncoderDescriptor {
-                label: Some("evaluate_fitness_copy"),
-            });
-            copy_enc.copy_buffer_to_buffer(
-                &p.chain_states_buf, 0,
-                &p.working_states_buf, 0,
-                copy_bytes,
-            );
-            p.queue.submit(std::iter::once(copy_enc.finish()));
-        }
-
-        // The copies keep the parents' header words, where offspring keep
-        // their change record; replace it so binning and raster cover every
-        // pixel. This evaluation also re-derives each chain's cached baseline,
-        // so the chain records start unknown too.
-        p.mark_full_evaluation(active);
-        p.forget_chain_changes();
-
-        // Submit 2: bin polygons + rasterize_error
-        let rwg = p.rasterize_wg();
-        let grid = p.raster_grid(rwg);
-        let (wg_x, wg_y) = (grid.x, grid.y);
-
-        let params = default_gpu_params(p.image_width, p.image_height, active);
-        let params_bytes: &[u8] = bytemuck::bytes_of(&params);
-        p.queue.write_buffer(&p.params_buf, 0, params_bytes);
-
-        // A previous evaluation may have left entries; batches empty the list
-        // in update_framebuffers, which this path does not run.
-        p.reset_raster_work();
-        let mut encoder = p.device.create_command_encoder(&CommandEncoderDescriptor {
-            label: Some("evaluate_fitness"),
-        });
-        {
-            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                label: Some("evaluate_fitness"),
-                timestamp_writes: None,
-            });
-
-            // Bin polygons first (tile culling is always on)
-            pass.set_pipeline(p.bin_polygons_pipeline());
-            pass.set_bind_group(0, &p.bin_polygons_bind_group, &[]);
-            pass.set_bind_group(1, &p.params_bind_group, &[]);
-            pass.dispatch_workgroups(active, BIN_ROW_BANDS, 1);
-
-            pass.set_bind_group(1, &p.params_bind_group, &[]);
-            p.record_raster(&mut pass, [wg_x, wg_y], active);
-        }
-
-        // Use persistent staging buffer: errors (active * 8 bytes, stride-2) + polygon_counts (active * 4 bytes)
-        let errors_size = active as u64 * 8; // stride-2: 2 u32s per offspring
-        let staging_copy_size = errors_size + active as u64 * 4;
-        encoder.copy_buffer_to_buffer(
-            &p.error_accumulators_buf, 0,
-            &p.eval_fitness_staging_buf, 0,
-            errors_size,
-        );
-        // Copy polygon_count (first u32) from each chain's working_states
-        for i in 0..active {
-            encoder.copy_buffer_to_buffer(
-                &p.working_states_buf,
-                i as u64 * state_size,
-                &p.eval_fitness_staging_buf,
-                errors_size + i as u64 * 4,
-                4,
-            );
-        }
-
-        let si = p.queue.submit(std::iter::once(encoder.finish()));
-        p.reset_raster_work();
+        let (si, staging_copy_size) = submit_full_evaluation(p, active);
 
         // Map and read error values + polygon counts
         let slice = p.eval_fitness_staging_buf.slice(..staging_copy_size);
@@ -837,6 +565,57 @@ impl Drop for GpuEvolver {
     }
 }
 
+/// Evaluate parents `0..active` in full and stage their errors (stride 2) and
+/// polygon counts in `eval_fitness_staging_buf`. Returns the submission and
+/// the staged byte count. Leaves the raster worklist empty for the next batch.
+fn submit_full_evaluation(p: &GpuPipeline, active: u32) -> (SubmissionIndex, u64) {
+    let state_size = GPU_DRAWING_STATE_SIZE as u64;
+    let copy_bytes = u64::from(active) * state_size;
+
+    // Zero error accumulators for the active chains (stride-2)
+    let zeros = vec![0u8; active as usize * 8];
+    p.queue.write_buffer(&p.error_accumulators_buf, 0, &zeros);
+
+    // Submit 1: copy chain_states → working_states
+    // (must be a separate submit so the write_buffer calls below land AFTER the copy)
+    let mut copy_enc = p.device.create_command_encoder(&CommandEncoderDescriptor {
+        label: Some("evaluate_fitness_copy"),
+    });
+    copy_enc.copy_buffer_to_buffer(&p.chain_states_buf, 0, &p.working_states_buf, 0, copy_bytes);
+    p.queue.submit(std::iter::once(copy_enc.finish()));
+
+    // The copies keep the parents' header words, where offspring keep
+    // their change record; replace it so binning and raster cover every
+    // pixel. This evaluation also re-derives each chain's cached baseline,
+    // so the chain records start unknown too.
+    p.mark_full_evaluation(active);
+    p.forget_chain_changes();
+
+    // Submit 2: bin polygons + rasterize_error
+    let params = default_gpu_params(p.image_width, p.image_height, active);
+    p.queue.write_buffer(&p.params_buf, 0, bytemuck::bytes_of(&params));
+
+    // A previous evaluation may have left entries; batches empty the list
+    // in update_framebuffers, which this path does not run.
+    p.reset_raster_work();
+    let mut encoder = p.device.create_command_encoder(&CommandEncoderDescriptor {
+        label: Some("evaluate_fitness"),
+    });
+    schedule::record_full_evaluation(p, &mut encoder, active);
+
+    let errors_size = u64::from(active) * 8; // stride-2: 2 u32s per offspring
+    encoder.copy_buffer_to_buffer(&p.error_accumulators_buf, 0, &p.eval_fitness_staging_buf, 0, errors_size);
+    // Copy polygon_count (first u32) from each chain's working_states
+    for i in 0..u64::from(active) {
+        encoder.copy_buffer_to_buffer(
+            &p.working_states_buf, i * state_size, &p.eval_fitness_staging_buf, errors_size + i * 4, 4);
+    }
+
+    let submission = p.queue.submit(std::iter::once(encoder.finish()));
+    p.reset_raster_work();
+    (submission, errors_size + u64::from(active) * 4)
+}
+
 /// Sum actual allocated GPU buffer sizes.
 fn gpu_memory_bytes(p: &GpuPipeline) -> u64 {
     p.chain_states_buf.size()
@@ -888,25 +667,4 @@ fn init_offspring_rng(pipeline: &GpuPipeline, iteration: u32) {
         .flat_map(|s| bytemuck::bytes_of(s).to_vec())
         .collect();
     pipeline.queue.write_buffer(&pipeline.working_states_buf, 0, &bytes);
-}
-
-/// Command buffers one batch is split into; each but the last is finished on
-/// its own scoped thread.
-const FINISH_THREADS: u32 = 4;
-
-/// Finish `others` on scoped threads and `last` on this one, preserving order.
-fn finish_in_parallel(others: Vec<CommandEncoder>, last: CommandEncoder) -> Vec<CommandBuffer> {
-    std::thread::scope(|scope| {
-        let handles: Vec<_> = others
-            .into_iter()
-            .map(|encoder| scope.spawn(move || encoder.finish()))
-            .collect();
-        let last = last.finish();
-        let mut buffers: Vec<CommandBuffer> = handles
-            .into_iter()
-            .map(|handle| handle.join().expect("command encoder finish panicked"))
-            .collect();
-        buffers.push(last);
-        buffers
-    })
 }

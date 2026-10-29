@@ -219,7 +219,7 @@ qualified revision. See [the retained reproducer and result](../benchmarks/evolu
 **Context**: Many trials in one `evolution-bench serve` process.
 **Gotcha**: ff throughput falls ~7% over 12 trials (357k to 332k evals/s) while
 GPU kernel time, drain, replay hash and work stay constant. The time is in
-`encoder.finish()` (`src/gpu_evolver/mod.rs` `run_batch_inner`): 13 ms to 21 ms per
+`encoder.finish()` (`src/gpu_evolver/schedule.rs` `BatchCommands::finish`): 13 ms to 21 ms per
 batch, plateauing near 22 ms after ~4000 batches. `perf` puts it in a linked-list
 walk inside NVIDIA's D3D12 user-mode driver (`libnvwgf2umx.so`): constant
 instructions, ~1.8x cache and ~6x dTLB misses. RSS, mappings, fds, extra buffers,

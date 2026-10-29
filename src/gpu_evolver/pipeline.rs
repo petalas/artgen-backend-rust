@@ -953,7 +953,7 @@ impl GpuPipeline {
     /// (the host fell behind; see LEARNINGS). Raster variants that do not read
     /// the list keep the full grid. The pass must already have the params bind
     /// group at 1.
-    pub fn record_raster(&self, pass: &mut ComputePass<'_>, grid: [u32; 2], offspring: u32) {
+    pub(super) fn record_raster(&self, pass: &mut ComputePass<'_>, grid: [u32; 2], offspring: u32) {
         let tiles = self.programs.tiles();
         if let RasterSchedule::ListedByPass { pipeline, bind_group } = &tiles.schedule {
             pass.set_pipeline(pipeline);

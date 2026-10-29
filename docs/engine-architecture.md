@@ -85,6 +85,27 @@ Bundled programs, historical programs and diagnostic binners are existing reason
 for the installation seam. A generic cache abstraction or another GPU adapter
 would add no needed variation.
 
+## Stage schedule
+
+`gpu_evolver::schedule` records the stages; no other engine code begins a
+compute pass. Raster's dispatches come from `GpuPipeline::record_raster`, which
+matches on the installed `RasterSchedule`. `record_batch` records a batch of search
+iterations (mutate, bin, raster, select, `update_framebuffers`), each as two
+compute passes, mutate+bin+raster and select+update: the pass boundaries are the
+error-sum barriers, since wgpu inserts none for RW→RW use inside a pass. A timed
+batch records its final iteration as four passes with per-stage query pairs and
+resolves the queries; `BatchTimestamps` names the three timing modes.
+`record_full_evaluation` records bin and raster only, in one pass;
+`record_framebuffer_init` the initial full rasterization. The module records
+commands only. Callers upload params, do the host part of skipped stages
+(`mark_full_evaluation`, `reset_raster_work`), append readback copies to
+`BatchCommands::last` and submit.
+
+The split of a batch into `FINISH_THREADS` encoders lives here because its
+boundaries fall between iterations. `BatchCommands::finish` finishes them in
+parallel; the caller makes the single submit, so the submit policy (one submit
+per batch, LEARNINGS "Chunked submits") stays visible at the call site.
+
 ## Change records
 
 A change record says which polygons an evaluated drawing changed relative to
@@ -127,7 +148,8 @@ slot, queued winning chain and collected observations. The optional drawing map
 is the authority for whether that batch contains a drawing copy. Batch metadata
 and receivers can no longer be detached or paired with a separate deferred flag.
 
-`GpuEvolver` retains command recording. Each staging slot has its own drawing
+`GpuEvolver` retains the batch's readback copies, appended after the
+recorded iterations. Each staging slot has its own drawing
 staging buffer, so the new submission always precedes prior collection, and map
 registration follows collection. A winning chain reported by batch N-1 is copied
 at the end of batch N+1, because batch N is encoded before N-1 is collected. The
@@ -191,10 +213,11 @@ comparisons, their limits and the separate longer ff check.
 - Rule 3. Wgpu command encoding, map callbacks and returned drawings allocate
   during ordinary batches. The refactor introduces no new heap allocation in
   that path. Existing chain, offspring, image and batch limits bound live work.
-- Rule 4. The existing pipeline constructor and command-recording function exceed
-  one page. Their cohesive allocation order and synchronization are preserved;
-  capacity arithmetic moves out without splitting the GPU command schedule.
-  Subsequent ownership changes must keep those synchronization decisions local.
+- Rule 4. The existing pipeline constructor exceeds one page; its cohesive
+  allocation order is preserved. Command recording moved to `schedule`, where
+  the pass boundaries and submit split stay together; `run_batch_inner` (~75
+  lines with its readback copies) and `evaluate_chain_fitness` (~70) remain
+  slightly over the guide.
 - Rules 8 and 9. Existing serde/bytemuck derives and wgpu map callbacks remain.
   Callbacks target one pending operation and existing fixed staging storage.
 - Rule 10. Run all/pedantic Clippy and retain its output. Existing warnings outside
