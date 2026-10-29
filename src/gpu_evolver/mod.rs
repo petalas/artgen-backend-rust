@@ -316,10 +316,8 @@ impl GpuEvolver {
                 pass.set_bind_group(1, &p.params_bind_group, &[]);
                 pass.dispatch_workgroups(offspring, BIN_ROW_BANDS, 1);
 
-                pass.set_pipeline(p.rasterize_error_pipeline());
-                pass.set_bind_group(0, &p.rasterize_error_bind_group, &[]);
                 pass.set_bind_group(1, &p.params_bind_group, &[]);
-                pass.dispatch_workgroups(wg_x, wg_y, offspring);
+                p.record_raster(&mut pass, [wg_x, wg_y], offspring);
             }
             {
                 let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
@@ -381,10 +379,8 @@ impl GpuEvolver {
                         end_of_pass_write_index: Some(5),
                     }),
                 });
-                pass.set_pipeline(p.rasterize_error_pipeline());
-                pass.set_bind_group(0, &p.rasterize_error_bind_group, &[]);
                 pass.set_bind_group(1, &p.params_bind_group, &[]);
-                pass.dispatch_workgroups(wg_x, wg_y, offspring);
+                p.record_raster(&mut pass, [wg_x, wg_y], offspring);
             }
 
             {
@@ -639,6 +635,9 @@ impl GpuEvolver {
         let params_bytes: &[u8] = bytemuck::bytes_of(&params);
         p.queue.write_buffer(&p.params_buf, 0, params_bytes);
 
+        // A previous evaluation may have left entries; batches empty the list
+        // in update_framebuffers, which this path does not run.
+        p.reset_raster_work();
         let mut encoder = p.device.create_command_encoder(&CommandEncoderDescriptor {
             label: Some("evaluate_fitness"),
         });
@@ -654,10 +653,8 @@ impl GpuEvolver {
             pass.set_bind_group(1, &p.params_bind_group, &[]);
             pass.dispatch_workgroups(active, BIN_ROW_BANDS, 1);
 
-            pass.set_pipeline(p.rasterize_error_pipeline());
-            pass.set_bind_group(0, &p.rasterize_error_bind_group, &[]);
             pass.set_bind_group(1, &p.params_bind_group, &[]);
-            pass.dispatch_workgroups(wg_x, wg_y, active);
+            p.record_raster(&mut pass, [wg_x, wg_y], active);
         }
 
         // Use persistent staging buffer: errors (active * 8 bytes, stride-2) + polygon_counts (active * 4 bytes)
@@ -680,6 +677,7 @@ impl GpuEvolver {
         }
 
         let si = p.queue.submit(std::iter::once(encoder.finish()));
+        p.reset_raster_work();
 
         // Map and read error values + polygon counts
         let slice = p.eval_fitness_staging_buf.slice(..staging_copy_size);

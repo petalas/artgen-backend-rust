@@ -121,6 +121,9 @@ fn pack_fb_pixel(r: f32, g: f32, b: f32) -> u32 {
 @group(0) @binding(2) var<storage, read>       chain_update_flags: array<u32>;
 @group(0) @binding(3) var<storage, read>       tile_data:          array<u32>;
 @group(0) @binding(4) var<storage, read>       tile_counts:        array<u32>;
+// raster_worklist.wgsl's entry count is word 0. This is the last stage of an
+// iteration, so it empties the list for the next one.
+@group(0) @binding(5) var<storage, read_write> raster_work:        array<u32>;
 @group(1) @binding(0) var<uniform>             params:             Params;
 
 // Shared memory: acceptance flag + dirty bbox (read by thread 0, broadcast to workgroup)
@@ -206,6 +209,10 @@ fn main(
     @builtin(workgroup_id) wid: vec3<u32>,
     @builtin(local_invocation_index) local_idx: u32,
 ) {
+    if all(wid == vec3<u32>(0u)) && local_idx == 0u {
+        raster_work[0] = 0u;
+    }
+
     let chain_id = wid.z;
     let chain_count = arrayLength(&chain_states);
     if chain_id >= chain_count {

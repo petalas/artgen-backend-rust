@@ -257,3 +257,19 @@ the engine records each batch as 4 buffers, finishes them on scoped threads
 (`finish` 11 ms to ~4.5 ms per ff batch; recording before `finish` costs only
 0.05 ms) and submits them together. The host then waits ~6.5 ms per batch on
 readback instead of ~0.2 ms; gpu% 85–89% to 99% at 512 batches.
+
+### Indirect dispatch is slow on Dozen; use a fixed grid over a worklist
+
+**Context**: Raster launched 73.7k workgroups per iteration (32x16 tiles x 256
+offspring) and 91–93% exited at the top. A worklist pass listed the tiles with
+work and raster ran `dispatch_workgroups_indirect` sized to the list.
+**Gotcha**: Results were replay-identical, but throughput fell to 0.17x (ff 1.18M
+to 0.19M evals/s) with GPU share 14–17%. The kernels were faster; the host was
+the bottleneck, so the cost sits in Dozen's indirect-dispatch path, not on the
+GPU. Disabling wgpu's `VALIDATION_INDIRECT_CALL` in the same build did not help.
+**Fix**: Dispatch a fixed `(8192, 1, 1)` raster grid. Each workgroup loops over
+worklist entries `g, g + 8192, ...` up to the GPU-written count; extra workgroups
+exit at the loop test. 2048, 4096 and 16384 groups measured 1.112, 1.137 and
+1.148 against 8192's 1.149. Build the list in an existing dispatch: as a sixth
+dispatch per iteration it gave 1.11 at 64 batches but 0.94 at 512 (GPU share
+66–79%, host-bound). Folding it into bin_polygons gave 1.13 and 1.00.

@@ -37,6 +37,8 @@ pub struct GpuPipeline {
     // Tile culling buffers
     pub tile_data_buf: Buffer,
     pub tile_counts_buf: Buffer,
+    // The (offspring, tile) pairs that need raster, after an entry count.
+    pub raster_work_buf: Buffer,
 
     // Incremental evaluation buffers
     pub chain_framebuffers_buf: Buffer,
@@ -53,6 +55,7 @@ pub struct GpuPipeline {
     // Bind groups
     pub mutate_bind_group: BindGroup,
     pub rasterize_error_bind_group: BindGroup,
+    raster_worklist_bind_group: BindGroup,
     pub select_bind_group: BindGroup,
     pub bin_polygons_bind_group: BindGroup,
     pub init_framebuffers_bind_group: BindGroup,
@@ -317,6 +320,14 @@ impl GpuPipeline {
             mapped_at_creation: false,
         });
 
+        // Zero-initialized: an empty list.
+        let raster_work_buf = device.create_buffer(&BufferDescriptor {
+            label: Some("raster_work"),
+            size: resources.raster_work,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         println!(
             "Tile culling buffers allocated: tile_data {:.1} MB, tile_counts {:.1} MB (max {} tiles, {} offspring)",
             tile_data_buf_size as f64 / (1024.0 * 1024.0),
@@ -492,10 +503,24 @@ impl GpuPipeline {
                     },
                     count: None,
                 },
+                storage_entry(7, true, 4),
             ],
         });
 
-        // Bin polygons: working_states(read), tile_data(rw), tile_counts(rw); params via push constants
+        // Raster worklist: working_states(read), chain_states(read), tile_counts(read),
+        //                  raster_work(rw)
+        let raster_worklist_bgl = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("raster_worklist_bgl"),
+            entries: &[
+                storage_entry(0, true, GPU_DRAWING_STATE_SIZE as u64),
+                storage_entry(1, true, GPU_DRAWING_STATE_SIZE as u64),
+                storage_entry(2, true, 4),
+                storage_entry(3, false, 4),
+            ],
+        });
+
+        // Bin polygons: working_states(read), tile_data(rw), tile_counts(rw),
+        //               chain_states(read), raster_work(rw); params via push constants
         let bin_polygons_bgl = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some("bin_polygons_bgl"),
             entries: &[
@@ -529,6 +554,8 @@ impl GpuPipeline {
                     },
                     count: None,
                 },
+                storage_entry(3, true, GPU_DRAWING_STATE_SIZE as u64),
+                storage_entry(4, false, 4),
             ],
         });
 
@@ -742,6 +769,7 @@ impl GpuPipeline {
                     },
                     count: None,
                 },
+                storage_entry(5, false, 4),
             ],
         });
         let programs = GpuPrograms::new(
@@ -751,6 +779,7 @@ impl GpuPipeline {
                 params: &params_bgl,
                 mutate: &mutate_bgl,
                 raster: &rasterize_error_bgl,
+                worklist: &raster_worklist_bgl,
                 bin: &bin_polygons_bgl,
                 select: &select_bgl,
                 init: &init_framebuffers_bgl,
@@ -780,6 +809,18 @@ impl GpuPipeline {
                 BindGroupEntry { binding: 4, resource: tile_counts_buf.as_entire_binding() },
                 BindGroupEntry { binding: 5, resource: chain_states_buf.as_entire_binding() },
                 BindGroupEntry { binding: 6, resource: chain_framebuffers_buf.as_entire_binding() },
+                BindGroupEntry { binding: 7, resource: raster_work_buf.as_entire_binding() },
+            ],
+        });
+
+        let raster_worklist_bind_group = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("raster_worklist_bg"),
+            layout: &raster_worklist_bgl,
+            entries: &[
+                BindGroupEntry { binding: 0, resource: working_states_buf.as_entire_binding() },
+                BindGroupEntry { binding: 1, resource: chain_states_buf.as_entire_binding() },
+                BindGroupEntry { binding: 2, resource: tile_counts_buf.as_entire_binding() },
+                BindGroupEntry { binding: 3, resource: raster_work_buf.as_entire_binding() },
             ],
         });
 
@@ -790,6 +831,8 @@ impl GpuPipeline {
                 BindGroupEntry { binding: 0, resource: working_states_buf.as_entire_binding() },
                 BindGroupEntry { binding: 1, resource: tile_data_buf.as_entire_binding() },
                 BindGroupEntry { binding: 2, resource: tile_counts_buf.as_entire_binding() },
+                BindGroupEntry { binding: 3, resource: chain_states_buf.as_entire_binding() },
+                BindGroupEntry { binding: 4, resource: raster_work_buf.as_entire_binding() },
             ],
         });
 
@@ -816,6 +859,7 @@ impl GpuPipeline {
                 BindGroupEntry { binding: 2, resource: chain_update_flags_buf.as_entire_binding() },
                 BindGroupEntry { binding: 3, resource: tile_data_buf.as_entire_binding() },
                 BindGroupEntry { binding: 4, resource: tile_counts_buf.as_entire_binding() },
+                BindGroupEntry { binding: 5, resource: raster_work_buf.as_entire_binding() },
             ],
         });
 
@@ -847,6 +891,7 @@ impl GpuPipeline {
             fitness_staging_bufs,
             tile_data_buf,
             tile_counts_buf,
+            raster_work_buf,
             chain_framebuffers_buf,
             chain_total_errors_buf,
             chain_update_flags_buf,
@@ -859,6 +904,7 @@ impl GpuPipeline {
             params_bind_group,
             mutate_bind_group,
             rasterize_error_bind_group,
+            raster_worklist_bind_group,
             select_bind_group,
             bin_polygons_bind_group,
             init_framebuffers_bind_group,
@@ -883,7 +929,8 @@ impl GpuPipeline {
         ResourceSizes {
             parents: self.chain_states_buf.size(), working: self.working_states_buf.size(),
             errors: self.error_accumulators_buf.size(), tile_data: self.tile_data_buf.size(),
-            tile_counts: self.tile_counts_buf.size(), framebuffers: self.chain_framebuffers_buf.size(),
+            tile_counts: self.tile_counts_buf.size(), raster_work: self.raster_work_buf.size(),
+            framebuffers: self.chain_framebuffers_buf.size(),
             parent_errors: self.chain_total_errors_buf.size(), updates: self.chain_update_flags_buf.size(),
             fitness: self.fitness_packed_buf.size(),
         }
@@ -899,6 +946,42 @@ impl GpuPipeline {
     #[must_use]
     pub fn rasterize_error_pipeline(&self) -> &ComputePipeline {
         &self.programs.tiles().raster.pipeline
+    }
+
+    /// Record raster/error for `offspring` offspring over `grid` tiles.
+    ///
+    /// The bundled raster program runs a fixed number of raster workgroups
+    /// that share the (offspring, tile) pairs listed by the bundled binner, or
+    /// by a separate worklist pass after a benchmark binner that lists none.
+    /// An indirect dispatch sized to the list cut throughput about 6x on Dozen
+    /// (the host fell behind; see LEARNINGS). Benchmark raster sources without
+    /// the worklist binding keep
+    /// the full grid. The pass must already have the params bind group at 1.
+    pub fn record_raster(&self, pass: &mut ComputePass<'_>, grid: [u32; 2], offspring: u32) {
+        let tiles = self.programs.tiles();
+        if tiles.raster.worklist {
+            if !tiles.bin.worklist {
+                pass.set_pipeline(&tiles.worklist_pipeline);
+                pass.set_bind_group(0, &self.raster_worklist_bind_group, &[]);
+                pass.dispatch_workgroups(offspring, 1, 1);
+            }
+            pass.set_pipeline(&tiles.raster.pipeline);
+            pass.set_bind_group(0, &self.rasterize_error_bind_group, &[]);
+            let pairs = u64::from(grid[0]) * u64::from(grid[1]) * u64::from(offspring);
+            let groups = u32::try_from(pairs.min(u64::from(RASTER_WORKGROUPS)))
+                .expect("raster workgroups fit u32");
+            pass.dispatch_workgroups(groups, 1, 1);
+        } else {
+            pass.set_pipeline(&tiles.raster.pipeline);
+            pass.set_bind_group(0, &self.rasterize_error_bind_group, &[]);
+            pass.dispatch_workgroups(grid[0], grid[1], offspring);
+        }
+    }
+
+    /// Empty the raster worklist outside the batch loop (update_framebuffers
+    /// empties it inside). Takes effect at the next submission.
+    pub fn reset_raster_work(&self) {
+        self.queue.write_buffer(&self.raster_work_buf, 0, &[0; 4]);
     }
 
     /// Installed selection handle.
@@ -975,5 +1058,22 @@ impl GpuPipeline {
     /// Save pipeline cache data to disk for faster startup next time.
     pub fn save_pipeline_cache(&self) {
         self.programs.save_pipeline_cache();
+    }
+}
+
+/// Raster workgroups sharing the worklist. About 6k pairs need raster per
+/// iteration on the v1 fixtures; extra workgroups exit at the loop test.
+const RASTER_WORKGROUPS: u32 = 8192;
+
+fn storage_entry(binding: u32, read_only: bool, min_size: u64) -> BindGroupLayoutEntry {
+    BindGroupLayoutEntry {
+        binding,
+        visibility: ShaderStages::COMPUTE,
+        ty: BindingType::Buffer {
+            ty: BufferBindingType::Storage { read_only },
+            has_dynamic_offset: false,
+            min_binding_size: NonZeroU64::new(min_size),
+        },
+        count: None,
     }
 }

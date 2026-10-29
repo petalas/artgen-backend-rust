@@ -5,7 +5,10 @@
 // bitmask per consumed tile column and row. A tile's list is its column mask AND
 // its row mask, walked in ascending polygon order as alpha blending requires.
 //
-// This shader runs between mutate and rasterize_error.
+// This shader runs between mutate and rasterize_error. It also appends the
+// band's consumed tiles that rasterize_error must run to raster_work (the
+// consumed-tile test is raster's dirty-rectangle test; the changed-polygon test
+// is below).
 
 struct Polygon {
     data: vec4<u32>,   // [color_packed, v0_packed, v1_packed, v2_packed] — 16 bytes
@@ -101,6 +104,8 @@ const TILE_MAX_POLYS: u32 = 256u;
 @group(0) @binding(0) var<storage, read>       working_states: array<DrawingState>;
 @group(0) @binding(1) var<storage, read_write> tile_data:      array<u32>;
 @group(0) @binding(2) var<storage, read_write> tile_counts:    array<atomic<u32>>;
+@group(0) @binding(3) var<storage, read>       chain_states:   array<DrawingState>;
+@group(0) @binding(4) var<storage, read_write> raster_work:    array<atomic<u32>>;
 @group(1) @binding(0) var<uniform>             params:         Params;
 
 // Shared scratch, 16,320 bytes, below the 16,352-byte downlevel limit.
@@ -151,11 +156,54 @@ fn line_consumed(coord: u32, is_row: bool, w: u32, h: u32, dirty_min: vec2<u32>,
     return tile_max > lo && tile_min < hi;
 }
 
+// --- Raster worklist (see raster_worklist.wgsl, which holds the same test for
+// binning sources that do not build the list) ---
+// Must match rasterize_error.wgsl and raster_worklist.wgsl.
+const CHANGED_INDICES: u32 = 4u;
+const COVER_MARGIN: f32 = 1e-5;
+const WORK_COUNT: u32 = 0u;
+const WORK_ENTRIES: u32 = 1u;
+
+fn changed_may_meet_tile(poly: Polygon, lo: vec2<f32>, hi: vec2<f32>) -> bool {
+    let pv0 = unpack_vertex(poly.data.y);
+    let pv1 = unpack_vertex(poly.data.z);
+    let pv2 = unpack_vertex(poly.data.w);
+    let bb_min_x = min(pv0.x, min(pv1.x, pv2.x));
+    let bb_max_x = max(pv0.x, max(pv1.x, pv2.x));
+    let bb_min_y = min(pv0.y, min(pv1.y, pv2.y));
+    let bb_max_y = max(pv0.y, max(pv1.y, pv2.y));
+    return hi.x >= bb_min_x - COVER_MARGIN && lo.x <= bb_max_x + COVER_MARGIN &&
+           hi.y >= bb_min_y - COVER_MARGIN && lo.y <= bb_max_y + COVER_MARGIN;
+}
+
+fn changed_meets_tile(
+    changed: vec2<u32>, parent_chain: u32, chain_id: u32, lo: vec2<f32>, hi: vec2<f32>,
+) -> bool {
+    let parent_count = chain_states[parent_chain].polygon_count;
+    let offspring_count = working_states[chain_id].polygon_count;
+    var meets = false;
+    for (var half = 0u; half < CHANGED_INDICES; half++) {
+        let word = select(changed.x, changed.y, half >= 2u);
+        let encoded = (word >> (16u * (half & 1u))) & 0xFFFFu;
+        if encoded != 0u {
+            let idx = encoded - 1u;
+            if idx < parent_count {
+                meets = meets || changed_may_meet_tile(chain_states[parent_chain].polygons[idx], lo, hi);
+            }
+            if idx < offspring_count {
+                meets = meets || changed_may_meet_tile(working_states[chain_id].polygons[idx], lo, hi);
+            }
+        }
+    }
+    return meets;
+}
+
 @compute @workgroup_size(512, 1, 1)
 fn main(
     @builtin(workgroup_id) wid: vec3<u32>,
     @builtin(num_workgroups) groups: vec3<u32>,
     @builtin(local_invocation_index) local_idx: u32,
+    @builtin(subgroup_invocation_id) sg_inv_id: u32,
 ) {
     let offspring_id = wid.x;
     let offspring_count = arrayLength(&working_states);
@@ -306,5 +354,53 @@ fn main(
         }
         // The next chunk overwrites bounds and masks.
         workgroupBarrier();
+    }
+
+    // Raster worklist. A consumed tile is skipped only when the shortcut is on
+    // and no changed version may meet it: rasterize_error used to return early
+    // there, adding nothing to the error sums. Final counts are read back after
+    // the storage barrier; the loop bound is uniform, so subgroup operations run
+    // with all lanes active.
+    storageBarrier();
+    let parent_chain = offspring_id / params.lambda;
+    let first = working_states[offspring_id].rng_state.y;
+    var second = 0u;
+    if first != 0u {
+        second = working_states[offspring_id].rng_state.z;
+    }
+    let listed = select(2u, CHANGED_INDICES, second != 0u);
+    let changed = vec2<u32>(first, second);
+    for (var round = 0u; round < band_tiles; round += 512u) {
+        let band_tile = round + local_idx;
+        var needed = false;
+        var entry = 0u;
+        if band_tile < band_tiles {
+            let tile_x = first_col + band_tile % cols;
+            let tile_y = first_row + band_tile / cols;
+            entry = offspring_id * num_tiles + tile_y * num_tiles_x + tile_x;
+            let raw_count = atomicLoad(&tile_counts[entry]);
+            needed = first == 0u || raw_count + listed > TILE_MAX_POLYS;
+            if !needed {
+                let tile_min_x = tile_x * TILE_W;
+                let tile_min_y = tile_y * TILE_H;
+                let tile_max_x = min(tile_min_x + TILE_W, w);
+                let tile_max_y = min(tile_min_y + TILE_H, h);
+                let tile_lo = vec2<f32>(f32(tile_min_x) / f32(w), f32(tile_min_y) / f32(h));
+                let tile_hi = vec2<f32>(f32(tile_max_x) / f32(w), f32(tile_max_y) / f32(h));
+                needed = changed_meets_tile(changed, parent_chain, offspring_id, tile_lo, tile_hi);
+            }
+        }
+        let flag = select(0u, 1u, needed);
+        let n = subgroupAdd(flag);
+        let prefix = subgroupExclusiveAdd(flag);
+        var base = 0u;
+        if sg_inv_id == 0u && n != 0u {
+            base = atomicAdd(&raster_work[WORK_COUNT], n);
+        }
+        base = subgroupBroadcastFirst(base);
+        let slot = WORK_ENTRIES + base + prefix;
+        if needed && slot < arrayLength(&raster_work) {
+            atomicStore(&raster_work[slot], entry);
+        }
     }
 }

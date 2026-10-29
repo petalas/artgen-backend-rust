@@ -104,6 +104,7 @@ pub(super) struct ProgramBindings<'a> {
     pub params: &'a BindGroupLayout,
     pub mutate: &'a BindGroupLayout,
     pub raster: &'a BindGroupLayout,
+    pub worklist: &'a BindGroupLayout,
     pub bin: &'a BindGroupLayout,
     pub select: &'a BindGroupLayout,
     pub init: &'a BindGroupLayout,
@@ -113,6 +114,7 @@ pub(super) struct ProgramBindings<'a> {
 struct ProgramLayouts {
     mutate: PipelineLayout,
     raster: PipelineLayout,
+    worklist: PipelineLayout,
     bin: PipelineLayout,
     select: PipelineLayout,
     init: PipelineLayout,
@@ -131,6 +133,7 @@ impl ProgramLayouts {
         Self {
             mutate: layout("mutate_layout", bindings.mutate),
             raster: layout("rasterize_error_layout", bindings.raster),
+            worklist: layout("raster_worklist_layout", bindings.worklist),
             bin: layout("bin_polygons_layout", bindings.bin),
             select: layout("select_layout", bindings.select),
             init: layout("init_framebuffers_layout", bindings.init),
@@ -182,11 +185,19 @@ impl ProgramCompiler {
                 pipeline,
                 shader,
                 source: None,
+                worklist: true,
             },
+            worklist_pipeline: create_raster_worklist_pipeline(
+                &self.device,
+                &self.layouts.worklist,
+                wg,
+                &self.cache,
+            ),
             bin: BinProgram {
                 pipeline: bin,
                 source: None,
                 validation: false,
+                worklist: true,
             },
             init_framebuffers_pipeline: create_init_framebuffers_pipeline(
                 &self.device,
@@ -223,12 +234,23 @@ pub(super) struct RasterProgram {
     pub pipeline: ComputePipeline,
     shader: ShaderModule,
     source: Option<Arc<str>>,
+    /// Consumes raster_worklist.wgsl's list instead of the full tile grid.
+    pub worklist: bool,
+}
+
+/// Whether a raster source reads the worklist, or a binning source writes it
+/// (bundled sources do). Older raster sources index tiles by workgroup id and
+/// need the full grid; older binning sources need the separate worklist pass.
+fn raster_source_uses_worklist(source: Option<&str>) -> bool {
+    source.is_none_or(|source| source.contains("raster_work"))
 }
 
 pub(super) struct BinProgram {
     pub pipeline: ComputePipeline,
     source: Option<Arc<str>>,
     pub validation: bool,
+    /// Appends rasterize_error's worklist (the bundled source does).
+    pub worklist: bool,
 }
 
 // A tile transition replaces this whole value only after every stage succeeds.
@@ -236,6 +258,7 @@ pub(super) struct BinProgram {
 pub(super) struct TilePrograms {
     pub wg: [u32; 2],
     pub raster: RasterProgram,
+    pub worklist_pipeline: ComputePipeline,
     pub bin: BinProgram,
     pub init_framebuffers_pipeline: ComputePipeline,
     pub update_framebuffers_pipeline: ComputePipeline,
@@ -325,6 +348,12 @@ impl GpuPrograms {
         Ok(TilePrograms {
             wg,
             raster,
+            worklist_pipeline: create_raster_worklist_pipeline(
+                &self.compiler.device,
+                &self.compiler.layouts.worklist,
+                wg,
+                &self.compiler.cache,
+            ),
             bin,
             init_framebuffers_pipeline: create_init_framebuffers_pipeline(
                 &self.compiler.device,
@@ -362,6 +391,7 @@ impl GpuPrograms {
         };
         Ok(BinProgram {
             pipeline,
+            worklist: raster_source_uses_worklist(bin_source.as_deref()),
             source: bin_source,
             validation,
         })
@@ -382,6 +412,7 @@ impl GpuPrograms {
         Ok(RasterProgram {
             pipeline,
             shader,
+            worklist: raster_source_uses_worklist(source.as_deref()),
             source,
         })
     }
@@ -444,6 +475,7 @@ impl GpuPrograms {
         self.tiles.raster = RasterProgram {
             pipeline,
             shader,
+            worklist: raster_source_uses_worklist(Some(&source)),
             source: Some(source),
         };
         Ok(())
@@ -527,6 +559,7 @@ impl GpuPrograms {
         )?;
         self.tiles.bin = BinProgram {
             pipeline,
+            worklist: raster_source_uses_worklist(Some(&source)),
             source: Some(source),
             validation: self.tiles.bin.validation,
         };
@@ -549,6 +582,7 @@ impl GpuPrograms {
             pipeline,
             source: self.tiles.bin.source.clone(),
             validation: enabled,
+            worklist: self.tiles.bin.worklist,
         };
         Ok(())
     }
@@ -834,6 +868,28 @@ fn create_rasterize_pipeline_from_source(
     });
 
     (pipeline, shader)
+}
+
+/// Create the raster worklist pipeline for the raster tile size.
+fn create_raster_worklist_pipeline(
+    device: &Device,
+    layout: &PipelineLayout,
+    wg: [u32; 2],
+    cache: &PipelineCache,
+) -> ComputePipeline {
+    let source = specialize_raster_source(include_str!("../shaders/raster_worklist.wgsl"), wg);
+    let shader = device.create_shader_module(ShaderModuleDescriptor {
+        label: Some("raster_worklist_shader"),
+        source: ShaderSource::Wgsl(source.into()),
+    });
+    device.create_compute_pipeline(&ComputePipelineDescriptor {
+        label: Some("raster_worklist_pipeline"),
+        layout: Some(layout),
+        module: &shader,
+        entry_point: Some("main"),
+        compilation_options: rasterize_compilation_options(device),
+        cache: Some(cache),
+    })
 }
 
 fn specialize_raster_source(source: &str, wg: [u32; 2]) -> String {

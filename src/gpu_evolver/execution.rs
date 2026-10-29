@@ -60,6 +60,9 @@ impl Workload {
     }
 }
 
+/// raster_worklist.wgsl's header: the entry count.
+pub(super) const RASTER_WORK_HEADER_BYTES: u64 = 4;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct ResourceSizes {
     pub parents: u64,
@@ -67,6 +70,7 @@ pub(super) struct ResourceSizes {
     pub errors: u64,
     pub tile_data: u64,
     pub tile_counts: u64,
+    pub raster_work: u64,
     pub framebuffers: u64,
     pub parent_errors: u64,
     pub updates: u64,
@@ -83,6 +87,8 @@ impl ResourceSizes {
             tile_data: offspring * grid.tiles() * u64::from(TILE_MAX_POLYS) * 4,
             // The final word retains diagnostic occupancy across every iteration.
             tile_counts: offspring * grid.tiles() * 4 + 4,
+            // The entry count, then one entry per (offspring, tile).
+            raster_work: RASTER_WORK_HEADER_BYTES + offspring * grid.tiles() * 4,
             framebuffers: chains * pixels * 4,
             parent_errors: chains * 4,
             updates: chains * 16,
@@ -90,13 +96,14 @@ impl ResourceSizes {
         }
     }
 
-    pub fn entries(self) -> [(&'static str, u64); 9] {
+    pub fn entries(self) -> [(&'static str, u64); 10] {
         [
             ("parent states", self.parents),
             ("working states", self.working),
             ("error accumulators", self.errors),
             ("tile data", self.tile_data),
             ("tile counts", self.tile_counts),
+            ("raster worklist", self.raster_work),
             ("parent framebuffers", self.framebuffers),
             ("parent errors", self.parent_errors),
             ("update flags", self.updates),
@@ -140,6 +147,7 @@ impl AllocationPlan {
                 .max((resources.tile_counts - 4).min(max_storage));
         resources.tile_data = resources.tile_data.min(max_buffer_size);
         resources.tile_counts = (resources.tile_counts - 4).min(max_buffer_size);
+        resources.raster_work = resources.raster_work.min(max_buffer_size);
         resources.framebuffers = resources.framebuffers.min(max_buffer_size);
         Self {
             chain_count: u32::try_from(chains).expect("chain count fits requested u32"),
@@ -163,6 +171,7 @@ mod tests {
         assert_eq!(plan.resources.framebuffers, 134_217_728);
         assert_eq!(plan.resources.tile_data, 134_217_728);
         assert_eq!(plan.resources.tile_counts, 77_147_136);
+        assert_eq!(plan.resources.raster_work, 77_147_140);
         let smaller = AllocationPlan::new(1, [17, 19], 128 * 1024 * 1024);
         assert_eq!(smaller.chain_count, 1);
         assert_eq!(smaller.offspring_capacity, 64);
@@ -211,6 +220,10 @@ mod tests {
             },
             ResourceSizes {
                 tile_counts: required.tile_counts - 4,
+                ..required
+            },
+            ResourceSizes {
+                raster_work: required.raster_work - 4,
                 ..required
             },
             ResourceSizes {

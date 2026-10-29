@@ -1,5 +1,9 @@
-// SOURCE-ONLY PROTOTYPE: paired pixels per physical lane, same logical raster tile.
-// Dispatch and binning remain (ceil(W/WG_X), ceil(H/WG_Y), K*lambda).
+// Paired pixels per physical lane, same logical raster tile.
+// Dispatch: (n, 1, 1) for a fixed n (pipeline.rs). raster_worklist.wgsl lists the
+// (offspring, tile) pairs that have work; workgroup g rasterizes entries g,
+// g + n, g + 2n, ... The list omits tiles outside the dirty rectangle and tiles no
+// changed polygon meets, which added nothing to the error sums, so far fewer
+// workgroups launch than the former (tiles_x, tiles_y, offspring) grid.
 // 1D workgroup layout is retained for subgroup intrinsics.
 // Each lane owns ordinal local_idx + k*PHYSICAL_LANES, within WG_X*WG_Y.
 // Each pixel retains C's f32 rasterization followed by integer byte-L1.
@@ -125,6 +129,7 @@ struct Params {
 @group(0) @binding(4) var<storage, read>       tile_counts_buf:    array<u32>;
 @group(0) @binding(5) var<storage, read>       chain_states:       array<DrawingState>;
 @group(0) @binding(6) var<storage, read>       chain_framebuffers: array<u32>;
+@group(0) @binding(7) var<storage, read>       raster_work:        array<u32>;
 @group(1) @binding(0) var<uniform>             params:             Params;
 
 // Shared polygon capacity follows the tile polygon clamp.
@@ -223,40 +228,6 @@ fn may_cover(poly: DecodedPolygon, fx: f32, fy: f32) -> bool {
     let all_pos = e0 >= -COVER_MARGIN && e1 >= -COVER_MARGIN && e2 >= -COVER_MARGIN;
     let all_neg = e0 <= COVER_MARGIN && e1 <= COVER_MARGIN && e2 <= COVER_MARGIN;
     return all_pos || all_neg;
-}
-
-// Whether a changed version may cover a pixel centre of the tile [lo, hi) in
-// pixels. The test uses tile edges, half a pixel beyond the outermost centres, so
-// it is a superset of may_cover for every pixel of the tile.
-fn changed_may_meet_tile(poly: Polygon, lo: vec2<f32>, hi: vec2<f32>) -> bool {
-    let d = decode_changed(poly);
-    return hi.x >= d.bb_min_x - COVER_MARGIN && lo.x <= d.bb_max_x + COVER_MARGIN &&
-           hi.y >= d.bb_min_y - COVER_MARGIN && lo.y <= d.bb_max_y + COVER_MARGIN;
-}
-
-// Workgroup-uniform: whether any parent or offspring version of the listed
-// changed indices may cover a pixel of the tile. Same slot decoding as the
-// shared_changed loader; indices at or beyond a drawing's count are empty.
-fn changed_meets_tile(
-    changed: vec2<u32>, parent_chain: u32, chain_id: u32, lo: vec2<f32>, hi: vec2<f32>,
-) -> bool {
-    let parent_count = chain_states[parent_chain].polygon_count;
-    let offspring_count = working_states[chain_id].polygon_count;
-    var meets = false;
-    for (var half = 0u; half < CHANGED_INDICES; half++) {
-        let word = select(changed.x, changed.y, half >= 2u);
-        let encoded = (word >> (16u * (half & 1u))) & 0xFFFFu;
-        if encoded != 0u {
-            let idx = encoded - 1u;
-            if idx < parent_count {
-                meets = meets || changed_may_meet_tile(chain_states[parent_chain].polygons[idx], lo, hi);
-            }
-            if idx < offspring_count {
-                meets = meets || changed_may_meet_tile(working_states[chain_id].polygons[idx], lo, hi);
-            }
-        }
-    }
-    return meets;
 }
 
 // Tests the first `slots` entries of shared_changed (workgroup-uniform).
@@ -459,48 +430,50 @@ fn pixel_pair_errors(
     return kept_or_blended_errors(pixel0, blend0) + kept_or_blended_errors(pixel1, blend1);
 }
 
+// Worklist words; must match raster_worklist.wgsl.
+const WORK_COUNT: u32 = 0u;
+const WORK_ENTRIES: u32 = 1u;
+
 @compute @workgroup_size(PHYSICAL_LANES, 1, 1)
 fn main(
-    @builtin(workgroup_id) wid: vec3<u32>,
+    @builtin(workgroup_id) group_id: vec3<u32>,
+    @builtin(num_workgroups) group_count: vec3<u32>,
     @builtin(local_invocation_index) local_idx: u32,
     @builtin(subgroup_invocation_id) sg_inv_id: u32,
     @builtin(subgroup_id) sg_idx: u32,
     @builtin(num_subgroups) num_subgroups: u32,
 ) {
-    let chain_id = wid.z;
+    // The bound is a uniform read-only storage word, so every barrier in
+    // raster_tile is reached by the whole workgroup. Shared memory needs no
+    // barrier between entries: the next entry's shared writes follow the
+    // previous entry's final barrier (readers done), and its subgroup leaders
+    // write shared_errors only after its first barrier, which thread 0 reaches
+    // after summing the previous entry.
+    let count = raster_work[WORK_COUNT];
+    for (var work_index = group_id.x; work_index < count; work_index += group_count.x) {
+        raster_tile(raster_work[WORK_ENTRIES + work_index], local_idx, sg_inv_id, sg_idx, num_subgroups);
+    }
+}
 
+// One worklist entry: offspring * num_tiles + tile_id.
+fn raster_tile(entry: u32, local_idx: u32, sg_inv_id: u32, sg_idx: u32, num_subgroups: u32) {
     let w = params.image_width;
     let h = params.image_height;
+    let num_tiles_x = (w + WG_X - 1u) / WG_X;
+    let num_tiles_y = (h + WG_Y - 1u) / WG_Y;
+    let num_tiles = num_tiles_x * num_tiles_y;
+    let tile_id = entry % num_tiles;
+    // (tile x, tile y, offspring) as in the former direct dispatch.
+    let wid = vec3<u32>(tile_id % num_tiles_x, tile_id / num_tiles_x, entry / num_tiles);
+    let chain_id = wid.z;
+
     let lambda = params.lambda;
     let parent_chain = chain_id / lambda;
-
-    // --- Dirty bbox tile skip ---
-    // Every lane reads the same header words from read-only storage, so the
-    // skip is workgroup-uniform and returns before any shared memory or barrier.
-    // Workgroups fully outside the dirty region (most of the grid) do nothing else.
-    let bbox_lo = working_states[chain_id].fitness_bits;
-    let bbox_hi = working_states[chain_id].stagnation_counter;
-    let dirty_min_x = bbox_lo & 0xFFFFu;
-    let dirty_min_y = (bbox_lo >> 16u) & 0xFFFFu;
-    let dirty_max_x = bbox_hi & 0xFFFFu;
-    let dirty_max_y = (bbox_hi >> 16u) & 0xFFFFu;
-    let tile_min_x = wid.x * WG_X;
-    let tile_min_y = wid.y * WG_Y;
-    let tile_max_x = min(tile_min_x + WG_X, w);
-    let tile_max_y = min(tile_min_y + WG_Y, h);
-    if tile_max_x <= dirty_min_x || tile_min_x >= dirty_max_x ||
-       tile_max_y <= dirty_min_y || tile_min_y >= dirty_max_y {
-        return;
-    }
 
     // Tile metadata — workgroup-uniform, computed by all threads.
     // Must be outside the pixel bounds check so all threads (including those in
     // partial tiles with px >= w) participate in shared memory loads and barriers.
     let chain_count = arrayLength(&working_states);
-    let num_tiles_x = (w + WG_X - 1u) / WG_X;
-    let num_tiles_y = (h + WG_Y - 1u) / WG_Y;
-    let num_tiles = num_tiles_x * num_tiles_y;
-    let tile_id = wid.y * num_tiles_x + wid.x;
 
     var tile_poly_count = 0u;
     var tile_data_base = 0u;
@@ -524,20 +497,6 @@ fn main(
     }
     // Slots to test per pixel; zero disables the shortcut.
     let shortcut_slots = select(0u, select(4u, CHANGED_SLOTS, changed.y != 0u), changed.x != 0u);
-
-    // --- Unchanged-tile skip ---
-    // When no changed version may cover any pixel of the tile, every pixel takes
-    // the shortcut and adds its old error to both sums, which select subtracts
-    // again. Skipping the tile leaves the offspring error unchanged. Exact copies
-    // (NO_CHANGES) list no index and skip every tile. The inputs are uniform
-    // storage reads, so the return precedes any shared memory or barrier.
-    if shortcut_slots != 0u {
-        let tile_lo = vec2<f32>(f32(tile_min_x) / f32(w), f32(tile_min_y) / f32(h));
-        let tile_hi = vec2<f32>(f32(tile_max_x) / f32(w), f32(tile_max_y) / f32(h));
-        if !changed_meets_tile(changed, parent_chain, chain_id, tile_lo, tile_hi) {
-            return;
-        }
-    }
 
     // Slot k holds index half k/2, from the parent (even k) or offspring (odd k).
     // Halves 0..1 are in .y, 2..3 in .z. An index at or beyond the drawing's

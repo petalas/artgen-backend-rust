@@ -456,8 +456,22 @@ fn new_bin_buffers(p: &GpuPipeline, poison: &[u32], slots: usize) -> BinBuffers 
     });
     // The engine's tile_data lacks COPY_SRC. Rebind checker-owned readable
     // buffers through the actual production pipeline's public layout instead.
-    let entries =
-        [(0, &p.working_states_buf), (1, &indices), (2, &counts)].map(|(binding, buffer)| {
+    // The binner also appends raster work; a one-word buffer keeps the count
+    // and drops entries, leaving the engine's worklist untouched.
+    let raster_work = p.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("checker raster work"),
+        size: 4,
+        usage: wgpu::BufferUsages::STORAGE,
+        mapped_at_creation: false,
+    });
+    let entries = [
+        (0, &p.working_states_buf),
+        (1, &indices),
+        (2, &counts),
+        (3, &p.chain_states_buf),
+        (4, &raster_work),
+    ]
+    .map(|(binding, buffer)| {
             wgpu::BindGroupEntry {
                 binding,
                 resource: buffer.as_entire_binding(),

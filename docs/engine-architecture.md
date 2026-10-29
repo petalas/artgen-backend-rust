@@ -44,6 +44,19 @@ with the frozen full binner and no longer applies to the production shader.
 Each offspring is dispatched as `BIN_ROW_BANDS` workgroups over bands of tile
 rows, so full-image (crossover) offspring do not bound the dispatch alone.
 
+After binning its band, each bin workgroup appends the consumed tiles that a
+changed polygon may meet (or that have the shortcut off) to `raster_work`.
+`GpuPipeline::record_raster` then dispatches 8192 raster workgroups that loop
+over the list. On the v1 fixtures, about 7–10% of the former 73.7k-workgroup grid
+had work. The test must match the raster shortcut exactly, because skipped tiles
+used to return before adding to the error sums. update_framebuffers empties the
+list at the end of every iteration, and `evaluate_chain_fitness` resets it from
+the host because it runs no update. A benchmark binning source without
+`raster_work` gets a separate `raster_worklist.wgsl` pass with the same test.
+A benchmark raster source without it keeps the full grid. That extra pass made
+512-batch runs host-bound and 5% slower, so production keeps the list in the
+binner.
+
 Bundled programs, historical programs and diagnostic binners are existing reasons
 for the installation seam. A generic cache abstraction or another GPU adapter
 would add no needed variation.
