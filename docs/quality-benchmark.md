@@ -195,3 +195,26 @@ Remaining error r = 100 − fitness%, median [min..max], and median triangles:
   `--min-effect 0.02` matches.
 - Batches per run vary between seeds (mona 10k–19k in 300 s), because the
   raster cost follows the drawing; compare at fixed seconds, not batches.
+
+## Cap and penalty sweep, 2026-10-29
+
+`2f79e3d`, 3 seeds × 300 s per image, settings-only sides. Ratio of
+unpenalized remaining error to the default (cap 1000, penalty 2e-7), lower is
+better, with the 95% interval, and final median triangles. Penalized and
+unpenalized ratios agree within 2%.
+
+| Side | T | ff | mona | darwin |
+| --- | --- | --- | --- | --- |
+| cap 2000 | 120 s | 0.974 | 0.999 | 0.966 |
+| cap 2000 | 300 s | 0.910 [0.899, 0.929], 1128 | 0.947 [0.945, 0.948], 1176 | 0.894 [0.858, 0.918], 1251 |
+| penalty 8e-7 (cap 1000 or 2000) | 300 s | 1.590, 517 | 1.422, 399 | 1.412, 539 |
+
+- Cap 2000 gains nothing until the default runs reach 1000 triangles
+  (120–180 s), then 5–11% by 300 s and still widening; it is not binding
+  at 300 s.
+- A 4x penalty halves the triangle count and costs 41–59% more remaining
+  error, and never reaches either cap. Penalized drawings converge to a
+  different, much smaller drawing; any useful penalty is well below 4x.
+
+Evidence: `.cache/quality/runs/20261029T164405Z-p_5yl0m9` (ff),
+`20261029T174525Z-jf8bdj4a` (mona), `20261029T184656Z-pm8z1wan` (darwin).
