@@ -73,6 +73,9 @@ class HillclimbCli(unittest.TestCase):
         self.root = Path(scratch.name)
         manifest = self.root / "manifest.json"
         manifest.write_text("{}")
+        quiet = mock.patch.object(hillclimb, "wait_for_quiet", return_value=True)
+        quiet.start()
+        self.addCleanup(quiet.stop)
         for name, value in (("ROOT", self.root / "hc"), ("MANIFEST", manifest),
                             ("LOCK", self.root / "lock"), ("LOG", self.root / "log.tsv")):
             patcher = mock.patch.object(hillclimb, name, value)
@@ -258,6 +261,14 @@ class RevertSide(unittest.TestCase):
 
 
 class ForeignCpu(unittest.TestCase):
+    def test_wait_for_quiet_returns_once_settled_and_gives_up_at_the_limit(self):
+        with mock.patch.object(hillclimb, "QUIET_SAMPLE_SECONDS", 0.01), \
+                mock.patch.object(hillclimb, "foreign_cores", return_value=0.0):
+            self.assertTrue(hillclimb.wait_for_quiet([], settle=0.03, limit=5))
+        with mock.patch.object(hillclimb, "QUIET_SAMPLE_SECONDS", 0.01), \
+                mock.patch.object(hillclimb, "foreign_cores", return_value=8.0):
+            self.assertFalse(hillclimb.wait_for_quiet([], settle=0.03, limit=0.1))
+
     def test_own_cpu_time_is_attributed_to_us(self):
         # Independent of other load on the machine: our busy loop lands in `ours`.
         before = hillclimb.cpu_snapshot([])

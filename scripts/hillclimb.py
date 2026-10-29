@@ -83,6 +83,9 @@ BUSY_CORES = 1.0
 # A pair with a busy trial is discarded and re-timed up to this many times;
 # parallel agents' builds kept contaminating screens despite the warning.
 BUSY_RETRIES = 3
+QUIET_SECONDS = 5.0
+QUIET_SAMPLE_SECONDS = 1.0
+QUIET_LIMIT_SECONDS = 600.0
 
 
 class HillclimbError(Exception):
@@ -324,6 +327,20 @@ def cpu_snapshot(pids):
     return time.monotonic(), busy, ours
 
 
+def wait_for_quiet(pids, settle=QUIET_SECONDS, limit=QUIET_LIMIT_SECONDS):
+    """Block until other processes use at most BUSY_CORES for `settle` seconds, or `limit`."""
+    deadline = time.monotonic() + limit
+    quiet_since = time.monotonic()
+    while time.monotonic() < deadline:
+        before = cpu_snapshot(pids)
+        time.sleep(QUIET_SAMPLE_SECONDS)
+        if foreign_cores(before, cpu_snapshot(pids)) > BUSY_CORES:
+            quiet_since = time.monotonic()
+        elif time.monotonic() - quiet_since >= settle:
+            return True
+    return False
+
+
 def foreign_cores(before, after):
     """Average CPU cores used by other processes between two snapshots."""
     wall = max(after[0] - before[0], 1e-9)
@@ -364,9 +381,12 @@ def run_case(servers, case, args, evidence, rows):
             if attempt == BUSY_RETRIES or all(
                     row["foreign_cores"] <= BUSY_CORES for row in pair_rows):
                 break
-            # Another process shared the CPU during this pair; time it again.
+            # Another process shared the CPU during this pair; time it again once
+            # the host is quiet (builds last minutes, so an immediate retry fails).
             args.discarded.extend(pair_rows)
-            print(f"  {case} pair {pair}: other processes were busy; retrying", file=sys.stderr)
+            print(f"  {case} pair {pair}: other processes were busy; waiting to retry",
+                  file=sys.stderr)
+            wait_for_quiet([server.pid for server in servers.values() if server.pid])
         rows.extend(pair_rows)
         rates = {row["side"]: row["rate"] for row in pair_rows}
         for name, values in ratios.items():
