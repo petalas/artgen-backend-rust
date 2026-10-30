@@ -34,7 +34,8 @@ interval. BETTER/WORSE need the interval to exclude 1 and a move of at least
 --min-effect; fewer than three seeds give SCREEN. Also: time to reach fitness
 targets taken from the control's worst seed. Records from builds with operator
 stats (protocol 3) also give, per side and image, which mutation operators produced
-the accepted improvements in each time window. See docs/quality-benchmark.md.
+the accepted improvements in each time window; protocol 4 adds, for a side with a
+step spread, how often each step-size rung improved. See docs/quality-benchmark.md.
 """
 
 import argparse
@@ -250,6 +251,15 @@ def check_record(record, image, seed, seconds, start=None):
                 f"{image} seed {seed}: malformed operator stats")
         require(sum(snapshots[-1]["offered"]) == snapshots[-1]["evaluations"],
                 f"{image} seed {seed}: operator stats do not cover every evaluation")
+    if record.get("protocol_version", 2) >= 4:
+        rungs, scaled = len(record["step_multipliers"]), record["step_operators"]
+        require(rungs and set(scaled) <= set(names)
+                and all(len(s[kind]) == rungs for s in snapshots for kind in RUNG_KINDS),
+                f"{image} seed {seed}: malformed step rung stats")
+        last = snapshots[-1]
+        for kind, rung_kind in zip(OPERATOR_KINDS, RUNG_KINDS):
+            require(sum(last[rung_kind]) == sum(last[kind][names.index(n)] for n in scaled),
+                    f"{image} seed {seed}: step rungs do not cover the step-scaled operators")
 
 
 def run_one(servers, name, side, position, args, evidence):
@@ -299,7 +309,8 @@ def summarize_run(record, name, image, seed, seconds):
             "by_batch": {p["batches"]: p["fitness"] for p in trajectory},
             "trajectory": trajectory,
             "operator_names": record.get("operator_names"),
-            "operators": record.get("operators")}
+            "operators": record.get("operators"),
+            "step_multipliers": record.get("step_multipliers")}
 
 
 def measure(args, resolved, evidence):
@@ -472,6 +483,8 @@ def comparison_table(runs, args):
 
 
 OPERATOR_KINDS = ("offered", "improved", "neutral")
+# Per step rung, in the same order; protocol 4.
+RUNG_KINDS = ("rung_offered", "rung_improved", "rung_neutral")
 
 
 def operator_snapshot(run, t, seconds):
@@ -485,31 +498,39 @@ def operator_snapshot(run, t, seconds):
     return snapshots[-1]
 
 
-def operator_windows(runs, side, image, ends, seconds):
+def operator_windows(runs, side, image, ends, seconds, rungs=False):
     """(names, windows) for one side and image, counts summed over seeds; each window
-    holds the counts between consecutive `ends` (from 0). None without operator stats."""
+    holds the counts between consecutive `ends` (from 0). None without operator stats.
+    With `rungs`, the step rung counts (keys OPERATOR_KINDS), named by multiplier;
+    None unless every run has them and a spread (multipliers that differ)."""
+    names_key = "step_multipliers" if rungs else "operator_names"
     mine = [r for r in runs if r["side"] == side and r["image"] == image and r["operators"]]
-    if not mine:
+    if not mine or (rungs and not all(r.get(names_key) and len(set(r[names_key])) > 1
+                                      for r in mine)):
         return None
-    names = mine[0]["operator_names"]
-    require(all(r["operator_names"] == names for r in mine), "operator names differ between runs")
+    names = mine[0][names_key]
+    require(all(r[names_key] == names for r in mine), f"{names_key} differ between runs")
+    source = dict(zip(OPERATOR_KINDS, RUNG_KINDS if rungs else OPERATOR_KINDS))
     windows, before, start = [], {kind: [0] * len(names) for kind in OPERATOR_KINDS}, 0.0
     for end in ends:
-        now = {kind: [sum(column) for column in zip(*(operator_snapshot(r, end, seconds)[kind]
+        now = {kind: [sum(column) for column in zip(*(operator_snapshot(r, end, seconds)[key]
                                                        for r in mine))]
-               for kind in OPERATOR_KINDS}
+               for kind, key in source.items()}
         windows.append({"from": start, "to": end, **{
             kind: [b - a for a, b in zip(before[kind], now[kind])] for kind in OPERATOR_KINDS}})
         before, start = now, end
     return names, windows
 
 
+def table_windows(seconds):
+    """Window ends of the printed operator and rung tables."""
+    return [float(t) for t in OPERATOR_WINDOWS if t < seconds] + [seconds]
+
+
 def operator_table(runs, side, image, seconds):
     """Per operator and window: its share of all improvements (%) and its improvement
     rate (improvements per 1000 offspring it produced); then whole-run columns."""
-    found = operator_windows(runs, side, image,
-                             [float(t) for t in OPERATOR_WINDOWS if t < seconds] + [seconds],
-                             seconds)
+    found = operator_windows(runs, side, image, table_windows(seconds), seconds)
     if found is None:
         return ""
     names, windows = found
@@ -543,15 +564,49 @@ def operator_table(runs, side, image, seconds):
     return "\n".join(lines)
 
 
+def rung_table(runs, side, image, seconds):
+    """Per step rung of a side with a spread: its multiplier, its share of the
+    step-scaled operators' offspring, its improvements per 1000 offered in each window,
+    then whole-run improvement share and rate. Empty without a spread."""
+    found = operator_windows(runs, side, image, table_windows(seconds), seconds, rungs=True)
+    if found is None:
+        return ""
+    multipliers, windows = found
+    whole = {kind: [sum(w[kind][i] for w in windows) for i in range(len(multipliers))]
+             for kind in OPERATOR_KINDS}
+    seeds = sum(1 for r in runs if r["side"] == side and r["image"] == image)
+
+    def rate(counts, i):
+        return 1000 * counts["improved"][i] / counts["offered"][i] if counts["offered"][i] else 0.0
+
+    def share(values, i):
+        return 100 * values[i] / sum(values) if sum(values) else 0.0
+
+    labels = [f"{w['from']:g}-{w['to']:g}s" for w in windows]
+    lines = [(f"\n{image} {side}: step rungs over {seeds} seeds (offset and vertex moves); "
+              "improvements per 1000 offered per window"),
+             f"{'rung':>4}{'step x':>8}{'offered%':>9}" + "".join(f"{label:>10}" for label in labels)
+             + f"{'improved%':>10}{'per 1000':>9}"]
+    for i, multiplier in enumerate(multipliers):
+        cells = "".join(f"{rate(w, i):>10.3f}" for w in windows)
+        lines.append(f"{i:>4}{multiplier:>8.3f}{share(whole['offered'], i):>9.1f}{cells}"
+                     f"{share(whole['improved'], i):>10.1f}{rate(whole, i):>9.3f}")
+    return "\n".join(lines)
+
+
 def operator_summary(runs, sides, images, seconds):
-    """Full counts per side and image, one window per checkpoint, for summary.json."""
+    """Full counts per side and image, one window per checkpoint, for summary.json;
+    `rungs` holds the step rung counts of a side with a spread."""
     entries = []
     for side in sides:
         for image in images:
             found = operator_windows(runs, side, image, checkpoints(seconds), seconds)
             if found:
-                entries.append({"side": side, "image": image, "names": found[0],
-                                "windows": found[1]})
+                entry = {"side": side, "image": image, "names": found[0], "windows": found[1]}
+                rungs = operator_windows(runs, side, image, checkpoints(seconds), seconds, True)
+                if rungs:
+                    entry["rungs"] = {"multipliers": rungs[0], "windows": rungs[1]}
+                entries.append(entry)
     return entries
 
 
@@ -585,9 +640,10 @@ def report(args, resolved, evidence, runs, discarded):
     for image in args.images:
         print(distribution_table(runs, args.sides, image, args.seconds))
         for side in args.sides:
-            table = operator_table(runs, side, image, args.seconds)
-            if table:
-                print(table)
+            for table in (operator_table(runs, side, image, args.seconds),
+                          rung_table(runs, side, image, args.seconds)):
+                if table:
+                    print(table)
     entries, targets = [], {}
     if len(args.sides) > 1:
         entries, targets, table = comparison_table(runs, args)
@@ -599,7 +655,7 @@ def report(args, resolved, evidence, runs, discarded):
                                    "DETERMINISM-MISMATCH " + "; ".join(mismatches)))
     if discarded:
         print(f"re-ran {len(discarded)} runs that overlapped other CPU work")
-    strip = ("trajectory", "by_batch", "operators", "operator_names")
+    strip = ("trajectory", "by_batch", "operators", "operator_names", "step_multipliers")
     (evidence / "summary.json").write_text(json.dumps(
         {"args": {k: v for k, v in vars(args).items() if k != "starts"}, "identities": resolved,
          "starts": [{"image": image, "seed": seed, "path": str(path), "sha256": sha}

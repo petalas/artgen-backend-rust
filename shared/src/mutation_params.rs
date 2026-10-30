@@ -21,11 +21,27 @@ fn default_medium_move_delta() -> f32 { settings::MEDIUM_MOVE_DELTA }
 fn default_merge_centroid_threshold() -> f32 { settings::MERGE_CENTROID_THRESHOLD }
 fn default_merge_color_threshold() -> f32 { settings::MERGE_COLOR_THRESHOLD }
 fn default_per_point_penalty() -> f32 { settings::PER_POINT_PENALTY }
+fn default_step_spread() -> f32 { settings::STEP_SPREAD_DEFAULT }
 // Records and frozen fixtures from before the field omit it; leaving the default
 // out keeps their exact parameter maps (effective-parameter gates compare them).
 #[allow(clippy::trivially_copy_pass_by_ref)] // skip_serializing_if passes a reference
 fn is_default_per_point_penalty(value: &f32) -> bool {
     value.to_bits() == settings::PER_POINT_PENALTY.to_bits()
+}
+// Omitted at the default for the same reason as `per_point_penalty`.
+#[allow(clippy::trivially_copy_pass_by_ref)] // skip_serializing_if passes a reference
+fn is_default_step_spread(value: &f32) -> bool {
+    value.to_bits() == settings::STEP_SPREAD_DEFAULT.to_bits()
+}
+
+/// A step-spread end as `sanitize` keeps it: within
+/// [1 / STEP_SPREAD_LIMIT, STEP_SPREAD_LIMIT]; NaN becomes the default (no spread).
+fn clamp_step_spread(value: f32) -> f32 {
+    if value.is_nan() {
+        settings::STEP_SPREAD_DEFAULT
+    } else {
+        value.clamp(1.0 / settings::STEP_SPREAD_LIMIT, settings::STEP_SPREAD_LIMIT)
+    }
 }
 
 /// Runtime-configurable mutation parameters.
@@ -103,6 +119,14 @@ pub struct MutationParams {
     // Adaptive mutation scale (only applies to offspring indices 1..λ-1)
     pub adaptive_mutation: bool,
 
+    // Step spread: offspring with local index i multiply their offset, point-move
+    // and micro vertex step sizes by rung i % STEP_RUNGS of a log-spaced ladder
+    // from min to max (see `step_multipliers`). Both 1: no spread.
+    #[serde(default = "default_step_spread", skip_serializing_if = "is_default_step_spread")]
+    pub step_spread_min: f32,
+    #[serde(default = "default_step_spread", skip_serializing_if = "is_default_step_spread")]
+    pub step_spread_max: f32,
+
     // Rasterize workgroup size: [wg_x, wg_y] (e.g. [16,16], [16,8], [8,8])
     // Affects SM occupancy vs shared memory tradeoff. Default: [16,16] = 256 threads.
     #[serde(default = "default_rasterize_wg")]
@@ -133,6 +157,10 @@ impl MutationParams {
         } else {
             self.per_point_penalty.clamp(0.0, settings::MAX_PER_POINT_PENALTY)
         };
+
+        // Step spread: each end within [1/16, 16], NaN to 1; min <= max
+        self.step_spread_max = clamp_step_spread(self.step_spread_max);
+        self.step_spread_min = clamp_step_spread(self.step_spread_min).min(self.step_spread_max);
 
         // Probabilities: clamp to [0, 1]
         self.add_polygon_prob = self.add_polygon_prob.clamp(0.0, 1.0);
@@ -187,6 +215,24 @@ impl MutationParams {
         self.gpu_batch_iters = self.gpu_batch_iters.clamp(1, settings::GPU_MAX_BATCH_ITERS);
         self.gpu_batch_iters = 1u32 << self.gpu_batch_iters.ilog2();
     }
+
+    /// Step-size multiplier of each rung: rung `k` is
+    /// `min * (max / min)^(k / (STEP_RUNGS - 1))`, so rung 0 is `min`, the last
+    /// is `max` (to rounding) and the ratio between neighbours is constant.
+    /// When `min == max` every rung is exactly `min`, so the defaults give
+    /// exactly 1.0 and mutation multiplies by it without changing a bit.
+    /// Ends are taken as `sanitize` would leave them.
+    #[must_use]
+    pub fn step_multipliers(&self) -> [f32; settings::STEP_RUNGS] {
+        let max = clamp_step_spread(self.step_spread_max);
+        let min = clamp_step_spread(self.step_spread_min).min(max);
+        if min == max {
+            return [min; settings::STEP_RUNGS];
+        }
+        let ratio = f64::from(max) / f64::from(min);
+        let last = (settings::STEP_RUNGS - 1) as f64;
+        std::array::from_fn(|k| (f64::from(min) * ratio.powf(k as f64 / last)) as f32)
+    }
 }
 
 impl Default for MutationParams {
@@ -227,6 +273,8 @@ impl Default for MutationParams {
             chain_count: settings::GPU_DEFAULT_CHAIN_COUNT,
             lambda: settings::GPU_DEFAULT_LAMBDA,
             adaptive_mutation: settings::ADAPTIVE_MUTATION,
+            step_spread_min: settings::STEP_SPREAD_DEFAULT,
+            step_spread_max: settings::STEP_SPREAD_DEFAULT,
             rasterize_wg: [settings::RASTERIZE_WG_X_DEFAULT, settings::RASTERIZE_WG_Y_DEFAULT],
             gpu_batch_iters: settings::GPU_DEFAULT_BATCH_ITERS,
         }

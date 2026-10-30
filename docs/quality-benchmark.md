@@ -13,6 +13,7 @@ scripts/quality.py --side control=HEAD --side cand=WORKTREE                     
 scripts/quality.py --side control=HEAD --side nox=HEAD --params 'nox={"crossover_prob":0}'
 scripts/quality.py --side cap2000=HEAD --side cap1000=HEAD --params 'cap1000={"max_polygons":1000}'
 scripts/quality.py --side p1=HEAD --side p16=HEAD --params 'p16={"per_point_penalty":3.2e-6}'
+scripts/quality.py --side c=HEAD --side sp=HEAD --params 'sp={"step_spread_min":0.25,"step_spread_max":4}'
 scripts/quality.py --side a=HEAD --side b=HEAD --seconds 20 --seeds 2                # A/A
 scripts/quality.py --seconds 120 --seeds 5 --save-starts .cache/quality/starts/s120   # make starts
 scripts/quality.py --start .cache/quality/starts/s120 --side control=HEAD --side cand=WORKTREE \
@@ -33,6 +34,12 @@ scripts/quality.py --start .cache/quality/starts/s120 --side control=HEAD --side
   factor `1 - penalty * points`. One build serves every cap and penalty, so such
   sides differ by settings only. Each side's engine is allocated for its own
   chain count and λ.
+- `step_spread_min` and `step_spread_max` (default 1 each: no spread; each
+  within [1/16, 16], min at most max) spread offset and vertex move sizes over
+  each chain's offspring: offspring i uses rung i mod 8, multiplier
+  `min * (max/min)^(rung/7)`, on top of the adaptive scale (see
+  [engine architecture](engine-architecture.md#step-spread)). A side with a
+  spread gets a step rung table (below).
 - `--images` (default ff,mona,darwin; see darwin under Limits), `--seeds` (default 5),
   `--first-seed`, `--seconds` (default 120, at most 3600), `--min-effect` (default
   0.02), `--server-scope image|run`, `--build-only`, `--note`.
@@ -81,10 +88,10 @@ renderer (`reference::evaluate`, with the run's `per_point_penalty`) and
 described by `reference::complexity`. A gap
 above 0.05 fitness points, or any wgpu device error, makes the run invalid, and
 the script stops. `DIR` gets `result.json` (the full record) and `best.json`.
-The record (protocol 3) carries `start_sha256`, the start file's SHA-256 or
+The record (protocol 4) carries `start_sha256`, the start file's SHA-256 or
 null for a blank start; the script checks it against the file it named.
-Protocol 3 added operator stats (below); the script still accepts protocol 2
-records, which have none.
+Protocol 3 added operator stats (below) and protocol 4 their step rung counts;
+the script still accepts protocol 2 and 3 records, which lack them.
 
 ## Operator stats
 
@@ -109,6 +116,33 @@ Share says where improvements came from; rate says how productive an
 operator's offspring are, so a high-share, low-rate operator is common, not
 good. Neutral acceptances are mostly copies: crossover of near-identical
 parents yields offspring equal to the parent, which select takes half the time.
+
+### Step rungs
+
+Protocol 4 records also hold, per snapshot, `rung_offered`, `rung_improved` and
+`rung_neutral`: the same counts per step rung, for the operators that scale
+with the step only (`step_operators`: offset, move point, medium move, micro
+move), with the rungs' multipliers in `step_multipliers`. Each rung block sums
+to those operators' counts; the script rejects a run where it does not.
+
+For a side whose records have a spread (multipliers that differ), the script
+prints a rung table per image after the operator table, summed over seeds:
+the rung, its multiplier (`step x`), its share of the step-scaled offspring
+(12.5% each at λ 64), improvements per 1000 offered in each window (the
+operator table's windows), then the whole run's share of the step-scaled
+improvements and rate. Compare rates down a column: the rung with the highest
+rate is the step size that paid in that window, and a peak that moves to
+smaller rungs in later windows says the search wants finer steps as the
+drawing matures. Rates count improvements, not their size, and offspring of
+every rung compete in the same select, so a rung's rate also depends on the
+others. `summary.json` has the rung counts under `rungs` in the side's
+`operators` entry.
+
+Smoke run, 2026-10-30 (mona, seed 1, 60 s from `s120v2`, spread 0.25–4,
+evidence `.cache/quality/runs/20261030T183122Z-_5hdokr8`): rates fell
+steadily with step size in every window, 0.195 per 1000 at ×0.25 to 0.080 at
+×4 over the run (0.390 → 0.141 in 0–5 s, 0.122 → 0.054 in 30–60 s). One
+seed, one image: the mechanism works, not a tuning result.
 
 Smoke run, 2026-10-30 (mona, seed 1, 60 s from the s120 starts): crossover
 made 20% of offspring and 75% of the 15,919 improvements (1.1 per 1000),

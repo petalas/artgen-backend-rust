@@ -68,6 +68,16 @@ pub const TOURNAMENT_SIZE: u32 = 3;
 // Adaptive mutation default
 pub const ADAPTIVE_MUTATION: bool = false;
 
+// Step spread
+/// Step-size rungs: offspring with local index `i` scale offset, point-move and
+/// micro vertex step sizes by rung `i % STEP_RUNGS`'s multiplier, log-spaced
+/// from `MutationParams::step_spread_min` to `step_spread_max`.
+pub const STEP_RUNGS: usize = 8;
+/// Default `step_spread_min` and `step_spread_max`: every rung is 1, no spread.
+pub const STEP_SPREAD_DEFAULT: f32 = 1.0;
+/// `sanitize` keeps both spread ends within [1 / STEP_SPREAD_LIMIT, STEP_SPREAD_LIMIT].
+pub const STEP_SPREAD_LIMIT: f32 = 16.0;
+
 // Rasterize workgroup size defaults
 pub const RASTERIZE_WG_X_DEFAULT: u32 = 32;
 pub const RASTERIZE_WG_Y_DEFAULT: u32 = 16;

@@ -5,7 +5,7 @@ use crate::models::drawing::Drawing;
 use crate::models::point::Point;
 use crate::models::polygon::Polygon;
 use crate::mutation_params::MutationParams;
-use crate::settings::POLYGON_CAPACITY;
+use crate::settings::{POLYGON_CAPACITY, STEP_RUNGS};
 
 /// GPU polygon: a single triangle with color, quantized to 16 bytes.
 /// Word 0: RGBA color packed as 4x u8 via pack4x8unorm convention
@@ -109,9 +109,16 @@ pub struct GpuParams {
     pub _pad2: u32,
     pub _pad3: u32,
 
-    // vec4[11-15] — reserved padding to fill 256 bytes
-    pub _reserved: [u32; 20],
+    // vec4[11-12] — step-size multiplier per rung (`MutationParams::step_multipliers`);
+    // historical shader variants see reserved words here.
+    pub step_multipliers: [f32; STEP_RUNGS],
+
+    // vec4[13-15] — reserved padding to fill 256 bytes
+    pub _reserved: [u32; 12],
 }
+
+// WGSL `Params` holds the multipliers as two vec4s.
+const _: () = assert!(STEP_RUNGS == 8);
 
 /// Control flags for CPU ↔ GPU communication (atomic u32s).
 #[repr(C)]
@@ -174,7 +181,8 @@ pub fn gpu_params_from(mp: &MutationParams, w: u32, h: u32, chain_count: u32) ->
         merge_color_threshold: mp.merge_color_threshold,
         _pad2: 0,
         _pad3: 0,
-        _reserved: [0u32; 20],
+        step_multipliers: mp.step_multipliers(),
+        _reserved: [0u32; 12],
     }
 }
 

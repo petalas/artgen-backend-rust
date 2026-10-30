@@ -56,8 +56,9 @@ fn write_changed_words(oid: u32, words: vec2<u32>) {
 
 @group(0) @binding(0) var<storage, read>       chain_states:   array<DrawingState>;
 @group(0) @binding(1) var<storage, read_write>  working_states: array<DrawingState>;
-// The operator that produced each offspring (OP_*), for select's operator stats.
-// Outside the working states, so canonical state never sees it.
+// The operator that produced each offspring (OP_*), with rung + 1 from
+// OP_RUNG_SHIFT up when the operator scales with the step, for select's
+// operator stats. Outside the working states, so canonical state never sees it.
 @group(0) @binding(2) var<storage, read_write>  offspring_ops:  array<u32>;
 @group(1) @binding(0) var<uniform>              params:         Params;
 
@@ -323,6 +324,8 @@ fn crossover_dirty_box(out_count: u32) -> vec4<u32> {
 
 // --- Mutation: exactly one operator per offspring, picked by weighted roulette
 // (offspring-aware, with adaptive mutation scale) ---
+// `ms` multiplies offset, point-move and micro vertex step sizes: the adaptive
+// scale times the offspring's step rung multiplier (op_scales_with_step).
 // Returns dirty bbox as vec4<u32>(min_x, min_y, max_x, max_y) in pixel coords.
 // `op` receives the branch that ran (OP_*); a pick whose guard fails falls
 // through to a later branch, which is the one recorded.
@@ -680,6 +683,11 @@ fn mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<function, u32>
     return merge_bbox(old_bbox, polygon_bbox_pixels(poly, w, h));
 }
 
+// Step-size multiplier of `rung` (< STEP_RUNGS); see MutationParams::step_multipliers.
+fn step_multiplier(rung: u32) -> f32 {
+    return params.step_multipliers[rung / 4u][rung % 4u];
+}
+
 // Source metadata must match the host's offspring dispatch group size.
 const OFFSPRING_GROUP_SIZE: u32 = 1u;
 const PHYSICAL_WG_SIZE: u32 = 64u;
@@ -795,13 +803,18 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
     working_states[offspring_id].mutation_scale = mutation_scale;
     working_states[offspring_id].stagnation_counter = 0u;
 
-    // Apply exactly one mutation
+    // Apply exactly one mutation. The working state keeps the adaptive scale
+    // (select reads the chain's own scale, never an offspring's); only the
+    // sizes inside mutate_offspring see the rung's multiplier, which is
+    // exactly 1.0 on every rung without a spread.
+    let rung = offspring_local_idx % STEP_RUNGS;
     var count = working_states[offspring_id].polygon_count;
     var changed = 0u;
     var op = OP_UNCHANGED;
-    let dirty_bbox = mutate_offspring(&rng, offspring_id, &count, mutation_scale, &changed, &op);
+    let step = mutation_scale * step_multiplier(rung);
+    let dirty_bbox = mutate_offspring(&rng, offspring_id, &count, step, &changed, &op);
     write_dirty_box(offspring_id, dirty_bbox);
     working_states[offspring_id].rng_state.x = rng;
     write_changed_words(offspring_id, vec2<u32>(changed, 0u));
-    offspring_ops[offspring_id] = op;
+    offspring_ops[offspring_id] = op | select(0u, (rung + 1u) << OP_RUNG_SHIFT, op_scales_with_step(op));
 }

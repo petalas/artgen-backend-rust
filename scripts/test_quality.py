@@ -26,8 +26,11 @@ hc = quality.hc
 # the recorder's scalar-renderer disagreement; ign-1 ignores --start; ops-1
 # reports operator stats (protocol 3), ops-0 is an older build without them. Of
 # each batch's 16384 offspring, add makes 4096 and 100 * sqrt(batch) improvements
-# in all, offset 8192 and 10 per batch, crossover 4096 and none. Each run writes
-# best.json naming its case and seed.
+# in all, offset 8192 and 10 per batch, crossover 4096 and none. rg-1 adds step
+# rungs (protocol 4) without a spread, rg-2 with one (multipliers 0.25..4): offset's
+# offspring split evenly over 8 rungs, its 10 improvements per batch as
+# 0,0,1,1,2,2,2,2 and its neutral ones on rung 0. Each run writes best.json naming
+# its case and seed.
 FAKE = r'''#!/usr/bin/env python3
 import hashlib, json, os, sys
 from pathlib import Path
@@ -55,7 +58,10 @@ for line in sys.stdin:
         return {"seconds": at, "batches": batch, "evaluations": batch * 16384,
                 "offered": [4096 * batch, 8192 * batch, 4096 * batch],
                 "improved": [int(100 * batch ** 0.5), 10 * batch, 0],
-                "neutral": [0, batch, 0]}
+                "neutral": [0, batch, 0],
+                "rung_offered": [1024 * batch] * 8,
+                "rung_improved": [k * batch for k in (0, 0, 1, 1, 2, 2, 2, 2)],
+                "rung_neutral": [batch] + [0] * 7}
     operators = [stats(p["batches"], p["seconds"])
                  for t in (1, 2, 5, 10, 20, 30, 60, 120, 180, 300, 600) if t < seconds
                  for p in [next(p for p in points if p["seconds"] >= t)]]
@@ -68,6 +74,9 @@ for line in sys.stdin:
     if fields["ops"] == "1":
         record.update(protocol_version=3, operator_names=["add", "offset", "crossover"],
                       operators=operators)
+    if fields["rg"] != "0":
+        spread = [0.25 * 16 ** (k / 7) for k in range(8)] if fields["rg"] == "2" else [1.0] * 8
+        record.update(protocol_version=4, step_multipliers=spread, step_operators=["offset"])
     if "start" in flags and fields["ign"] == "0":
         record["start_sha256"] = hashlib.sha256(Path(flags["start"]).read_bytes()).hexdigest()
     out = Path(flags["output"]); out.mkdir(parents=True)
@@ -96,8 +105,8 @@ class QualityCli(unittest.TestCase):
             patch.start()
             self.addCleanup(patch.stop)
 
-    def fake(self, scale=1.0, nd=0, err=0, ign=0, ops=1):
-        path = self.root / f"scale-{scale}-nd-{nd}-err-{err}-ign-{ign}-ops-{ops}"
+    def fake(self, scale=1.0, nd=0, err=0, ign=0, ops=1, rg=0):
+        path = self.root / f"scale-{scale}-nd-{nd}-err-{err}-ign-{ign}-ops-{ops}-rg-{rg}"
         path.write_text(FAKE)
         path.chmod(0o755)
         return str(path)
@@ -154,6 +163,34 @@ class QualityCli(unittest.TestCase):
         self.assertEqual(sum(sum(w["offered"]) for w in windows), 3 * 201 * 16384)
         self.assertEqual(windows[-1]["improved"][1], 3 * 10 * 101)
         self.assertNotIn("operators", self.summary(out)["runs"][0])
+
+    def test_step_rungs_are_tabled_only_for_a_side_with_a_spread(self):
+        code, out, err = self.run_cli("--side", f"flat={self.fake(rg=1)}",
+                                      "--side", f"spread={self.fake(rg=2)}",
+                                      "--side", f"old={self.fake()}")
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("ff spread: step rungs over 3 seeds", out)
+        self.assertNotIn("flat: step rungs", out)
+        self.assertNotIn("old: step rungs", out)
+        lines = out.splitlines()
+        start = lines.index(next(x for x in lines if x.startswith("ff spread: step rungs")))
+        self.assertEqual(lines[start + 1].split()[:5], ["rung", "step", "x", "offered%", "0-5s"])
+        rows = [line.split() for line in lines[start + 2:start + 10]]
+        self.assertEqual([row[0] for row in rows], [str(k) for k in range(8)])
+        self.assertEqual((rows[0][1], rows[7][1]), ("0.250", "4.000"))
+        # Columns: rung, multiplier, offered%, per 1000 at 0-5 s and 5-20 s, improved%, per 1000.
+        self.assertEqual(rows[0][2:], ["12.5", "0.000", "0.000", "0.0", "0.000"])
+        self.assertEqual(rows[4][2:], ["12.5", "1.953", "1.953", "20.0", "1.953"])
+        entries = {e["side"]: e for e in self.summary(out)["operators"] if e["image"] == "ff"}
+        self.assertNotIn("rungs", entries["flat"])
+        self.assertEqual(entries["spread"]["rungs"]["windows"][-1]["improved"][4], 3 * 2 * 101)
+
+    def test_rungs_that_miss_the_scaled_operators_fail_the_run(self):
+        fake = Path(self.fake(rg=2))
+        fake.write_text(fake.read_text().replace('"rung_neutral": [batch]', '"rung_neutral": [0]'))
+        code, _, err = self.run_cli("--side", f"a={fake}")
+        self.assertEqual(code, 1)
+        self.assertIn("step rungs do not cover the step-scaled operators", err)
 
     def test_builds_without_operator_stats_still_compare(self):
         code, out, err = self.run_cli("--side", f"old={self.fake(ops=0)}",

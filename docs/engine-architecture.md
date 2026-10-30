@@ -80,6 +80,25 @@ workload has no unused worst-case slack to hold it. The requested device
 `max_buffer_size` is the adapter's whole binding limit whatever the workload:
 diagnostic snapshots stage several resources in one buffer.
 
+### Step spread
+
+`MutationParams::step_spread_min` and `step_spread_max` (default 1.0 each,
+omitted from serialized parameters at the default like the penalty; `sanitize`
+clamps each to [1/16, 16], NaN to 1, then lowers min to max when it is larger)
+give the offspring of a chain a ladder of step sizes. Offspring with local
+index i uses rung k = i % `STEP_RUNGS` (8) and multiplier
+`min * (max/min)^(k/7)`, computed once on the host
+(`MutationParams::step_multipliers`) and passed in `GpuParams::step_multipliers`
+(vec4s 11–12, formerly reserved; historical shader variants still see
+reserved words there). With λ below 8 only the first λ rungs run. mutate multiplies offset, move-point, medium-move and
+micro vertex sizes by `mutation_scale * step_multiplier(rung)`. The working
+state's `mutation_scale` stays the adaptive scale alone, and select's adaptive
+update reads and writes the chain's scale, never an offspring's, so the rung
+does not feed back into adaptation. With equal ends every rung is exactly that
+value, so the defaults multiply by 1.0 and replay is bit-identical
+(`check-gpu-mutation` 220/220 against the previous mutate; hillclimb `replay
+same`, `lifecycle same`).
+
 ## Shader installation
 
 `gpu_evolver::programs` owns source specialization, compilation policy and
@@ -276,13 +295,21 @@ checks that mutate stores every one.
 - `offspring_ops` (one u32 per offspring slot): mutate writes the branch that
   ran, not the roulette's pick, since a pick whose guard fails (an add at the
   cap) falls through to a later branch. Crossover offspring get `OP_CROSSOVER`;
-  an empty parent whose pick cannot run is `OP_UNCHANGED`. The word lives
-  outside the working state, so canonical state and the replay hash do not
-  change (hillclimb: `replay same`, `lifecycle same`).
-- `operator_stats` (3 x `OPERATOR_COUNT` atomic u32: offered, improved,
-  neutral): each select workgroup counts its λ codes in workgroup memory and
-  adds the nonzero totals, at most 19 atomics per chain and iteration; thread 0
-  adds its accepted winner. Counters are cumulative and wrap.
+  an empty parent whose pick cannot run is `OP_UNCHANGED`. For the operators
+  that scale with the step (`Operator::scales_with_step`: offset, move point,
+  medium move, micro move; the generated `op_scales_with_step`) the word also
+  holds the step rung + 1 from bit 8 (`OP_RUNG_SHIFT`); select masks the code
+  with `OP_CODE_MASK`. The word lives outside the working state, so canonical
+  state and the replay hash do not change (hillclimb: `replay same`,
+  `lifecycle same`).
+- `operator_stats` (`OPERATOR_STATS_WORDS` atomic u32: offered, improved and
+  neutral blocks of `OPERATOR_COUNT`, then the same three blocks of
+  `STEP_RUNGS` per step rung): each select workgroup counts its λ codes and
+  rungs in workgroup memory and adds the nonzero totals, at most 27 atomics per
+  chain and iteration; thread 0 adds its accepted winner under its operator
+  and, if it has one, its rung. The rung blocks therefore sum to the
+  step-scaled operators' blocks; rungs are counted with or without a spread.
+  Counters are cumulative and wrap.
 - Readback: `run_batch` copies `operator_stats` into the batch's control
   staging buffer, after the control flags, so the existing map reads both.
   `Readback::collect` folds each copy into `OperatorTally`, u64 totals built
@@ -296,8 +323,9 @@ checks that mutate stores every one.
 Shader variants do not declare either binding; the explicit layouts still bind
 them. A historical mutate leaves `offspring_ops` at zero, so its runs count
 every offspring as `add`, but offered still sums to the evaluations, since
-select is always bundled. Cost: hillclimb 0.9970 [0.9954, 0.9985] against
-`874047a`.
+select is always bundled; it records no rungs. Cost: hillclimb 0.9970 [0.9954,
+0.9985] against `874047a`; the rung blocks and step multiply 0.9993 [0.9964,
+1.0018] (NOISE) against `7eb5cac`.
 
 ## Pending readback
 

@@ -8,8 +8,9 @@
 //! round-trip. Given a seed, the delivered sequence is a function of the batch
 //! index; wall-clock time only maps batches to seconds.
 //!
-//! Operator stats (`gpu_evolver::operators`) arrive with each collected batch's
-//! control readback, so snapshots of them add no round-trip either.
+//! Operator stats (`gpu_evolver::operators`), with their per step rung counts,
+//! arrive with each collected batch's control readback, so snapshots of them
+//! add no round-trip either.
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -33,11 +34,12 @@ use crate::{
     },
     models::drawing::Drawing,
     mutation_params::MutationParams,
-    settings::TILE_MAX_POLYS,
+    settings::{STEP_RUNGS, TILE_MAX_POLYS},
 };
 
-/// 3 added operator stats (`operator_names`, `operators`).
-pub const PROTOCOL_VERSION: u32 = 3;
+/// 3 added operator stats (`operator_names`, `operators`); 4 added step rungs
+/// (`step_multipliers`, `step_operators`, and `rung_*` counts in each snapshot).
+pub const PROTOCOL_VERSION: u32 = 4;
 /// Wall-clock checkpoints recorded at the first batch at or after each second.
 pub const FIXED_SECONDS: [f64; 11] = [
     1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 60.0, 120.0, 180.0, 300.0, 600.0,
@@ -105,6 +107,11 @@ pub struct OperatorSnapshot {
     pub offered: [u64; OPERATOR_COUNT],
     pub improved: [u64; OPERATOR_COUNT],
     pub neutral: [u64; OPERATOR_COUNT],
+    /// Offspring of the `QualityRecord::step_operators` per step rung, indexed
+    /// like `QualityRecord::step_multipliers`: rung_offered sums to their offered.
+    pub rung_offered: [u64; STEP_RUNGS],
+    pub rung_improved: [u64; STEP_RUNGS],
+    pub rung_neutral: [u64; STEP_RUNGS],
 }
 
 impl OperatorSnapshot {
@@ -118,7 +125,40 @@ impl OperatorSnapshot {
             offered: stats.offered,
             improved: stats.improved,
             neutral: stats.neutral,
+            rung_offered: stats.rung_offered,
+            rung_improved: stats.rung_improved,
+            rung_neutral: stats.rung_neutral,
         }
+    }
+
+    /// Run errors for counts that do not add up: offered must cover every
+    /// evaluation, and the rung counts every offspring, improvement and neutral
+    /// acceptance of the operators that scale with the step.
+    fn consistency_errors(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+        let offered: u64 = self.offered.iter().sum();
+        if offered != self.evaluations {
+            errors.push(format!(
+                "operator stats offered {offered} offspring; the run evaluated {}",
+                self.evaluations
+            ));
+        }
+        let scaled = |counts: &[u64; OPERATOR_COUNT]| -> u64 {
+            Operator::ALL.into_iter().filter(|op| op.scales_with_step()).map(|op| counts[op as usize]).sum()
+        };
+        for (kind, by_operator, by_rung) in [
+            ("offered", &self.offered, &self.rung_offered),
+            ("improved", &self.improved, &self.rung_improved),
+            ("neutral", &self.neutral, &self.rung_neutral),
+        ] {
+            let (operators, rungs) = (scaled(by_operator), by_rung.iter().sum::<u64>());
+            if operators != rungs {
+                errors.push(format!(
+                    "step rungs count {rungs} {kind}; the step-scaled operators {operators}"
+                ));
+            }
+        }
+        errors
     }
 }
 
@@ -187,6 +227,10 @@ pub struct QualityRecord {
     /// Operator names by code.
     pub operator_names: [&'static str; OPERATOR_COUNT],
     pub operators: Vec<OperatorSnapshot>,
+    /// Step-size multiplier of each rung (`MutationParams::step_multipliers`).
+    pub step_multipliers: [f32; STEP_RUNGS],
+    /// The operators the rung counts cover (`Operator::scales_with_step`).
+    pub step_operators: Vec<&'static str>,
 }
 
 /// Merge overrides onto `MutationParams::default()`.
@@ -195,10 +239,12 @@ pub struct QualityRecord {
 /// Rejects unknown keys, ill-typed values and values that production's
 /// `sanitize` would silently change.
 pub fn params_with(overrides: &Map<String, Value>) -> Result<MutationParams> {
-    // `per_point_penalty` is serialized only away from its default, so name it
-    // from parameters that hold another value.
+    // `per_point_penalty` and the step spread are serialized only away from
+    // their defaults, so name them from parameters that hold other values.
     let every_field = MutationParams {
         per_point_penalty: 0.0,
+        step_spread_min: 0.5,
+        step_spread_max: 2.0,
         ..MutationParams::default()
     };
     let known = serde_json::to_value(every_field)?;
@@ -422,19 +468,14 @@ pub fn run(
     let mut errors = futures_lite::future::block_on(scopes.finish());
     let (recorder, operators, initial_fitness, seconds) = result?;
     if let Some(last) = operators.snapshots.last() {
-        let offered: u64 = last.offered.iter().sum();
-        if offered != last.evaluations {
-            errors.push(format!(
-                "operator stats offered {offered} offspring; the run evaluated {}",
-                last.evaluations
-            ));
-        }
+        errors.extend(last.consistency_errors());
     }
     let last = *recorder
         .points
         .last()
         .context("trajectory has a final point")?;
     let (scalar, complexity) = final_check(&recorder.best, input, &params, &mut errors)?;
+    let step_multipliers = params.step_multipliers();
     let record = QualityRecord {
         kind: "quality",
         protocol_version: PROTOCOL_VERSION,
@@ -459,6 +500,8 @@ pub fn run(
         trajectory: recorder.points,
         operator_names: Operator::names(),
         operators: operators.snapshots,
+        step_multipliers,
+        step_operators: Operator::step_scaled_names(),
     };
     fs::write(
         output.join("best.json"),
@@ -570,6 +613,42 @@ mod tests {
             .to_string()
             .contains("sanitize"));
         assert!(set(r#"{"perPointPenalty":1.0}"#).is_err());
+        let spread = set(r#"{"stepSpreadMin":0.25,"stepSpreadMax":4}"#).unwrap();
+        assert_eq!((spread.step_spread_min, spread.step_spread_max), (0.25, 4.0));
+        assert!(set(r#"{"stepSpreadMin":2,"stepSpreadMax":1}"#)
+            .unwrap_err()
+            .to_string()
+            .contains("sanitize"));
+        assert!(set(r#"{"stepSpreadMax":32}"#).is_err());
+    }
+
+    #[test]
+    fn rung_counts_must_cover_the_step_scaled_operators() {
+        let mut snapshot = OperatorSnapshot {
+            seconds: 1.0,
+            batches: 1,
+            evaluations: 10,
+            offered: [0; OPERATOR_COUNT],
+            improved: [0; OPERATOR_COUNT],
+            neutral: [0; OPERATOR_COUNT],
+            rung_offered: [0; STEP_RUNGS],
+            rung_improved: [0; STEP_RUNGS],
+            rung_neutral: [0; STEP_RUNGS],
+        };
+        snapshot.offered[Operator::Add as usize] = 4;
+        snapshot.offered[Operator::Offset as usize] = 2;
+        snapshot.offered[Operator::MicroMove as usize] = 4;
+        snapshot.improved[Operator::MicroMove as usize] = 1;
+        snapshot.rung_offered[0] = 5;
+        snapshot.rung_offered[7] = 1;
+        snapshot.rung_improved[3] = 1;
+        assert_eq!(snapshot.consistency_errors(), Vec::<String>::new());
+        snapshot.rung_offered[7] = 0;
+        snapshot.rung_neutral[1] = 1;
+        let errors = snapshot.consistency_errors();
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert!(errors[0].contains("5 offered"), "{errors:?}");
+        assert!(errors[1].contains("1 neutral"), "{errors:?}");
     }
 
     #[test]

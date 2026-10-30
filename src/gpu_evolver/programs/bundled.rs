@@ -338,7 +338,7 @@ mod tests {
                 scale_polygon_prob, rotate_polygon_prob, adjacent_swap_prob, merge_polygon_prob,
                 clone_polygon_prob, medium_move_prob, medium_move_delta, swap_colors_prob,
                 merge_centroid_threshold, merge_color_threshold, _pad2, _pad3,
-                _reserved,
+                step_multipliers, _reserved,
             }),
             |member| match member {
                 // Shaders ignore these words.

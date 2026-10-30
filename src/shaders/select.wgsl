@@ -26,8 +26,9 @@ struct ControlFlags {
 @group(0) @binding(5) var<storage, read_write> chain_update_flags: array<u32>;
 @group(0) @binding(6) var<storage, read_write> chain_total_errors: array<atomic<u32>>;
 @group(0) @binding(7) var<storage, read_write> chain_changes:      array<ChainChange>;
-// Operator stats (gpu_evolver::operators): mutate's code per offspring, and
-// cumulative counters [offered | improved | neutral], OPERATOR_COUNT each.
+// Operator stats (gpu_evolver::operators): mutate's code (and step rung + 1 above
+// OP_RUNG_SHIFT) per offspring, and cumulative counters [offered | improved |
+// neutral], OPERATOR_COUNT each, then the same three blocks of STEP_RUNGS.
 @group(0) @binding(8) var<storage, read>       offspring_ops:      array<u32>;
 @group(0) @binding(9) var<storage, read_write> operator_stats:     array<atomic<u32>>;
 
@@ -41,9 +42,21 @@ var<workgroup> shared_best_offspring_id: u32;
 var<workgroup> reduction_err: array<u32, 64>;
 var<workgroup> reduction_idx: array<u32, 64>;
 
-// This chain's offspring per operator code, added to operator_stats once.
-var<workgroup> offered_ops: array<atomic<u32>, OPERATOR_COUNT>;
-const_assert OPERATOR_COUNT <= 64u;
+// This chain's offspring per operator code, then per step rung, added to
+// operator_stats once.
+var<workgroup> offered_ops: array<atomic<u32>, OPERATOR_COUNT + STEP_RUNGS>;
+const_assert OPERATOR_COUNT + STEP_RUNGS <= 64u;
+const RUNG_STATS: u32 = 3u * OPERATOR_COUNT;
+
+// Add one accepted winner (block 1 improved, 2 neutral) from its offspring_ops
+// word: under its operator, and under its rung when it has one.
+fn count_winner(block: u32, word: u32) {
+    atomicAdd(&operator_stats[block * OPERATOR_COUNT + (word & OP_CODE_MASK)], 1u);
+    let rung_tag = word >> OP_RUNG_SHIFT;
+    if rung_tag != 0u {
+        atomicAdd(&operator_stats[RUNG_STATS + block * STEP_RUNGS + rung_tag - 1u], 1u);
+    }
+}
 
 // Unchanged-pixel note for update_framebuffers (ChainChange in changes.wgsl):
 // the winner's changed-index words and the parent versions of those indices.
@@ -86,7 +99,7 @@ fn select_main(@builtin(global_invocation_id) gid: vec3<u32>,
 
     // --- Parallel min-reduction to find best offspring among λ candidates ---
     let lambda = params.lambda;
-    if local_id < OPERATOR_COUNT {
+    if local_id < OPERATOR_COUNT + STEP_RUNGS {
         atomicStore(&offered_ops[local_id], 0u);
     }
     var op = 0u;
@@ -115,7 +128,11 @@ fn select_main(@builtin(global_invocation_id) gid: vec3<u32>,
     workgroupBarrier();
     // The reduction's barriers order these before the totals are read.
     if local_id < lambda {
-        atomicAdd(&offered_ops[op], 1u);
+        atomicAdd(&offered_ops[op & OP_CODE_MASK], 1u);
+        let rung_tag = op >> OP_RUNG_SHIFT;
+        if rung_tag != 0u {
+            atomicAdd(&offered_ops[OPERATOR_COUNT + rung_tag - 1u], 1u);
+        }
     }
 
     // Phase 2: Binary tree min-reduction (O(log2(64)) = 6 steps)
@@ -163,8 +180,7 @@ fn select_main(@builtin(global_invocation_id) gid: vec3<u32>,
 
         if should_accept {
             // Improved, else neutral: operator_stats' second or third block.
-            let block = select(2u, 1u, dominated);
-            atomicAdd(&operator_stats[block * OPERATOR_COUNT + offspring_ops[best_offspring_id]], 1u);
+            count_winner(select(2u, 1u, dominated), offspring_ops[best_offspring_id]);
             record_chain_change(chain_id, best_offspring_id, chain_states[chain_id].polygon_count);
             chain_states[chain_id].polygon_count = working_states[best_offspring_id].polygon_count;
             chain_states[chain_id].fitness_bits = fitness_bits;
@@ -224,10 +240,13 @@ fn select_main(@builtin(global_invocation_id) gid: vec3<u32>,
 
     workgroupBarrier();
 
-    if local_id < OPERATOR_COUNT {
+    if local_id < OPERATOR_COUNT + STEP_RUNGS {
         let offered = atomicLoad(&offered_ops[local_id]);
         if offered != 0u {
-            atomicAdd(&operator_stats[local_id], offered);
+            // Operator codes index the first block; rungs follow at RUNG_STATS.
+            let rung = local_id >= OPERATOR_COUNT;
+            let word = select(local_id, RUNG_STATS + local_id - OPERATOR_COUNT, rung);
+            atomicAdd(&operator_stats[word], offered);
         }
     }
 

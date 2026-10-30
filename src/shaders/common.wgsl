@@ -78,13 +78,15 @@ struct Params {
     _pad2: u32,
     _pad3: u32,
 
-    // Reserved padding (vec4[11-15])
+    // Step-size multiplier per rung (vec4[11-12]); mutate's step_multiplier() reads it
+    step_multipliers: array<vec4<f32>, 2>,
+
+    // Reserved padding (vec4[13-15])
     _reserved0: vec4<u32>,
     _reserved1: vec4<u32>,
     _reserved2: vec4<u32>,
-    _reserved3: vec4<u32>,
-    _reserved4: vec4<u32>,
 }
+const_assert STEP_RUNGS == 8u;
 
 // --- Quantized polygon unpack helpers ---
 

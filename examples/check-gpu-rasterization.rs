@@ -726,8 +726,26 @@ fn verify_operator_stats() {
         assert!(offered_by(op) > 0, "{} produced no offspring", op.name());
     }
     assert!(improved > 0, "no chain improved");
+    assert_rungs_cover_the_scaled_operators(stats, "no spread");
     let summary = format!("{} improved, {neutral} neutral of {} offered", improved,
         stats.offered.iter().sum::<u64>());
+
+    // A step spread: the rungs still count exactly the step-scaled operators,
+    // and λ 64 gives every rung its share of their offspring.
+    let spread = MutationParams { step_spread_min: 0.25, step_spread_max: 4.0, ..params };
+    evolver.prepare_seeded_benchmark(&drawing, &spread, 23, 0, true).expect("spread");
+    for _ in 0..48 {
+        evolver.run_batch(&spread, true);
+    }
+    evolver.benchmark_drain().expect("drain");
+    let stats = evolver.operator_stats();
+    assert_eq!(stats.offered.iter().sum::<u64>(), 48 * u64::from(CHAINS * LAMBDA));
+    assert_rungs_cover_the_scaled_operators(stats, "spread");
+    let rungs = stats.rung_offered;
+    let fair = rungs.iter().sum::<u64>() / rungs.len() as u64;
+    assert!(rungs.iter().all(|&n| n > fair / 2 && n < fair * 2), "uneven rungs {rungs:?}");
+    let summary = format!("{summary}; spread rungs offered {rungs:?}, improved {:?}",
+        stats.rung_improved);
 
     // Only additions: every mutated offspring is an addition.
     let adds = MutationParams {
@@ -763,4 +781,19 @@ fn verify_operator_stats() {
     assert_eq!(stats.improved.iter().sum::<u64>(), 0);
     assert!(stats.neutral[unchanged] > 0, "no neutral acceptance of an unchanged copy");
     println!("operator stats check: {summary}");
+}
+
+/// Each rung block sums to the same block of the operators that scale with the step.
+fn assert_rungs_cover_the_scaled_operators(stats: &OperatorStats, context: &str) {
+    let scaled = |counts: &[u64]| -> u64 {
+        Operator::ALL.into_iter().filter(|op| op.scales_with_step()).map(|op| counts[op as usize]).sum()
+    };
+    for (kind, by_operator, by_rung) in [
+        ("offered", &stats.offered, &stats.rung_offered),
+        ("improved", &stats.improved, &stats.rung_improved),
+        ("neutral", &stats.neutral, &stats.rung_neutral),
+    ] {
+        assert_eq!(by_rung.iter().sum::<u64>(), scaled(by_operator), "{context}: rung {kind}");
+    }
+    assert!(scaled(&stats.offered) > 0, "{context}: no step-scaled offspring");
 }

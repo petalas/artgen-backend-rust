@@ -40,6 +40,16 @@ Per search operator (each mutation branch, crossover), the offspring it produced
 and how many of them were accepted as improvements or at equal fitness, counted
 since the chains were initialized.
 
+**Step spread**:
+A range of step-size multipliers (`step_spread_min` to `step_spread_max`) spread
+over a chain's offspring, so that each iteration tries offset and vertex moves
+of several sizes at once. Without a spread every offspring uses one size.
+
+**Step rung**:
+One multiplier of a step spread, log-spaced between its ends; offspring i of a
+chain uses rung i mod 8. Operator stats count, per rung, the step-scaled
+offspring and their accepted winners.
+
 **Change record**:
 The polygons an evaluated drawing changed relative to the drawing whose pixels
 are cached. An unknown record turns off the shortcuts that skip unchanged pixels.
