@@ -133,3 +133,4 @@ utc	control	candidate	cases	pairs	batches	ratio	low95	high95	verdict	replay	cont
 2026-10-29T23:13:47+00:00	HEAD@a12a8a9390	worktree	ff,mona,darwin	2	64	1.02549	1.00908	1.04216	REPLAY-MISMATCH	differs	1492773	1492498	.cache/hillclimb/runs/20261029T231300Z-faeo7xv_	tight crossover dirty box v2 (probe, uncommitted)	0.6						0
 2026-10-30T10:29:24+00:00	HEAD@c69195c980	worktree	ff,mona,darwin	5	64	1.00322	1.00051	1.00676	NOISE	same	1567596	1567746	.cache/hillclimb/runs/20261030T102820Z-wam8qx83	remove multi-mutation mode	0.4					same	0
 2026-10-30T11:46:27+00:00	HEAD@874047a871	worktree	ff,mona,darwin	5	64	0.99699	0.99540	0.99852	NOISE	same	1560963	1557831	.cache/hillclimb/runs/20261030T114523Z-1c2b8xb0	operator stats	0.7					same	0
+2026-10-30T12:52:20+00:00	HEAD@7a1bd4eb24	worktree	ff,mona,darwin	5	64	1.00370	1.00172	1.00598	NOISE	same	1549022	1554125	.cache/hillclimb/runs/20261030T125116Z-pfurj504	never accept exact parent copies	0.6					same	0

@@ -150,9 +150,14 @@ fn select_main(@builtin(global_invocation_id) gid: vec3<u32>,
         chain_states[chain_id].fitness_bits = bitcast<u32>(current_fitness);
 
         // Accept if strictly better, or with 50% probability if equal (plateau traversal)
-        // Use the best offspring's RNG for neutral acceptance
+        // Use the best offspring's RNG for neutral acceptance. An exact copy of
+        // the parent (a crossover that kept every slot: NO_CHANGES) is never
+        // accepted; it would leave the chain as it is at the cost of the
+        // polygon copy and framebuffer update.
         let dominated = fitness > current_fitness;
-        let neutral = fitness == current_fitness && (working_states[best_offspring_id].rng_state.x & 1u) == 1u;
+        let copy = offspring_changed_words(best_offspring_id).x == NO_CHANGES;
+        let neutral = fitness == current_fitness && !copy
+            && (working_states[best_offspring_id].rng_state.x & 1u) == 1u;
         // Every offspring was rejected when the minimum is REJECTED_ERROR.
         let should_accept = best_error != REJECTED_ERROR && (dominated || neutral);
 
