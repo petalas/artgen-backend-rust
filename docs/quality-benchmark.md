@@ -400,3 +400,26 @@ Operator weights, ff only (evidence `.cache/quality/runs/20261030T140631Z-8sb6nx
   includes 1.
 - More full colour changes did not help: their rate fell from 0.075 to 0.030
   per 1000 offered.
+
+## Cut, adaptive and micro step confirm from s120, 2026-10-30
+
+`54ffd03`, ff + mona + darwin, seeds 1–3, 90 s from `s120` (evidence
+`.cache/quality/runs/20261030T143916Z-95dggffl`). cut = offset 0.000565,
+medium move 0.001; micro2 = `micro_adjust_delta` 0.002 (default 0.001).
+
+| side | time ratio at 90 s | r ratio at 90 s | median r at 90 s, ff / mona / darwin | improvements, ff / mona / darwin |
+| --- | --- | --- | --- | --- |
+| control | 1 | 1 | 1.2203 / 2.0963 / 1.2486 | 46,477 / 65,585 / 47,330 |
+| cut | 0.78 [0.65, 0.90] | 0.9912 [0.9836, 0.9971] | 1.2083 / 2.0810 / 1.2423 | 51,422 / 81,813 / 56,072 |
+| adaptive | 0.83 [0.69, 0.98] | 0.9948 [0.9902, 0.9991] | 1.1965 / 2.1092 / 1.2409 | 50,784 / 66,954 / 55,134 |
+| micro2 | 0.87 [0.75, 1.01] | 0.9996 [0.9940, 1.0051] | 1.2061 / 2.1177 / 1.2548 | 46,145 / 63,785 / 48,671 |
+| cut + micro2 | 0.70 [0.56, 0.80] | 0.9874 [0.9780, 0.9951] | 1.2046 / 2.0786 / 1.2333 | 55,524 / 81,633 / 63,131 |
+
+- cut and cut + micro2 beat the control on every image; adaptive and micro2
+  alone lose on mona. All r ratios are NOISE against the 2% bar, which is too
+  coarse from a mature start (see the characterization above).
+- micro2 raises micro vertex moves' improvement rate right after the start
+  (ff 0.109 → 0.223 per 1000 offered in 0–5 s) but not after 30 s (0.081 →
+  0.075; mona and darwin equal or lower): larger steps pay early in the window
+  and stop paying later.
+- The cut sides keep 13–55 more triangles at 90 s.
