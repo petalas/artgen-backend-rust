@@ -1,23 +1,31 @@
 #!/usr/bin/env python3
-"""Long-run quality benchmark: how far evolution gets from a blank drawing over minutes.
+"""Long-run quality benchmark: how far evolution gets over minutes, from blank or a mature start.
 
     scripts/quality.py --side master=master --seconds 300 --seeds 5        # characterize
     scripts/quality.py --side control=HEAD --side cand=WORKTREE             # build A/B
     scripts/quality.py --side control=HEAD --side nox=HEAD \\
         --params 'nox={"crossover_prob":0}'                                 # settings A/B
     scripts/quality.py --side a=HEAD --side b=HEAD --seconds 20 --seeds 2   # A/A
+    scripts/quality.py --seconds 120 --seeds 3 --save-starts .cache/quality/starts/s120
+    scripts/quality.py --start .cache/quality/starts/s120 --side control=HEAD \
+        --side cand=WORKTREE --seconds 90 --images ff --seeds 3          # late-game screen
 
 A side is NAME=BUILD, where BUILD is a git ref, WORKTREE, revert:SHA[@BASE] or an
 evolution-bench executable (built and cached exactly as scripts/hillclimb.py does).
 --params NAME=JSON|FILE merges MutationParams fields (snake_case or camelCase)
 onto MutationParams::default() for that side. The first side is the control.
 
-Each run evolves a blank drawing on one frozen v1 fixture image with one seed for
+Each run evolves a drawing on one frozen v1 fixture image with one seed for
 --seconds of wall clock, through ordinary `run_batch` calls with delivery, and
 returns a trajectory of the GPU-delivered best. Every side runs the same seeds;
 side order rotates per seed; each image gets fresh server processes. Runs wait
 for a quiet host, hold the benchmark lock, and a run during which other processes
 used more than one core is discarded and re-run.
+
+Runs start blank unless --start DIR names saved start drawings, DIR/IMAGE/seedN.json
+for every image and seed; then a run measures only the late game. --save-starts DIR
+(one side only) copies each run's final drawing there, with meta.json naming the
+build, params, seconds and start that produced them.
 
 Metric at checkpoint T: remaining error r = 100 - fitness% (and r_raw without
 the polygon point penalty). Comparison: geometric mean over images x seeds of
@@ -30,6 +38,8 @@ targets taken from the control's worst seed. See docs/quality-benchmark.md.
 import argparse
 import datetime
 import fcntl
+import hashlib
+import shutil
 import itertools
 import json
 import math
@@ -61,7 +71,7 @@ REQUEST_SLACK_SECONDS = 600
 NAME = re.compile(r"[A-Za-z0-9_.-]{1,32}")
 LOG_COLUMNS = ("utc", "evidence", "side", "build", "identity", "params", "image", "seed",
                "seconds", "elapsed", "batches", "evals_per_s", "fitness", "raw_fitness",
-               "polygons", "remaining_at", "host_load", "attempts", "note")
+               "polygons", "remaining_at", "host_load", "attempts", "note", "start")
 
 
 def camel(key):
@@ -117,6 +127,10 @@ def parse_args(argv):
                           "(+~12 s shader compile per run; no in-process submit drift)")
     cli.add_argument("--min-effect", type=float, default=0.02,
                      help="smallest remaining-error ratio change reported (default 0.02)")
+    cli.add_argument("--start", type=Path,
+                     help="directory of start drawings IMAGE/seedN.json (default: blank)")
+    cli.add_argument("--save-starts", type=Path,
+                     help="new directory to save each run's final drawing as a start")
     cli.add_argument("--build-only", action="store_true", help="resolve sides and exit")
     cli.add_argument("--note", default="", help="free text recorded in the log")
     args = cli.parse_args(argv)
@@ -128,7 +142,26 @@ def parse_args(argv):
     require(args.first_seed >= 0, "first-seed must be non-negative")
     require(1 <= args.seconds <= MAX_SECONDS, f"seconds must be 1..{MAX_SECONDS}")
     require(0 <= args.min_effect < 1, "min-effect must be in 0..1")
+    args.starts = start_files(args.start, args.images,
+                              range(args.first_seed, args.first_seed + args.seeds))
+    if args.save_starts:
+        require(len(args.sides) == 1, "--save-starts needs exactly one side")
+        require(not args.save_starts.exists(), f"{args.save_starts} already exists")
     return args
+
+
+def start_files(directory, images, seeds):
+    """{(image, seed): (absolute path, sha256)} for --start, or {} for blank starts."""
+    if directory is None:
+        return {}
+    starts = {}
+    for image in images:
+        for seed in seeds:
+            path = (directory / image / f"seed{seed}.json").resolve()
+            require(path.is_file(), f"missing start drawing {path}")
+            require(not re.search(r"\s", str(path)), f"start path has whitespace: {path}")
+            starts[image, seed] = (path, hashlib.sha256(path.read_bytes()).hexdigest())
+    return starts
 
 
 def checkpoints(seconds):
@@ -183,17 +216,21 @@ class Servers:
         self.open = {}
 
 
-def request_line(side, image, seed, seconds, output):
+def request_line(side, image, seed, seconds, output, start=None):
     line = (f"quality --case {image} --seed {seed} --seconds {seconds} "
             f"--warmup {WARMUP_BATCHES} --output {output}")
     if side["overrides"]:
         line += " --params " + json.dumps(side["overrides"], separators=(",", ":"))
+    if start:
+        line += f" --start {start[0]}"
     return line
 
 
-def check_record(record, image, seed, seconds):
+def check_record(record, image, seed, seconds, start=None):
     require(record.get("kind") == "quality" and record["case_id"] == image
             and record["seed"] == seed, "record does not match its request")
+    require(record.get("start_sha256") == (start[1] if start else None),
+            f"{image} seed {seed}: the run did not start from the requested drawing")
     # Errors include GPU device errors and a final fitness the scalar renderer disagrees
     # with (tile-bin overflow made darwin report 99.97% for an 81% drawing).
     require(not record["errors"], f"{image} seed {seed}: invalid run: {record['errors'][:3]}")
@@ -212,7 +249,8 @@ def run_one(servers, name, side, position, args, evidence):
         server = servers.get(name)
         hc.wait_for_quiet(servers.pids())
         output = evidence / image / f"seed{seed}-{name}" / f"attempt{attempt}"
-        line = request_line(side, image, seed, args.seconds, output)
+        start = args.starts.get(position)
+        line = request_line(side, image, seed, args.seconds, output, start)
         before = hc.cpu_snapshot(servers.pids())
         try:
             record = server.request(line, args.seconds + REQUEST_SLACK_SECONDS)
@@ -221,7 +259,7 @@ def run_one(servers, name, side, position, args, evidence):
                                  "has no `quality` request)") from None
         foreign = hc.foreign_cores(before, hc.cpu_snapshot(servers.pids()))
         servers.done(name)
-        check_record(record, image, seed, args.seconds)
+        check_record(record, image, seed, args.seconds, start)
         run = summarize_run(record, name, image, seed, args.seconds)
         run.update(foreign_cores=foreign, attempts=attempt + 1, output=str(output))
         print(f"  {image} seed {seed} {name}: fitness {run['fitness']:.4f}  "
@@ -438,7 +476,8 @@ def append_log(runs, args, resolved, evidence):
                                                  for t, v in run["at"].items()},
                                                 separators=(",", ":")),
                      "host_load": f"{run['foreign_cores']:.1f}", "attempts": run["attempts"],
-                     "note": args.note}
+                     "note": args.note,
+                     "start": args.starts[run["image"], run["seed"]][1][:12] if args.starts else ""}
             clean = [str(entry[key]).replace("\t", " ").replace("\n", " ") for key in LOG_COLUMNS]
             stream.write("\t".join(clean) + "\n")
 
@@ -460,15 +499,35 @@ def report(args, resolved, evidence, runs, discarded):
         print(f"re-ran {len(discarded)} runs that overlapped other CPU work")
     strip = ("trajectory", "by_batch")
     (evidence / "summary.json").write_text(json.dumps(
-        {"args": {k: v for k, v in vars(args).items()}, "identities": resolved,
+        {"args": {k: v for k, v in vars(args).items() if k != "starts"}, "identities": resolved,
+         "starts": [{"image": image, "seed": seed, "path": str(path), "sha256": sha}
+                    for (image, seed), (path, sha) in args.starts.items()],
          "runs": [{k: v for k, v in r.items() if k not in strip} for r in runs],
          "discarded": [{k: v for k, v in r.items() if k not in strip} for r in discarded],
          "comparisons": entries, "targets": targets,
          "determinism": {"pairs": compared, "points": shared, "mismatches": mismatches}},
         indent=2, default=str))
     append_log(runs, args, resolved, evidence)
+    if args.save_starts:
+        save_starts(runs, args, resolved, evidence)
     print(f"evidence {os.path.relpath(evidence, hc.REPO)}")
     return 1 if mismatches else 0
+
+
+def save_starts(runs, args, resolved, evidence):
+    """Copy each run's final delivered drawing to --save-starts as IMAGE/seedN.json."""
+    (side,) = args.sides
+    for run in runs:
+        target = args.save_starts / run["image"] / f"seed{run['seed']}.json"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(Path(run["output"]) / "best.json", target)
+    meta = {"build": resolved[side][0], "identity": resolved[side][1],
+            "params": args.sides[side]["overrides"], "seconds": args.seconds,
+            "start": str(args.start) if args.start else None,
+            "evidence": os.path.relpath(evidence, hc.REPO),
+            "fitness": {f"{r['image']}/seed{r['seed']}": r["fitness"] for r in runs}}
+    (args.save_starts / "meta.json").write_text(json.dumps(meta, indent=2))
+    print(f"saved {len(runs)} start drawings to {args.save_starts}")
 
 
 def resolve_sides(sides):

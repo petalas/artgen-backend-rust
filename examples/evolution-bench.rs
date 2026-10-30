@@ -56,7 +56,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// One blank-start quality run in its own process (the supervisor uses `serve`).
+/// One quality run in its own process (the supervisor uses `serve`).
 fn quality(mut values: BTreeMap<String, String>) -> Result<()> {
     let manifest = path(&values, "manifest")?;
     values.remove("manifest");
@@ -140,9 +140,10 @@ fn quality_spec(mut values: BTreeMap<String, String>) -> Result<(QualitySpec, Pa
         None => serde_json::Map::new(),
         Some(json) => serde_json::from_str(&json).context("--params must be a JSON object")?,
     };
+    let start = values.remove("start").map(PathBuf::from);
     ensure!(
         values.len() == 5,
-        "quality expects case, seed, seconds, warmup, output and optional params"
+        "quality expects case, seed, seconds, warmup, output and optional params and start"
     );
     let spec = QualitySpec {
         case_id: value(&values, "case")?.into(),
@@ -150,6 +151,7 @@ fn quality_spec(mut values: BTreeMap<String, String>) -> Result<(QualitySpec, Pa
         seconds: value(&values, "seconds")?.parse()?,
         warmup_batches: value(&values, "warmup")?.parse()?,
         overrides,
+        start,
     };
     Ok((spec, path(&values, "output")?))
 }

@@ -1,7 +1,7 @@
 # Long-run quality benchmark
 
-`scripts/quality.py` measures how far evolution gets from a blank drawing over
-minutes of wall clock. Throughput screens (`scripts/hillclimb.py`) time 64–512
+`scripts/quality.py` measures how far evolution gets from a blank drawing, or
+from a saved mature drawing, over minutes of wall clock. Throughput screens (`scripts/hillclimb.py`) time 64–512
 batches from mature fixtures and cannot show late-game behavior. Use this
 benchmark for evolution settings (mutation probabilities and sizes, adaptive
 mutation, polygon penalty, chains vs lambda, crossover and tournament) and for
@@ -14,6 +14,9 @@ scripts/quality.py --side control=HEAD --side nox=HEAD --params 'nox={"crossover
 scripts/quality.py --side cap2000=HEAD --side cap1000=HEAD --params 'cap1000={"max_polygons":1000}'
 scripts/quality.py --side p1=HEAD --side p16=HEAD --params 'p16={"per_point_penalty":3.2e-6}'
 scripts/quality.py --side a=HEAD --side b=HEAD --seconds 20 --seeds 2                # A/A
+scripts/quality.py --seconds 120 --seeds 5 --save-starts .cache/quality/starts/s120   # make starts
+scripts/quality.py --start .cache/quality/starts/s120 --side control=HEAD --side cand=WORKTREE \
+    --images ff --seeds 3 --seconds 90                                               # late-game screen
 ```
 
 - `--side NAME=BUILD` (repeatable; the first side is the control). BUILD is a git
@@ -33,6 +36,11 @@ scripts/quality.py --side a=HEAD --side b=HEAD --seconds 20 --seeds 2           
 - `--images` (default ff,mona,darwin; see darwin under Limits), `--seeds` (default 5),
   `--first-seed`, `--seconds` (default 120, at most 3600), `--min-effect` (default
   0.02), `--server-scope image|run`, `--build-only`, `--note`.
+- `--start DIR` starts every run from `DIR/IMAGE/seedN.json` instead of blank;
+  each image and seed needs its file. `--save-starts DIR` (one side, `DIR` must
+  not exist) copies each run's final delivered drawing there, plus `meta.json`
+  with the build, params, budget and start that made them. See
+  [Mature starts](#mature-starts).
 
 Only builds that include the quality recorder can be sides. Older executables
 have no `quality` request, and their server exits on the first run.
@@ -42,11 +50,11 @@ have no `quality` request, and their server exits on the first run.
 `evolution-bench` accepts a `quality` request, in `serve` mode or as a command:
 
 ```text
-quality --case ff --seed 3 --seconds 300 --warmup 8 [--params {"crossoverProb":0}] --output DIR
+quality --case ff --seed 3 --seconds 300 --warmup 8 [--params {"crossoverProb":0}] [--start FILE] --output DIR
 ```
 
-`src/benchmark/quality.rs` restarts the resident engine on a blank drawing with
-`prepare_seeded_benchmark`, then calls `run_batch(params, true)` until the budget
+`src/benchmark/quality.rs` restarts the resident engine on a blank drawing, or
+on the `--start` drawing in every chain, with `prepare_seeded_benchmark`, then calls `run_batch(params, true)` until the budget
 passes. This is the app's call, with timestamps, one-batch-behind delivery and
 the strict-improvement global best. The final pending batch is flushed and the
 GPU is drained inside the clock. Every value comes from a drawing the engine had
@@ -73,6 +81,31 @@ renderer (`reference::evaluate`, with the run's `per_point_penalty`) and
 described by `reference::complexity`. A gap
 above 0.05 fitness points, or any wgpu device error, makes the run invalid, and
 the script stops. `DIR` gets `result.json` (the full record) and `best.json`.
+The record (protocol 2) carries `start_sha256`, the start file's SHA-256 or
+null for a blank start; the script checks it against the file it named.
+
+## Mature starts
+
+From blank, most of a run repeats the early game: ff reaches r 1.50 by 30 s and
+1.32 by 120 s (baseline below), and settings that matter only late spend their
+budget getting there. A start set is the final drawings of one characterization
+run (`--save-starts`), one per image and seed. A side then starts from those
+drawings, with its own params and seed, so the whole budget measures the late
+game. The frozen v1 fixture drawings are not mature enough: they score 97.2–97.4%
+with 423–539 triangles, worse than a blank run's 5 s.
+
+What a start changes: every chain begins from the same single drawing, not the
+population that made it, and the starts were evolved under the start set's
+params. So a start-set result says how a side continues a default-evolved
+drawing, not how it does from blank; early-game effects are not measured.
+Starts for seed N are used by seed N, so seed-to-seed variation includes the
+start. A typical workflow is a one-image, three-seed screen from starts (about 9
+minutes for two sides at 90 s), then the full three images from starts for
+candidates that pass.
+
+Smoke check, 2026-10-30: a 5 s mona run saved a 95.92% drawing; a run started
+from it recorded initial fitness 95.92382, equal to the saved fitness, and the
+start's hash in the log.
 
 ## Metrics
 
@@ -156,7 +189,8 @@ images, 5 seeds, 300 s and one side, that is ~52 minutes.
   darwin). milkshakes has no fixture, and other resolutions are not supported.
 - Logs: one row per scored run goes to `benchmarks/quality/log.tsv`, with the
   side, build, params, image, seed, final fitness and polygons, r at each
-  checkpoint and host load. Evidence goes to `.cache/quality/runs/<utc>-*/`: each
+  checkpoint, host load and the first 12 hex digits of the start drawing's
+  SHA-256 (empty for a blank start). Evidence goes to `.cache/quality/runs/<utc>-*/`: each
   run's `result.json` and `best.json`, `serve/*/stderr.log` and a `summary.json`
   with the comparisons and targets.
 

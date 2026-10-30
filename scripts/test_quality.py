@@ -23,9 +23,10 @@ hc = quality.hc
 # Speaks `serve` with `quality` requests. Remaining error falls as 1/sqrt(batch),
 # scaled by the executable's name (scale-1.0-nd-0), the seed and crossoverProb=0.
 # nd-1 adds per-process noise, so the same seed no longer replays; err-1 reports
-# the recorder's scalar-renderer disagreement.
+# the recorder's scalar-renderer disagreement; ign-1 ignores --start. Each run
+# writes best.json naming its case and seed.
 FAKE = r'''#!/usr/bin/env python3
-import json, os, sys
+import hashlib, json, os, sys
 from pathlib import Path
 name = Path(sys.argv[0]).name
 fields = dict(zip(name.split("-")[::2], name.split("-")[1::2]))
@@ -52,8 +53,11 @@ for line in sys.stdin:
               "evals_per_second": 163840.0, "trajectory": points,
               "errors": ["delivered fitness differs from the scalar renderer's"]
               if fields["err"] == "1" else []}
+    if "start" in flags and fields["ign"] == "0":
+        record["start_sha256"] = hashlib.sha256(Path(flags["start"]).read_bytes()).hexdigest()
     out = Path(flags["output"]); out.mkdir(parents=True)
     (out / "result.json").write_text(json.dumps(record))
+    (out / "best.json").write_text(json.dumps({"case": flags["case"], "seed": seed}))
     print("engine log line", flush=True)
     print("@result " + json.dumps(record), flush=True)
 '''
@@ -77,8 +81,8 @@ class QualityCli(unittest.TestCase):
             patch.start()
             self.addCleanup(patch.stop)
 
-    def fake(self, scale=1.0, nd=0, err=0):
-        path = self.root / f"scale-{scale}-nd-{nd}-err-{err}"
+    def fake(self, scale=1.0, nd=0, err=0, ign=0):
+        path = self.root / f"scale-{scale}-nd-{nd}-err-{err}-ign-{ign}"
         path.write_text(FAKE)
         path.chmod(0o755)
         return str(path)
@@ -110,6 +114,40 @@ class QualityCli(unittest.TestCase):
         self.assertEqual({row["seed"] for row in rows}, {"1", "2", "3"})
         remaining = json.loads(rows[0]["remaining_at"])
         self.assertEqual(list(remaining), ["1", "2", "5", "10", "20"])
+
+    def test_saved_starts_seed_later_runs_and_are_logged(self):
+        fake = self.fake()
+        starts = self.root / "starts"
+        code, out, err = self.run_cli("--side", f"base={fake}", "--save-starts", str(starts))
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(json.loads((starts / "mona" / "seed2.json").read_text()),
+                         {"case": "mona", "seed": 2})
+        meta = json.loads((starts / "meta.json").read_text())
+        self.assertEqual((meta["seconds"], len(meta["fitness"])), (20.0, 6))
+        self.assertEqual({row["start"] for row in self.log_rows()}, {""})
+
+        code, out, err = self.run_cli("--side", f"a={fake}", "--side", f"b={fake}",
+                                      "--start", str(starts))
+        self.assertEqual(code, 0, out + err)
+        started = self.log_rows()[6:]
+        self.assertEqual(len(started), 12)
+        self.assertTrue(all(len(row["start"]) == 12 for row in started))
+        self.assertEqual(len({(row["image"], row["seed"], row["start"]) for row in started}), 6)
+
+        code, _, err = self.run_cli("--side", f"old={self.fake(ign=1)}", "--start", str(starts))
+        self.assertEqual(code, 1)
+        self.assertIn("did not start from the requested drawing", err)
+
+        code, _, err = self.run_cli("--side", f"a={fake}", "--start", str(starts), "--seeds", "4")
+        self.assertEqual(code, 1)
+        self.assertIn("missing start drawing", err)
+        code, _, err = self.run_cli("--side", f"a={fake}", "--save-starts", str(starts))
+        self.assertEqual(code, 1)
+        self.assertIn("already exists", err)
+        code, _, err = self.run_cli("--side", f"a={fake}", "--side", f"b={fake}",
+                                    "--save-starts", str(self.root / "new"))
+        self.assertEqual(code, 1)
+        self.assertIn("exactly one side", err)
 
     def test_identical_sides_are_noise_and_replay_identically(self):
         fake = self.fake()

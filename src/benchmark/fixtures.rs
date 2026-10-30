@@ -262,6 +262,18 @@ fn validate_manifest(manifest: &Manifest) -> Result<()> {
     Ok(())
 }
 
+/// Read and validate a drawing file; returns it with its SHA-256.
+///
+/// # Errors
+/// Rejects unreadable, oversized, malformed or unpackable drawings.
+pub fn load_drawing(path: &Path) -> Result<(Drawing, String)> {
+    let bytes = read_bounded(path, MAX_DRAWING_BYTES)?;
+    let drawing: Drawing = serde_json::from_slice(&bytes)
+        .with_context(|| format!("{} is not a drawing", path.display()))?;
+    validate_drawing(&drawing)?;
+    Ok((drawing, sha256(&bytes)))
+}
+
 fn validate_drawing(drawing: &Drawing) -> Result<()> {
     ensure!(
         drawing.polygons.len() <= POLYGON_CAPACITY,

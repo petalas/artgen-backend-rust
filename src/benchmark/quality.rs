@@ -1,18 +1,24 @@
-//! Long-run quality recorder: evolve a blank drawing for a wall-clock budget.
+//! Long-run quality recorder: evolve a drawing for a wall-clock budget, from
+//! blank or from a saved start drawing (a mature drawing, so a run measures
+//! only the late game).
 //!
 //! Batches run exactly as the app runs them (`run_batch` with timestamps, its
 //! one-batch-behind delivery and its global-best rule). The trajectory is built
 //! only from values the engine already delivered, so recording never adds a GPU
 //! round-trip. Given a seed, the delivered sequence is a function of the batch
 //! index; wall-clock time only maps batches to seconds.
-use std::{fs, path::Path, time::Instant};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    time::Instant,
+};
 
 use anyhow::{ensure, Context, Result};
 use serde::Serialize;
 use serde_json::{Map, Value};
 
 use super::{
-    fixtures::LoadedFixture,
+    fixtures::{self, LoadedFixture},
     reference::{self, Complexity},
 };
 use crate::{
@@ -22,7 +28,7 @@ use crate::{
     settings::TILE_MAX_POLYS,
 };
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 /// Wall-clock checkpoints recorded at the first batch at or after each second.
 pub const FIXED_SECONDS: [f64; 11] = [
     1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 60.0, 120.0, 180.0, 300.0, 600.0,
@@ -57,6 +63,8 @@ pub struct QualitySpec {
     pub warmup_batches: u32,
     /// Serialized `MutationParams` fields (camelCase) merged onto the defaults.
     pub overrides: Map<String, Value>,
+    /// Drawing every chain starts from; blank when absent.
+    pub start: Option<PathBuf>,
 }
 
 /// Best delivered drawing at one moment. `seconds` is measured after the batch
@@ -87,6 +95,8 @@ pub struct QualityRecord {
     pub height: u32,
     pub overrides: Map<String, Value>,
     pub params: MutationParams,
+    /// SHA-256 of the start drawing file; absent for a blank start.
+    pub start_sha256: Option<String>,
     pub initial_fitness: f64,
     /// The scalar reference renderer's fitness of the final delivered drawing,
     /// computed after the clock stops.
@@ -204,9 +214,10 @@ struct Recorder {
 }
 
 impl Recorder {
-    fn new(initial_fitness: f32, per_point_penalty: f32) -> Self {
+    /// `start` scored `initial_fitness` on the GPU.
+    fn new(start: &Drawing, initial_fitness: f32, per_point_penalty: f32) -> Self {
         let best = Drawing {
-            polygons: Vec::new(),
+            polygons: start.polygons.clone(),
             is_dirty: false,
             fitness: initial_fitness,
         };
@@ -302,7 +313,7 @@ fn validate(spec: &QualitySpec, output: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Run one blank-start trajectory on a resident engine; writes `result.json`
+/// Run one trajectory on a resident engine; writes `result.json`
 /// and the final delivered `best.json` outside the clock.
 ///
 /// # Errors
@@ -316,9 +327,22 @@ pub fn run(
 ) -> Result<QualityRecord> {
     validate(spec, output)?;
     let params = params_with(&spec.overrides)?;
+    let (start, start_sha256) = match &spec.start {
+        None => (Drawing { polygons: Vec::new(), is_dirty: false, fitness: 0.0 }, None),
+        Some(path) => {
+            let (drawing, sha) = fixtures::load_drawing(path)?;
+            let triangles = drawing_to_gpu(&drawing, 0).polygon_count;
+            ensure!(
+                triangles <= params.max_polygons,
+                "start drawing has {triangles} triangles, above max_polygons {}",
+                params.max_polygons
+            );
+            (drawing, Some(sha))
+        }
+    };
     fs::create_dir_all(output)?;
     let scopes = evolver.benchmark_error_scopes();
-    let result = evolve(evolver, &params, spec);
+    let result = evolve(evolver, &params, spec, &start);
     let mut errors = futures_lite::future::block_on(scopes.finish());
     let (recorder, initial_fitness, seconds) = result?;
     let last = *recorder
@@ -337,6 +361,7 @@ pub fn run(
         height: input.fixture.height,
         overrides: spec.overrides.clone(),
         params,
+        start_sha256,
         initial_fitness: f64::from(initial_fitness),
         final_scalar_fitness: scalar,
         final_complexity: complexity,
@@ -390,6 +415,7 @@ fn evolve(
     evolver: &mut GpuEvolver,
     params: &MutationParams,
     spec: &QualitySpec,
+    start: &Drawing,
 ) -> Result<(Recorder, f32, f64)> {
     evolver
         .benchmark_set_batch_envelope(params, false)
@@ -397,15 +423,10 @@ fn evolve(
     evolver
         .benchmark_set_validation(false)
         .map_err(anyhow::Error::msg)?;
-    let blank = Drawing {
-        polygons: Vec::new(),
-        is_dirty: false,
-        fitness: 0.0,
-    };
     let initial = evolver
-        .prepare_seeded_benchmark(&blank, params, spec.seed, spec.warmup_batches, true)
+        .prepare_seeded_benchmark(start, params, spec.seed, spec.warmup_batches, true)
         .map_err(anyhow::Error::msg)?;
-    let mut recorder = Recorder::new(initial, params.per_point_penalty);
+    let mut recorder = Recorder::new(start, initial, params.per_point_penalty);
     let start = Instant::now();
     let mut batches = 0u64;
     while batches < MAX_BATCHES {
