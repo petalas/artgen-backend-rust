@@ -9,6 +9,7 @@ use super::execution::{
 use super::buffers::{
     ControlFlags, GpuDrawingState, GpuParams, GPU_DRAWING_STATE_SIZE,
 };
+use super::operators::OPERATOR_STATS_WORDS;
 use super::changes::{
     pack_dirty_box, ChangedIndices, CHANGED_WORDS_OFFSET, DIRTY_MAX_OFFSET, DIRTY_MIN_OFFSET,
 };
@@ -35,6 +36,7 @@ pub struct GpuPipeline {
     pub readback_staging_bufs: [Buffer; 2], // best-drawing copy, one per staging slot
     pub multi_readback_staging_buf: Buffer,  // persistent staging for batch chain readback
     pub eval_fitness_staging_buf: Buffer,    // persistent staging for evaluate_chain_fitness readback
+    // Per staging slot: the control flags, then the operator stats.
     pub control_staging_bufs: [Buffer; 2],
     pub fitness_packed_buf: Buffer,
     pub fitness_staging_bufs: [Buffer; 2],
@@ -53,6 +55,11 @@ pub struct GpuPipeline {
     // update_framebuffers reads it. Only write_chain_states and
     // forget_chain_changes write it from the host.
     pub(super) chain_changes_buf: Buffer,
+
+    // Operator stats (`operators`): mutate writes each offspring's operator
+    // code; select counts them into the cumulative counters.
+    pub(super) offspring_ops_buf: Buffer,
+    pub(super) operator_stats_buf: Buffer,
 
     // Selected programs, specialization and compilation caches share one owner.
     pub(super) programs: GpuPrograms,
@@ -303,11 +310,12 @@ impl GpuPipeline {
             mapped_at_creation: false,
         });
 
-        // Control staging (for polling new_best_found) — double-buffered
+        // Control staging (for polling new_best_found), followed by the
+        // operator stats, so one map per batch reads both — double-buffered
         let control_staging_bufs = std::array::from_fn(|i| {
             device.create_buffer(&BufferDescriptor {
                 label: Some(if i == 0 { "control_staging_0" } else { "control_staging_1" }),
-                size: std::mem::size_of::<ControlFlags>() as u64,
+                size: CONTROL_STAGING_BYTES,
                 usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             })
@@ -407,6 +415,20 @@ impl GpuPipeline {
             mapped_at_creation: false,
         });
 
+        // Zero-initialized: no operator has been counted.
+        let offspring_ops_buf = device.create_buffer(&BufferDescriptor {
+            label: Some("offspring_ops"),
+            size: resources.offspring_ops,
+            usage: BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let operator_stats_buf = device.create_buffer(&BufferDescriptor {
+            label: Some("operator_stats"),
+            size: resources.operator_stats,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         let max_incr_chains = chain_framebuffers_size / (pixels_per_chain * 4);
         println!(
             "Incremental eval buffers allocated: framebuffers {:.1} MB ({} chains max), total_errors {} bytes",
@@ -463,6 +485,8 @@ impl GpuPipeline {
             Resource::ChainTotalErrors => chain_total_errors_buf.as_entire_binding(),
             Resource::ChainUpdateFlags => chain_update_flags_buf.as_entire_binding(),
             Resource::ChainChanges => chain_changes_buf.as_entire_binding(),
+            Resource::OffspringOps => offspring_ops_buf.as_entire_binding(),
+            Resource::OperatorStats => operator_stats_buf.as_entire_binding(),
             Resource::Params => params_buf.as_entire_binding(),
         };
         let bind = |stage| {
@@ -517,6 +541,8 @@ impl GpuPipeline {
             chain_total_errors_buf,
             chain_update_flags_buf,
             chain_changes_buf,
+            offspring_ops_buf,
+            operator_stats_buf,
             programs,
             timestamp_query_set,
             timestamp_resolve_buf,
@@ -560,6 +586,8 @@ impl GpuPipeline {
             framebuffers: self.chain_framebuffers_buf.size(),
             parent_errors: self.chain_total_errors_buf.size(), updates: self.chain_update_flags_buf.size(),
             chain_changes: self.chain_changes_buf.size(), fitness: self.fitness_packed_buf.size(),
+            offspring_ops: self.offspring_ops_buf.size(),
+            operator_stats: self.operator_stats_buf.size(),
         }
     }
 
@@ -730,6 +758,13 @@ impl GpuPipeline {
         self.programs.save_pipeline_cache();
     }
 }
+
+/// Byte offset of the operator stats in a control staging buffer.
+pub(super) const OPERATOR_STATS_STAGING_OFFSET: usize = std::mem::size_of::<ControlFlags>();
+/// The control flags, then `OPERATOR_STATS_WORDS` counters.
+const CONTROL_STAGING_BYTES: u64 = (OPERATOR_STATS_STAGING_OFFSET + OPERATOR_STATS_WORDS * 4) as u64;
+const _: () =
+    assert!((OPERATOR_STATS_STAGING_OFFSET as u64).is_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT));
 
 /// Raster workgroups sharing the worklist. About 6k pairs need raster per
 /// iteration on the v1 fixtures; extra workgroups exit at the loop test.

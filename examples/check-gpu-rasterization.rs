@@ -5,7 +5,10 @@
 use artgen_backend_rust::{
     benchmark::reference,
     gpu_evolver::{
-        benchmark::BenchmarkSnapshot, buffers::drawing_to_gpu, EngineCapacity, GpuEvolver,
+        benchmark::BenchmarkSnapshot,
+        buffers::drawing_to_gpu,
+        operators::{Operator, OperatorStats},
+        EngineCapacity, GpuEvolver,
     },
     models::{color::Color, drawing::Drawing, point::Point, polygon::Polygon},
     mutation_params::MutationParams,
@@ -80,6 +83,7 @@ fn main() {
     verify_shortcuts_near_polygon_capacity(1000);
     verify_shortcuts_near_polygon_capacity(u32::try_from(POLYGON_CAPACITY).unwrap());
     verify_tile_list_overflow();
+    verify_operator_stats();
     println!("GPU rasterization checks passed");
 }
 
@@ -656,4 +660,107 @@ fn verify_tile_list_overflow() {
         delivered.fitness,
         delivered.polygons.len()
     );
+}
+
+/// Operator stats count every evaluated offspring once, under the operator that
+/// produced it, and every accepted winner once, as improved when it raised its
+/// chain's fitness and neutral when it kept it.
+fn verify_operator_stats() {
+    const SIDE: u32 = 96;
+    const CHAINS: u32 = 4;
+    const LAMBDA: u32 = 64;
+    let reference: Vec<u8> = (0..SIDE * SIDE)
+        .flat_map(|i| {
+            let (x, y) = (i % SIDE, i / SIDE);
+            [(x * 255 / SIDE) as u8, 96, (y * 255 / SIDE) as u8, 255]
+        })
+        .collect();
+    let drawing = scattered_triangles(64);
+    let params = MutationParams {
+        chain_count: CHAINS,
+        lambda: LAMBDA,
+        gpu_batch_iters: 1,
+        ..Default::default()
+    };
+    let mut evolver = futures_lite::future::block_on(GpuEvolver::new(
+        &reference,
+        SIDE,
+        SIDE,
+        &drawing,
+        EngineCapacity::for_params(&params),
+    ));
+    evolver
+        .prepare_seeded_benchmark(&drawing, &params, 13, 2, true)
+        .expect("operator stats preparation failed");
+    assert_eq!(*evolver.operator_stats(), OperatorStats::default(), "warmup was not forgotten");
+
+    // One iteration per batch, so each snapshot shows one select: its accept
+    // flags, and the chains' fitness before and after. The baseline is a GPU
+    // select's fitness, not the host's evaluation of the start.
+    evolver.run_batch(&params, true);
+    let mut before = evolver.benchmark_snapshot(CHAINS, LAMBDA).expect("snapshot").fitness_packed;
+    let base = evolver.operator_stats().clone();
+    let (mut improved, mut neutral) = (0u64, 0u64);
+    for _ in 0..48 {
+        evolver.run_batch(&params, true);
+        let after = evolver.benchmark_snapshot(CHAINS, LAMBDA).expect("snapshot");
+        for (chain, flags) in after.chain_update_flags.iter().enumerate() {
+            let (old, new) = (f32::from_bits(before[chain]), f32::from_bits(after.fitness_packed[chain]));
+            if flags[0] == 1 {
+                assert!(new >= old, "chain {chain} accepted a worse winner: {old} -> {new}");
+                improved += u64::from(new > old);
+                neutral += u64::from(new == old);
+            }
+        }
+        before = after.fitness_packed;
+    }
+    let stats = evolver.operator_stats();
+    let delta = |now: &[u64], then: &[u64]| -> u64 { now.iter().sum::<u64>() - then.iter().sum::<u64>() };
+    assert_eq!(delta(&stats.offered, &base.offered), 48 * u64::from(CHAINS * LAMBDA));
+    assert_eq!(delta(&stats.improved, &base.improved), improved, "improved winners");
+    assert_eq!(delta(&stats.neutral, &base.neutral), neutral, "neutral winners");
+    let counters = evolver.benchmark_counters();
+    assert_eq!(stats.offered.iter().sum::<u64>(), counters.completed_evaluations);
+    let offered_by = |op: Operator| stats.offered[op as usize];
+    for op in [Operator::Crossover, Operator::Offset, Operator::MicroMove, Operator::ChangeColor] {
+        assert!(offered_by(op) > 0, "{} produced no offspring", op.name());
+    }
+    assert!(improved > 0, "no chain improved");
+    let summary = format!("{} improved, {neutral} neutral of {} offered", improved,
+        stats.offered.iter().sum::<u64>());
+
+    // Only additions: every mutated offspring is an addition.
+    let adds = MutationParams {
+        add_polygon_prob: 1.0,
+        min_polygons: 1,
+        max_polygons: 1000,
+        chain_count: CHAINS,
+        lambda: LAMBDA,
+        gpu_batch_iters: 4,
+        ..no_op_params()
+    };
+    evolver.prepare_seeded_benchmark(&drawing, &adds, 17, 0, true).expect("additions");
+    for _ in 0..4 {
+        evolver.run_batch(&adds, true);
+    }
+    evolver.benchmark_drain().expect("drain");
+    let stats = evolver.operator_stats();
+    assert_eq!(stats.offered[Operator::Add as usize], 4 * 4 * u64::from(CHAINS * LAMBDA));
+    assert_eq!(stats.offered.iter().sum::<u64>(), stats.offered[Operator::Add as usize]);
+
+    // An empty parent whose only operator (removal) cannot run is evaluated
+    // unchanged; select accepts such equal-fitness copies only as neutral.
+    let empty = Drawing { polygons: vec![], is_dirty: false, fitness: 0.0 };
+    let removals = MutationParams { add_polygon_prob: 0.0, remove_polygon_prob: 1.0, ..adds };
+    evolver.prepare_seeded_benchmark(&empty, &removals, 19, 0, true).expect("removals");
+    for _ in 0..4 {
+        evolver.run_batch(&removals, true);
+    }
+    evolver.benchmark_drain().expect("drain");
+    let stats = evolver.operator_stats();
+    let unchanged = Operator::Unchanged as usize;
+    assert_eq!(stats.offered[unchanged], 4 * 4 * u64::from(CHAINS * LAMBDA));
+    assert_eq!(stats.improved.iter().sum::<u64>(), 0);
+    assert!(stats.neutral[unchanged] > 0, "no neutral acceptance of an unchanged copy");
+    println!("operator stats check: {summary}");
 }

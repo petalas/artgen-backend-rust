@@ -4,7 +4,8 @@
 // Single-pass: tries all mutations once, then forces a vertex micro-nudge if none fired.
 
 // common.wgsl, changes.wgsl and the generated constants (POLYGON_CAPACITY,
-// CHANGED_INDICES, TILE_MAX_POLYS) are appended by programs.rs.
+// CHANGED_INDICES, TILE_MAX_POLYS, OPERATOR_COUNT and the OP_* operator codes)
+// are appended by programs.rs.
 
 // --- Quantized polygon pack helpers ---
 
@@ -55,6 +56,9 @@ fn write_changed_words(oid: u32, words: vec2<u32>) {
 
 @group(0) @binding(0) var<storage, read>       chain_states:   array<DrawingState>;
 @group(0) @binding(1) var<storage, read_write>  working_states: array<DrawingState>;
+// The operator that produced each offspring (OP_*), for select's operator stats.
+// Outside the working states, so canonical state never sees it.
+@group(0) @binding(2) var<storage, read_write>  offspring_ops:  array<u32>;
 @group(1) @binding(0) var<uniform>              params:         Params;
 
 // The parent's header, broadcast to the workgroup. Its polygons are read from
@@ -320,7 +324,9 @@ fn crossover_dirty_box(out_count: u32) -> vec4<u32> {
 // --- Mutation: exactly one operator per offspring, picked by weighted roulette
 // (offspring-aware, with adaptive mutation scale) ---
 // Returns dirty bbox as vec4<u32>(min_x, min_y, max_x, max_y) in pixel coords.
-fn mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<function, u32>, ms: f32, changed: ptr<function, u32>) -> vec4<u32> {
+// `op` receives the branch that ran (OP_*); a pick whose guard fails falls
+// through to a later branch, which is the one recorded.
+fn mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<function, u32>, ms: f32, changed: ptr<function, u32>, op: ptr<function, u32>) -> vec4<u32> {
     let c = *count;
     let w = params.image_width;
     let h = params.image_height;
@@ -365,6 +371,7 @@ fn mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<function, u32>
         *count = c + 1u;
         working_states[oid].polygon_count = c + 1u;
         *changed = changed_indices(c, NO_CHANGED_INDEX);
+        *op = OP_ADD;
         return polygon_bbox_pixels(new_poly, w, h);
     }
 
@@ -383,6 +390,7 @@ fn mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<function, u32>
         *count = c - 1u;
         working_states[oid].polygon_count = c - 1u;
         *changed = changed_indices(remove_idx, last_idx);
+        *op = OP_REMOVE;
         return dirty;
     }
 
@@ -398,6 +406,7 @@ fn mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<function, u32>
         working_states[oid].polygons[i1] = working_states[oid].polygons[i2];
         working_states[oid].polygons[i2] = tmp;
         *changed = changed_indices(i1, i2);
+        *op = OP_REORDER;
         return merge_bbox(bbox1, bbox2);
     }
 
@@ -416,6 +425,7 @@ fn mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<function, u32>
         poly.data.y = pack_vertex(sv0); poly.data.z = pack_vertex(sv1); poly.data.w = pack_vertex(sv2);
         working_states[oid].polygons[si] = poly;
         *changed = changed_indices(si, NO_CHANGED_INDEX);
+        *op = OP_SCALE;
         return merge_bbox(old_bbox, polygon_bbox_pixels(poly, w, h));
     }
 
@@ -435,6 +445,7 @@ fn mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<function, u32>
         poly.data.y = pack_vertex(rv0); poly.data.z = pack_vertex(rv1); poly.data.w = pack_vertex(rv2);
         working_states[oid].polygons[ri] = poly;
         *changed = changed_indices(ri, NO_CHANGED_INDEX);
+        *op = OP_ROTATE;
         return merge_bbox(old_bbox, polygon_bbox_pixels(poly, w, h));
     }
 
@@ -449,6 +460,7 @@ fn mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<function, u32>
         working_states[oid].polygons[ai] = working_states[oid].polygons[aj];
         working_states[oid].polygons[aj] = tmp;
         *changed = changed_indices(ai, aj);
+        *op = OP_ADJACENT_SWAP;
         return merge_bbox(bbox_ai, bbox_aj);
     }
 
@@ -483,6 +495,7 @@ fn mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<function, u32>
             *count = c - 1u;
             working_states[oid].polygon_count = c - 1u;
             *changed = changed_indices(remove_idx, last);
+            *op = OP_MERGE;
             return dirty;
         }
         // Criteria not met — fall through to next mutation
@@ -517,6 +530,7 @@ fn mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<function, u32>
         *count = c + 1u;
         working_states[oid].polygon_count = c + 1u;
         *changed = changed_indices(c, NO_CHANGED_INDEX);
+        *op = OP_CLONE;
         return polygon_bbox_pixels(new_poly, w, h);
     }
 
@@ -532,10 +546,15 @@ fn mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<function, u32>
         working_states[oid].polygons[sci].data.x = working_states[oid].polygons[scj].data.x;
         working_states[oid].polygons[scj].data.x = tmp_color;
         *changed = changed_indices(sci, scj);
+        *op = OP_SWAP_COLORS;
         return merge_bbox(bbox_sci, bbox_scj);
     }
 
-    if c == 0u { return full_image_bbox(); }
+    // An empty parent whose pick failed its guard: evaluated unchanged.
+    if c == 0u {
+        *op = OP_UNCHANGED;
+        return full_image_bbox();
+    }
     let pi = rand_u32(rng, c);
     var poly = working_states[oid].polygons[pi];
     let old_bbox = polygon_bbox_pixels(poly, w, h);
@@ -547,6 +566,7 @@ fn mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<function, u32>
     // Offset polygon (scaled)
     cumulative += w_offset;
     if r < cumulative {
+        *op = OP_OFFSET;
         let mag = params.offset_polygon_magnitude * ms;
         let dx = rand_f32_range(rng, -mag, mag);
         let dy = rand_f32_range(rng, -mag, mag);
@@ -557,6 +577,7 @@ fn mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<function, u32>
     else {
         cumulative += w_move_point;
         if r < cumulative {
+            *op = OP_MOVE_POINT;
             let d = params.move_point_max_delta * ms;
             let vi = rand_u32(rng, 3u);
             if vi == 0u { v0.x = clamp(rand_f32_range(rng, v0.x - d, v0.x + d), 0.0, 1.0); v0.y = clamp(rand_f32_range(rng, v0.y - d, v0.y + d), 0.0, 1.0); }
@@ -567,6 +588,7 @@ fn mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<function, u32>
             // Medium-range point move
             cumulative += w_medium_move;
             if r < cumulative {
+                *op = OP_MEDIUM_MOVE;
                 let d = params.medium_move_delta * ms;
                 let vi = rand_u32(rng, 3u);
                 if vi == 0u { v0.x = clamp(rand_f32_range(rng, v0.x - d, v0.x + d), 0.0, 1.0); v0.y = clamp(rand_f32_range(rng, v0.y - d, v0.y + d), 0.0, 1.0); }
@@ -576,6 +598,7 @@ fn mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<function, u32>
             else {
                 cumulative += w_micro_adjust;
                 if r < cumulative {
+                    *op = OP_MICRO_MOVE;
                     let d = params.micro_adjust_delta * ms;
                     let vi = rand_u32(rng, 3u);
                     if vi == 0u { v0.x = clamp(rand_f32_range(rng, v0.x - d, v0.x + d), 0.0, 1.0); v0.y = clamp(rand_f32_range(rng, v0.y - d, v0.y + d), 0.0, 1.0); }
@@ -586,6 +609,7 @@ fn mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<function, u32>
                 else {
                     cumulative += w_change_color;
                     if r < cumulative {
+                        *op = OP_CHANGE_COLOR;
                         let ch = rand_u32(rng, 4u);
                         if ch == 0u { color.x = rand_f32(rng); }
                         else if ch == 1u { color.y = rand_f32(rng); }
@@ -596,6 +620,7 @@ fn mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<function, u32>
                     else {
                         cumulative += w_micro_color;
                         if r < cumulative {
+                            *op = OP_MICRO_COLOR;
                             let ch = rand_u32(rng, 4u);
                             let color_step = 1.0 / 255.0;
                             let dir = select(-color_step, color_step, rand_f32(rng) > 0.5);
@@ -608,6 +633,7 @@ fn mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<function, u32>
                         else {
                             cumulative += w_brightness;
                             if r < cumulative {
+                                *op = OP_BRIGHTNESS;
                                 let color_step = 1.0 / 255.0;
                                 let brighten = rand_f32(rng) > 0.5;
                                 if brighten {
@@ -622,6 +648,7 @@ fn mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<function, u32>
                             }
                             // Adjust saturation (fallback)
                             else {
+                                *op = OP_SATURATION;
                                 let avg = (color.x + color.y + color.z) / 3.0;
                                 let color_step = 1.0 / 255.0;
                                 let saturate = rand_f32(rng) > 0.5;
@@ -750,6 +777,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
             shared_crossover_rng, chain_id, shared_crossover_parent_b, offspring_id, lid.x);
         if lid.x == 0u {
             working_states[offspring_id].rng_state.x = crossover_rng;
+            offspring_ops[offspring_id] = OP_CROSSOVER;
         }
         return;
     }
@@ -770,8 +798,10 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
     // Apply exactly one mutation
     var count = working_states[offspring_id].polygon_count;
     var changed = 0u;
-    let dirty_bbox = mutate_offspring(&rng, offspring_id, &count, mutation_scale, &changed);
+    var op = OP_UNCHANGED;
+    let dirty_bbox = mutate_offspring(&rng, offspring_id, &count, mutation_scale, &changed, &op);
     write_dirty_box(offspring_id, dirty_bbox);
     working_states[offspring_id].rng_state.x = rng;
     write_changed_words(offspring_id, vec2<u32>(changed, 0u));
+    offspring_ops[offspring_id] = op;
 }

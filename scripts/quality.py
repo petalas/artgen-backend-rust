@@ -32,7 +32,9 @@ the polygon point penalty). Comparison: geometric mean over images x seeds of
 r_candidate / r_control (equal weight per image) with a stratified bootstrap 95%
 interval. BETTER/WORSE need the interval to exclude 1 and a move of at least
 --min-effect; fewer than three seeds give SCREEN. Also: time to reach fitness
-targets taken from the control's worst seed. See docs/quality-benchmark.md.
+targets taken from the control's worst seed. Records from builds with operator
+stats (protocol 3) also give, per side and image, which mutation operators produced
+the accepted improvements in each time window. See docs/quality-benchmark.md.
 """
 
 import argparse
@@ -61,6 +63,9 @@ LOG = hc.SHARED / "benchmarks/quality/log.tsv"
 # Must match FIXED_SECONDS in src/benchmark/quality.rs: the recorder takes a
 # point at the first batch at or after each of these.
 CHECKPOINTS = (1, 2, 5, 10, 20, 30, 60, 120, 180, 300, 600)
+# Window ends of the printed operator table (and the budget); summary.json has
+# a window per checkpoint.
+OPERATOR_WINDOWS = (5, 30, 120, 600)
 ABSOLUTE_TARGETS = (98.0, 99.0, 99.5)
 WARMUP_BATCHES = 8
 MAX_SIDES = 6
@@ -238,6 +243,13 @@ def check_record(record, image, seed, seconds, start=None):
     require(trajectory and trajectory[-1]["seconds"] >= seconds, f"{image}: run ended early")
     require(all(a["fitness"] <= b["fitness"] and a["batches"] <= b["batches"]
                 for a, b in itertools.pairwise(trajectory)), f"{image}: trajectory not monotone")
+    if record.get("protocol_version", 2) >= 3:
+        names, snapshots = record["operator_names"], record["operators"]
+        require(snapshots and all(len(s[kind]) == len(names) for s in snapshots
+                                  for kind in OPERATOR_KINDS),
+                f"{image} seed {seed}: malformed operator stats")
+        require(sum(snapshots[-1]["offered"]) == snapshots[-1]["evaluations"],
+                f"{image} seed {seed}: operator stats do not cover every evaluation")
 
 
 def run_one(servers, name, side, position, args, evidence):
@@ -285,7 +297,9 @@ def summarize_run(record, name, image, seed, seconds):
             "polygons": final["polygons"], "at": at,
             "scalar_fitness": record.get("final_scalar_fitness"),
             "by_batch": {p["batches"]: p["fitness"] for p in trajectory},
-            "trajectory": trajectory}
+            "trajectory": trajectory,
+            "operator_names": record.get("operator_names"),
+            "operators": record.get("operators")}
 
 
 def measure(args, resolved, evidence):
@@ -457,6 +471,90 @@ def comparison_table(runs, args):
     return entries, targets, "\n".join(lines)
 
 
+OPERATOR_KINDS = ("offered", "improved", "neutral")
+
+
+def operator_snapshot(run, t, seconds):
+    """Cumulative counts at checkpoint `t`: the first snapshot at or after it (the
+    post-drain one for the budget), as value_at reads the trajectory."""
+    snapshots = run["operators"]
+    if t < seconds:
+        for snapshot in snapshots:
+            if snapshot["seconds"] >= t:
+                return snapshot
+    return snapshots[-1]
+
+
+def operator_windows(runs, side, image, ends, seconds):
+    """(names, windows) for one side and image, counts summed over seeds; each window
+    holds the counts between consecutive `ends` (from 0). None without operator stats."""
+    mine = [r for r in runs if r["side"] == side and r["image"] == image and r["operators"]]
+    if not mine:
+        return None
+    names = mine[0]["operator_names"]
+    require(all(r["operator_names"] == names for r in mine), "operator names differ between runs")
+    windows, before, start = [], {kind: [0] * len(names) for kind in OPERATOR_KINDS}, 0.0
+    for end in ends:
+        now = {kind: [sum(column) for column in zip(*(operator_snapshot(r, end, seconds)[kind]
+                                                       for r in mine))]
+               for kind in OPERATOR_KINDS}
+        windows.append({"from": start, "to": end, **{
+            kind: [b - a for a, b in zip(before[kind], now[kind])] for kind in OPERATOR_KINDS}})
+        before, start = now, end
+    return names, windows
+
+
+def operator_table(runs, side, image, seconds):
+    """Per operator and window: its share of all improvements (%) and its improvement
+    rate (improvements per 1000 offspring it produced); then whole-run columns."""
+    found = operator_windows(runs, side, image,
+                             [float(t) for t in OPERATOR_WINDOWS if t < seconds] + [seconds],
+                             seconds)
+    if found is None:
+        return ""
+    names, windows = found
+    whole = {kind: [sum(w[kind][i] for w in windows) for i in range(len(names))]
+             for kind in OPERATOR_KINDS}
+    seeds = sum(1 for r in runs if r["side"] == side and r["image"] == image)
+
+    def share(values, i):
+        total = sum(values)
+        return 100 * values[i] / total if total else 0.0
+
+    def rate(counts, i):
+        return 1000 * counts["improved"][i] / counts["offered"][i] if counts["offered"][i] else 0.0
+
+    labels = [f"{w['from']:g}-{w['to']:g}s" for w in windows]
+    lines = [f"\n{image} {side}: operators over {seeds} seeds; per window improvement share % "
+             "and improvements per 1000 offered",
+             f"{'operator':14}" + "".join(f"{label:>15}" for label in labels)
+             + f"{'offered%':>10}{'improved%':>10}{'per 1000':>9}{'neutral%':>9}"]
+    for i, name in enumerate(names):
+        if not whole["offered"][i]:
+            continue
+        cells = "".join(f"{share(w['improved'], i):>7.1f} {rate(w, i):>7.3f}" for w in windows)
+        lines.append(f"{name:14}{cells}{share(whole['offered'], i):>10.1f}"
+                     f"{share(whole['improved'], i):>10.1f}{rate(whole, i):>9.3f}"
+                     f"{share(whole['neutral'], i):>9.1f}")
+    lines.append(f"{'improvements':14}" + "".join(f"{sum(w['improved']):>15}" for w in windows)
+                 + f"{sum(whole['offered']):>10}{sum(whole['improved']):>10}"
+                 f"{1000 * sum(whole['improved']) / max(sum(whole['offered']), 1):>9.3f}"
+                 f"{sum(whole['neutral']):>9}")
+    return "\n".join(lines)
+
+
+def operator_summary(runs, sides, images, seconds):
+    """Full counts per side and image, one window per checkpoint, for summary.json."""
+    entries = []
+    for side in sides:
+        for image in images:
+            found = operator_windows(runs, side, image, checkpoints(seconds), seconds)
+            if found:
+                entries.append({"side": side, "image": image, "names": found[0],
+                                "windows": found[1]})
+    return entries
+
+
 def append_log(runs, args, resolved, evidence):
     LOG.parent.mkdir(parents=True, exist_ok=True)
     if not LOG.exists():
@@ -486,6 +584,10 @@ def report(args, resolved, evidence, runs, discarded):
     """Print tables, write the summary and log; return the exit code."""
     for image in args.images:
         print(distribution_table(runs, args.sides, image, args.seconds))
+        for side in args.sides:
+            table = operator_table(runs, side, image, args.seconds)
+            if table:
+                print(table)
     entries, targets = [], {}
     if len(args.sides) > 1:
         entries, targets, table = comparison_table(runs, args)
@@ -497,7 +599,7 @@ def report(args, resolved, evidence, runs, discarded):
                                    "DETERMINISM-MISMATCH " + "; ".join(mismatches)))
     if discarded:
         print(f"re-ran {len(discarded)} runs that overlapped other CPU work")
-    strip = ("trajectory", "by_batch")
+    strip = ("trajectory", "by_batch", "operators", "operator_names")
     (evidence / "summary.json").write_text(json.dumps(
         {"args": {k: v for k, v in vars(args).items() if k != "starts"}, "identities": resolved,
          "starts": [{"image": image, "seed": seed, "path": str(path), "sha256": sha}
@@ -505,6 +607,7 @@ def report(args, resolved, evidence, runs, discarded):
          "runs": [{k: v for k, v in r.items() if k not in strip} for r in runs],
          "discarded": [{k: v for k, v in r.items() if k not in strip} for r in discarded],
          "comparisons": entries, "targets": targets,
+         "operators": operator_summary(runs, args.sides, args.images, args.seconds),
          "determinism": {"pairs": compared, "points": shared, "mismatches": mismatches}},
         indent=2, default=str))
     append_log(runs, args, resolved, evidence)

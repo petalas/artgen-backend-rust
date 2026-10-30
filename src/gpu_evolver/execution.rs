@@ -7,6 +7,7 @@ use crate::{
 
 use super::buffers::GPU_DRAWING_STATE_SIZE;
 use super::changes::GPU_CHAIN_CHANGE_SIZE;
+use super::operators::OPERATOR_STATS_WORDS;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct RasterGrid {
@@ -153,6 +154,8 @@ pub(super) struct ResourceSizes {
     pub updates: u64,
     pub chain_changes: u64,
     pub fitness: u64,
+    pub offspring_ops: u64,
+    pub operator_stats: u64,
 }
 
 impl ResourceSizes {
@@ -172,10 +175,12 @@ impl ResourceSizes {
             updates: chains * 16,
             chain_changes: chains * GPU_CHAIN_CHANGE_SIZE as u64,
             fitness: chains * 4,
+            offspring_ops: offspring * 4,
+            operator_stats: OPERATOR_STATS_WORDS as u64 * 4,
         }
     }
 
-    pub fn entries(self) -> [(&'static str, u64); 11] {
+    pub fn entries(self) -> [(&'static str, u64); 13] {
         [
             ("parent states", self.parents),
             ("working states", self.working),
@@ -188,6 +193,8 @@ impl ResourceSizes {
             ("update flags", self.updates),
             ("chain change records", self.chain_changes),
             ("fitness", self.fitness),
+            ("offspring operators", self.offspring_ops),
+            ("operator stats", self.operator_stats),
         ]
     }
 
@@ -379,6 +386,14 @@ mod tests {
             },
             ResourceSizes {
                 fitness: required.fitness - 4,
+                ..required
+            },
+            ResourceSizes {
+                offspring_ops: required.offspring_ops - 4,
+                ..required
+            },
+            ResourceSizes {
+                operator_stats: required.operator_stats - 4,
                 ..required
             },
         ];

@@ -1,6 +1,7 @@
 pub mod benchmark;
 pub mod buffers;
 pub mod changes;
+pub mod operators;
 pub mod pipeline;
 mod bindings;
 mod execution;
@@ -26,6 +27,7 @@ use buffers::{
     ControlFlags, GpuDrawingState, GPU_DRAWING_STATE_SIZE,
 };
 use execution::TILE_OVERFLOW_ERROR;
+use operators::OperatorStats;
 use pipeline::GpuPipeline;
 use readback::{Readback, SubmittedBatch};
 use schedule::BatchTimestamps;
@@ -260,6 +262,9 @@ impl GpuEvolver {
         let control_size = std::mem::size_of::<ControlFlags>() as u64;
         encoder.copy_buffer_to_buffer(
             &p.control_flags_buf, 0, &p.control_staging_bufs[write_idx], 0, control_size);
+        encoder.copy_buffer_to_buffer(
+            &p.operator_stats_buf, 0, &p.control_staging_bufs[write_idx],
+            pipeline::OPERATOR_STATS_STAGING_OFFSET as u64, p.operator_stats_buf.size());
         let fitness_size = u64::from(active) * 4;
         encoder.copy_buffer_to_buffer(
             &p.fitness_packed_buf, 0, &p.fitness_staging_bufs[write_idx], 0, fitness_size);
@@ -296,6 +301,27 @@ impl GpuEvolver {
     /// produced a new global best.
     pub fn flush_pending(&mut self) -> Option<Drawing> {
         self.readback.flush(&self.pipeline)
+    }
+
+    /// Operator stats of every batch collected since the chains were last
+    /// initialized (`reinit_chains`, seeded benchmark preparation or
+    /// construction). A pending batch is not included until it is collected:
+    /// by the next `run_batch`, or by `flush_pending`.
+    #[must_use]
+    pub fn operator_stats(&self) -> &OperatorStats {
+        self.readback.operator_tally.totals()
+    }
+
+    /// Zero the GPU counters and the host totals. Takes effect at the next
+    /// submission.
+    ///
+    /// # Panics
+    /// Panics if a batch is pending; flush it first.
+    fn reset_operator_stats(&mut self) {
+        self.readback.reset_operator_tally();
+        let p = &self.pipeline;
+        let bytes = usize::try_from(p.operator_stats_buf.size()).expect("stats fit host memory");
+        p.queue.write_buffer(&p.operator_stats_buf, 0, &vec![0; bytes]);
     }
 
     pub fn readback_chain(&self, chain_id: u32) -> Drawing {
@@ -375,6 +401,7 @@ impl GpuEvolver {
     pub fn reinit_chains(&mut self, drawing: &Drawing) {
         // Flush any in-flight batch before reinitializing
         self.flush_pending();
+        self.reset_operator_stats();
 
         let chain_count = self.pipeline.chain_count;
         let iteration = u64::from(self.iteration);
@@ -715,6 +742,8 @@ fn gpu_memory_bytes(p: &GpuPipeline) -> u64 {
         + p.chain_total_errors_buf.size()
         + p.chain_update_flags_buf.size()
         + p.chain_changes_buf.size()
+        + p.offspring_ops_buf.size()
+        + p.operator_stats_buf.size()
         + p.params_buf.size()
         + p.timestamp_resolve_buf.size()
         + p.timestamp_staging_bufs[0].size()

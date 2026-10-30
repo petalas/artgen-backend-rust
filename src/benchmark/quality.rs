@@ -7,6 +7,9 @@
 //! only from values the engine already delivered, so recording never adds a GPU
 //! round-trip. Given a seed, the delivered sequence is a function of the batch
 //! index; wall-clock time only maps batches to seconds.
+//!
+//! Operator stats (`gpu_evolver::operators`) arrive with each collected batch's
+//! control readback, so snapshots of them add no round-trip either.
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -22,13 +25,19 @@ use super::{
     reference::{self, Complexity},
 };
 use crate::{
-    gpu_evolver::{benchmark::BenchmarkProvenance, buffers::drawing_to_gpu, GpuEvolver},
+    gpu_evolver::{
+        benchmark::BenchmarkProvenance,
+        buffers::drawing_to_gpu,
+        operators::{Operator, OPERATOR_COUNT},
+        GpuEvolver,
+    },
     models::drawing::Drawing,
     mutation_params::MutationParams,
     settings::TILE_MAX_POLYS,
 };
 
-pub const PROTOCOL_VERSION: u32 = 2;
+/// 3 added operator stats (`operator_names`, `operators`).
+pub const PROTOCOL_VERSION: u32 = 3;
 /// Wall-clock checkpoints recorded at the first batch at or after each second.
 pub const FIXED_SECONDS: [f64; 11] = [
     1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 60.0, 120.0, 180.0, 300.0, 600.0,
@@ -83,6 +92,70 @@ pub struct Point {
     pub points: u32,
 }
 
+/// Cumulative operator stats since the run's seeded start. They cover the
+/// collected batches, `batches` of them (one fewer than submitted before the
+/// final drain), which evaluated `evaluations` offspring: the offered counts
+/// sum to it.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct OperatorSnapshot {
+    pub seconds: f64,
+    pub batches: u64,
+    pub evaluations: u64,
+    /// Indexed like `QualityRecord::operator_names`.
+    pub offered: [u64; OPERATOR_COUNT],
+    pub improved: [u64; OPERATOR_COUNT],
+    pub neutral: [u64; OPERATOR_COUNT],
+}
+
+impl OperatorSnapshot {
+    fn of(evolver: &GpuEvolver, seconds: f64) -> Self {
+        let stats = evolver.operator_stats();
+        let counters = evolver.benchmark_counters();
+        Self {
+            seconds,
+            batches: counters.completed_batches,
+            evaluations: counters.completed_evaluations,
+            offered: stats.offered,
+            improved: stats.improved,
+            neutral: stats.neutral,
+        }
+    }
+}
+
+/// Operator snapshots at the first batch at or after each fixed second, and
+/// after the final drain.
+struct OperatorLog {
+    next_fixed: usize,
+    snapshots: Vec<OperatorSnapshot>,
+}
+
+impl OperatorLog {
+    fn new() -> Self {
+        Self {
+            next_fixed: 0,
+            snapshots: Vec::with_capacity(FIXED_SECONDS.len() + 1),
+        }
+    }
+
+    /// Whether a batch ending at `seconds` passed the next fixed second.
+    fn due(&mut self, seconds: f64) -> bool {
+        if self.next_fixed < FIXED_SECONDS.len() && seconds >= FIXED_SECONDS[self.next_fixed] {
+            self.next_fixed = FIXED_SECONDS.partition_point(|&t| t <= seconds);
+            return true;
+        }
+        false
+    }
+
+    fn push(&mut self, snapshot: OperatorSnapshot) -> Result<()> {
+        ensure!(
+            self.snapshots.len() < FIXED_SECONDS.len() + 1,
+            "operator snapshot capacity exhausted"
+        );
+        self.snapshots.push(snapshot);
+        Ok(())
+    }
+}
+
 #[derive(Serialize)]
 pub struct QualityRecord {
     pub kind: &'static str,
@@ -111,6 +184,9 @@ pub struct QualityRecord {
     pub errors: Vec<String>,
     pub gpu: BenchmarkProvenance,
     pub trajectory: Vec<Point>,
+    /// Operator names by code.
+    pub operator_names: [&'static str; OPERATOR_COUNT],
+    pub operators: Vec<OperatorSnapshot>,
 }
 
 /// Merge overrides onto `MutationParams::default()`.
@@ -344,7 +420,16 @@ pub fn run(
     let scopes = evolver.benchmark_error_scopes();
     let result = evolve(evolver, &params, spec, &start);
     let mut errors = futures_lite::future::block_on(scopes.finish());
-    let (recorder, initial_fitness, seconds) = result?;
+    let (recorder, operators, initial_fitness, seconds) = result?;
+    if let Some(last) = operators.snapshots.last() {
+        let offered: u64 = last.offered.iter().sum();
+        if offered != last.evaluations {
+            errors.push(format!(
+                "operator stats offered {offered} offspring; the run evaluated {}",
+                last.evaluations
+            ));
+        }
+    }
     let last = *recorder
         .points
         .last()
@@ -372,6 +457,8 @@ pub fn run(
         errors,
         gpu: evolver.benchmark_provenance(),
         trajectory: recorder.points,
+        operator_names: Operator::names(),
+        operators: operators.snapshots,
     };
     fs::write(
         output.join("best.json"),
@@ -416,7 +503,7 @@ fn evolve(
     params: &MutationParams,
     spec: &QualitySpec,
     start: &Drawing,
-) -> Result<(Recorder, f32, f64)> {
+) -> Result<(Recorder, OperatorLog, f32, f64)> {
     evolver
         .benchmark_set_batch_envelope(params, false)
         .map_err(anyhow::Error::msg)?;
@@ -427,6 +514,7 @@ fn evolve(
         .prepare_seeded_benchmark(start, params, spec.seed, spec.warmup_batches, true)
         .map_err(anyhow::Error::msg)?;
     let mut recorder = Recorder::new(start, initial, params.per_point_penalty);
+    let mut operators = OperatorLog::new();
     let start = Instant::now();
     let mut batches = 0u64;
     while batches < MAX_BATCHES {
@@ -435,6 +523,9 @@ fn evolve(
         let seconds = start.elapsed().as_secs_f64();
         recorder.deliver(delivered);
         recorder.observe(batches, evolver.total_evaluations(), seconds)?;
+        if operators.due(seconds) {
+            operators.push(OperatorSnapshot::of(evolver, seconds))?;
+        }
         if seconds >= spec.seconds {
             break;
         }
@@ -448,7 +539,8 @@ fn evolve(
     );
     let final_point = recorder.point(seconds, batches, evolver.total_evaluations());
     recorder.push(final_point)?;
-    Ok((recorder, initial, seconds))
+    operators.push(OperatorSnapshot::of(evolver, seconds))?;
+    Ok((recorder, operators, initial, seconds))
 }
 
 #[cfg(test)]
@@ -496,6 +588,20 @@ mod tests {
         // A jump over several fixed seconds records once and moves past them.
         assert!(schedule.due(3, 25.0, 29.3));
         assert_eq!(schedule.next_fixed, 5);
+    }
+
+    #[test]
+    fn operator_snapshots_are_due_once_per_fixed_second_passed() {
+        let mut log = OperatorLog::new();
+        assert!(!log.due(0.9));
+        assert!(log.due(1.0));
+        assert!(!log.due(1.5));
+        // A batch past several fixed seconds is one snapshot.
+        assert!(log.due(12.0));
+        assert!(!log.due(19.9));
+        assert!(log.due(20.0));
+        assert!(log.due(700.0));
+        assert!(!log.due(3600.0));
     }
 
     #[test]

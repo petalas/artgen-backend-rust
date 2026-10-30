@@ -33,6 +33,10 @@ pub(super) enum Resource {
     ChainTotalErrors,
     ChainUpdateFlags,
     ChainChanges,
+    /// One operator code per offspring slot (`operators`).
+    OffspringOps,
+    /// Cumulative per-operator counters (`operators::OPERATOR_STATS_WORDS`).
+    OperatorStats,
     Params,
 }
 
@@ -52,8 +56,8 @@ pub(super) struct Stage {
 use Access::{Read, Write};
 use Resource::{
     ChainChanges, ChainFramebuffers, ChainStates, ChainTotalErrors, ChainUpdateFlags, Control,
-    ErrorAccumulators, FitnessPacked, Params, RasterWork, ReferenceImage, TileCounts, TileData,
-    WorkingStates,
+    ErrorAccumulators, FitnessPacked, OffspringOps, OperatorStats, Params, RasterWork,
+    ReferenceImage, TileCounts, TileData, WorkingStates,
 };
 
 pub(super) const PARAMS: Stage = Stage {
@@ -63,7 +67,7 @@ pub(super) const PARAMS: Stage = Stage {
 
 pub(super) const MUTATE: Stage = Stage {
     name: "mutate",
-    bindings: &[(ChainStates, Read), (WorkingStates, Write)],
+    bindings: &[(ChainStates, Read), (WorkingStates, Write), (OffspringOps, Write)],
 };
 
 pub(super) const RASTERIZE_ERROR: Stage = Stage {
@@ -113,6 +117,8 @@ pub(super) const SELECT: Stage = Stage {
         (ChainUpdateFlags, Write),
         (ChainTotalErrors, Write),
         (ChainChanges, Write),
+        (OffspringOps, Read),
+        (OperatorStats, Write),
     ],
 };
 
@@ -194,7 +200,8 @@ impl Resource {
             Params => std::mem::size_of::<GpuParams>(),
             ReferenceImage => unreachable!("the reference image is a texture"),
             ErrorAccumulators | FitnessPacked | TileData | TileCounts | RasterWork
-            | ChainFramebuffers | ChainTotalErrors | ChainUpdateFlags => 4,
+            | ChainFramebuffers | ChainTotalErrors | ChainUpdateFlags | OffspringOps
+            | OperatorStats => 4,
         }
     }
 

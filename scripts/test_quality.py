@@ -23,8 +23,11 @@ hc = quality.hc
 # Speaks `serve` with `quality` requests. Remaining error falls as 1/sqrt(batch),
 # scaled by the executable's name (scale-1.0-nd-0), the seed and crossoverProb=0.
 # nd-1 adds per-process noise, so the same seed no longer replays; err-1 reports
-# the recorder's scalar-renderer disagreement; ign-1 ignores --start. Each run
-# writes best.json naming its case and seed.
+# the recorder's scalar-renderer disagreement; ign-1 ignores --start; ops-1
+# reports operator stats (protocol 3), ops-0 is an older build without them. Of
+# each batch's 16384 offspring, add makes 4096 and 100 * sqrt(batch) improvements
+# in all, offset 8192 and 10 per batch, crossover 4096 and none. Each run writes
+# best.json naming its case and seed.
 FAKE = r'''#!/usr/bin/env python3
 import hashlib, json, os, sys
 from pathlib import Path
@@ -48,11 +51,23 @@ for line in sys.stdin:
         points.append({"seconds": batch * 0.1, "batches": batch, "evaluations": batch * 16384,
                        "fitness": 100 - r, "raw_fitness": 100 - r * 0.99,
                        "polygons": min(batch, 1000), "points": 3 * min(batch, 1000)})
+    def stats(batch, at):
+        return {"seconds": at, "batches": batch, "evaluations": batch * 16384,
+                "offered": [4096 * batch, 8192 * batch, 4096 * batch],
+                "improved": [int(100 * batch ** 0.5), 10 * batch, 0],
+                "neutral": [0, batch, 0]}
+    operators = [stats(p["batches"], p["seconds"])
+                 for t in (1, 2, 5, 10, 20, 30, 60, 120, 180, 300, 600) if t < seconds
+                 for p in [next(p for p in points if p["seconds"] >= t)]]
+    operators.append(stats(points[-1]["batches"], points[-1]["seconds"]))
     record = {"kind": "quality", "case_id": flags["case"], "seed": seed,
               "elapsed_seconds": points[-1]["seconds"], "batches": points[-1]["batches"],
               "evals_per_second": 163840.0, "trajectory": points,
               "errors": ["delivered fitness differs from the scalar renderer's"]
               if fields["err"] == "1" else []}
+    if fields["ops"] == "1":
+        record.update(protocol_version=3, operator_names=["add", "offset", "crossover"],
+                      operators=operators)
     if "start" in flags and fields["ign"] == "0":
         record["start_sha256"] = hashlib.sha256(Path(flags["start"]).read_bytes()).hexdigest()
     out = Path(flags["output"]); out.mkdir(parents=True)
@@ -81,8 +96,8 @@ class QualityCli(unittest.TestCase):
             patch.start()
             self.addCleanup(patch.stop)
 
-    def fake(self, scale=1.0, nd=0, err=0, ign=0):
-        path = self.root / f"scale-{scale}-nd-{nd}-err-{err}-ign-{ign}"
+    def fake(self, scale=1.0, nd=0, err=0, ign=0, ops=1):
+        path = self.root / f"scale-{scale}-nd-{nd}-err-{err}-ign-{ign}-ops-{ops}"
         path.write_text(FAKE)
         path.chmod(0o755)
         return str(path)
@@ -114,6 +129,39 @@ class QualityCli(unittest.TestCase):
         self.assertEqual({row["seed"] for row in rows}, {"1", "2", "3"})
         remaining = json.loads(rows[0]["remaining_at"])
         self.assertEqual(list(remaining), ["1", "2", "5", "10", "20"])
+
+    def test_operator_stats_are_tabled_per_window_and_summed_over_seeds(self):
+        code, out, err = self.run_cli("--side", f"base={self.fake()}")
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("ff base: operators over 3 seeds", out)
+        header = next(line for line in out.splitlines() if line.startswith("operator "))
+        self.assertEqual(header.split()[1:3], ["0-5s", "5-20s"])
+        rows = {line.split()[0]: line.split() for line in out.splitlines()
+                if line.split()[:1] in (["add"], ["offset"], ["crossover"])}
+        # 5-20 s: batches 50..201 (the post-drain snapshot); offset makes 10 per batch.
+        add_late = 3 * (int(100 * 201 ** 0.5) - int(100 * 50 ** 0.5))
+        offset_late = 3 * 10 * 151
+        self.assertAlmostEqual(float(rows["offset"][3]), 100 * offset_late / (add_late + offset_late),
+                               places=1)
+        self.assertAlmostEqual(float(rows["offset"][4]), 1000 * 10 / 8192, places=3)
+        # Columns: window shares and rates, then offered%, improved%, per 1000, neutral%.
+        self.assertEqual(rows["crossover"][3:8], ["0.0", "0.000", "25.0", "0.0", "0.000"])
+
+        entries = self.summary(out)["operators"]
+        self.assertEqual([(e["side"], e["image"]) for e in entries], [("base", "ff"), ("base", "mona")])
+        windows = entries[0]["windows"]
+        self.assertEqual([w["to"] for w in windows], [1, 2, 5, 10, 20])
+        self.assertEqual(sum(sum(w["offered"]) for w in windows), 3 * 201 * 16384)
+        self.assertEqual(windows[-1]["improved"][1], 3 * 10 * 101)
+        self.assertNotIn("operators", self.summary(out)["runs"][0])
+
+    def test_builds_without_operator_stats_still_compare(self):
+        code, out, err = self.run_cli("--side", f"old={self.fake(ops=0)}",
+                                      "--side", f"new={self.fake()}")
+        self.assertEqual(code, 0, out + err)
+        self.assertNotIn("old: operators", out)
+        self.assertIn("ff new: operators over 3 seeds", out)
+        self.assertEqual([e["side"] for e in self.summary(out)["operators"]], ["new", "new"])
 
     def test_saved_starts_seed_later_runs_and_are_logged(self):
         fake = self.fake()

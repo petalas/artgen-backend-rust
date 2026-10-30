@@ -8,6 +8,8 @@ use wgpu::{
 
 use super::benchmark::{self, BenchmarkCounters, BenchmarkEnvelopeTimings};
 use super::buffers::{gpu_to_drawing, ControlFlags, GpuDrawingState, GPU_DRAWING_STATE_SIZE};
+use super::operators::{OperatorTally, OPERATOR_STATS_WORDS};
+use super::pipeline::OPERATOR_STATS_STAGING_OFFSET;
 use super::{GpuPipeline, PassTimings};
 use crate::models::drawing::Drawing;
 
@@ -86,6 +88,8 @@ pub(super) struct Readback {
     pub benchmark_envelope_timings: BenchmarkEnvelopeTimings,
     pub benchmark_counters: BenchmarkCounters,
     pub chain_fitness: Vec<f32>,
+    /// Folded from the control staging of every collected batch.
+    pub operator_tally: OperatorTally,
 }
 
 impl Readback {
@@ -99,6 +103,7 @@ impl Readback {
             benchmark_envelope_timings: BenchmarkEnvelopeTimings::default(),
             benchmark_counters: BenchmarkCounters::default(),
             chain_fitness: vec![0.0; chain_count as usize],
+            operator_tally: OperatorTally::default(),
         }
     }
 
@@ -167,7 +172,12 @@ impl Readback {
             .slice(..)
             .get_mapped_range()
             .expect("Failed to access mapped control flags buffer");
-        let flags: ControlFlags = *bytemuck::from_bytes(&control_data);
+        let (flags, stats) = control_data.split_at(OPERATOR_STATS_STAGING_OFFSET);
+        let flags: ControlFlags = *bytemuck::from_bytes(flags);
+        let stats: &[u32; OPERATOR_STATS_WORDS] = bytemuck::cast_slice(stats)
+            .try_into()
+            .expect("control staging holds the operator stats");
+        self.operator_tally.fold(stats);
         drop(control_data);
 
         if pending.timestamp_rx.is_some() {
@@ -243,6 +253,12 @@ impl Readback {
             .take()
             .map(|chain_id| readback_chain(p, chain_id));
         sync_result.or(batch_result)
+    }
+
+    /// Forget the totals along with the GPU counters they mirror.
+    pub fn reset_operator_tally(&mut self) {
+        assert!(self.pending.is_none(), "reset requires drained batch readback");
+        self.operator_tally = OperatorTally::default();
     }
 
     /// Seeded preparation resets slot order; ordinary reinitialization preserves it.

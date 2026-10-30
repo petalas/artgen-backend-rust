@@ -465,6 +465,7 @@ impl GpuEvolver {
     ) -> Result<f32, String> {
         let active = params.chain_count;
         self.benchmark_drain()?;
+        self.reset_operator_stats();
         let states = self.parent_states(
             drawing,
             (0..self.pipeline.chain_count).map(|index| u64::from(benchmark_seed(seed, index, 0))),

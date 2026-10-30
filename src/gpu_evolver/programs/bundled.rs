@@ -9,6 +9,7 @@
 
 use crate::gpu_evolver::changes::CHANGED_INDICES;
 use crate::gpu_evolver::execution::{RASTER_WORK_HEADER_BYTES, TILE_OVERFLOW_ERROR};
+use crate::gpu_evolver::operators;
 use crate::settings::{POLYGON_CAPACITY, TILE_MAX_POLYS};
 
 const COMMON: &str = include_str!("../../shaders/common.wgsl");
@@ -146,7 +147,9 @@ fn generated_constants(tile: Option<[u32; 2]>) -> String {
         "const POLYGON_CAPACITY: u32 = {POLYGON_CAPACITY}u; // settings::POLYGON_CAPACITY\n\
          const TILE_MAX_POLYS: u32 = {TILE_MAX_POLYS}u; // settings::TILE_MAX_POLYS\n\
          const CHANGED_INDICES: u32 = {CHANGED_INDICES}u; // changes::CHANGED_INDICES\n\
-         const TILE_OVERFLOW_ERROR: u32 = {TILE_OVERFLOW_ERROR}u; // execution::TILE_OVERFLOW_ERROR\n"
+         const TILE_OVERFLOW_ERROR: u32 = {TILE_OVERFLOW_ERROR}u; // execution::TILE_OVERFLOW_ERROR\n\
+         {}",
+        operators::wgsl_constants()
     );
     let Some([width, height]) = tile else {
         return common;

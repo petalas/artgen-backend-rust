@@ -2,8 +2,8 @@
 // Entry point: `select_main`
 
 // common.wgsl, changes.wgsl, offspring_changes.wgsl and the generated constants
-// (POLYGON_CAPACITY, CHANGED_INDICES, TILE_MAX_POLYS, TILE_OVERFLOW_ERROR) are
-// appended by programs.rs.
+// (POLYGON_CAPACITY, CHANGED_INDICES, TILE_MAX_POLYS, TILE_OVERFLOW_ERROR,
+// OPERATOR_COUNT and the OP_* operator codes) are appended by programs.rs.
 
 // Reduction value of an offspring that must not be accepted: rasterize_error
 // set TILE_OVERFLOW_ERROR because a tile list it evaluated was truncated. Real
@@ -26,6 +26,10 @@ struct ControlFlags {
 @group(0) @binding(5) var<storage, read_write> chain_update_flags: array<u32>;
 @group(0) @binding(6) var<storage, read_write> chain_total_errors: array<atomic<u32>>;
 @group(0) @binding(7) var<storage, read_write> chain_changes:      array<ChainChange>;
+// Operator stats (gpu_evolver::operators): mutate's code per offspring, and
+// cumulative counters [offered | improved | neutral], OPERATOR_COUNT each.
+@group(0) @binding(8) var<storage, read>       offspring_ops:      array<u32>;
+@group(0) @binding(9) var<storage, read_write> operator_stats:     array<atomic<u32>>;
 
 // Workgroup-shared variables for communicating decisions from thread 0 to all threads
 var<workgroup> shared_accept: u32;
@@ -36,6 +40,10 @@ var<workgroup> shared_best_offspring_id: u32;
 // Each entry holds (error, local_offspring_index) packed so min on error also selects the index
 var<workgroup> reduction_err: array<u32, 64>;
 var<workgroup> reduction_idx: array<u32, 64>;
+
+// This chain's offspring per operator code, added to operator_stats once.
+var<workgroup> offered_ops: array<atomic<u32>, OPERATOR_COUNT>;
+const_assert OPERATOR_COUNT <= 64u;
 
 // Unchanged-pixel note for update_framebuffers (ChainChange in changes.wgsl):
 // the winner's changed-index words and the parent versions of those indices.
@@ -78,6 +86,10 @@ fn select_main(@builtin(global_invocation_id) gid: vec3<u32>,
 
     // --- Parallel min-reduction to find best offspring among λ candidates ---
     let lambda = params.lambda;
+    if local_id < OPERATOR_COUNT {
+        atomicStore(&offered_ops[local_id], 0u);
+    }
+    var op = 0u;
 
     // Phase 1: Each thread loads its error value (or sentinel if beyond lambda)
     // Threads 0..lambda-1 each read one error accumulator via atomicExchange (resets to 0)
@@ -94,12 +106,17 @@ fn select_main(@builtin(global_invocation_id) gid: vec3<u32>,
         let overflowed = (new_err & TILE_OVERFLOW_ERROR) != 0u;
         reduction_err[local_id] = select(base + new_err, REJECTED_ERROR, overflowed);
         reduction_idx[local_id] = local_id;
+        op = offspring_ops[oid];
     } else {
         reduction_err[local_id] = REJECTED_ERROR;
         reduction_idx[local_id] = 0xFFFFFFFFu;
     }
 
     workgroupBarrier();
+    // The reduction's barriers order these before the totals are read.
+    if local_id < lambda {
+        atomicAdd(&offered_ops[op], 1u);
+    }
 
     // Phase 2: Binary tree min-reduction (O(log2(64)) = 6 steps)
     // At each step, the active thread compares its value with the one at offset `stride`
@@ -140,6 +157,9 @@ fn select_main(@builtin(global_invocation_id) gid: vec3<u32>,
         let should_accept = best_error != REJECTED_ERROR && (dominated || neutral);
 
         if should_accept {
+            // Improved, else neutral: operator_stats' second or third block.
+            let block = select(2u, 1u, dominated);
+            atomicAdd(&operator_stats[block * OPERATOR_COUNT + offspring_ops[best_offspring_id]], 1u);
             record_chain_change(chain_id, best_offspring_id, chain_states[chain_id].polygon_count);
             chain_states[chain_id].polygon_count = working_states[best_offspring_id].polygon_count;
             chain_states[chain_id].fitness_bits = fitness_bits;
@@ -198,6 +218,13 @@ fn select_main(@builtin(global_invocation_id) gid: vec3<u32>,
     }
 
     workgroupBarrier();
+
+    if local_id < OPERATOR_COUNT {
+        let offered = atomicLoad(&offered_ops[local_id]);
+        if offered != 0u {
+            atomicAdd(&operator_stats[local_id], offered);
+        }
+    }
 
     // Copy the evaluated candidate unchanged. Even a tiny triangle can cover a
     // pixel; unscored cleanup would invalidate cached error and point penalty.

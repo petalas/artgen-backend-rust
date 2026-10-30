@@ -171,6 +171,8 @@ struct Buffers {
     errors: wgpu::Buffer,
     params: wgpu::Buffer,
     staging: wgpu::Buffer,
+    /// The engine's mutate layout binds the operator codes; they are not compared.
+    _offspring_ops: wgpu::Buffer,
     states_group: wgpu::BindGroup,
     params_group: wgpu::BindGroup,
 }
@@ -643,6 +645,12 @@ fn new_buffers(device: &wgpu::Device, layouts: &[wgpu::BindGroupLayout; 2]) -> B
         storage,
     );
     let output = buffer(device, "mutation checker output 256", OUTPUT_BYTES, storage);
+    let offspring_ops = buffer(
+        device,
+        "mutation checker operator codes",
+        (OFFSPRING * 4) as u64,
+        wgpu::BufferUsages::STORAGE,
+    );
     let errors = buffer(
         device,
         "mutation checker error guards",
@@ -673,6 +681,10 @@ fn new_buffers(device: &wgpu::Device, layouts: &[wgpu::BindGroupLayout; 2]) -> B
                 binding: 1,
                 resource: output.as_entire_binding(),
             },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: offspring_ops.as_entire_binding(),
+            },
         ],
     });
     let params_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -689,6 +701,7 @@ fn new_buffers(device: &wgpu::Device, layouts: &[wgpu::BindGroupLayout; 2]) -> B
         errors,
         params,
         staging,
+        _offspring_ops: offspring_ops,
         states_group,
         params_group,
     }

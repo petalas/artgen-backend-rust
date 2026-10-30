@@ -86,7 +86,8 @@ diagnostic snapshots stage several resources in one buffer.
 compiled handles, and installs the bundled sources. Each stage file in
 `src/shaders/` holds only its own logic. `programs/bundled.rs` appends the shared
 prelude: constants generated from Rust (polygon capacity, `TILE_MAX_POLYS`,
-`CHANGED_INDICES`, `TILE_OVERFLOW_ERROR`, and for the tile group `TILE_W`/`TILE_H` and the
+`CHANGED_INDICES`, `TILE_OVERFLOW_ERROR`, `OPERATOR_COUNT` and the `OP_*`
+operator codes, and for the tile group `TILE_W`/`TILE_H` and the
 `raster_work` header words), then `common.wgsl` (the `Polygon`, `DrawingState`
 and `Params` structs and unpack helpers), `changes.wgsl` (the change-record
 encoding, below), for the stages that read offspring records
@@ -263,6 +264,40 @@ whole-image dirty rectangle and unknown changed indices. The two stay separate:
 the offspring record is rewritten by mutate every iteration and needs the host
 only when mutate does not run; the chain record is read only in the iteration
 select writes it, so forgetting it is a guard, not a batch-loop step.
+
+## Operator stats
+
+`gpu_evolver::operators` counts, per search operator, the offspring it
+produced (offered) and the winners select accepted from it, as a strict
+improvement (improved) or at equal fitness (neutral). `Operator` lists the
+codes once; the bundled prelude gets them as `OP_*` constants, and a CPU test
+checks that mutate stores every one.
+
+- `offspring_ops` (one u32 per offspring slot): mutate writes the branch that
+  ran, not the roulette's pick, since a pick whose guard fails (an add at the
+  cap) falls through to a later branch. Crossover offspring get `OP_CROSSOVER`;
+  an empty parent whose pick cannot run is `OP_UNCHANGED`. The word lives
+  outside the working state, so canonical state and the replay hash do not
+  change (hillclimb: `replay same`, `lifecycle same`).
+- `operator_stats` (3 x `OPERATOR_COUNT` atomic u32: offered, improved,
+  neutral): each select workgroup counts its λ codes in workgroup memory and
+  adds the nonzero totals, at most 19 atomics per chain and iteration; thread 0
+  adds its accepted winner. Counters are cumulative and wrap.
+- Readback: `run_batch` copies `operator_stats` into the batch's control
+  staging buffer, after the control flags, so the existing map reads both.
+  `Readback::collect` folds each copy into `OperatorTally`, u64 totals built
+  from wrapping u32 differences (a batch adds far less than 2^32), and
+  `flush_pending` folds the last batch. `GpuEvolver::operator_stats` covers the
+  collected batches only.
+- Reset: `reinit_chains` and seeded benchmark preparation zero the GPU counters
+  and the host totals after draining; construction allocates them zeroed. Seeded
+  warmup batches are therefore not counted.
+
+Shader variants do not declare either binding; the explicit layouts still bind
+them. A historical mutate leaves `offspring_ops` at zero, so its runs count
+every offspring as `add`, but offered still sums to the evaluations, since
+select is always bundled. Cost: hillclimb 0.9970 [0.9954, 0.9985] against
+`874047a`.
 
 ## Pending readback
 

@@ -81,8 +81,39 @@ renderer (`reference::evaluate`, with the run's `per_point_penalty`) and
 described by `reference::complexity`. A gap
 above 0.05 fitness points, or any wgpu device error, makes the run invalid, and
 the script stops. `DIR` gets `result.json` (the full record) and `best.json`.
-The record (protocol 2) carries `start_sha256`, the start file's SHA-256 or
+The record (protocol 3) carries `start_sha256`, the start file's SHA-256 or
 null for a blank start; the script checks it against the file it named.
+Protocol 3 added operator stats (below); the script still accepts protocol 2
+records, which have none.
+
+## Operator stats
+
+The record's `operator_names` and `operators` say which search operators
+produced the accepted winners (see
+[engine architecture](engine-architecture.md#operator-stats)). Each snapshot
+holds cumulative `offered`, `improved` and `neutral` counts per operator,
+taken at the first batch at or after each fixed second and after the drain.
+`batches` and `evaluations` in a snapshot count the collected batches, one
+fewer than submitted except in the final snapshot; offered always sums to
+`evaluations`, and the script rejects a run where it does not. Counting starts
+at the seeded start; warmup is excluded.
+
+The script prints one table per side and image, counts summed over seeds, with
+windows ending at 5, 30, 120 and 600 s and the budget. Per window: the
+operator's share of all improvements (%) and its rate, improvements per 1000
+offspring it produced. The last four columns cover the whole run: share of
+offspring, share of improvements, rate and share of neutral acceptances.
+`summary.json` (`operators`) has the counts for a window per checkpoint.
+
+Share says where improvements came from; rate says how productive an
+operator's offspring are, so a high-share, low-rate operator is common, not
+good. Neutral acceptances are mostly copies: crossover of near-identical
+parents yields offspring equal to the parent, which select takes half the time.
+
+Smoke run, 2026-10-30 (mona, seed 1, 60 s from the s120 starts): crossover
+made 20% of offspring and 75% of the 15,919 improvements (1.1 per 1000),
+micro_move 11% (0.20 per 1000), offset 0.3% from 10.7% of offspring
+(0.009 per 1000). Offered summed to the record's 54,427,648 evaluations.
 
 ## Mature starts
 

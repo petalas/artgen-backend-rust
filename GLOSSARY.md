@@ -35,6 +35,11 @@ from the number of physical lanes in that workgroup.
 A new seeded search starting from an existing drawing, without its previous search
 history.
 
+**Operator stats**:
+Per search operator (each mutation branch, crossover), the offspring it produced
+and how many of them were accepted as improvements or at equal fitness, counted
+since the chains were initialized.
+
 **Change record**:
 The polygons an evaluated drawing changed relative to the drawing whose pixels
 are cached. An unknown record turns off the shortcuts that skip unchanged pixels.
