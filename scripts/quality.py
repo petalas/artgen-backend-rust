@@ -35,7 +35,8 @@ interval. BETTER/WORSE need the interval to exclude 1 and a move of at least
 targets taken from the control's worst seed. Records from builds with operator
 stats (protocol 3) also give, per side and image, which mutation operators produced
 the accepted improvements in each time window; protocol 4 adds, for a side with a
-step spread, how often each step-size rung improved. See docs/quality-benchmark.md.
+step spread, how often each step-size rung improved; protocol 5 adds how much
+fitness each operator's and rung's improvements gained. See docs/quality-benchmark.md.
 """
 
 import argparse
@@ -260,6 +261,11 @@ def check_record(record, image, seed, seconds, start=None):
         for kind, rung_kind in zip(OPERATOR_KINDS, RUNG_KINDS):
             require(sum(last[rung_kind]) == sum(last[kind][names.index(n)] for n in scaled),
                     f"{image} seed {seed}: step rungs do not cover the step-scaled operators")
+    if record.get("protocol_version", 2) >= 5:
+        require(all(len(s["gain"]) == len(names) and len(s["rung_gain"]) == rungs
+                    for s in snapshots), f"{image} seed {seed}: malformed gain stats")
+        require(sum(last["rung_gain"]) == sum(last["gain"][names.index(n)] for n in scaled),
+                f"{image} seed {seed}: step rung gain does not cover the step-scaled operators")
 
 
 def run_one(servers, name, side, position, args, evidence):
@@ -485,6 +491,26 @@ def comparison_table(runs, args):
 OPERATOR_KINDS = ("offered", "improved", "neutral")
 # Per step rung, in the same order; protocol 4.
 RUNG_KINDS = ("rung_offered", "rung_improved", "rung_neutral")
+# Protocol 5 adds "gain" and "rung_gain": the improvements' summed fitness gain in
+# error units, per operator and per rung.
+GAIN_HEADER = f"{'gain%':>8}{'last gain%':>11}{'per win':>8}{'per offer':>10}"
+
+
+def gain_cells(windows, whole, i):
+    """Gain columns for row i when the windows have gain, else "": its share of all
+    gain over the run and in the last window, and its gain per improvement and per
+    offspring relative to the table's average (1 = average)."""
+    if "gain" not in whole:
+        return ""
+
+    def share(values):
+        return values[i] / sum(values) if sum(values) else 0.0
+
+    def relative(per):
+        return share(whole["gain"]) / share(whole[per]) if share(whole[per]) else 0.0
+
+    return (f"{100 * share(whole['gain']):>8.1f}{100 * share(windows[-1]['gain']):>11.1f}"
+            f"{relative('improved'):>8.2f}{relative('offered'):>10.2f}")
 
 
 def operator_snapshot(run, t, seconds):
@@ -502,7 +528,8 @@ def operator_windows(runs, side, image, ends, seconds, rungs=False):
     """(names, windows) for one side and image, counts summed over seeds; each window
     holds the counts between consecutive `ends` (from 0). None without operator stats.
     With `rungs`, the step rung counts (keys OPERATOR_KINDS), named by multiplier;
-    None unless every run has them and a spread (multipliers that differ)."""
+    None unless every run has them and a spread (multipliers that differ). Windows
+    also hold "gain" when every run recorded it."""
     names_key = "step_multipliers" if rungs else "operator_names"
     mine = [r for r in runs if r["side"] == side and r["image"] == image and r["operators"]]
     if not mine or (rungs and not all(r.get(names_key) and len(set(r[names_key])) > 1
@@ -511,13 +538,15 @@ def operator_windows(runs, side, image, ends, seconds, rungs=False):
     names = mine[0][names_key]
     require(all(r[names_key] == names for r in mine), f"{names_key} differ between runs")
     source = dict(zip(OPERATOR_KINDS, RUNG_KINDS if rungs else OPERATOR_KINDS))
-    windows, before, start = [], {kind: [0] * len(names) for kind in OPERATOR_KINDS}, 0.0
+    if all("gain" in r["operators"][0] for r in mine):
+        source["gain"] = "rung_gain" if rungs else "gain"
+    windows, before, start = [], {kind: [0] * len(names) for kind in source}, 0.0
     for end in ends:
         now = {kind: [sum(column) for column in zip(*(operator_snapshot(r, end, seconds)[key]
                                                        for r in mine))]
                for kind, key in source.items()}
         windows.append({"from": start, "to": end, **{
-            kind: [b - a for a, b in zip(before[kind], now[kind])] for kind in OPERATOR_KINDS}})
+            kind: [b - a for a, b in zip(before[kind], now[kind])] for kind in source}})
         before, start = now, end
     return names, windows
 
@@ -529,14 +558,16 @@ def table_windows(seconds):
 
 def operator_table(runs, side, image, seconds):
     """Per operator and window: its share of all improvements (%) and its improvement
-    rate (improvements per 1000 offspring it produced); then whole-run columns."""
+    rate (improvements per 1000 offspring it produced); then whole-run columns, and
+    gain columns (gain_cells) for protocol 5 records."""
     found = operator_windows(runs, side, image, table_windows(seconds), seconds)
     if found is None:
         return ""
     names, windows = found
     whole = {kind: [sum(w[kind][i] for w in windows) for i in range(len(names))]
-             for kind in OPERATOR_KINDS}
+             for kind in windows[0] if kind not in ("from", "to")}
     seeds = sum(1 for r in runs if r["side"] == side and r["image"] == image)
+    gain_header = GAIN_HEADER if "gain" in whole else ""
 
     def share(values, i):
         total = sum(values)
@@ -549,14 +580,14 @@ def operator_table(runs, side, image, seconds):
     lines = [f"\n{image} {side}: operators over {seeds} seeds; per window improvement share % "
              "and improvements per 1000 offered",
              f"{'operator':14}" + "".join(f"{label:>15}" for label in labels)
-             + f"{'offered%':>10}{'improved%':>10}{'per 1000':>9}{'neutral%':>9}"]
+             + f"{'offered%':>10}{'improved%':>10}{'per 1000':>9}{'neutral%':>9}" + gain_header]
     for i, name in enumerate(names):
         if not whole["offered"][i]:
             continue
         cells = "".join(f"{share(w['improved'], i):>7.1f} {rate(w, i):>7.3f}" for w in windows)
         lines.append(f"{name:14}{cells}{share(whole['offered'], i):>10.1f}"
                      f"{share(whole['improved'], i):>10.1f}{rate(whole, i):>9.3f}"
-                     f"{share(whole['neutral'], i):>9.1f}")
+                     f"{share(whole['neutral'], i):>9.1f}{gain_cells(windows, whole, i)}")
     lines.append(f"{'improvements':14}" + "".join(f"{sum(w['improved']):>15}" for w in windows)
                  + f"{sum(whole['offered']):>10}{sum(whole['improved']):>10}"
                  f"{1000 * sum(whole['improved']) / max(sum(whole['offered']), 1):>9.3f}"
@@ -567,13 +598,14 @@ def operator_table(runs, side, image, seconds):
 def rung_table(runs, side, image, seconds):
     """Per step rung of a side with a spread: its multiplier, its share of the
     step-scaled operators' offspring, its improvements per 1000 offered in each window,
-    then whole-run improvement share and rate. Empty without a spread."""
+    then whole-run improvement share and rate, and gain columns (gain_cells) for
+    protocol 5 records. Empty without a spread."""
     found = operator_windows(runs, side, image, table_windows(seconds), seconds, rungs=True)
     if found is None:
         return ""
     multipliers, windows = found
     whole = {kind: [sum(w[kind][i] for w in windows) for i in range(len(multipliers))]
-             for kind in OPERATOR_KINDS}
+             for kind in windows[0] if kind not in ("from", "to")}
     seeds = sum(1 for r in runs if r["side"] == side and r["image"] == image)
 
     def rate(counts, i):
@@ -586,11 +618,12 @@ def rung_table(runs, side, image, seconds):
     lines = [(f"\n{image} {side}: step rungs over {seeds} seeds (offset and vertex moves); "
               "improvements per 1000 offered per window"),
              f"{'rung':>4}{'step x':>8}{'offered%':>9}" + "".join(f"{label:>10}" for label in labels)
-             + f"{'improved%':>10}{'per 1000':>9}"]
+             + f"{'improved%':>10}{'per 1000':>9}" + (GAIN_HEADER if "gain" in whole else "")]
     for i, multiplier in enumerate(multipliers):
         cells = "".join(f"{rate(w, i):>10.3f}" for w in windows)
         lines.append(f"{i:>4}{multiplier:>8.3f}{share(whole['offered'], i):>9.1f}{cells}"
-                     f"{share(whole['improved'], i):>10.1f}{rate(whole, i):>9.3f}")
+                     f"{share(whole['improved'], i):>10.1f}{rate(whole, i):>9.3f}"
+                     f"{gain_cells(windows, whole, i)}")
     return "\n".join(lines)
 
 

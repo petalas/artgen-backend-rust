@@ -304,12 +304,14 @@ checks that mutate stores every one.
   `lifecycle same`).
 - `operator_stats` (`OPERATOR_STATS_WORDS` atomic u32: offered, improved and
   neutral blocks of `OPERATOR_COUNT`, then the same three blocks of
-  `STEP_RUNGS` per step rung): each select workgroup counts its λ codes and
+  `STEP_RUNGS` per step rung, then a gain block of each): each select workgroup counts its λ codes and
   rungs in workgroup memory and adds the nonzero totals, at most 27 atomics per
   chain and iteration; thread 0 adds its accepted winner under its operator
-  and, if it has one, its rung. The rung blocks therefore sum to the
-  step-scaled operators' blocks; rungs are counted with or without a spread.
-  Counters are cumulative and wrap.
+  and, if it has one, its rung. An improving winner also adds its fitness gain
+  in error units (`improvement_gain`: the error drop less the point penalty's
+  change, rounded), as two's complement, to both gain blocks. The rung blocks
+  therefore sum to the step-scaled operators' blocks; rungs are counted with or
+  without a spread. Counters are cumulative and wrap.
 - Readback: `run_batch` copies `operator_stats` into the batch's control
   staging buffer, after the control flags, so the existing map reads both.
   `Readback::collect` folds each copy into `OperatorTally`, u64 totals built

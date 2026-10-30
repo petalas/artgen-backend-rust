@@ -136,3 +136,4 @@ utc	control	candidate	cases	pairs	batches	ratio	low95	high95	verdict	replay	cont
 2026-10-30T12:52:20+00:00	HEAD@7a1bd4eb24	worktree	ff,mona,darwin	5	64	1.00370	1.00172	1.00598	NOISE	same	1549022	1554125	.cache/hillclimb/runs/20261030T125116Z-pfurj504	never accept exact parent copies	0.6					same	0
 2026-10-30T18:30:07+00:00	HEAD@7eb5cacfc1	worktree	ff,mona,darwin	5	64	0.99927	0.99643	1.00179	NOISE	same	1544448	1545481	.cache/hillclimb/runs/20261030T182854Z-ld7iqimd	step spread (off)	0.8					same	0
 2026-10-30T21:08:54+00:00	HEAD@de6e7001f0	worktree	ff,mona,darwin	5	64	1.00466	1.00233	1.00784	NOISE	same	1542848	1546468	.cache/hillclimb/runs/20261030T210749Z-yxqn3e_i	default step spread 0.25-4 (fixtures keep none)	0.7					same	0
+2026-10-30T23:33:17+00:00	HEAD@7e3ed7d2a3	worktree	ff,mona,darwin	5	64	1.00349	1.00120	1.00615	NOISE	same	1546449	1551864	.cache/hillclimb/runs/20261030T233212Z-2wev1adh	operator stats: improvement gain per operator and rung	0.8					same	0

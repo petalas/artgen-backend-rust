@@ -38,8 +38,9 @@ use crate::{
 };
 
 /// 3 added operator stats (`operator_names`, `operators`); 4 added step rungs
-/// (`step_multipliers`, `step_operators`, and `rung_*` counts in each snapshot).
-pub const PROTOCOL_VERSION: u32 = 4;
+/// (`step_multipliers`, `step_operators`, and `rung_*` counts in each snapshot);
+/// 5 added each snapshot's improvement `gain` and `rung_gain`.
+pub const PROTOCOL_VERSION: u32 = 5;
 /// Wall-clock checkpoints recorded at the first batch at or after each second.
 pub const FIXED_SECONDS: [f64; 11] = [
     1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 60.0, 120.0, 180.0, 300.0, 600.0,
@@ -112,6 +113,10 @@ pub struct OperatorSnapshot {
     pub rung_offered: [u64; STEP_RUNGS],
     pub rung_improved: [u64; STEP_RUNGS],
     pub rung_neutral: [u64; STEP_RUNGS],
+    /// Summed fitness gain of the improvements, in error units (see
+    /// `gpu_evolver::operators`), per operator and per step rung.
+    pub gain: [i64; OPERATOR_COUNT],
+    pub rung_gain: [i64; STEP_RUNGS],
 }
 
 impl OperatorSnapshot {
@@ -128,12 +133,14 @@ impl OperatorSnapshot {
             rung_offered: stats.rung_offered,
             rung_improved: stats.rung_improved,
             rung_neutral: stats.rung_neutral,
+            gain: stats.gain,
+            rung_gain: stats.rung_gain,
         }
     }
 
     /// Run errors for counts that do not add up: offered must cover every
-    /// evaluation, and the rung counts every offspring, improvement and neutral
-    /// acceptance of the operators that scale with the step.
+    /// evaluation, and the rung counts every offspring, improvement, neutral
+    /// acceptance and gain of the operators that scale with the step.
     fn consistency_errors(&self) -> Vec<String> {
         let mut errors = Vec::new();
         let offered: u64 = self.offered.iter().sum();
@@ -143,9 +150,9 @@ impl OperatorSnapshot {
                 self.evaluations
             ));
         }
-        let scaled = |counts: &[u64; OPERATOR_COUNT]| -> u64 {
+        fn scaled<T: Copy + std::iter::Sum>(counts: &[T; OPERATOR_COUNT]) -> T {
             Operator::ALL.into_iter().filter(|op| op.scales_with_step()).map(|op| counts[op as usize]).sum()
-        };
+        }
         for (kind, by_operator, by_rung) in [
             ("offered", &self.offered, &self.rung_offered),
             ("improved", &self.improved, &self.rung_improved),
@@ -157,6 +164,10 @@ impl OperatorSnapshot {
                     "step rungs count {rungs} {kind}; the step-scaled operators {operators}"
                 ));
             }
+        }
+        let (operators, rungs) = (scaled(&self.gain), self.rung_gain.iter().sum::<i64>());
+        if operators != rungs {
+            errors.push(format!("step rungs gained {rungs}; the step-scaled operators {operators}"));
         }
         errors
     }
@@ -634,6 +645,8 @@ mod tests {
             rung_offered: [0; STEP_RUNGS],
             rung_improved: [0; STEP_RUNGS],
             rung_neutral: [0; STEP_RUNGS],
+            gain: [0; OPERATOR_COUNT],
+            rung_gain: [0; STEP_RUNGS],
         };
         snapshot.offered[Operator::Add as usize] = 4;
         snapshot.offered[Operator::Offset as usize] = 2;
@@ -642,13 +655,18 @@ mod tests {
         snapshot.rung_offered[0] = 5;
         snapshot.rung_offered[7] = 1;
         snapshot.rung_improved[3] = 1;
+        snapshot.gain[Operator::MicroMove as usize] = 30;
+        snapshot.gain[Operator::Add as usize] = -5;
+        snapshot.rung_gain[3] = 30;
         assert_eq!(snapshot.consistency_errors(), Vec::<String>::new());
         snapshot.rung_offered[7] = 0;
         snapshot.rung_neutral[1] = 1;
+        snapshot.rung_gain[3] = 25;
         let errors = snapshot.consistency_errors();
-        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert_eq!(errors.len(), 3, "{errors:?}");
         assert!(errors[0].contains("5 offered"), "{errors:?}");
         assert!(errors[1].contains("1 neutral"), "{errors:?}");
+        assert!(errors[2].contains("gained 25"), "{errors:?}");
     }
 
     #[test]

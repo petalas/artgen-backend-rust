@@ -28,7 +28,9 @@ struct ControlFlags {
 @group(0) @binding(7) var<storage, read_write> chain_changes:      array<ChainChange>;
 // Operator stats (gpu_evolver::operators): mutate's code (and step rung + 1 above
 // OP_RUNG_SHIFT) per offspring, and cumulative counters [offered | improved |
-// neutral], OPERATOR_COUNT each, then the same three blocks of STEP_RUNGS.
+// neutral], OPERATOR_COUNT each, then the same three blocks of STEP_RUNGS, then
+// the improvements' summed fitness gain (signed, see improvement_gain) per
+// operator and per rung.
 @group(0) @binding(8) var<storage, read>       offspring_ops:      array<u32>;
 @group(0) @binding(9) var<storage, read_write> operator_stats:     array<atomic<u32>>;
 
@@ -47,15 +49,37 @@ var<workgroup> reduction_idx: array<u32, 64>;
 var<workgroup> offered_ops: array<atomic<u32>, OPERATOR_COUNT + STEP_RUNGS>;
 const_assert OPERATOR_COUNT + STEP_RUNGS <= 64u;
 const RUNG_STATS: u32 = 3u * OPERATOR_COUNT;
+const GAIN_STATS: u32 = RUNG_STATS + 3u * STEP_RUNGS;
 
 // Add one accepted winner (block 1 improved, 2 neutral) from its offspring_ops
-// word: under its operator, and under its rung when it has one.
-fn count_winner(block: u32, word: u32) {
-    atomicAdd(&operator_stats[block * OPERATOR_COUNT + (word & OP_CODE_MASK)], 1u);
+// word: under its operator, and under its rung when it has one. An improvement
+// also adds its gain, as two's complement, to the gain blocks.
+fn count_winner(block: u32, word: u32, gain: i32) {
+    let code = word & OP_CODE_MASK;
+    atomicAdd(&operator_stats[block * OPERATOR_COUNT + code], 1u);
     let rung_tag = word >> OP_RUNG_SHIFT;
     if rung_tag != 0u {
         atomicAdd(&operator_stats[RUNG_STATS + block * STEP_RUNGS + rung_tag - 1u], 1u);
     }
+    if block == 1u {
+        atomicAdd(&operator_stats[GAIN_STATS + code], bitcast<u32>(gain));
+        if rung_tag != 0u {
+            atomicAdd(&operator_stats[GAIN_STATS + OPERATOR_COUNT + rung_tag - 1u], bitcast<u32>(gain));
+        }
+    }
+}
+
+// Fitness gain from (old_error, old_polygons) to (new_error, new_polygons) in
+// error units: compute_fitness's difference times M / 100, M = max_total_error.
+// fitness = 100 (M - E) / M * (1 - 3 p n), so the gain is
+// (E_old - E_new) - 3 p ((M - E_new) n_new - (M - E_old) n_old): the error drop
+// exactly, the point penalty's change rounded.
+fn improvement_gain(old_error: u32, old_polygons: u32, new_error: u32, new_polygons: u32) -> i32 {
+    let max_total_error = params.max_error_per_pixel * f32(params.image_width * params.image_height);
+    let penalty = 3.0 * params.per_point_penalty * (
+        (max_total_error - f32(new_error)) * f32(new_polygons)
+        - (max_total_error - f32(old_error)) * f32(old_polygons));
+    return i32(old_error) - i32(new_error) - i32(round(penalty));
 }
 
 // Unchanged-pixel note for update_framebuffers (ChainChange in changes.wgsl):
@@ -180,7 +204,9 @@ fn select_main(@builtin(global_invocation_id) gid: vec3<u32>,
 
         if should_accept {
             // Improved, else neutral: operator_stats' second or third block.
-            count_winner(select(2u, 1u, dominated), offspring_ops[best_offspring_id]);
+            let gain = improvement_gain(parent_error, chain_states[chain_id].polygon_count,
+                best_error, working_states[best_offspring_id].polygon_count);
+            count_winner(select(2u, 1u, dominated), offspring_ops[best_offspring_id], gain);
             record_chain_change(chain_id, best_offspring_id, chain_states[chain_id].polygon_count);
             chain_states[chain_id].polygon_count = working_states[best_offspring_id].polygon_count;
             chain_states[chain_id].fitness_bits = fitness_bits;

@@ -17,6 +17,11 @@
 //! counts it in per-rung offered, improved and neutral blocks after the
 //! operator blocks. Other offspring carry no rung and are not counted there.
 //!
+//! Gain: each improvement also adds its fitness gain, in error units (fitness
+//! times max total error / 100: the error drop, less the point penalty's
+//! change), to signed per-operator and per-rung gain blocks at the end. Counts
+//! say how often an operator wins; gain says how much its wins were worth.
+//!
 //! Counters start at zero when chains are (re)initialized and are not part of
 //! the search, so shader variants that never write them leave them meaningless.
 
@@ -60,8 +65,9 @@ pub enum Operator {
 pub const OPERATOR_COUNT: usize = 19;
 
 /// Words of `operator_stats`: offered, then improved, then neutral, each
-/// indexed by operator code; then the same three blocks indexed by step rung.
-pub const OPERATOR_STATS_WORDS: usize = 3 * OPERATOR_COUNT + 3 * STEP_RUNGS;
+/// indexed by operator code; then the same three blocks indexed by step rung;
+/// then gain by operator code and gain by step rung.
+pub const OPERATOR_STATS_WORDS: usize = 4 * OPERATOR_COUNT + 4 * STEP_RUNGS;
 
 /// An `offspring_ops` word holds the operator code below this bit and, for an
 /// operator that scales with the step, its rung + 1 from this bit up (0: none).
@@ -184,12 +190,18 @@ pub struct OperatorStats {
     pub rung_offered: [u64; STEP_RUNGS],
     pub rung_improved: [u64; STEP_RUNGS],
     pub rung_neutral: [u64; STEP_RUNGS],
+    /// Summed fitness gain of the improvements, in error units.
+    pub gain: [i64; OPERATOR_COUNT],
+    pub rung_gain: [i64; STEP_RUNGS],
 }
 
 /// Host totals of the GPU's wrapping u32 counters. Each collected batch folds
 /// in its snapshot as the wrapping difference from the previous one; a batch
 /// adds at most chains x λ x iterations (about 2^24) per counter, far below
-/// 2^32, so the difference is exact even after a counter wraps.
+/// 2^32, so the difference is exact even after a counter wraps. A gain word
+/// is a two's complement sum; a batch moves it by less than the whole image's
+/// error (about 2^27 at 384 px) per chain, so its wrapping difference read as
+/// i32 is exact.
 #[derive(Clone, Debug)]
 pub(super) struct OperatorTally {
     last: [u32; OPERATOR_STATS_WORDS],
@@ -220,6 +232,12 @@ impl OperatorTally {
         for block in blocks {
             for total in block.iter_mut() {
                 *total += u64::from(words[word].wrapping_sub(self.last[word]));
+                word += 1;
+            }
+        }
+        for block in [&mut t.gain[..], &mut t.rung_gain[..]] {
+            for total in block.iter_mut() {
+                *total += i64::from(words[word].wrapping_sub(self.last[word]) as i32);
                 word += 1;
             }
         }
@@ -307,6 +325,25 @@ mod tests {
         words[rungs] = 3;
         tally.fold(&words);
         assert_eq!(tally.totals().rung_offered[0], 7 + u64::from(3u32.wrapping_sub(7)));
+    }
+
+    #[test]
+    fn tally_reads_signed_gains_after_the_rung_blocks() {
+        let gains = 3 * OPERATOR_COUNT + 3 * STEP_RUNGS;
+        let mut words = [0; OPERATOR_STATS_WORDS];
+        words[gains + Operator::Remove as usize] = 500;
+        words[gains + Operator::Add as usize] = (-40i32) as u32; // add's penalty outweighed its error drop
+        words[gains + OPERATOR_COUNT + STEP_RUNGS - 1] = 70; // last rung
+        let mut tally = OperatorTally::default();
+        tally.fold(&words);
+        // The next batch: add gains 100, so its word crosses zero.
+        words[gains + Operator::Add as usize] = 60;
+        tally.fold(&words);
+        let totals = tally.totals();
+        assert_eq!(totals.gain[Operator::Add as usize], 60);
+        assert_eq!(totals.gain[Operator::Remove as usize], 500);
+        assert_eq!(totals.rung_gain, [0, 0, 0, 0, 0, 0, 0, 70]);
+        assert_eq!(totals.improved, [0; OPERATOR_COUNT]);
     }
 
     #[test]

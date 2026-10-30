@@ -89,10 +89,11 @@ renderer (`reference::evaluate`, with the run's `per_point_penalty`) and
 described by `reference::complexity`. A gap
 above 0.05 fitness points, or any wgpu device error, makes the run invalid, and
 the script stops. `DIR` gets `result.json` (the full record) and `best.json`.
-The record (protocol 4) carries `start_sha256`, the start file's SHA-256 or
+The record (protocol 5) carries `start_sha256`, the start file's SHA-256 or
 null for a blank start; the script checks it against the file it named.
-Protocol 3 added operator stats (below) and protocol 4 their step rung counts;
-the script still accepts protocol 2 and 3 records, which lack them.
+Protocol 3 added operator stats (below), protocol 4 their step rung counts and
+protocol 5 their gain; the script still accepts protocol 2 to 4 records, which
+lack them.
 
 ## Operator stats
 
@@ -138,6 +139,25 @@ drawing matures. Rates count improvements, not their size, and offspring of
 every rung compete in the same select, so a rung's rate also depends on the
 others. `summary.json` has the rung counts under `rungs` in the side's
 `operators` entry.
+
+### Gain
+
+Protocol 5 snapshots also hold `gain` per operator and `rung_gain` per rung:
+the summed fitness gain of their improvements, in error units (fitness points
+times max total error / 100, so one unit is about 9e-7 points at 384 px). It is
+the error drop less the change in point penalty, signed: an addition that
+lowers error by less than its points cost would count negative, though select
+never accepts one. The rung gains sum to the step-scaled operators'; the script
+rejects a run where they do not.
+
+Both tables then end in four gain columns: `gain%`, the row's share of all gain
+in the table over the run; `last gain%`, the same for the last window; `per win`,
+gain per improvement relative to the table's average (gain share over
+improvement share); and `per offer`, gain per offspring relative to the average
+(gain share over offspring share). `per offer` above 1 means the row's offspring
+are worth more than average; it is the column to weigh operators and rungs by.
+Gain sums every chain's improvements, so a crossover that pulls in another
+chain's polygons gets credit for gains that chain's own operators found first.
 
 Smoke run, 2026-10-30 (mona, seed 1, 60 s from `s120v2`, spread 0.25–4,
 evidence `.cache/quality/runs/20261030T183122Z-_5hdokr8`): rates fell

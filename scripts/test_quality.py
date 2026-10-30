@@ -29,8 +29,9 @@ hc = quality.hc
 # in all, offset 8192 and 10 per batch, crossover 4096 and none. rg-1 adds step
 # rungs (protocol 4) without a spread, rg-2 with one (multipliers 0.25..4): offset's
 # offspring split evenly over 8 rungs, its 10 improvements per batch as
-# 0,0,1,1,2,2,2,2 and its neutral ones on rung 0. Each run writes best.json naming
-# its case and seed.
+# 0,0,1,1,2,2,2,2 and its neutral ones on rung 0. rg-3 is rg-2 with gain
+# (protocol 5): each rung-k improvement gains 10 (k + 1), add's gains 5 each.
+# Each run writes best.json naming its case and seed.
 FAKE = r'''#!/usr/bin/env python3
 import hashlib, json, os, sys
 from pathlib import Path
@@ -61,7 +62,11 @@ for line in sys.stdin:
                 "neutral": [0, batch, 0],
                 "rung_offered": [1024 * batch] * 8,
                 "rung_improved": [k * batch for k in (0, 0, 1, 1, 2, 2, 2, 2)],
-                "rung_neutral": [batch] + [0] * 7}
+                "rung_neutral": [batch] + [0] * 7,
+                **({"gain": [5 * int(100 * batch ** 0.5), 590 * batch, 0],
+                    "rung_gain": [k * batch * 10 * (i + 1)
+                                  for i, k in enumerate((0, 0, 1, 1, 2, 2, 2, 2))]}
+                   if fields["rg"] == "3" else {})}
     operators = [stats(p["batches"], p["seconds"])
                  for t in (1, 2, 5, 10, 20, 30, 60, 120, 180, 300, 600) if t < seconds
                  for p in [next(p for p in points if p["seconds"] >= t)]]
@@ -75,8 +80,9 @@ for line in sys.stdin:
         record.update(protocol_version=3, operator_names=["add", "offset", "crossover"],
                       operators=operators)
     if fields["rg"] != "0":
-        spread = [0.25 * 16 ** (k / 7) for k in range(8)] if fields["rg"] == "2" else [1.0] * 8
-        record.update(protocol_version=4, step_multipliers=spread, step_operators=["offset"])
+        spread = [0.25 * 16 ** (k / 7) for k in range(8)] if fields["rg"] != "1" else [1.0] * 8
+        record.update(protocol_version=5 if fields["rg"] == "3" else 4,
+                      step_multipliers=spread, step_operators=["offset"])
     if "start" in flags and fields["ign"] == "0":
         record["start_sha256"] = hashlib.sha256(Path(flags["start"]).read_bytes()).hexdigest()
     out = Path(flags["output"]); out.mkdir(parents=True)
@@ -184,6 +190,32 @@ class QualityCli(unittest.TestCase):
         entries = {e["side"]: e for e in self.summary(out)["operators"] if e["image"] == "ff"}
         self.assertNotIn("rungs", entries["flat"])
         self.assertEqual(entries["spread"]["rungs"]["windows"][-1]["improved"][4], 3 * 2 * 101)
+
+    def test_gain_is_tabled_as_shares_and_relative_worth(self):
+        code, out, err = self.run_cli("--side", f"gain={self.fake(rg=3)}", "--side", f"old={self.fake(rg=2)}")
+        self.assertEqual(code, 0, out + err)
+        lines = out.splitlines()
+        header = next(x for x in lines if x.startswith("operator ") and "gain%" in x)
+        self.assertEqual(header.split()[-7:], ["gain%", "last", "gain%", "per", "win", "per", "offer"])
+        self.assertEqual(sum("gain%" in x for x in lines if x.startswith("operator ")), 2)  # ff, mona
+        start = lines.index(next(x for x in lines if x.startswith("ff gain: step rungs")))
+        rows = [line.split() for line in lines[start + 2:start + 10]]
+        # Columns end: improved%, per 1000, gain%, last gain%, per win, per offer.
+        # Rung 7 gains 160 of 590: 27.1%; per win (16/59)/(2/10); per offer (16/59)/(1/8).
+        self.assertEqual(rows[7][-4:], ["27.1", "27.1", "1.36", "2.17"])
+        self.assertEqual(rows[0][-4:], ["0.0", "0.0", "0.00", "0.00"])
+        old = lines.index(next(x for x in lines if x.startswith("ff old: step rungs")))
+        self.assertNotIn("gain%", lines[old + 1])
+        entries = {e["side"]: e for e in self.summary(out)["operators"] if e["image"] == "ff"}
+        self.assertEqual(entries["gain"]["rungs"]["windows"][-1]["gain"][7], 3 * 2 * 101 * 80)
+        self.assertNotIn("gain", entries["old"]["windows"][-1])
+
+    def test_rung_gain_that_misses_the_scaled_operators_fails_the_run(self):
+        fake = Path(self.fake(rg=3))
+        fake.write_text(fake.read_text().replace("590 * batch", "591 * batch"))
+        code, _, err = self.run_cli("--side", f"a={fake}")
+        self.assertEqual(code, 1)
+        self.assertIn("step rung gain does not cover the step-scaled operators", err)
 
     def test_rungs_that_miss_the_scaled_operators_fail_the_run(self):
         fake = Path(self.fake(rg=2))

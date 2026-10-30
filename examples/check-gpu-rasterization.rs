@@ -7,7 +7,7 @@ use artgen_backend_rust::{
     gpu_evolver::{
         benchmark::BenchmarkSnapshot,
         buffers::drawing_to_gpu,
-        operators::{Operator, OperatorStats},
+        operators::{Operator, OperatorStats, OPERATOR_COUNT},
         EngineCapacity, GpuEvolver,
     },
     models::{color::Color, drawing::Drawing, point::Point, polygon::Polygon},
@@ -664,7 +664,8 @@ fn verify_tile_list_overflow() {
 
 /// Operator stats count every evaluated offspring once, under the operator that
 /// produced it, and every accepted winner once, as improved when it raised its
-/// chain's fitness and neutral when it kept it.
+/// chain's fitness and neutral when it kept it; the improvements' gains sum to
+/// the fitness they added.
 fn verify_operator_stats() {
     const SIDE: u32 = 96;
     const CHAINS: u32 = 4;
@@ -701,6 +702,9 @@ fn verify_operator_stats() {
     let mut before = evolver.benchmark_snapshot(CHAINS, LAMBDA).expect("snapshot").fitness_packed;
     let base = evolver.operator_stats().clone();
     let (mut improved, mut neutral) = (0u64, 0u64);
+    // Gain is in error units: fitness percentage points times M / 100.
+    let units_per_point = f64::from(MAX_ERROR_PER_PIXEL) * f64::from(SIDE * SIDE) / 100.0;
+    let mut fitness_gain = 0.0f64;
     for _ in 0..48 {
         evolver.run_batch(&params, true);
         let after = evolver.benchmark_snapshot(CHAINS, LAMBDA).expect("snapshot");
@@ -710,6 +714,7 @@ fn verify_operator_stats() {
                 assert!(new >= old, "chain {chain} accepted a worse winner: {old} -> {new}");
                 improved += u64::from(new > old);
                 neutral += u64::from(new == old);
+                fitness_gain += (f64::from(new) - f64::from(old)) * units_per_point;
             }
         }
         before = after.fitness_packed;
@@ -719,6 +724,11 @@ fn verify_operator_stats() {
     assert_eq!(delta(&stats.offered, &base.offered), 48 * u64::from(CHAINS * LAMBDA));
     assert_eq!(delta(&stats.improved, &base.improved), improved, "improved winners");
     assert_eq!(delta(&stats.neutral, &base.neutral), neutral, "neutral winners");
+    let gain = stats.gain.iter().sum::<i64>() - base.gain.iter().sum::<i64>();
+    // Each f32 fitness is within half an ulp (under one unit here) and each
+    // penalty term within half a unit of rounding.
+    assert!((gain as f64 - fitness_gain).abs() <= 3.0 * improved as f64,
+        "gain {gain} units; the chains' fitness rose by {fitness_gain:.1} units over {improved} improvements");
     let counters = evolver.benchmark_counters();
     assert_eq!(stats.offered.iter().sum::<u64>(), counters.completed_evaluations);
     let offered_by = |op: Operator| stats.offered[op as usize];
@@ -727,8 +737,8 @@ fn verify_operator_stats() {
     }
     assert!(improved > 0, "no chain improved");
     assert_rungs_cover_the_scaled_operators(stats, "no spread");
-    let summary = format!("{} improved, {neutral} neutral of {} offered", improved,
-        stats.offered.iter().sum::<u64>());
+    let summary = format!("{} improved (gain {gain} units, fitness {fitness_gain:.1}), {neutral} neutral of {} offered",
+        improved, stats.offered.iter().sum::<u64>());
 
     // A step spread: the rungs still count exactly the step-scaled operators,
     // and λ 64 gives every rung its share of their offspring.
@@ -779,6 +789,7 @@ fn verify_operator_stats() {
     let unchanged = Operator::Unchanged as usize;
     assert_eq!(stats.offered[unchanged], 4 * 4 * u64::from(CHAINS * LAMBDA));
     assert_eq!(stats.improved.iter().sum::<u64>(), 0);
+    assert_eq!(stats.gain, [0; OPERATOR_COUNT]);
     assert!(stats.neutral[unchanged] > 0, "no neutral acceptance of an unchanged copy");
     println!("operator stats check: {summary}");
 }
@@ -795,5 +806,8 @@ fn assert_rungs_cover_the_scaled_operators(stats: &OperatorStats, context: &str)
     ] {
         assert_eq!(by_rung.iter().sum::<u64>(), scaled(by_operator), "{context}: rung {kind}");
     }
+    let scaled_gain: i64 =
+        Operator::ALL.into_iter().filter(|op| op.scales_with_step()).map(|op| stats.gain[op as usize]).sum();
+    assert_eq!(stats.rung_gain.iter().sum::<i64>(), scaled_gain, "{context}: rung gain");
     assert!(scaled(&stats.offered) > 0, "{context}: no step-scaled offspring");
 }
