@@ -423,3 +423,22 @@ medium move 0.001; micro2 = `micro_adjust_delta` 0.002 (default 0.001).
   0.075; mona and darwin equal or lower): larger steps pay early in the window
   and stop paying later.
 - The cut sides keep 13–55 more triangles at 90 s.
+
+## Cut + micro2 hold-out and blank check; adopted, 2026-10-30
+
+`c5a66ca`, control vs cut + micro2 (offset 0.000565, medium move 0.001,
+`micro_adjust_delta` 0.002). These became the defaults in the next commit;
+the frozen v1 fixtures keep their explicit old values.
+
+- Hold-out seeds 4–5, 90 s from `s120` (evidence
+  `.cache/quality/runs/20261030T163323Z-8xt8izpr`): time ratio 0.75 [0.60,
+  0.95], r ratio 0.9861 [0.9790, 0.9933] (SCREEN, two seeds). Median r at 90 s
+  lower on every image: ff 1.251 → 1.218, mona 2.167 → 2.148, darwin 1.257 →
+  1.248.
+- From blank, 120 s, seeds 1–3 (evidence
+  `.cache/quality/runs/20261030T165246Z-slntxqs6`): r ratio 0.9751 [0.9593,
+  0.9929] BETTER at 120 s (0.9606 BETTER at 30 s); time ratio 0.69 [0.57,
+  0.85]. mona (2.174 → 2.115) and darwin (1.325 → 1.276) gain; ff is mixed,
+  worse at 5 s (2.32 → 2.89) and by median at 120 s (1.280 → 1.293, range
+  1.234–1.322 against 1.254–1.283). Triangles at 120 s rise: ff 1049 → 1083,
+  mona 999 → 1141, darwin 1079 → 1250.
