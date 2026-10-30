@@ -73,8 +73,13 @@ pub const ADAPTIVE_MUTATION: bool = false;
 /// micro vertex step sizes by rung `i % STEP_RUNGS`'s multiplier, log-spaced
 /// from `MutationParams::step_spread_min` to `step_spread_max`.
 pub const STEP_RUNGS: usize = 8;
-/// Default `step_spread_min` and `step_spread_max`: every rung is 1, no spread.
-pub const STEP_SPREAD_DEFAULT: f32 = 1.0;
+/// A spread end of 1 on both sides: every rung is 1, no spread. Serialized
+/// params omit an end at this value and read a missing end as it, so records,
+/// fixtures and saved settings from before the step spread keep their meaning.
+pub const STEP_SPREAD_NONE: f32 = 1.0;
+/// Default spread: rungs from 0.25x to 4x (docs/quality-benchmark.md, step spread).
+pub const STEP_SPREAD_MIN_DEFAULT: f32 = 0.25;
+pub const STEP_SPREAD_MAX_DEFAULT: f32 = 4.0;
 /// `sanitize` keeps both spread ends within [1 / STEP_SPREAD_LIMIT, STEP_SPREAD_LIMIT].
 pub const STEP_SPREAD_LIMIT: f32 = 16.0;
 

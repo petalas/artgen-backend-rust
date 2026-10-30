@@ -66,7 +66,8 @@ mod tests {
 
     #[test]
     fn step_multipliers_are_log_spaced_from_min_to_max() {
-        let ones = MutationParams::default().step_multipliers();
+        let none = MutationParams { step_spread_min: 1.0, step_spread_max: 1.0, ..MutationParams::default() };
+        let ones = none.step_multipliers();
         assert!(ones.iter().all(|m| m.to_bits() == 1.0f32.to_bits()), "{ones:?}");
         let spread = MutationParams { step_spread_min: 0.25, step_spread_max: 4.0, ..MutationParams::default() };
         let rungs = spread.step_multipliers();
@@ -89,12 +90,15 @@ mod tests {
     }
 
     #[test]
-    fn the_default_step_spread_is_omitted_and_restored() {
-        let json = serde_json::to_value(MutationParams::default()).unwrap();
+    fn no_spread_is_omitted_and_a_missing_end_reads_as_no_spread() {
+        let none = MutationParams { step_spread_min: 1.0, step_spread_max: 1.0, ..MutationParams::default() };
+        let json = serde_json::to_value(&none).unwrap();
         assert!(json.get("stepSpreadMin").is_none() && json.get("stepSpreadMax").is_none());
-        let spread = MutationParams { step_spread_min: 0.5, step_spread_max: 2.0, ..MutationParams::default() };
-        let json = serde_json::to_value(&spread).unwrap();
-        assert_eq!((json["stepSpreadMin"].as_f64(), json["stepSpreadMax"].as_f64()), (Some(0.5), Some(2.0)));
-        assert_eq!(serde_json::from_value::<MutationParams>(json).unwrap(), spread);
+        assert_eq!(serde_json::from_value::<MutationParams>(json).unwrap(), none);
+        // The default spread is written out, so it survives a round trip.
+        let default = MutationParams::default();
+        let json = serde_json::to_value(&default).unwrap();
+        assert_eq!((json["stepSpreadMin"].as_f64(), json["stepSpreadMax"].as_f64()), (Some(0.25), Some(4.0)));
+        assert_eq!(serde_json::from_value::<MutationParams>(json).unwrap(), default);
     }
 }

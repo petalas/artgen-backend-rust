@@ -1323,13 +1323,15 @@ mod tests {
                 max_storage_buffer_binding_size: 0,
                 max_buffer_size: 0,
             },
-            // The frozen v1 manifest's settings, which predate the 2000 cap and
-            // the 2026-10-30 operator weights and micro step.
+            // The frozen v1 manifest's settings, which predate the 2000 cap,
+            // the 2026-10-30 operator weights and micro step, and the step spread.
             params: MutationParams {
                 max_polygons: 1000,
                 offset_polygon_prob: 0.00565,
                 medium_move_prob: 0.004,
                 micro_adjust_delta: 0.001,
+                step_spread_min: 1.0,
+                step_spread_max: 1.0,
                 ..MutationParams::default()
             },
             timestamp_samples: 0,

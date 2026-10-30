@@ -21,24 +21,25 @@ fn default_medium_move_delta() -> f32 { settings::MEDIUM_MOVE_DELTA }
 fn default_merge_centroid_threshold() -> f32 { settings::MERGE_CENTROID_THRESHOLD }
 fn default_merge_color_threshold() -> f32 { settings::MERGE_COLOR_THRESHOLD }
 fn default_per_point_penalty() -> f32 { settings::PER_POINT_PENALTY }
-fn default_step_spread() -> f32 { settings::STEP_SPREAD_DEFAULT }
+fn no_step_spread() -> f32 { settings::STEP_SPREAD_NONE }
 // Records and frozen fixtures from before the field omit it; leaving the default
 // out keeps their exact parameter maps (effective-parameter gates compare them).
 #[allow(clippy::trivially_copy_pass_by_ref)] // skip_serializing_if passes a reference
 fn is_default_per_point_penalty(value: &f32) -> bool {
     value.to_bits() == settings::PER_POINT_PENALTY.to_bits()
 }
-// Omitted at the default for the same reason as `per_point_penalty`.
+// Omitted at no spread (absent means no spread), for the same reason as
+// `per_point_penalty`.
 #[allow(clippy::trivially_copy_pass_by_ref)] // skip_serializing_if passes a reference
-fn is_default_step_spread(value: &f32) -> bool {
-    value.to_bits() == settings::STEP_SPREAD_DEFAULT.to_bits()
+fn is_no_step_spread(value: &f32) -> bool {
+    value.to_bits() == settings::STEP_SPREAD_NONE.to_bits()
 }
 
 /// A step-spread end as `sanitize` keeps it: within
 /// [1 / STEP_SPREAD_LIMIT, STEP_SPREAD_LIMIT]; NaN becomes the default (no spread).
 fn clamp_step_spread(value: f32) -> f32 {
     if value.is_nan() {
-        settings::STEP_SPREAD_DEFAULT
+        settings::STEP_SPREAD_NONE
     } else {
         value.clamp(1.0 / settings::STEP_SPREAD_LIMIT, settings::STEP_SPREAD_LIMIT)
     }
@@ -122,9 +123,9 @@ pub struct MutationParams {
     // Step spread: offspring with local index i multiply their offset, point-move
     // and micro vertex step sizes by rung i % STEP_RUNGS of a log-spaced ladder
     // from min to max (see `step_multipliers`). Both 1: no spread.
-    #[serde(default = "default_step_spread", skip_serializing_if = "is_default_step_spread")]
+    #[serde(default = "no_step_spread", skip_serializing_if = "is_no_step_spread")]
     pub step_spread_min: f32,
-    #[serde(default = "default_step_spread", skip_serializing_if = "is_default_step_spread")]
+    #[serde(default = "no_step_spread", skip_serializing_if = "is_no_step_spread")]
     pub step_spread_max: f32,
 
     // Rasterize workgroup size: [wg_x, wg_y] (e.g. [16,16], [16,8], [8,8])
@@ -273,8 +274,8 @@ impl Default for MutationParams {
             chain_count: settings::GPU_DEFAULT_CHAIN_COUNT,
             lambda: settings::GPU_DEFAULT_LAMBDA,
             adaptive_mutation: settings::ADAPTIVE_MUTATION,
-            step_spread_min: settings::STEP_SPREAD_DEFAULT,
-            step_spread_max: settings::STEP_SPREAD_DEFAULT,
+            step_spread_min: settings::STEP_SPREAD_MIN_DEFAULT,
+            step_spread_max: settings::STEP_SPREAD_MAX_DEFAULT,
             rasterize_wg: [settings::RASTERIZE_WG_X_DEFAULT, settings::RASTERIZE_WG_Y_DEFAULT],
             gpu_batch_iters: settings::GPU_DEFAULT_BATCH_ITERS,
         }
