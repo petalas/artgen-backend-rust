@@ -261,13 +261,6 @@ Synthesized from 6 expert analyses (GPU compute, evolutionary algorithm, CPU-GPU
 
 ## Tier 2 — Medium Impact, Low Effort (Quick Wins)
 
-### 2.1 Skip unconditional polygon writeback in multi-mutation — [~500KB/iter saved]
-**Source:** GPU Compute expert
-**Problem:** Per-polygon loop in `mutate.wgsl` unpacks, potentially mutates, then repacks and writes back ALL polygons even when nothing changed (~96% are unmodified).
-**Fix:** Add `modified` flag, skip writeback for unmodified polygons.
-**Effort:** Very low — zero risk
-**Details:** [gpu-compute-optimization.md](gpu-compute-optimization.md)
-
 ### 2.2 Fix `shared_polys` over-allocation — [improved SM occupancy]
 **Source:** Data Structures expert
 **Problem:** `shared_polys` is hardcoded to 1536 entries but actual `TILE_CAP = THREAD_COUNT * 3` at default 16x16 uses only 768. Wastes 12KB shared memory per workgroup, reducing SM occupancy.
@@ -323,7 +316,7 @@ Synthesized from 6 expert analyses (GPU compute, evolutionary algorithm, CPU-GPU
 
 ### 3.3 Copy-on-write offspring representation — [50-100x memory reduction]
 **Source:** Data Structures expert
-**Problem:** Each offspring duplicates full 16032-byte GpuDrawingState even though single-mutation modifies only 1-2 polygons.
+**Problem:** Each offspring duplicates full 16032-byte GpuDrawingState even though a mutation modifies only 1-2 polygons.
 **Fix:** Delta representation: (polygon_index, old_polygon, new_polygon) at ~48 bytes per mutation.
 **Effort:** Very high — fundamental restructuring of mutate and rasterize shaders
 **Details:** [data-structures-algorithms.md](data-structures-algorithms.md)
@@ -393,13 +386,6 @@ mechanism from parallel count resets, and gives no evidence for the historical
 **Fix:** EWMA-based controller targeting ~10ms per batch, auto-tunes dynamically.
 **Effort:** Medium
 **Details:** [cpu-gpu-hybrid.md](cpu-gpu-hybrid.md)
-
-### 4.8 Multi-mutation RNG batching — [30-50% less arithmetic in mutation loop]
-**Source:** Data Structures expert
-**Problem:** Multi-mutation path draws ~18 random numbers per polygon regardless of whether any mutation fires.
-**Fix:** Batch 2-3 RNG calls, use bit extraction, skip inner loop when no mutation probability exceeds threshold.
-**Effort:** Medium
-**Details:** [data-structures-algorithms.md](data-structures-algorithms.md)
 
 ### 4.9 Async non-blocking best-chain readback — [eliminate 0.5-3ms stall]
 **Source:** CPU-GPU Hybrid expert

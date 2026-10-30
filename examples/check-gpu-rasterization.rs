@@ -116,7 +116,6 @@ fn no_op_params() -> MutationParams {
         chain_count: 2,
         lambda: 1,
         gpu_batch_iters: 1,
-        single_mutation_mode: false,
         adaptive_mutation: false,
         ..Default::default()
     }
@@ -601,7 +600,6 @@ fn verify_tile_list_overflow() {
         chain_count: CHAINS,
         lambda: 64,
         gpu_batch_iters: 16,
-        single_mutation_mode: true,
         rasterize_wg: TILE,
         ..no_op_params()
     };

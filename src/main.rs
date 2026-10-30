@@ -1156,7 +1156,6 @@ fn handle_ws_command(
             let mut params = MutationParams {
                 chain_count: 4,
                 lambda: 64,
-                single_mutation_mode: true,
                 adaptive_mutation: true,
                 ..Default::default()
             };
@@ -1860,11 +1859,10 @@ fn run_cli_benchmark(project: &str, gpu_batch_iters_override: Option<u32>) {
     // Start from blank — deterministic baseline, no random variance
     let initial = Drawing { polygons: vec![], is_dirty: false, fitness: 0.0 };
 
-    // Configure benchmark params: 4 chains, 64 lambda, single mutation, adaptive scale
+    // Configure benchmark params: 4 chains, 64 lambda, adaptive scale
     let mut params = MutationParams {
         chain_count: BENCH_CHAINS,
         lambda: BENCH_LAMBDA,
-        single_mutation_mode: true,
         adaptive_mutation: true,
         ..Default::default()
     };

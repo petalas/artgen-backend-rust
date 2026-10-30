@@ -10,7 +10,7 @@ The system uses a **(1+lambda)-ES** running entirely on the GPU via wgpu compute
 - **Per iteration**: Each chain spawns lambda offspring (1-64, power-of-2, default 64). Offspring are independently mutated, rasterized, error-scored via L1 pixel error, and the best offspring is compared against the parent. Three GPU passes per iteration: mutate -> rasterize_error -> select.
 - **Selection**: Strictly elitist -- offspring replaces parent only if fitness strictly improves, with 50% neutral acceptance for plateau traversal (coin flip using offspring RNG bit).
 - **Crossover**: Tournament selection (size 3) across the entire population, uniform crossover that walks both parent polygon arrays in lockstep with per-slot coin flip. Probability 0.2 default.
-- **Mutation**: 17 mutation operators. Single-mutation mode (default) uses weighted roulette-wheel selection. Multi-mutation mode applies each independently per polygon. Mutations include: add/remove polygon, reorder (random swap), adjacent swap, scale, rotate, offset polygon, move point (large/medium/micro), change color (full/micro), adjust brightness, adjust saturation, merge polygons, clone+jitter, swap colors.
+- **Mutation**: 17 mutation operators. Each offspring gets exactly one, picked by weighted roulette wheel (per-polygon operators weighted by polygon count). Mutations include: add/remove polygon, reorder (random swap), adjacent swap, scale, rotate, offset polygon, move point (large/medium/micro), change color (full/micro), adjust brightness, adjust saturation, merge polygons, clone+jitter, swap colors.
 - **Adaptive mutation scale**: 1.2x on accept (capped at 2.0), pow(0.99, 1/lambda) decay on reject (floor at 0.2), burst to 1.5 on stagnation (>10000/lambda iterations). Only affects offspring indices 1..lambda-1 when enabled; offspring 0 always uses scale 1.0.
 - **Fitness**: L1 error per pixel (`abs(dr) + abs(dg) + abs(db)`, max 765 per pixel) summed across all pixels, converted to percentage, with a tiny complexity penalty (`per_point_penalty`, default 1/5000000 per vertex, a `MutationParams` setting).
 - **Degenerate triangle culling**: On acceptance, compacts polygon array by removing triangles with cross-product area < 0.00001.
@@ -58,7 +58,7 @@ if params.stratified_mutation == 1u && offspring_local_idx < STRATIFIED_SLOTS {
     let mutation_type = stratification_table[offspring_local_idx];
     apply_specific_mutation(rng, oid, count, mutation_scale, mutation_type);
 } else {
-    // Existing roulette-wheel or multi-mutation path
+    // Existing roulette-wheel path
     ...
 }
 ```
@@ -97,7 +97,7 @@ A more practical adaptation: instead of blending, run a second round of mutation
 
 ### Simplest Version: Accept Top-K Sequentially
 
-Even simpler: if the best offspring improves fitness, also check the 2nd-best offspring's mutation against the newly accepted state. If it also improves, accept it too. This "greedy sequential accept" captures correlated improvements that a single-winner selection misses. With single-mutation mode, this is safe because individual mutations are small and typically non-interfering.
+Even simpler: if the best offspring improves fitness, also check the 2nd-best offspring's mutation against the newly accepted state. If it also improves, accept it too. This "greedy sequential accept" captures correlated improvements that a single-winner selection misses. This is safe because individual mutations are small and typically non-interfering.
 
 In the select shader:
 

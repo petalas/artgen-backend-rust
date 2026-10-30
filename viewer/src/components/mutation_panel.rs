@@ -171,20 +171,6 @@ pub fn ParamsEditor(
                     <input
                         type="checkbox"
                         disabled={move || is_disabled()}
-                        prop:checked={move || params.get().single_mutation_mode}
-                        on:change={move |_| {
-                            params.update(|p| p.single_mutation_mode = !p.single_mutation_mode);
-                            notify();
-                        }}
-                    />
-                    "Single mutation per iteration"
-                </label>
-            </div>
-            <div class="mutation-row">
-                <label class="bench-checkbox-label">
-                    <input
-                        type="checkbox"
-                        disabled={move || is_disabled()}
                         prop:checked={move || params.get().adaptive_mutation}
                         on:change={move |_| {
                             params.update(|p| p.adaptive_mutation = !p.adaptive_mutation);

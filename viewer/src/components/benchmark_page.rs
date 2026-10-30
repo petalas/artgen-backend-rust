@@ -125,7 +125,6 @@ fn SnapshotsSection(state: RwSignal<ViewerState>) -> impl IntoView {
 // ── Configure Run ──────────────────────────────────────────
 
 fn auto_label(params: &MutationParams, resolution: u32) -> String {
-    let mode = if params.single_mutation_mode { "single" } else { "multi" };
     let lambda_str = if params.lambda > 1 { format!("-{}\u{03BB}", params.lambda) } else { String::new() };
     let adaptive_str = if params.adaptive_mutation { "-adaptive" } else { "" };
     let defaults = MutationParams::default();
@@ -136,7 +135,7 @@ fn auto_label(params: &MutationParams, resolution: u32) -> String {
         String::new()
     };
     let res_str = format!("-{}px", resolution);
-    format!("{}c{}-{}{}{}{}{}", params.chain_count, lambda_str, mode, adaptive_str, wg_str, batch_str, res_str)
+    format!("{}c{}{}{}{}{}", params.chain_count, lambda_str, adaptive_str, wg_str, batch_str, res_str)
 }
 
 fn deduplicate_label(base: &str, state: &ViewerState) -> String {
@@ -1143,16 +1142,12 @@ fn params_detail_view(p: &MutationParams, resolution: u32, pass_timings: &Option
     let d = MutationParams::default();
     let is_all_default = *p == d;
 
-    let mode_str = if p.single_mutation_mode { "single" } else { "multi" };
-    let d_mode_str = if d.single_mutation_mode { "single" } else { "multi" };
-
     let timing_bar = pass_timings.as_ref().map(|pt| timing_bar_view(pt));
 
     view! {
         <div class="bench-params-detail">
             {timing_bar}
             <div class="bench-params-row">
-                {pv("Mode", mode_str.to_string(), mode_str != d_mode_str)}
                 {pv("Adaptive", if p.adaptive_mutation { "on" } else { "off" }.to_string(), p.adaptive_mutation != d.adaptive_mutation)}
                 {pv("Chains", p.chain_count.to_string(), p.chain_count != d.chain_count)}
                 {pv("Lambda", p.lambda.to_string(), p.lambda != d.lambda)}

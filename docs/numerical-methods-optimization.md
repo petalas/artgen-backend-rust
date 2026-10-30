@@ -251,13 +251,12 @@ fn pcg_step(state: ptr<function, u32>) -> u32 {
 ### Is the Period Sufficient?
 
 Each offspring consumes RNG calls per iteration:
-- Single mutation mode: ~5-15 calls (selection + mutation parameters)
-- Multi mutation mode: ~20-50 calls per polygon * up to 1000 polygons = 20K-50K calls
+- Mutation: ~5-15 calls (selection + mutation parameters)
 
-At 50K calls per iteration and 64 batch iterations: 3.2M calls per batch.
-At 2^32 period: the RNG would repeat after 2^32 / 3.2M = ~1340 batches.
+At 15 calls per iteration and 64 batch iterations: ~1K calls per batch.
+At 2^32 period: the RNG would repeat after 2^32 / 1K = ~4.5M batches.
 
-In a typical run of millions of batches (hours of evolution), each offspring's RNG **will cycle multiple times**. However, since the RNG state is persistent and continues from where it left off, cycling is not a problem unless the period is short enough that the same sequence of mutations repeats within a correlated window. With 1340 batches between repeats and each batch producing independent mutations, the correlation is negligible.
+A long run can reach millions of batches, so an offspring's RNG may cycle. Since the RNG state is persistent and continues from where it left off, cycling is not a problem unless the same sequence of mutations repeats within a correlated window. With millions of batches between repeats, the correlation is negligible.
 
 ### Would Better RNG Improve Convergence?
 
@@ -399,14 +398,13 @@ The current incremental eval computes dirty bbox per mutation type:
 - Per-polygon mutations (move_point, micro_adjust, color changes): union of old and new polygon bbox.
 - Z-order mutations (reorder, adjacent_swap, swap_colors, remove, merge): full image bbox.
 - Crossover: full image bbox.
-- Multi-mutation mode: always full image bbox.
 
 **Opportunity:** For z-order mutations, the dirty region could be tightened:
 - **Adjacent swap of polygons i and i+1**: The dirty region is the union of the bounding boxes of polygons i and i+1 (only pixels covered by these two polygons are affected). Currently returns `full_image_bbox()`.
 - **Remove polygon at index k**: The dirty region is the bbox of the removed polygon (pixels above it in z-order need re-compositing within that region). Currently returns `full_image_bbox()`.
 - **Swap colors between polygons i and j**: The dirty region is the union of both polygons' bboxes. Currently returns `full_image_bbox()`.
 
-**Impact estimate:** In single-mutation mode with incremental eval, ~20-30% of mutations are z-order operations (reorder + adjacent_swap + swap_colors + remove). Tightening their dirty bbox from full-image to the affected polygon regions would reduce the rasterization work by 10-25x for those mutations (typical polygon covers 5% of image).
+**Impact estimate:** With incremental eval, ~20-30% of mutations are z-order operations (reorder + adjacent_swap + swap_colors + remove). Tightening their dirty bbox from full-image to the affected polygon regions would reduce the rasterization work by 10-25x for those mutations (typical polygon covers 5% of image).
 
 **Weighted impact:** 20-30% of mutations get 10-25x speedup = 2-7.5x average speedup on rasterize pass for incremental eval. This is significant.
 

@@ -100,9 +100,6 @@ pub struct MutationParams {
     // Lambda: offspring per chain per iteration (1+λ)-ES
     pub lambda: u32,
 
-    // Mutation mode
-    pub single_mutation_mode: bool,
-
     // Adaptive mutation scale (only applies to offspring indices 1..λ-1)
     pub adaptive_mutation: bool,
 
@@ -229,7 +226,6 @@ impl Default for MutationParams {
             tournament_size: settings::TOURNAMENT_SIZE,
             chain_count: settings::GPU_DEFAULT_CHAIN_COUNT,
             lambda: settings::GPU_DEFAULT_LAMBDA,
-            single_mutation_mode: settings::SINGLE_MUTATION_MODE,
             adaptive_mutation: settings::ADAPTIVE_MUTATION,
             rasterize_wg: [settings::RASTERIZE_WG_X_DEFAULT, settings::RASTERIZE_WG_Y_DEFAULT],
             gpu_batch_iters: settings::GPU_DEFAULT_BATCH_ITERS,

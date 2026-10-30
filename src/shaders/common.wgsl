@@ -57,7 +57,7 @@ struct Params {
 
     // Chain count + lambda + padding
     chain_count_param: u32,
-    single_mutation_mode: u32,
+    _pad_sm: u32,
     lambda: u32,
     adaptive_mutation: u32,
 

@@ -23,11 +23,11 @@
 //! agree. Inactive polygon padding may differ, and its differences are logged.
 //! A later active tail is always compared, even if it used to be padding.
 //!
-//! There are 368 fixtures: 256 small-parent cases covering every integer lambda
-//! 1..64 and all single/multi/adaptive combinations at crossover .2; 40 small
-//! cases at lambdas 1/3/32/33/64 and crossover 0/1; 36 targeted dense cases plus
-//! 36 immediate small-parent history probes. Three candidates mean 1472 GPU
-//! dispatches; four mean 1840. All 1024 parents remain bound because tournament
+//! There are 220 fixtures: 128 small-parent cases covering every integer lambda
+//! 1..64 with adaptive scale off and on at crossover .2; 20 small cases at
+//! lambdas 1/3/32/33/64 and crossover 0/1; 36 targeted dense cases plus 36
+//! immediate small-parent history probes. Three candidates mean 880 GPU
+//! dispatches; four mean 1100. All 1024 parents remain bound because tournament
 //! selection uses arrayLength, although only four chains produce children.
 //! The maximum is 256 offspring, each with `POLYGON_CAPACITY` (2048) physical
 //! polygon slots; fixtures cap drawings at 1000 polygons.
@@ -119,7 +119,7 @@ const MAX_SOURCE_BYTES: usize = 256 * 1024;
 const MAX_ERROR_CHARS: usize = 16 * 1024;
 const MAX_SAMPLES: usize = 12;
 const MAX_FIXTURES: usize = 400;
-const FIXTURES: usize = 368;
+const FIXTURES: usize = 220;
 const MAX_DISPATCHES: usize = 2000;
 const WAIT: Duration = Duration::from_secs(120);
 const OUTER: Duration = Duration::from_secs(600);
@@ -154,7 +154,6 @@ struct Source {
 struct Fixture {
     counts: [u32; 4],
     lambda: u32,
-    single: bool,
     adaptive: bool,
     crossover: f32,
     history_probe: bool,
@@ -328,7 +327,7 @@ fn print_help() {
         Compare one reference with 1..4 mutation sources on the main thread.\n\
         NEWDIR must not exist; its parent must exist. UTF-8 sources: 1..256 KiB.\n\
         Run the built executable under `timeout 600s`. Poll/map limit: 120s.\n\
-        368 fixtures, dispatch(4,1,1), 1024 parents, up to 256 children.\n\
+        220 fixtures, dispatch(4,1,1), 1024 parents, up to 256 children.\n\
         Compare all header bits, active polygons/counts, errors and untouched slots.\n\
         Log inactive polygon padding differences without treating them as semantic.\n\
         Save exact sources/SHA-256, events.jsonl and result.json. No throughput scores.\n\
@@ -564,32 +563,26 @@ fn check_abi() -> Result<()> {
 fn fixtures() -> Vec<Fixture> {
     let mut cases = Vec::with_capacity(MAX_FIXTURES);
     for lambda in 1..=u32::try_from(MAX_LAMBDA).expect("lambda limit fits u32") {
-        for single in [false, true] {
-            for adaptive in [false, true] {
-                cases.push(Fixture {
-                    counts: SMALL,
-                    lambda,
-                    single,
-                    adaptive,
-                    crossover: 0.2,
-                    history_probe: false,
-                });
-            }
+        for adaptive in [false, true] {
+            cases.push(Fixture {
+                counts: SMALL,
+                lambda,
+                adaptive,
+                crossover: 0.2,
+                history_probe: false,
+            });
         }
     }
     for lambda in [1, 3, 32, 33, 64] {
         for crossover in [0.0, 1.0] {
-            for single in [false, true] {
-                for adaptive in [false, true] {
-                    cases.push(Fixture {
-                        counts: SMALL,
-                        lambda,
-                        single,
-                        adaptive,
-                        crossover,
-                        history_probe: false,
-                    });
-                }
+            for adaptive in [false, true] {
+                cases.push(Fixture {
+                    counts: SMALL,
+                    lambda,
+                    adaptive,
+                    crossover,
+                    history_probe: false,
+                });
             }
         }
     }
@@ -601,19 +594,13 @@ fn fixtures() -> Vec<Fixture> {
 
 fn dense_fixtures(cases: &mut Vec<Fixture>) {
     // Target clone-stripe boundaries rather than expanding a dense crossproduct.
-    let modes = [
-        (false, false, 0.0),
-        (true, true, 0.2),
-        (false, true, 1.0),
-        (true, false, 0.2),
-    ];
+    let modes = [(false, 0.0), (true, 0.2), (true, 1.0), (false, 0.2)];
     for counts in DENSE {
         for (lambda, next_lambda) in [(64, 1), (1, 33), (33, 64)] {
-            for (single, adaptive, crossover) in modes {
+            for (adaptive, crossover) in modes {
                 cases.push(Fixture {
                     counts,
                     lambda,
-                    single,
                     adaptive,
                     crossover,
                     history_probe: false,
@@ -623,7 +610,6 @@ fn dense_fixtures(cases: &mut Vec<Fixture>) {
                 cases.push(Fixture {
                     counts: SMALL,
                     lambda: next_lambda,
-                    single,
                     adaptive,
                     crossover: 0.2,
                     history_probe: true,
@@ -848,7 +834,6 @@ fn fixture_params(case: Fixture, index: usize) -> GpuParams {
     // Deliberately bypass campaign normalization, which rounds lambda to a
     // power of two. These artificial values never enter an evolution campaign.
     params.lambda = case.lambda;
-    params.single_mutation_mode = u32::from(case.single);
     params.adaptive_mutation = u32::from(case.adaptive);
     params.crossover_prob = case.crossover;
     params.min_polygons = 0;
@@ -1478,7 +1463,7 @@ mod tests {
     #[test]
     fn fixture_matrix_keeps_all_lambda_modes_historical_dispatch_and_parent_bounds() {
         let cases = fixtures();
-        assert_eq!(cases.len(), 368);
+        assert_eq!(cases.len(), FIXTURES);
         let baseline = benchmark_mutate_group_size_from_source(HISTORICAL_MUTATE).unwrap();
         assert_eq!(baseline, 64);
         for lambda in 1..=64 {
@@ -1490,12 +1475,9 @@ mod tests {
                         && case.crossover == 0.2
                         && !case.history_probe
                 })
-                .map(|case| (case.single, case.adaptive))
+                .map(|case| case.adaptive)
                 .collect();
-            assert_eq!(
-                modes,
-                [(false, false), (false, true), (true, false), (true, true)]
-            );
+            assert_eq!(modes, [false, true]);
             assert_eq!(
                 mutation_dispatch(Fixture { lambda, ..cases[0] }, baseline),
                 [4, 1, 1]

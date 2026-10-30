@@ -127,50 +127,6 @@ This replaces O(polygon_count) rasterization per pixel with a single buffer read
 
 ---
 
-## 3. Mutate Shader: Excessive Global Memory Writes in Per-Polygon Loop
-
-### Current State
-
-In multi-mutation mode, the per-polygon mutation loop reads, potentially mutates, and writes EVERY polygon back to global memory regardless of whether it changed:
-
-```wgsl
-// mutate.wgsl line 823-926
-for (var pi = 0u; pi < count; pi++) {
-    var poly = working_states[offspring_id].polygons[pi];
-    // ... many independent RNG draws, most of which don't fire ...
-    poly.data = vec4<u32>(pack_color(color), pack_vertex(v0), pack_vertex(v1), pack_vertex(v2));
-    working_states[offspring_id].polygons[pi] = poly;  // ALWAYS writes back
-}
-```
-
-With default mutation probabilities, most per-polygon mutations have probability 0.001-0.004. For a drawing with 500 polygons, each polygon has ~18 independent RNG draws; on average only ~0.04 mutations fire per polygon. Yet all 500 polygons are unconditionally read, unpacked, repacked, and written.
-
-### Problem
-
-The pack/unpack overhead is non-trivial: `unpack_color` (1 call to `unpack4x8unorm`), 3x `unpack_vertex` (3 ALU ops each), then `pack_color` + 3x `pack_vertex` at the end. This is ~30 ALU ops per polygon even when nothing changed. With 500 polygons per offspring and 64 offspring = 32K unnecessary pack/unpack cycles per iteration.
-
-The global memory write is even more expensive: 16 bytes per polygon written regardless of modification. That's 500 * 16 = 8KB per offspring, 64 * 8KB = 512KB per iteration of unnecessary writes.
-
-### Optimization: Track Dirty Flag Per Polygon, Skip Writeback
-
-```wgsl
-for (var pi = 0u; pi < count; pi++) {
-    var poly = working_states[offspring_id].polygons[pi];
-    var modified = false;
-    // ... mutations set modified = true when they fire ...
-    if modified {
-        poly.data = vec4<u32>(pack_color(color), pack_vertex(v0), pack_vertex(v1), pack_vertex(v2));
-        working_states[offspring_id].polygons[pi] = poly;
-    }
-}
-```
-
-Since the polygon was already copied from shared memory to the offspring slot before the mutation loop (line 622), unmodified polygons are already correct in global memory. The write is purely redundant.
-
-**Estimated impact**: With ~4% mutation rate per polygon, this eliminates ~96% of per-polygon writebacks and all associated pack operations. **10-20% faster multi-mutation mode**. Less impactful in single-mutation mode (which exits early after one mutation).
-
----
-
 ## 4. Select Shader: Degenerate Culling is Single-Threaded on Acceptance
 
 ### Current State
@@ -484,7 +440,6 @@ However, triggering a per-chain init_framebuffers dispatch after select would re
 | # | Optimization | Pass | Est. Impact | Effort | Risk |
 |---|-------------|------|-------------|--------|------|
 | 2 | Read parent error from cached framebuffer (+ #12) | rasterize (incremental) | **2x faster incremental rasterize** | Medium | Medium (quantization drift) |
-| 3 | Skip writeback for unmodified polygons in multi-mutation | mutate | 10-20% faster multi-mutation | Low | None |
 | 6 | SoA shared memory layout (geometry-only prefetch) | rasterize | 10-20% for high polygon counts | Medium | Low |
 | 11 | Integer-space AABB culling before float unpack | rasterize | 5-10% faster inner loop | Medium | Low |
 | 1 | Parallelize bin_polygons tile count reset | binning | 5-15% of binning pass | Low | None |

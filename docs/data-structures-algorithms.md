@@ -17,7 +17,7 @@ Updated analysis of data layout, memory efficiency, and algorithmic complexity i
 - L1 error metric (no sqrt; `abs(dr) + abs(dg) + abs(db)`)
 - Adaptive mutation scale, per-offspring persistent PCG RNG
 - Configurable rasterize workgroup size (8x8, 16x8, 16x16) via string replacement
-- Incremental evaluation with dirty bounding boxes (single-mutation mode)
+- Incremental evaluation with dirty bounding boxes
 - Double-buffered async staging readback
 - Pipeline cache, degenerate triangle culling, variable lambda
 
@@ -66,7 +66,7 @@ However, the sort adds a full extra dispatch. The cost must be weighed against t
 
 ### Optimization B: Fuse Binning Into Mutate Shader
 
-Since the mutate shader already knows which polygons changed (and the dirty bounding box in single-mutation mode), it could incrementally update the tile data rather than rebuilding from scratch every iteration. In single-mutation mode, only the tiles overlapping the dirty bbox need to be re-binned.
+Since the mutate shader already knows which polygons changed (and the dirty bounding box), it could incrementally update the tile data rather than rebuilding from scratch every iteration. Only the tiles overlapping the dirty bbox need to be re-binned.
 
 **Estimated complexity**: High. Requires persistent tile data per chain (not per offspring), copy-on-write semantics for offspring tile data, and careful handling of polygon insertion/deletion that shifts indices.
 
@@ -181,68 +181,6 @@ This eliminates all wasted slots. For 300 polygons averaging 4 tiles each = 1200
 Optimization A (heuristic TILE_MAX_POLYS) is simple and effective. Optimization B (prefix-sum compaction) is more impactful but requires significant shader refactoring. Both are worth considering when running at high chain counts where tile buffer memory becomes the bottleneck.
 
 **Estimated impact**: 30-80% reduction in tile culling VRAM, enabling higher chain counts before hitting memory limits.
-
----
-
-## 4. Multi-Mutation Mode: Per-Polygon Loop is O(polygons * mutation_types)
-
-### Current State
-
-In multi-mutation mode (the default when `single_mutation_mode == 0`), the mutate shader iterates over every polygon and tests each against ~18 independent random draws:
-
-```wgsl
-for (var pi = 0u; pi < count; pi++) {
-    // offset_polygon: 1 rand draw + conditional work
-    // change_color: 4 rand draws (one per channel)
-    // micro_adjust_color: 4 rand draws
-    // adjust_brightness: 1 rand draw
-    // adjust_saturation: 1 rand draw
-    // move_point: 3 rand draws (one per vertex)
-    // medium_move: 3 rand draws
-    // micro_adjust: 3 rand draws
-    // Total: ~18 rand draws per polygon
-}
-```
-
-For 300 polygons: 5400 RNG calls per offspring. With lambda=8 and 16 chains: 691K RNG calls per iteration. The PCG hash function (`pcg_step`) is ~8 ALU ops, so this is ~5.5M ALU ops in RNG alone per iteration.
-
-### Optimization: Batched RNG with Bit Partitioning
-
-Draw fewer random numbers and use bit slicing to make multiple decisions from each one. Since all mutation probabilities are small (typically 0.001-0.01), a single 32-bit random number can drive 4 independent Bernoulli trials at u8 precision:
-
-```wgsl
-let r = pcg_step(&rng);
-let should_offset = (r & 0xFFu) < u32(params.offset_polygon_prob * 255.0);
-let should_color_r = ((r >> 8u) & 0xFFu) < u32(params.change_color_prob * 255.0);
-let should_color_g = ((r >> 16u) & 0xFFu) < u32(params.change_color_prob * 255.0);
-let should_color_b = ((r >> 24u) & 0xFFu) < u32(params.change_color_prob * 255.0);
-```
-
-This reduces RNG calls from ~18 to ~5 per polygon (ceil(18/4) + a few that need their own draw for the actual random values, not just the probability test).
-
-**Precision impact**: Using 8-bit comparison means probability resolution is 1/256. For probabilities like 0.003 (change_color default), the nearest representable value is 1/256 = 0.0039. This is a ~30% error in the probability, which is unlikely to affect evolution quality since these probabilities are approximate anyway.
-
-### Optimization: Skip Unchanged Polygons (Early-Out)
-
-In multi-mutation mode, most polygons are not modified in a given iteration (each per-polygon mutation has <1% probability). The shader could test all mutation probabilities for a polygon using a single combined threshold first:
-
-```wgsl
-let any_mutation_prob = 1.0 - pow(1.0 - max_per_poly_prob, 18.0);
-if rand_f32(&rng) > any_mutation_prob {
-    // No mutations will fire for this polygon -- skip entirely
-    continue;
-}
-```
-
-For `max_per_poly_prob = 0.01`, `any_mutation_prob = 1 - 0.99^18 = 0.166`. So ~83% of polygons can be skipped entirely, saving all 18 RNG draws and the associated unpack/repack work.
-
-**Caveat**: The `pow` computation should be precomputed on the CPU and passed as a GpuParams field, not computed per polygon.
-
-### Verdict
-
-The early-out optimization is the bigger win (83% reduction in per-polygon work) and is simple to implement. Batched RNG is an additional optimization that reduces the remaining 17% of polygon work.
-
-**Estimated impact**: 3-5x faster per-polygon loop in multi-mutation mode. Mutate is typically 10-20% of total iteration time, so overall impact is 5-10%.
 
 ---
 
@@ -444,11 +382,11 @@ On NVIDIA GPUs, i32 multiplies and f32 multiplies have the same throughput (1 pe
 
 ---
 
-## 10. Offspring Buffer: Copy-on-Write for Single-Mutation Mode
+## 10. Offspring Buffer: Copy-on-Write
 
 ### Current State
 
-In single-mutation mode, the mutate shader copies the entire parent drawing (up to 1000 polygons = 16KB) from shared memory to the offspring slot, then modifies 1-2 polygons. With lambda=8, this means 8 copies of the same 16KB parent per chain per iteration.
+The mutate shader copies the entire parent drawing (up to 1000 polygons = 16KB) from shared memory to the offspring slot, then modifies 1-2 polygons. With lambda=8, this means 8 copies of the same 16KB parent per chain per iteration.
 
 ```wgsl
 for (var i = 0u; i < poly_count; i++) {
@@ -500,8 +438,6 @@ This adds 1-3 comparisons per polygon per thread during the cooperative load, wh
 ### Verdict
 
 **High impact on memory footprint, medium implementation effort.** The offspring buffer is the largest GPU allocation after tile culling data. Reducing it by 100x allows dramatically higher offspring_capacity (more chains or higher lambda) within the same VRAM budget. The rasterize shader change (delta overlay during cooperative load) adds minimal overhead to the hot loop.
-
-This optimization only works for single-mutation mode. Multi-mutation mode modifies many polygons and falls back to the full copy.
 
 **Estimated impact**: 100x reduction in offspring buffer VRAM. Enables 10-100x more chains within current memory limits.
 
@@ -583,7 +519,6 @@ pub fn draw(&self, buffer: &mut [u8], w: usize, h: usize, rm: Rasterizer) {
 
 | # | Optimization | Expected Benefit | Effort |
 |---|-------------|-----------------|--------|
-| 4 | Multi-mutation early-out (skip unmodified polygons) | 3-5x faster per-polygon loop | Low |
 | 3 | Compact tile storage (reduce TILE_MAX_POLYS or prefix-sum) | 30-80% tile VRAM savings | Medium |
 | 9 | Integer edge functions (eliminate float conversion overhead) | 5-15% faster per-polygon rasterize | Medium |
 | 1 | Parallelize bin_polygons (multi-threaded tile reset, optional post-sort) | 2-5x faster binning | Medium |

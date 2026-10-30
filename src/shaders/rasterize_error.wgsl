@@ -48,13 +48,13 @@ var<workgroup> shared_errors: array<u32, 128>;      // only num_subgroups entrie
 var<workgroup> shared_errors_old: array<u32, 128>;  // old errors for incremental eval
 
 // Unchanged-pixel shortcut. mutate.wgsl lists every polygon index a
-// single-mutation or crossover offspring changed in its change record
+// mutated or crossover offspring changed in its change record
 // (changes.wgsl). Slots hold the parent and offspring versions of up to
 // CHANGED_INDICES indices. A pixel that none of them can cover has the same
 // covering polygon sequence in parent and offspring, so its offspring colour is
 // the cached parent framebuffer pixel and its new error equals its old error.
-// Multi-mutation offspring, and crossovers with more changed indices, record
-// unknown and keep the full blend loop.
+// Crossovers with more changed indices record unknown and keep the full blend
+// loop.
 var<workgroup> shared_changed: array<ChangedPolygon, CHANGED_SLOTS>;
 
 /// Rasterize a polygon and alpha-blend if pixel is inside.

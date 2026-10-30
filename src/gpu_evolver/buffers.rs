@@ -86,6 +86,7 @@ pub struct GpuParams {
 
     // vec4[7] — chain count + lambda + adaptive mutation
     pub chain_count_param: u32,
+    // Always 1: historical benchmark shaders branch on it; bundled shaders ignore it.
     pub single_mutation_mode: u32,
     pub lambda: u32,
     pub adaptive_mutation: u32,
@@ -158,7 +159,7 @@ pub fn gpu_params_from(mp: &MutationParams, w: u32, h: u32, chain_count: u32) ->
         incremental_eval: 1,
         tile_culling: 1,
         chain_count_param: chain_count,
-        single_mutation_mode: if mp.single_mutation_mode { 1 } else { 0 },
+        single_mutation_mode: 1,
         lambda: mp.lambda,
         adaptive_mutation: if mp.adaptive_mutation { 1 } else { 0 },
         scale_polygon_prob: mp.scale_polygon_prob,

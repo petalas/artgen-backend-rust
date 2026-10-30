@@ -341,6 +341,7 @@ mod tests {
                 // Shaders ignore these words.
                 "_pad_ie" => ("incremental_eval".into(), 0),
                 "_pad_tc" => ("tile_culling".into(), 0),
+                "_pad_sm" => ("single_mutation_mode".into(), 0),
                 _ => match member.strip_prefix("_reserved") {
                     Some(k) => ("_reserved".into(), 16 * k.parse::<usize>().unwrap()),
                     None => same(member),

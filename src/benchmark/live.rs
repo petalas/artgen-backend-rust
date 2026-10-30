@@ -1356,7 +1356,7 @@ mod tests {
                 "minAlpha": 10, "maxAlpha": 65, "minPolygons": 1,
                 "maxPolygons": 1000, "crossoverProb": 0.2,
                 "spatialCrossoverWeight": 0.66, "tournamentSize": 3,
-                "chainCount": 4, "lambda": 64, "singleMutationMode": true,
+                "chainCount": 4, "lambda": 64,
                 "adaptiveMutation": false, "rasterizeWg": [32, 16], "gpuBatchIters": 64
             }"#,
         )
