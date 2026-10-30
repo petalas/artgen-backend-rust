@@ -244,3 +244,18 @@ default), and batches completed in 300 s:
 
 Evidence: `.cache/quality/runs/` for the "population shape sweep" rows in
 `benchmarks/quality/log.tsv`.
+
+## Crossover probability sweep, 2026-10-30
+
+`b6cee9c`, 4×64, 3 seeds × 300 s. Unpenalized remaining error relative to
+`crossover_prob` 0.2 (the default):
+
+| crossover_prob | ff | mona | darwin |
+| --- | --- | --- | --- |
+| 0.1 | 1.023 [1.005, 1.056] WORSE | 0.997 NOISE | 0.987 NOISE |
+| 0.4 | 1.048 [1.016, 1.106] WORSE | 1.020 [1.005, 1.048] NOISE | 0.974 NOISE |
+
+0.2 stays: no setting is better on any image, and each alternative is worse
+on ff. Darwin's batch count again varied 3x between seeds of one side
+(6.8k–21.7k), which keeps its intervals wide. An earlier 20 s screen showed
+crossover off (0.0) about 13% worse.
