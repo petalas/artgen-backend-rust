@@ -496,3 +496,24 @@ from `s120v2` (evidence `.cache/quality/runs/20261030T183441Z-bfdzw_71`).
   succeed more often than small's (0.171 vs 0.104 per 1000 at 0.25× on ff).
   Large steps win rarely but appear to open room that small steps then use;
   counts do not show how much each improvement is worth.
+
+## Step spread hold-out and blank check; 0.25–4 adopted, 2026-10-30
+
+`de6e700`, control (no spread) vs wide (0.25–4) and wider (0.125–8).
+
+- Hold-out seeds 4–5, 90 s from `s120v2` (evidence
+  `.cache/quality/runs/20261030T195616Z-r6xewowa`): wide time ratio 0.75
+  [0.65, 0.87], r ratio 0.9896 [0.9854, 0.9938]; wider time ratio 0.49 [0.38,
+  0.63], r ratio 0.9820 [0.9759, 0.9881] (SCREEN, two seeds). Both lower r on
+  every image; wider lowest on all three (ff 1.184 → 1.167 → 1.158, mona 2.092
+  → 2.082 → 2.079, darwin 1.241 → 1.225 → 1.207).
+- Wide from blank, 120 s, seeds 1–3 (evidence
+  `.cache/quality/runs/20261030T202513Z-ht8giulz`): r ratio 0.9757 [0.9577,
+  0.9987] BETTER at 120 s and 0.8256 BETTER at 5 s; time ratio 0.76 [0.61,
+  1.00]. ff 1.294 → 1.237 and darwin 1.276 → 1.233 gain, mona is level (2.115 →
+  2.120). With fewer triangles: mona 1141 → 1064, darwin 1250 → 1169.
+
+0.25–4 became the default in the next commit; wider was seen on two seeds only
+and is the next candidate. A missing `stepSpreadMin`/`stepSpreadMax` still reads
+as no spread, so the frozen v1 fixtures, earlier records and saved settings keep
+their meaning (hillclimb against the previous commit: replay and lifecycle same).
