@@ -368,3 +368,35 @@ crossover off (0.0) about 13% worse.
   sizes by 1.46–2.0 once improvements are rare (the stagnation reset holds
   it there), so here larger geometric steps helped. One image and three
   seeds: a screen, not an adoption result.
+
+## Adaptive confirm and operator weight screen from s120, 2026-10-30
+
+`b454465` (exact parent copies never accepted), seeds 1–3, 90 s from `s120`.
+Time ratio = time to the control's worst final fitness, candidate / control.
+
+Adaptive mutation, ff + mona + darwin (evidence
+`.cache/quality/runs/20261030T133740Z-zahk6o2z`): r ratio 0.9947 [0.9902,
+0.9991], NOISE; time ratio 0.83 [0.69, 0.98]. Median r at 90 s: ff 1.220 →
+1.197, darwin 1.249 → 1.241, but mona 2.096 → 2.109 (worse).
+
+Operator weights, ff only (evidence `.cache/quality/runs/20261030T140631Z-8sb6nxan`):
+
+| side | change | r ratio at 90 s | time ratio | offered (M) | improvements |
+| --- | --- | --- | --- | --- | --- |
+| control | defaults | 1 | 1 | 395 | 46,345 |
+| cut | offset 0.000565 (÷10), medium move 0.001 (÷4) | 0.9955 [0.9899, 0.9985] | 0.88 [0.65, 1.06] | 395 | 51,305 |
+| struct | reorder 0.5, adjacent swap 0.5 (~1% of offspring each) | 1.0297 [1.0250, 1.0342] WORSE | 1.48 [1.00, 3.09] | 135 | 13,537 |
+| colour | change colour 0.0019 (×4) | 1.0056 [1.0035, 1.0069] | 1.12 [1.00, 1.34] | 397 | 41,800 |
+| combo | all three | 1.0289 [1.0239, 1.0331] WORSE | 1.48 [1.00, 3.09] | 137 | 15,584 |
+
+- More reordering kills crossover. Uniform crossover pairs polygons by index,
+  which works while chains share one polygon order; reordering scrambles it
+  and crossover's improvements fall from 75% of all to 0% after 30 s. Those
+  sides also evaluated a third as many offspring (larger dirty boxes, and
+  crossover offspring with many changed slots blend every pixel). Reorder's
+  high per-offer rate does not survive being offered more (4.5 → 0.9 per 1000).
+- Cutting offset and medium moves moves the freed offspring mostly to micro
+  vertex moves and gives 11% more improvements; its time ratio interval still
+  includes 1.
+- More full colour changes did not help: their rate fell from 0.075 to 0.030
+  per 1000 offered.
