@@ -34,8 +34,9 @@ scripts/quality.py --start .cache/quality/starts/s120 --side control=HEAD --side
   factor `1 - penalty * points`. One build serves every cap and penalty, so such
   sides differ by settings only. Each side's engine is allocated for its own
   chain count and λ.
-- `step_spread_min` and `step_spread_max` (default 1 each: no spread; each
-  within [1/16, 16], min at most max) spread offset and vertex move sizes over
+- `step_spread_min` and `step_spread_max` (default 0.25 and 4; 1 each is no
+  spread, and a record or setting without them reads as no spread; each within
+  [1/16, 16], min at most max) spread offset and vertex move sizes over
   each chain's offspring: offspring i uses rung i mod 8, multiplier
   `min * (max/min)^(rung/7)`, on top of the adaptive scale (see
   [engine architecture](engine-architecture.md#step-spread)). A side with a
@@ -517,3 +518,26 @@ from `s120v2` (evidence `.cache/quality/runs/20261030T183441Z-bfdzw_71`).
 and is the next candidate. A missing `stepSpreadMin`/`stepSpreadMax` still reads
 as no spread, so the frozen v1 fixtures, earlier records and saved settings keep
 their meaning (hillclimb against the previous commit: replay and lifecycle same).
+
+## Step spread width from s120v2; 0.25–4 kept, 2026-10-30
+
+`6ba827f` (default 0.25–4), ff + mona + darwin, seeds 1–3, 90 s from `s120v2`
+(evidence `.cache/quality/runs/20261030T223504Z-wvm44md_`), wide (the default)
+vs wider (0.125–8) and widest (1/16–16).
+
+| side | step rungs | time ratio at 90 s | r ratio at 90 s | median r at 90 s, ff / mona / darwin | offered, ff / mona / darwin (M) |
+| --- | --- | --- | --- | --- | --- |
+| wide | 0.25–4 | 1 | 1 | 1.2112 / 2.0397 / 1.2057 | 312 / 287 / 171 |
+| wider | 0.125–8 | 0.93 [0.80, 1.03] | 0.9974 [0.9926, 1.0017] NOISE | 1.2178 / 2.0473 / 1.1973 | 299 / 264 / 157 |
+| widest | 1/16–16 | 0.95 [0.86, 1.06] | 0.9977 [0.9909, 1.0031] NOISE | 1.2218 / 2.0452 / 1.1996 | 274 / 235 / 147 |
+
+- The hold-out's 0.49 for wider did not replicate: on seeds 1–3 against the new
+  default, neither wider spread is distinguishable from 0.25–4, and medians go
+  both ways per image.
+- Wider spreads offer 4–18% fewer offspring in the same time (larger moves dirty
+  larger boxes) and win that back with a higher improvement rate per offspring;
+  the two roughly cancel.
+- The largest rungs win least (widest on darwin, 30–90 s: 0.037 per 1000 at 16×
+  vs 0.123 at 1/16×), and below about 0.3× the rate stops rising.
+
+0.25–4 stays the default; no blank check was run since no candidate survived.
