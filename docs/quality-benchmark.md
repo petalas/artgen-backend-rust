@@ -476,3 +476,23 @@ the frozen v1 fixtures keep their explicit old values.
   worse at 5 s (2.32 → 2.89) and by median at 120 s (1.280 → 1.293, range
   1.234–1.322 against 1.254–1.283). Triangles at 120 s rise: ff 1049 → 1083,
   mona 999 → 1141, darwin 1079 → 1250.
+
+## Step spread A/B from s120v2, 2026-10-30
+
+`ce59872` (defaults include cut + micro2), ff + mona + darwin, seeds 1–3, 90 s
+from `s120v2` (evidence `.cache/quality/runs/20261030T183441Z-bfdzw_71`).
+
+| side | step rungs | time ratio at 90 s | r ratio at 90 s | median r at 90 s, ff / mona / darwin | improvements, ff / mona / darwin |
+| --- | --- | --- | --- | --- | --- |
+| control | 1 | 1 | 1 | 1.2267 / 2.0565 / 1.2110 | 44,433 / 59,206 / 44,322 |
+| wide | 0.25–4 | 0.68 [0.60, 0.76] | 0.9916 [0.9869, 0.9962] | 1.2112 / 2.0396 / 1.2057 | 61,509 / 70,825 / 52,967 |
+| small | 0.25–1 | 0.86 [0.71, 1.00] | 1.0015 [0.9988, 1.0043] | 1.2284 / 2.0508 / 1.2216 | 51,295 / 60,474 / — |
+| mid | 0.5–2 | 0.71 [0.61, 0.85] | 0.9960 [0.9923, 0.9998] | 1.2261 / 2.0345 / 1.1955 | 53,146 / 70,188 / — |
+
+- wide is ahead on every image; mid next; small barely differs from the control.
+- Within every spread the improvement rate falls with step size in every
+  window (wide on ff, 30–90 s: 0.137 per 1000 offered at 0.25×, 0.033 at 4×),
+  yet the side without large steps (small) gains least, and wide's small rungs
+  succeed more often than small's (0.171 vs 0.104 per 1000 at 0.25× on ff).
+  Large steps win rarely but appear to open room that small steps then use;
+  counts do not show how much each improvement is worth.
