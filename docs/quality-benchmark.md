@@ -324,3 +324,47 @@ Evidence: `.cache/quality/runs/` for the "population shape sweep" rows in
 on ff. Darwin's batch count again varied 3x between seeds of one side
 (6.8k–21.7k), which keeps its intervals wide. An earlier 20 s screen showed
 crossover off (0.0) about 13% worse.
+
+## Late-game characterization from s120, 2026-10-30
+
+`efe837f`, defaults, start set `s120` (defaults, 120 s from blank, seeds 1–3),
+120 s per run (evidence `.cache/quality/runs/20261030T115540Z-4yfm7t_t`).
+
+| image | r at start | r at 120 s | change | sd ln r at 120 s |
+| --- | --- | --- | --- | --- |
+| ff | 1.279 | 1.205 | −5.8% | 0.006 |
+| mona | 2.174 | 2.081 | −4.3% | 0.016 |
+| darwin | 1.324 | 1.229 | −7.2% | 0.051 |
+
+- From a mature start, a run removes only 4–7% of r in 120 s, so a setting
+  that makes progress 20% faster moves r by about 1%. Judge start-based
+  comparisons by time to target (the control-worst fitness at the budget),
+  not by the r ratio against the default 2% `--min-effect`.
+- Operators, 30–120 s, all three images: crossover is 20% of offspring and
+  73–76% of improvements. With 4 chains an improvement that one chain's
+  mutation found is counted again each time crossover copies it into another
+  chain, so this share overstates what crossover creates. Of the mutations,
+  micro vertex moves give 10–13% of improvements from 15.8% of offspring and
+  full colour changes 2–4% from 3.6%. Offset (10.7% of offspring) gives 0.2–0.3%,
+  medium moves (22.7%) 3–4%, micro colour (21.1%) 5–6%, large point moves (1.7%)
+  0.1%. Reorder has the highest rate (4–10 per 1000 offered) but is offered
+  almost never, because its weight does not scale with polygon count. Counts
+  say how often an operator wins, not by how much.
+- Accepted winners: 0.7–1.6% of chain-iterations improve, but 48% accept a
+  neutral winner (equal fitness, the 50% coin flip), mostly crossover copies
+  identical to the parent. Each acceptance pays the polygon copy and the
+  framebuffer update.
+
+## Adaptive mutation screen from s120, 2026-10-30
+
+`efe837f`, ff, seeds 1–3, 90 s from `s120`, `adaptive_mutation` true vs false
+(evidence `.cache/quality/runs/20261030T121440Z-7tsb32oc`).
+
+- r ratio at 90 s 0.9953 [0.9909, 0.9986], NOISE against the 2% bar.
+- Time to the control's worst final fitness: 0.84 [0.76, 0.91], so the
+  adaptive side reached the control's 90 s result about 16% sooner. It made
+  52,485 improvements against 46,241, mostly from micro vertex moves early
+  and crossover. Adaptive scales offset, point-move and micro vertex move
+  sizes by 1.46–2.0 once improvements are rare (the stagnation reset holds
+  it there), so here larger geometric steps helped. One image and three
+  seeds: a screen, not an adoption result.
