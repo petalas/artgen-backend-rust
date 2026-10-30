@@ -561,3 +561,33 @@ vs wider (0.125–8) and widest (1/16–16).
   vs 0.123 at 1/16×), and below about 0.3× the rate stops rising.
 
 0.25–4 stays the default; no blank check was run since no candidate survived.
+
+## Improvement gain per operator and rung from s120v2, 2026-10-30
+
+`3500b9c` (defaults, spread 0.25–4), ff + mona + darwin, seeds 1–3, 90 s from
+`s120v2` (evidence `.cache/quality/runs/20261030T233322Z-5fbt7995`). Counts
+match the wide side of the width A/B exactly, so the gain tally does not
+change the search. `per offer` is gain per offspring relative to the table's
+average; ff / mona / darwin.
+
+| operator | offered% | gain%, ff / mona / darwin | per offer |
+| --- | --- | --- | --- |
+| crossover | 20.0 | 74.9 / 75.0 / 75.0 | 3.74 / 3.75 / 3.75 |
+| micro_move | 23.8 | 14.3 / 15.2 / 14.0 | 0.60 / 0.64 / 0.59 |
+| change_color | 5.4 | 2.5 / 3.6 / 3.0 | 0.46 / 0.67 / 0.56 |
+| medium_move | 8.5 | 3.5 / 2.8 / 3.8 | 0.41 / 0.33 / 0.45 |
+| move_point | 2.5 | 0.7 / 0.4 / 1.1 | 0.29 / 0.17 / 0.43 |
+| micro_color | 31.7 | 2.9 / 1.8 / 2.0 | 0.09 / 0.06 / 0.06 |
+| saturation + brightness | 5.1 | 0.3 / 0.1 / 0.3 | ≤ 0.07 |
+| offset | 1.6 | 0.2 / 0.1 / 0.1 | 0.10 / 0.06 / 0.06 |
+| reorder | 0.05 | 0.2 / 0.2 / 0.2 | 29 / 44 / 38 |
+
+- Step rungs: worth per offspring is nearly flat, 0.81–1.24 across 0.25×–4×.
+  Large steps win 2–4× less often, but each win is worth 1.4–1.9× the average.
+  This is why the spread's width barely mattered.
+- micro_color makes 32% of offspring for 2–3% of gain. It also makes 26–38% of
+  neutral acceptances, whose value gain cannot see.
+- Crossover's 3.75 includes gains another chain's operators found first.
+- Reorder is the most valuable per offspring, at a very small offered share
+  (reorder probability 0.002). An earlier sweep found that more reordering
+  breaks crossover's slot alignment, so its value is not linear in its weight.
