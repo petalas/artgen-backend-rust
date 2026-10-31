@@ -23,10 +23,8 @@ pub const MERGE_POLYGON_PROB: f32 = 0.000667;
 pub const CLONE_POLYGON_PROB: f32 = 0.071429;
 pub const MEDIUM_MOVE_PROBABILITY: f32 = 0.001;
 pub const SWAP_COLORS_PROB: f32 = 0.005650;
-
-// Merge mutation thresholds
-pub const MERGE_CENTROID_THRESHOLD: f32 = 0.15;
-pub const MERGE_COLOR_THRESHOLD: f32 = 0.20;
+// Absorb (delete a triangle into a nearby larger one's colour) is off by default.
+pub const ABSORB_POLYGON_PROB: f32 = 0.0;
 
 // Mutation delta defaults
 pub const MOVE_POINT_MAX_DELTA: f32 = 0.113;

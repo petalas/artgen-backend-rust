@@ -58,11 +58,12 @@ struct Params {
     medium_move_prob: f32,
     swap_colors_prob: f32,
 
-    // Last operator weight, then the alpha range of new and recolored polygons
+    // Micro colour weight, the alpha range of new and recolored polygons, then
+    // the absorb weight
     micro_color_prob: f32,
     min_alpha_norm: f32,
     max_alpha_norm: f32,
-    _pad1: u32,
+    absorb_polygon_prob: f32,
 
     // Step sizes, multiplied by the offspring's step_multiplier()
     offset_polygon_magnitude: f32,
@@ -70,11 +71,10 @@ struct Params {
     medium_move_delta: f32,
     micro_adjust_delta: f32,
 
-    // New vertex spread (add, clone) and merge thresholds
+    // New vertex spread (add, clone), then padding
     new_point_max_distance: f32,
-    merge_centroid_threshold: f32,
-    merge_color_threshold: f32,
-    _pad2: u32,
+    _pad1: u32,
+    _pad2: vec2<u32>,
 
     // Step-size multiplier per rung (vec4[10-11]); mutate's step_multiplier() reads it
     step_multipliers: array<vec4<f32>, 2>,

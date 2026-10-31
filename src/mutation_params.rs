@@ -114,6 +114,28 @@ mod tests {
         assert_eq!(serde_json::from_value::<MutationParams>(json).unwrap(), default);
     }
 
+    /// Records and fixtures written before absorb keep their exact maps; settings
+    /// saved with the removed merge thresholds still load.
+    #[test]
+    fn absorb_is_omitted_at_zero_and_removed_merge_thresholds_are_ignored() {
+        let default = MutationParams::default();
+        assert_eq!(default.absorb_polygon_prob, 0.0);
+        let mut json = serde_json::to_value(&default).unwrap();
+        assert!(json.get("absorbPolygonProb").is_none());
+        json["mergeCentroidThreshold"] = 0.15.into();
+        json["mergeColorThreshold"] = 0.2.into();
+        assert_eq!(serde_json::from_value::<MutationParams>(json).unwrap(), default);
+        let absorbing = MutationParams { absorb_polygon_prob: 0.25, ..default };
+        let json = serde_json::to_value(&absorbing).unwrap();
+        assert_eq!(json["absorbPolygonProb"].as_f64(), Some(0.25));
+        assert_eq!(serde_json::from_value::<MutationParams>(json).unwrap(), absorbing);
+        for (given, expected) in [(-1.0, 0.0), (0.5, 0.5), (2.0, 1.0)] {
+            let mut params = MutationParams { absorb_polygon_prob: given, ..MutationParams::default() };
+            params.sanitize();
+            assert_eq!(params.absorb_polygon_prob, expected, "{given}");
+        }
+    }
+
     #[test]
     fn sanitize_bounds_the_penalty_exponent() {
         for (given, expected) in [

@@ -320,13 +320,127 @@ fn crossover_dirty_box(out_count: u32) -> vec4<u32> {
     return bb;
 }
 
+// --- Ordered deletion and neighbours (remove, merge, absorb) ---
+
+// Random other slots merge and absorb examine for a partner, drawn with
+// replacement. More look further for a close one at more RNG draws and
+// global reads; 8 finds a partner among the closer ones without scanning.
+const NEIGHBOR_CANDIDATES: u32 = 8u;
+
+/// Delete slot `idx` of offspring `oid`'s `c` polygons by shifting slots
+/// idx+1..c-1 down one, so every other polygon keeps its relative order: the
+/// drawing changes only where the deleted polygon covered pixels. Serial on the
+/// leader lane, the only one that runs mutations: a cooperative shift over the
+/// workgroup's 64 lanes measured within noise (2-4%, one seed) with deletions
+/// at 5% of offspring, where throughput is set by the drawing's larger
+/// triangles, not by the shift (docs/quality-benchmark.md).
+///
+/// Change record: listing the deleted index suffices for every
+/// changed-index reader (changes.wgsl). A pixel that the deleted polygon cannot
+/// cover is covered by the same polygons in the same order before and after,
+/// although their indices shifted, so its colour is unchanged; the parent
+/// version of the listed index is the deleted polygon, so the readers' coverage
+/// test includes every pixel that changed. Deletion only shortens tile lists,
+/// so the listed index leaves room in the truncation guard.
+fn delete_slot_ordered(oid: u32, idx: u32, c: u32) {
+    for (var i = idx; i + 1u < c; i++) {
+        working_states[oid].polygons[i] = working_states[oid].polygons[i + 1u];
+    }
+    working_states[oid].polygon_count = c - 1u;
+}
+
+/// Changed-index words after slot `kept` was rewritten and slot `deleted`
+/// removed with delete_slot_ordered: the rewritten polygon now sits at
+/// `kept - 1` when `deleted < kept`. Listing `deleted` and `kept` gives the
+/// parent versions of both changed polygons, and `kept - 1` the offspring
+/// version of the rewritten one; see delete_slot_ordered for why the shift
+/// needs nothing more.
+fn delete_and_change_indices(deleted: u32, kept: u32) -> vec2<u32> {
+    let moved = kept - select(0u, 1u, deleted < kept);
+    if moved == kept || moved == deleted {
+        return vec2<u32>(changed_indices(deleted, kept), 0u);
+    }
+    return vec2<u32>(changed_indices(deleted, kept), changed_indices(moved, NO_CHANGED_INDEX));
+}
+
+/// Area of a triangle in normalized units.
+fn triangle_area(poly: Polygon) -> f32 {
+    let v0 = unpack_vertex(poly.data.y);
+    let v1 = unpack_vertex(poly.data.z);
+    let v2 = unpack_vertex(poly.data.w);
+    return 0.5 * abs((v1.x - v0.x) * (v2.y - v0.y) - (v2.x - v0.x) * (v1.y - v0.y));
+}
+
+fn triangle_centroid(poly: Polygon) -> vec2<f32> {
+    return (unpack_vertex(poly.data.y) + unpack_vertex(poly.data.z) + unpack_vertex(poly.data.w)) / 3.0;
+}
+
+/// Of NEIGHBOR_CANDIDATES random slots other than `i` (c >= 2), the one whose
+/// centroid is nearest `i`'s (L1; ties: the first drawn). With `larger`, only
+/// slots whose triangle has a larger area than `i`'s qualify; when none does,
+/// the largest of the drawn slots. Uses the drawing only.
+fn nearest_neighbor(rng: ptr<function, u32>, oid: u32, c: u32, i: u32, larger: bool) -> u32 {
+    let own = working_states[oid].polygons[i];
+    let own_centroid = triangle_centroid(own);
+    let own_area = triangle_area(own);
+    var nearest = c;
+    var nearest_distance = 0.0;
+    var largest = c;
+    var largest_area = 0.0;
+    for (var k = 0u; k < NEIGHBOR_CANDIDATES; k++) {
+        var j = rand_u32(rng, c - 1u);
+        j += select(0u, 1u, j >= i);
+        let poly = working_states[oid].polygons[j];
+        let area = triangle_area(poly);
+        if largest == c || area > largest_area {
+            largest = j;
+            largest_area = area;
+        }
+        let d = triangle_centroid(poly) - own_centroid;
+        let distance = abs(d.x) + abs(d.y);
+        if (!larger || area > own_area) && (nearest == c || distance < nearest_distance) {
+            nearest = j;
+            nearest_distance = distance;
+        }
+    }
+    return select(nearest, largest, nearest == c);
+}
+
+/// One triangle for two: the largest-area triangle over their six vertices
+/// (C(6,3) = 20 candidates; ties: the first in lexicographic vertex order),
+/// coloured by the area-weighted mean of both colours (the plain mean when
+/// both are degenerate), alpha clamped to the configured range.
+fn merged_polygon(a: Polygon, b: Polygon) -> Polygon {
+    var words = array<u32, 6>(a.data.y, a.data.z, a.data.w, b.data.y, b.data.z, b.data.w);
+    var best = vec3<u32>(0u, 1u, 2u);
+    var best_area = -1.0;
+    for (var p = 0u; p < 4u; p++) {
+        for (var q = p + 1u; q < 5u; q++) {
+            for (var r = q + 1u; r < 6u; r++) {
+                let area = triangle_area(Polygon(vec4<u32>(0u, words[p], words[q], words[r])));
+                if area > best_area {
+                    best = vec3<u32>(p, q, r);
+                    best_area = area;
+                }
+            }
+        }
+    }
+    let area_a = triangle_area(a);
+    let area_b = triangle_area(b);
+    let total = area_a + area_b;
+    let t = select(0.5, area_b / total, total > 0.0);
+    var color = mix(unpack_color(a), unpack_color(b), t);
+    color.w = clamp(color.w, params.min_alpha_norm, params.max_alpha_norm);
+    return Polygon(vec4<u32>(pack_color(color), words[best.x], words[best.y], words[best.z]));
+}
+
 // --- Mutation: exactly one operator per offspring, picked by weighted roulette ---
 // `ms` multiplies offset, point-move, medium-move and micro vertex step sizes:
 // the offspring's step rung multiplier (op_scales_with_step).
 // Returns dirty bbox as vec4<u32>(min_x, min_y, max_x, max_y) in pixel coords.
 // `op` receives the branch that ran (OP_*); a pick whose guard fails falls
 // through to a later branch, which is the one recorded.
-fn mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<function, u32>, ms: f32, changed: ptr<function, u32>, op: ptr<function, u32>) -> vec4<u32> {
+fn mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<function, u32>, ms: f32, changed: ptr<function, vec2<u32>>, op: ptr<function, u32>) -> vec4<u32> {
     let c = *count;
     let w = params.image_width;
     let h = params.image_height;
@@ -338,6 +452,7 @@ fn mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<function, u32>
     let w_rotate = params.rotate_polygon_prob;
     let w_adjacent_swap = params.adjacent_swap_prob;
     let w_merge = params.merge_polygon_prob;
+    let w_absorb = params.absorb_polygon_prob;
     let w_clone = params.clone_polygon_prob;
     let w_swap_colors = params.swap_colors_prob;
     let fc = f32(c);
@@ -350,7 +465,7 @@ fn mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<function, u32>
     let w_brightness = params.adjust_brightness_prob * fc;
     let w_saturation = params.adjust_saturation_prob * fc;
 
-    let total = w_add + w_remove + w_reorder + w_scale + w_rotate + w_adjacent_swap + w_merge + w_clone + w_swap_colors + w_offset + w_move_point + w_medium_move + w_micro_adjust + w_change_color + w_micro_color + w_brightness + w_saturation;
+    let total = w_add + w_remove + w_reorder + w_scale + w_rotate + w_adjacent_swap + w_merge + w_absorb + w_clone + w_swap_colors + w_offset + w_move_point + w_medium_move + w_micro_adjust + w_change_color + w_micro_color + w_brightness + w_saturation;
 
     let r = rand_f32(rng) * total;
     var cumulative = 0.0;
@@ -370,26 +485,19 @@ fn mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<function, u32>
         working_states[oid].polygons[c] = new_poly;
         *count = c + 1u;
         working_states[oid].polygon_count = c + 1u;
-        *changed = changed_indices(c, NO_CHANGED_INDEX);
+        *changed = vec2<u32>(changed_indices(c, NO_CHANGED_INDEX), 0u);
         *op = OP_ADD;
         return polygon_bbox_pixels(new_poly, w, h);
     }
 
-    // Remove polygon — dirty region covers both the removed polygon and the polygon
-    // that swap-fills its slot (which changes z-order, affecting alpha blend results)
+    // Remove polygon: ordered delete, so only the removed polygon's pixels change
     cumulative += w_remove;
     if r < cumulative && c > params.min_polygons {
         let remove_idx = rand_u32(rng, c);
-        let removed_bbox = polygon_bbox_pixels(working_states[oid].polygons[remove_idx], w, h);
-        let last_idx = c - 1u;
-        var dirty = removed_bbox;
-        if remove_idx != last_idx {
-            dirty = merge_bbox(dirty, polygon_bbox_pixels(working_states[oid].polygons[last_idx], w, h));
-            working_states[oid].polygons[remove_idx] = working_states[oid].polygons[last_idx];
-        }
+        let dirty = polygon_bbox_pixels(working_states[oid].polygons[remove_idx], w, h);
+        delete_slot_ordered(oid, remove_idx, c);
         *count = c - 1u;
-        working_states[oid].polygon_count = c - 1u;
-        *changed = changed_indices(remove_idx, last_idx);
+        *changed = vec2<u32>(changed_indices(remove_idx, NO_CHANGED_INDEX), 0u);
         *op = OP_REMOVE;
         return dirty;
     }
@@ -405,7 +513,7 @@ fn mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<function, u32>
         let tmp = working_states[oid].polygons[i1];
         working_states[oid].polygons[i1] = working_states[oid].polygons[i2];
         working_states[oid].polygons[i2] = tmp;
-        *changed = changed_indices(i1, i2);
+        *changed = vec2<u32>(changed_indices(i1, i2), 0u);
         *op = OP_REORDER;
         return merge_bbox(bbox1, bbox2);
     }
@@ -424,7 +532,7 @@ fn mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<function, u32>
         sv2 = clamp(sc + (sv2 - sc) * scale, vec2<f32>(0.0), vec2<f32>(1.0));
         poly.data.y = pack_vertex(sv0); poly.data.z = pack_vertex(sv1); poly.data.w = pack_vertex(sv2);
         working_states[oid].polygons[si] = poly;
-        *changed = changed_indices(si, NO_CHANGED_INDEX);
+        *changed = vec2<u32>(changed_indices(si, NO_CHANGED_INDEX), 0u);
         *op = OP_SCALE;
         return merge_bbox(old_bbox, polygon_bbox_pixels(poly, w, h));
     }
@@ -444,7 +552,7 @@ fn mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<function, u32>
         let rd2 = rv2 - rc; rv2 = clamp(rc + vec2<f32>(rd2.x * cos_a - rd2.y * sin_a, rd2.x * sin_a + rd2.y * cos_a), vec2<f32>(0.0), vec2<f32>(1.0));
         poly.data.y = pack_vertex(rv0); poly.data.z = pack_vertex(rv1); poly.data.w = pack_vertex(rv2);
         working_states[oid].polygons[ri] = poly;
-        *changed = changed_indices(ri, NO_CHANGED_INDEX);
+        *changed = vec2<u32>(changed_indices(ri, NO_CHANGED_INDEX), 0u);
         *op = OP_ROTATE;
         return merge_bbox(old_bbox, polygon_bbox_pixels(poly, w, h));
     }
@@ -459,46 +567,54 @@ fn mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<function, u32>
         let tmp = working_states[oid].polygons[ai];
         working_states[oid].polygons[ai] = working_states[oid].polygons[aj];
         working_states[oid].polygons[aj] = tmp;
-        *changed = changed_indices(ai, aj);
+        *changed = vec2<u32>(changed_indices(ai, aj), 0u);
         *op = OP_ADJACENT_SWAP;
         return merge_bbox(bbox_ai, bbox_aj);
     }
 
-    // Merge polygons: pick two, check centroid proximity + color similarity, remove smaller
+    // Merge: a random triangle and the nearest of NEIGHBOR_CANDIDATES others
+    // become one triangle in the larger one's slot; the other slot is deleted.
     cumulative += w_merge;
     if r < cumulative && c >= 2u && c > params.min_polygons {
         let mi = rand_u32(rng, c);
-        var mj = rand_u32(rng, c);
-        while mi == mj { mj = rand_u32(rng, c); }
+        let mj = nearest_neighbor(rng, oid, c, mi, false);
         let pi_poly = working_states[oid].polygons[mi];
         let pj_poly = working_states[oid].polygons[mj];
-        let ci_v0 = unpack_vertex(pi_poly.data.y); let ci_v1 = unpack_vertex(pi_poly.data.z); let ci_v2 = unpack_vertex(pi_poly.data.w);
-        let cj_v0 = unpack_vertex(pj_poly.data.y); let cj_v1 = unpack_vertex(pj_poly.data.z); let cj_v2 = unpack_vertex(pj_poly.data.w);
-        let centroid_i = (ci_v0 + ci_v1 + ci_v2) / 3.0;
-        let centroid_j = (cj_v0 + cj_v1 + cj_v2) / 3.0;
-        let cdist = abs(centroid_i.x - centroid_j.x) + abs(centroid_i.y - centroid_j.y);
-        let color_i = unpack_color(pi_poly);
-        let color_j = unpack_color(pj_poly);
-        let cdiff = abs(color_i.x - color_j.x) + abs(color_i.y - color_j.y) + abs(color_i.z - color_j.z);
-        if cdist < params.merge_centroid_threshold && cdiff < params.merge_color_threshold {
-            // Remove the polygon with smaller area (cross product)
-            let area_i = abs((ci_v1.x - ci_v0.x) * (ci_v2.y - ci_v0.y) - (ci_v2.x - ci_v0.x) * (ci_v1.y - ci_v0.y));
-            let area_j = abs((cj_v1.x - cj_v0.x) * (cj_v2.y - cj_v0.y) - (cj_v2.x - cj_v0.x) * (cj_v1.y - cj_v0.y));
-            let remove_idx = select(mi, mj, area_j < area_i);
-            let removed_bbox = polygon_bbox_pixels(working_states[oid].polygons[remove_idx], w, h);
-            let last = c - 1u;
-            var dirty = removed_bbox;
-            if remove_idx != last {
-                dirty = merge_bbox(dirty, polygon_bbox_pixels(working_states[oid].polygons[last], w, h));
-                working_states[oid].polygons[remove_idx] = working_states[oid].polygons[last];
-            }
-            *count = c - 1u;
-            working_states[oid].polygon_count = c - 1u;
-            *changed = changed_indices(remove_idx, last);
-            *op = OP_MERGE;
-            return dirty;
-        }
-        // Criteria not met — fall through to next mutation
+        let merged = merged_polygon(pi_poly, pj_poly);
+        // The larger triangle's slot keeps the merged one (ties: the first pick).
+        let keep_i = triangle_area(pi_poly) >= triangle_area(pj_poly);
+        let kept = select(mj, mi, keep_i);
+        let deleted = select(mi, mj, keep_i);
+        working_states[oid].polygons[kept] = merged;
+        delete_slot_ordered(oid, deleted, c);
+        *count = c - 1u;
+        *changed = delete_and_change_indices(deleted, kept);
+        *op = OP_MERGE;
+        return merge_bbox(merge_bbox(polygon_bbox_pixels(pi_poly, w, h), polygon_bbox_pixels(pj_poly, w, h)),
+                          polygon_bbox_pixels(merged, w, h));
+    }
+
+    // Absorb: delete a random triangle and move the colour of a nearby larger
+    // one (geometry unchanged) toward it, weighted by area.
+    cumulative += w_absorb;
+    if r < cumulative && c >= 2u && c > params.min_polygons {
+        let si = rand_u32(rng, c);
+        let li = nearest_neighbor(rng, oid, c, si, true);
+        let s_poly = working_states[oid].polygons[si];
+        var l_poly = working_states[oid].polygons[li];
+        let area_s = triangle_area(s_poly);
+        let area_l = triangle_area(l_poly);
+        let total_area = area_s + area_l;
+        let t = select(0.5, area_s / total_area, total_area > 0.0);
+        var color = mix(unpack_color(l_poly), unpack_color(s_poly), t);
+        color.w = clamp(color.w, params.min_alpha_norm, params.max_alpha_norm);
+        l_poly.data.x = pack_color(color);
+        working_states[oid].polygons[li] = l_poly;
+        delete_slot_ordered(oid, si, c);
+        *count = c - 1u;
+        *changed = delete_and_change_indices(si, li);
+        *op = OP_ABSORB;
+        return merge_bbox(polygon_bbox_pixels(s_poly, w, h), polygon_bbox_pixels(l_poly, w, h));
     }
 
     // Clone + jitter: duplicate a polygon with small perturbation
@@ -529,7 +645,7 @@ fn mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<function, u32>
         working_states[oid].polygons[c] = new_poly;
         *count = c + 1u;
         working_states[oid].polygon_count = c + 1u;
-        *changed = changed_indices(c, NO_CHANGED_INDEX);
+        *changed = vec2<u32>(changed_indices(c, NO_CHANGED_INDEX), 0u);
         *op = OP_CLONE;
         return polygon_bbox_pixels(new_poly, w, h);
     }
@@ -545,7 +661,7 @@ fn mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<function, u32>
         let tmp_color = working_states[oid].polygons[sci].data.x;
         working_states[oid].polygons[sci].data.x = working_states[oid].polygons[scj].data.x;
         working_states[oid].polygons[scj].data.x = tmp_color;
-        *changed = changed_indices(sci, scj);
+        *changed = vec2<u32>(changed_indices(sci, scj), 0u);
         *op = OP_SWAP_COLORS;
         return merge_bbox(bbox_sci, bbox_scj);
     }
@@ -675,7 +791,7 @@ fn mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<function, u32>
     // Repack and write back
     poly.data = vec4<u32>(pack_color(color), pack_vertex(v0), pack_vertex(v1), pack_vertex(v2));
     working_states[oid].polygons[pi] = poly;
-    *changed = changed_indices(pi, NO_CHANGED_INDEX);
+    *changed = vec2<u32>(changed_indices(pi, NO_CHANGED_INDEX), 0u);
     // For per-polygon mutations (vertex/color changes), dirty region is union of old and new bbox
     return merge_bbox(old_bbox, polygon_bbox_pixels(poly, w, h));
 }
@@ -787,11 +903,11 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
     // the rung's multiplier, which is exactly 1.0 on every rung without a spread.
     let rung = offspring_local_idx % STEP_RUNGS;
     var count = working_states[offspring_id].polygon_count;
-    var changed = 0u;
+    var changed = vec2<u32>(0u, 0u);
     var op = OP_UNCHANGED;
     let dirty_bbox = mutate_offspring(&rng, offspring_id, &count, step_multiplier(rung), &changed, &op);
     write_dirty_box(offspring_id, dirty_bbox);
     working_states[offspring_id].rng_state.x = rng;
-    write_changed_words(offspring_id, vec2<u32>(changed, 0u));
+    write_changed_words(offspring_id, changed);
     offspring_ops[offspring_id] = op | select(0u, (rung + 1u) << OP_RUNG_SHIFT, op_scales_with_step(op));
 }

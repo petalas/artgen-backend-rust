@@ -90,6 +90,7 @@ fn main() {
     verify_shortcuts_near_polygon_capacity(u32::try_from(POLYGON_CAPACITY).unwrap(), 1.5);
     verify_tile_list_overflow();
     verify_operator_stats();
+    verify_deletion_operators();
     println!("GPU rasterization checks passed");
 }
 
@@ -850,4 +851,246 @@ fn assert_rungs_cover_the_scaled_operators(stats: &OperatorStats, context: &str)
         Operator::ALL.into_iter().filter(|op| op.scales_with_step()).map(|op| stats.gain[op as usize]).sum();
     assert_eq!(stats.rung_gain.iter().sum::<i64>(), scaled_gain, "{context}: rung gain");
     assert!(scaled(&stats.offered) > 0, "{context}: no step-scaled offspring");
+}
+
+/// Overlapping triangles of varied size, colour and alpha from a fixed LCG, so
+/// deleting one changes the blend of the ones above and below it.
+fn overlapping_triangles(count: usize) -> Drawing {
+    let mut state = 0x2545_f491_u32;
+    let mut next = move || {
+        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        (state >> 8) as f32 / (1u32 << 24) as f32
+    };
+    Drawing {
+        polygons: (0..count)
+            .map(|_| {
+                let (cx, cy, size) = (next(), next(), 0.04 + 0.2 * next());
+                let mut vertex = || Point {
+                    x: (cx + size * (next() - 0.5)).clamp(0.0, 1.0),
+                    y: (cy + size * (next() - 0.5)).clamp(0.0, 1.0),
+                };
+                let points = vec![vertex(), vertex(), vertex()];
+                let mut channel = || (next() * 255.0) as u8;
+                let color = Color { r: channel(), g: channel(), b: channel(), a: 40 + channel() / 2 };
+                Polygon { points, color }
+            })
+            .collect(),
+        is_dirty: false,
+        fitness: 0.0,
+    }
+}
+
+/// Remove, merge and absorb delete a slot in order, shifting the slots above
+/// it, and record changed indices rather than the shift. With only these
+/// operators and a strong point penalty (so deletions win), every cached
+/// framebuffer, cached total and fitness must equal the scalar renderer's for
+/// the accepted drawing after every batch, and the operator stats must count
+/// each operator's offspring and improvements.
+fn verify_deletion_operators() {
+    const SIDE: u32 = 96;
+    const CHAINS: u32 = 4;
+    const LAMBDA: u32 = 64;
+    const BATCHES: usize = 24;
+    let reference: Vec<u8> = (0..SIDE * SIDE)
+        .flat_map(|i| {
+            let (x, y) = (i % SIDE, i / SIDE);
+            let band = if (x / 12 + y / 12) % 2 == 0 { 40 } else { 200 };
+            [(x * 255 / SIDE) as u8, band, (y * 255 / SIDE) as u8, 255]
+        })
+        .collect();
+    let drawing = overlapping_triangles(300);
+    let params = MutationParams {
+        remove_polygon_prob: 0.2,
+        merge_polygon_prob: 0.4,
+        absorb_polygon_prob: 0.4,
+        per_point_penalty: MAX_PER_POINT_PENALTY,
+        min_alpha: 30,
+        max_alpha: 220,
+        min_polygons: 1,
+        max_polygons: 1000,
+        chain_count: CHAINS,
+        lambda: LAMBDA,
+        gpu_batch_iters: 4,
+        ..no_op_params()
+    };
+    let penalty = params.point_penalty();
+    let workload = [CHAINS, LAMBDA];
+    let mut evolver = futures_lite::future::block_on(GpuEvolver::new(
+        &reference,
+        SIDE,
+        SIDE,
+        &drawing,
+        EngineCapacity::for_params(&params),
+    ));
+    evolver
+        .prepare_seeded_benchmark(&drawing, &params, 29, 0, true)
+        .expect("deletion preparation failed");
+    let start = assert_chains_cached_byte_l1(&mut evolver, &reference, workload, penalty, "deletion start");
+    assert_parents_match_scalar(&start, &reference, SIDE, penalty, "deletion start");
+    let start_counts: Vec<u32> = start.parents.iter().map(|p| p.polygon_count).collect();
+    // Every CHECKPOINT batches (32 iterations of incremental updates), the
+    // cached framebuffers and totals must equal a full GPU re-render exactly.
+    const CHECKPOINT: usize = 8;
+    let mut counts = start_counts.clone();
+    for batch in 0..BATCHES {
+        evolver.run_batch(&params, true);
+        let context = format!("deletion batch {batch}");
+        let cached = assert_chains_cached_byte_l1(&mut evolver, &reference, workload, penalty, &context);
+        assert_parents_match_scalar(&cached, &reference, SIDE, penalty, &context);
+        if (batch + 1) % CHECKPOINT == 0 {
+            evolver.benchmark_drain().expect("drain");
+            let cached = assert_chains_cached_byte_l1(&mut evolver, &reference, workload, penalty, &context);
+            evolver.evaluate_chain_fitness(&params);
+            let full = assert_chains_cached_byte_l1(&mut evolver, &reference, workload, penalty, &context);
+            assert_eq!(cached.parent_total_errors, full.parent_total_errors, "{context}: incremental and full totals");
+            for chain in 0..CHAINS as usize {
+                assert!(
+                    cached.parent_framebuffers[chain] == full.parent_framebuffers[chain],
+                    "{context}, chain {chain}: incremental framebuffer differs from a full re-render"
+                );
+            }
+            counts = full.parents.iter().map(|p| p.polygon_count).collect();
+        }
+    }
+    assert!(
+        counts.iter().zip(&start_counts).all(|(now, before)| now < before),
+        "every chain must accept deletions: {start_counts:?} -> {counts:?}"
+    );
+
+    let stats = evolver.operator_stats().clone();
+    let offered: u64 = stats.offered.iter().sum();
+    assert_eq!(offered, evolver.benchmark_counters().completed_evaluations);
+    for op in [Operator::Remove, Operator::Merge, Operator::Absorb] {
+        let code = op as usize;
+        assert!(stats.offered[code] > 0, "{} produced no offspring", op.name());
+        assert!(stats.improved[code] > 0, "{} never improved", op.name());
+    }
+    let others = offered
+        - [Operator::Remove, Operator::Merge, Operator::Absorb]
+            .iter()
+            .map(|&op| stats.offered[op as usize])
+            .sum::<u64>();
+    assert_eq!(others, 0, "only remove, merge and absorb run: {:?}", stats.offered);
+    let shapes = verify_deletion_shapes(&mut evolver, &drawing, &params);
+    println!(
+        "deletion operators check: {shapes}; counts {start_counts:?} -> {counts:?}; offered/improved remove {}/{}, merge {}/{}, absorb {}/{}",
+        stats.offered[Operator::Remove as usize],
+        stats.improved[Operator::Remove as usize],
+        stats.offered[Operator::Merge as usize],
+        stats.improved[Operator::Merge as usize],
+        stats.offered[Operator::Absorb as usize],
+        stats.improved[Operator::Absorb as usize],
+    );
+}
+
+/// Every parent's cached framebuffer is the scalar renderer's for its polygons
+/// to rounding: the GPU's blend may fuse multiply-adds, so a channel can floor
+/// one lower or higher (a fresh upload shows the same differences). Its cached
+/// total matches those pixels; its fitness follows the scalar fitness.
+fn assert_parents_match_scalar(
+    snapshot: &BenchmarkSnapshot,
+    reference: &[u8],
+    side: u32,
+    penalty: PointPenalty,
+    context: &str,
+) {
+    for (chain, parent) in snapshot.parents.iter().enumerate() {
+        let scalar = reference::evaluate(&parent.polygons, reference, side, side, penalty)
+            .expect("reference evaluation");
+        let pixels = &snapshot.parent_framebuffers[chain];
+        let (mut differing, mut largest) = (0usize, 0u8);
+        for (gpu, cpu) in pixels.iter().zip(&scalar.pixels) {
+            let diff = (0..3).map(|c| gpu.to_le_bytes()[c].abs_diff(cpu.to_le_bytes()[c])).max().unwrap();
+            differing += usize::from(diff > 0);
+            largest = largest.max(diff);
+        }
+        assert!(largest <= 1, "{context}, chain {chain}: a cached pixel differs by {largest} from the scalar render");
+        let total = u64::from(snapshot.parent_total_errors[chain]);
+        assert!(
+            total.abs_diff(scalar.raw_error) <= 3 * differing as u64,
+            "{context}, chain {chain}: cached total {total}, scalar {}",
+            scalar.raw_error
+        );
+        let gpu = f32::from_bits(parent.fitness_bits);
+        assert!((gpu - scalar.fitness).abs() < 0.01, "{context}, chain {chain}: GPU {gpu}, scalar {}", scalar.fitness);
+    }
+}
+
+/// Twice the area of a packed triangle, from its 16-bit vertex coordinates.
+fn packed_twice_area(polygon: &[u32; 4]) -> i64 {
+    let v = |word: u32| [i64::from(word & 0xFFFF), i64::from(word >> 16)];
+    let [a, b, c] = [v(polygon[1]), v(polygon[2]), v(polygon[3])];
+    ((b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1])).abs()
+}
+
+/// The parent without slot `d`, in order.
+fn without(parent: &[[u32; 4]], d: usize) -> impl Iterator<Item = &[u32; 4]> {
+    parent[..d].iter().chain(&parent[d + 1..])
+}
+
+/// One iteration with only remove, only merge, then only absorb: every
+/// offspring is its parent with one slot deleted in order (the others keep
+/// their relative order), and merge and absorb also rewrite exactly one
+/// surviving polygon. Merge's has vertices from the pair and an area at least
+/// either's; absorb's keeps its geometry and moves each colour channel to
+/// between its own and the deleted polygon's.
+fn verify_deletion_shapes(evolver: &mut GpuEvolver, drawing: &Drawing, params: &MutationParams) -> String {
+    let (chains, lambda) = (params.chain_count, params.lambda);
+    let mut summary = Vec::new();
+    for (op, seed) in [(Operator::Remove, 31), (Operator::Merge, 37), (Operator::Absorb, 41)] {
+        let only = MutationParams {
+            remove_polygon_prob: f32::from(u8::from(op == Operator::Remove)),
+            merge_polygon_prob: f32::from(u8::from(op == Operator::Merge)),
+            absorb_polygon_prob: f32::from(u8::from(op == Operator::Absorb)),
+            gpu_batch_iters: 1,
+            ..params.clone()
+        };
+        evolver.prepare_seeded_benchmark(drawing, &only, seed, 0, true).expect("shape preparation");
+        let before = evolver.benchmark_snapshot(chains, lambda).expect("snapshot");
+        evolver.run_batch(&only, true);
+        let after = evolver.benchmark_snapshot(chains, lambda).expect("snapshot");
+        let mut shifted = 0;
+        for (offspring, child) in after.offspring.iter().enumerate() {
+            let parent = &before.parents[offspring / lambda as usize].polygons;
+            let child = &child.polygons;
+            let context = format!("{} offspring {offspring}", op.name());
+            assert_eq!(child.len() + 1, parent.len(), "{context}: count");
+            let rewritten = |d: usize| -> Vec<usize> {
+                without(parent, d).zip(child).enumerate().filter(|(_, (p, c))| p != c).map(|(k, _)| k).collect()
+            };
+            // A deleted slot whose removal leaves the child, up to the one
+            // rewritten polygon of merge and absorb (at most one). Neighbouring slots can
+            // both qualify; one must also show the operator's shape.
+            let fits = |d: usize| -> bool {
+                let changed = rewritten(d);
+                // Merge and absorb leave the survivor as it was when the deleted
+                // triangle has no area (its colour weight is zero).
+                let Some(&moved) = changed.first() else { return true };
+                if op == Operator::Remove || changed.len() > 1 {
+                    return false;
+                }
+                // The rewritten polygon's slot in the parent.
+                let kept = moved + usize::from(moved >= d);
+                let (new, old, gone) = (&child[moved], &parent[kept], &parent[d]);
+                if op == Operator::Merge {
+                    let pair = [old[1], old[2], old[3], gone[1], gone[2], gone[3]];
+                    new[1..].iter().all(|v| pair.contains(v))
+                        && packed_twice_area(new) >= packed_twice_area(old).max(packed_twice_area(gone))
+                } else {
+                    new[1..] == old[1..]
+                        && (0..4).all(|channel| {
+                            let byte = |p: &[u32; 4]| (p[0] >> (8 * channel)) & 0xFF;
+                            let (lo, hi) = (byte(old).min(byte(gone)), byte(old).max(byte(gone)));
+                            (lo.saturating_sub(1)..=hi + 1).contains(&byte(new))
+                        })
+                }
+            };
+            let d = (0..parent.len())
+                .find(|&d| fits(d))
+                .unwrap_or_else(|| panic!("{context}: not an ordered {}", op.name()));
+            shifted += usize::from(d + 1 < parent.len());
+        }
+        summary.push(format!("{} {shifted}/{} shifted", op.name(), after.offspring.len()));
+    }
+    summary.join(", ")
 }

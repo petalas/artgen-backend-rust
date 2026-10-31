@@ -1367,7 +1367,6 @@ mod tests {
                 "swapColorsProb": 0.00565, "movePointMaxDelta": 0.113,
                 "microAdjustDelta": 0.001, "newPointMaxDistance": 0.005,
                 "offsetPolygonMagnitude": 0.01, "mediumMoveDelta": 0.03,
-                "mergeCentroidThreshold": 0.15, "mergeColorThreshold": 0.2,
                 "minAlpha": 10, "maxAlpha": 65, "minPolygons": 1,
                 "maxPolygons": 1000, "crossoverProb": 0.2,
                 "tournamentSize": 3,

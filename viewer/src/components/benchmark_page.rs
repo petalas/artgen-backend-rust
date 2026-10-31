@@ -1165,6 +1165,7 @@ fn params_detail_view(p: &MutationParams, resolution: u32, pass_timings: &Option
                 {pv("reorder", fmt_prob(p.reorder_polygon_prob), p.reorder_polygon_prob != d.reorder_polygon_prob)}
                 {pv("adj-swap", fmt_prob(p.adjacent_swap_prob), p.adjacent_swap_prob != d.adjacent_swap_prob)}
                 {pv("merge", fmt_prob(p.merge_polygon_prob), p.merge_polygon_prob != d.merge_polygon_prob)}
+                {pv("absorb", fmt_prob(p.absorb_polygon_prob), p.absorb_polygon_prob != d.absorb_polygon_prob)}
                 {pv("clone", fmt_prob(p.clone_polygon_prob), p.clone_polygon_prob != d.clone_polygon_prob)}
                 {pv("swap-col", fmt_prob(p.swap_colors_prob), p.swap_colors_prob != d.swap_colors_prob)}
             </div>
@@ -1191,8 +1192,6 @@ fn params_detail_view(p: &MutationParams, resolution: u32, pass_timings: &Option
                 {pv("newpt", format!("{:.3}", p.new_point_max_distance), p.new_point_max_distance != d.new_point_max_distance)}
                 {pv("offset", format!("{:.3}", p.offset_polygon_magnitude), p.offset_polygon_magnitude != d.offset_polygon_magnitude)}
                 {pv("med", format!("{:.3}", p.medium_move_delta), p.medium_move_delta != d.medium_move_delta)}
-                {pv("merge-cd", format!("{:.2}", p.merge_centroid_threshold), p.merge_centroid_threshold != d.merge_centroid_threshold)}
-                {pv("merge-cc", format!("{:.2}", p.merge_color_threshold), p.merge_color_threshold != d.merge_color_threshold)}
             </div>
             <div class="bench-params-row">
                 <span class="bench-params-group">"Crossover: "</span>

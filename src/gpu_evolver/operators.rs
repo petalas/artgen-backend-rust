@@ -60,9 +60,12 @@ pub enum Operator {
     /// No branch could run (an empty parent whose roulette pick failed its
     /// guard): the offspring is the parent, evaluated over the whole image.
     Unchanged,
+    /// Delete a triangle and move a nearby larger one's colour toward it.
+    /// Appended, so the older codes keep their numbers.
+    Absorb,
 }
 
-pub const OPERATOR_COUNT: usize = 19;
+pub const OPERATOR_COUNT: usize = 20;
 
 /// Words of `operator_stats`: offered, then improved, then neutral, each
 /// indexed by operator code; then the same three blocks indexed by step rung;
@@ -96,6 +99,7 @@ impl Operator {
         Self::Saturation,
         Self::Crossover,
         Self::Unchanged,
+        Self::Absorb,
     ];
 
     /// In `snake_case`, as records and scripts name it.
@@ -121,6 +125,7 @@ impl Operator {
             Self::Saturation => "saturation",
             Self::Crossover => "crossover",
             Self::Unchanged => "unchanged",
+            Self::Absorb => "absorb",
         }
     }
 
@@ -265,6 +270,8 @@ mod tests {
         assert_eq!(sorted.len(), OPERATOR_COUNT);
         assert!(wgsl_constants().contains("const OP_ADJACENT_SWAP: u32 = 5u;\n"));
         assert!(wgsl_constants().contains("const OP_UNCHANGED: u32 = 18u;\n"));
+        assert!(wgsl_constants().contains("const OP_ABSORB: u32 = 19u;\n"));
+        assert!(!Operator::Absorb.scales_with_step() && !Operator::Merge.scales_with_step());
         assert!(wgsl_constants().contains(
             "return op == OP_OFFSET || op == OP_MOVE_POINT || op == OP_MEDIUM_MOVE || op == OP_MICRO_MOVE;"
         ));

@@ -46,6 +46,13 @@ scripts/quality.py --start .cache/quality/starts/s120 --side control=HEAD --side
   `min * (max/min)^(rung/7)` (see
   [engine architecture](engine-architecture.md#step-spread)). A side with a
   spread gets a step rung table (below).
+- `merge_polygon_prob` (default 0.000667) and `absorb_polygon_prob` (default
+  0, omitted from records at 0; within [0, 1]) are absolute weights, not
+  multiplied by the triangle count. Both delete a triangle in order (see
+  [evolutionary algorithm](evolutionary-algorithm.md)) and always act on a
+  drawing with at least two triangles above `min_polygons`. The merge distance
+  and colour thresholds were removed; records and settings that hold them still
+  load, and the values are ignored.
 - `--images` (default ff,mona,darwin; see darwin under Limits), `--seeds` (default 5),
   `--first-seed`, `--seconds` (default 120, at most 3600), `--min-effect` (default
   0.02), `--server-scope image|run`, `--build-only`, `--note`.
@@ -681,3 +688,30 @@ sides' penalties differ, so the unpenalized lines decide.
   next-triangle cost, so they end 4–8% smaller and 1.6–2.7% worse in
   unpenalized error. That is the trade of a stronger flat penalty, not a free
   gain; the early speed-up is the new part.
+
+## Ordered delete, merge and absorb smoke from blank, 2026-10-31
+
+Working tree after the ordered delete, the nearest-of-8 merge and absorb;
+mona, seed 1, 30 s from blank; one seed, so a smoke test of cost and
+behaviour, not a verdict (evidence `.cache/quality/runs/20261031T171146Z-klvn1vay`;
+removey `.cache/quality/runs/20261031T171923Z-o5zms94l` ran on a discarded
+variant with a cooperative 64-lane shift, as did
+`20261031T171711Z-mfn7zisr`, which matched the first run within 2–4%). No run
+was invalid.
+
+| side | params | evals/s | r at 30 s | triangles at 30 s | operator: offered% / improved% / gain% |
+| --- | --- | --- | --- | --- | --- |
+| base | defaults | 934k | 2.315 | 780 | remove 0.0 / 0.0 / 0.0; merge 0.0 / 0.0 / 0.4 |
+| mergey | `merge_polygon_prob` 0.7 | 450k | 2.704 | 476 | merge 5.6 / 0.2 / 4.4 |
+| absorby | `absorb_polygon_prob` 0.7 | 485k | 2.665 | 494 | absorb 5.3 / 0.2 / 1.3 |
+| removey | `remove_polygon_prob` 0.7 | 510k | 2.692 | 541 | remove 5.1 / 0.1 / 0.4 |
+
+- At 0.7 each deleting operator holds the drawing at about 500 triangles and
+  ends 15–17% worse in r than the defaults; the weight is far above a useful
+  setting. At the default weight, merge now acts on every pick and won 0.4% of
+  the gain in 0.0% of the offspring.
+- Throughput: the 0–5 s rates match base's (273–627k/s against 294–492k/s);
+  base then climbs to 1.1M/s as its triangles shrink, while the deleting sides
+  stay at 450–550k/s with fewer, larger triangles. The deletion itself is not
+  the cost (see "Change records" in
+  [engine architecture](engine-architecture.md#change-records)).

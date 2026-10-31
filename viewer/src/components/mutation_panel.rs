@@ -170,6 +170,7 @@ pub fn ParamsEditor(
             <ProbSlider params={params} on_change={on_change} label="Reorder polygon" field="reorder_polygon_prob"/>
             <ProbSlider params={params} on_change={on_change} label="Adjacent swap" field="adjacent_swap_prob"/>
             <ProbSlider params={params} on_change={on_change} label="Merge polygons" field="merge_polygon_prob"/>
+            <ProbSlider params={params} on_change={on_change} label="Absorb polygon" field="absorb_polygon_prob"/>
             <ProbSlider params={params} on_change={on_change} label="Clone + jitter" field="clone_polygon_prob"/>
             <ProbSlider params={params} on_change={on_change} label="Swap colors" field="swap_colors_prob"/>
         </div>
@@ -196,8 +197,6 @@ pub fn ParamsEditor(
             <DeltaSlider params={params} on_change={on_change} label="New point distance" field="new_point_max_distance" min=0.001 max=0.02 step=0.001/>
             <DeltaSlider params={params} on_change={on_change} label="Offset magnitude" field="offset_polygon_magnitude" min=0.001 max=0.03 step=0.001/>
             <DeltaSlider params={params} on_change={on_change} label="Medium move delta" field="medium_move_delta" min=0.005 max=0.06 step=0.005/>
-            <DeltaSlider params={params} on_change={on_change} label="Merge centroid dist" field="merge_centroid_threshold" min=0.03 max=0.3 step=0.01/>
-            <DeltaSlider params={params} on_change={on_change} label="Merge color dist" field="merge_color_threshold" min=0.04 max=0.4 step=0.01/>
         </div>
         <div class="mutation-section">
             <div class="mutation-section-title">"Crossover"</div>
@@ -455,6 +454,7 @@ fn get_prob_field(mp: &MutationParams, field: &str) -> f32 {
         "rotate_polygon_prob" => mp.rotate_polygon_prob,
         "adjacent_swap_prob" => mp.adjacent_swap_prob,
         "merge_polygon_prob" => mp.merge_polygon_prob,
+        "absorb_polygon_prob" => mp.absorb_polygon_prob,
         "clone_polygon_prob" => mp.clone_polygon_prob,
         "medium_move_prob" => mp.medium_move_prob,
         "micro_color_prob" => mp.micro_color_prob,
@@ -480,6 +480,7 @@ fn set_prob_field(mp: &mut MutationParams, field: &str, val: f32) {
         "rotate_polygon_prob" => mp.rotate_polygon_prob = val,
         "adjacent_swap_prob" => mp.adjacent_swap_prob = val,
         "merge_polygon_prob" => mp.merge_polygon_prob = val,
+        "absorb_polygon_prob" => mp.absorb_polygon_prob = val,
         "clone_polygon_prob" => mp.clone_polygon_prob = val,
         "medium_move_prob" => mp.medium_move_prob = val,
         "micro_color_prob" => mp.micro_color_prob = val,
@@ -496,8 +497,6 @@ fn get_delta_field(mp: &MutationParams, field: &str) -> f32 {
         "new_point_max_distance" => mp.new_point_max_distance,
         "offset_polygon_magnitude" => mp.offset_polygon_magnitude,
         "medium_move_delta" => mp.medium_move_delta,
-        "merge_centroid_threshold" => mp.merge_centroid_threshold,
-        "merge_color_threshold" => mp.merge_color_threshold,
         "penalty_exponent" => mp.penalty_exponent,
         _ => 0.0,
     }
@@ -510,8 +509,6 @@ fn set_delta_field(mp: &mut MutationParams, field: &str, val: f32) {
         "new_point_max_distance" => mp.new_point_max_distance = val,
         "offset_polygon_magnitude" => mp.offset_polygon_magnitude = val,
         "medium_move_delta" => mp.medium_move_delta = val,
-        "merge_centroid_threshold" => mp.merge_centroid_threshold = val,
-        "merge_color_threshold" => mp.merge_color_threshold = val,
         "penalty_exponent" => mp.penalty_exponent = val,
         _ => {}
     }

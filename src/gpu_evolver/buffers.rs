@@ -86,11 +86,12 @@ pub struct GpuParams {
     pub medium_move_prob: f32,
     pub swap_colors_prob: f32,
 
-    // vec4[7] — last operator weight, alpha range of new and recolored polygons
+    // vec4[7] — micro colour weight, alpha range of new and recolored polygons,
+    // absorb weight
     pub micro_color_prob: f32,
     pub min_alpha_norm: f32,
     pub max_alpha_norm: f32,
-    pub _pad1: u32,
+    pub absorb_polygon_prob: f32,
 
     // vec4[8] — step sizes, multiplied by the offspring's step multiplier
     pub offset_polygon_magnitude: f32,
@@ -98,11 +99,10 @@ pub struct GpuParams {
     pub medium_move_delta: f32,
     pub micro_adjust_delta: f32,
 
-    // vec4[9] — new vertex spread (add, clone) and merge thresholds
+    // vec4[9] — new vertex spread (add, clone), three pad words
     pub new_point_max_distance: f32,
-    pub merge_centroid_threshold: f32,
-    pub merge_color_threshold: f32,
-    pub _pad2: u32,
+    pub _pad1: u32,
+    pub _pad2: [u32; 2],
 
     // vec4[10-11] — step-size multiplier per rung (`MutationParams::step_multipliers`).
     pub step_multipliers: [f32; STEP_RUNGS],
@@ -162,15 +162,14 @@ pub fn gpu_params_from(mp: &MutationParams, w: u32, h: u32, chain_count: u32) ->
         micro_color_prob: mp.micro_color_prob,
         min_alpha_norm: mp.min_alpha as f32 / 255.0,
         max_alpha_norm: mp.max_alpha as f32 / 255.0,
-        _pad1: 0,
+        absorb_polygon_prob: mp.absorb_polygon_prob,
         offset_polygon_magnitude: mp.offset_polygon_magnitude,
         move_point_max_delta: mp.move_point_max_delta,
         medium_move_delta: mp.medium_move_delta,
         micro_adjust_delta: mp.micro_adjust_delta,
         new_point_max_distance: mp.new_point_max_distance,
-        merge_centroid_threshold: mp.merge_centroid_threshold,
-        merge_color_threshold: mp.merge_color_threshold,
-        _pad2: 0,
+        _pad1: 0,
+        _pad2: [0; 2],
         step_multipliers: mp.step_multipliers(),
         _reserved: [0u32; 16],
     }
