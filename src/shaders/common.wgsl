@@ -72,10 +72,10 @@ struct Params {
     medium_move_delta: f32,
     swap_colors_prob: f32,
 
-    // Merge thresholds + padding
+    // Merge thresholds, micro color weight + padding
     merge_centroid_threshold: f32,
     merge_color_threshold: f32,
-    _pad2: u32,
+    micro_color_prob: f32,
     _pad3: u32,
 
     // Step-size multiplier per rung (vec4[11-12]); mutate's step_multiplier() reads it

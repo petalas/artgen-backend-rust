@@ -349,7 +349,7 @@ fn mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<function, u32>
     let w_medium_move = params.medium_move_prob * fc * 3.0;
     let w_micro_adjust = params.micro_adjust_prob * fc * 3.0;
     let w_change_color = params.change_color_prob * fc * 4.0;
-    let w_micro_color = params.micro_adjust_prob * fc * 4.0;
+    let w_micro_color = params.micro_color_prob * fc * 4.0;
     let w_brightness = params.adjust_brightness_prob * fc;
     let w_saturation = params.adjust_saturation_prob * fc;
 

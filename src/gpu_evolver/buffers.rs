@@ -103,10 +103,11 @@ pub struct GpuParams {
     pub medium_move_delta: f32,
     pub swap_colors_prob: f32,
 
-    // vec4[10] — merge thresholds + padding
+    // vec4[10] — merge thresholds, micro color weight + padding
     pub merge_centroid_threshold: f32,
     pub merge_color_threshold: f32,
-    pub _pad2: u32,
+    // Historical shader variants see padding here.
+    pub micro_color_prob: f32,
     pub _pad3: u32,
 
     // vec4[11-12] — step-size multiplier per rung (`MutationParams::step_multipliers`);
@@ -175,11 +176,11 @@ pub fn gpu_params_from(mp: &MutationParams, w: u32, h: u32, chain_count: u32) ->
         merge_polygon_prob: mp.merge_polygon_prob,
         clone_polygon_prob: mp.clone_polygon_prob,
         medium_move_prob: mp.medium_move_prob,
+        micro_color_prob: mp.micro_color_prob,
         medium_move_delta: mp.medium_move_delta,
         swap_colors_prob: mp.swap_colors_prob,
         merge_centroid_threshold: mp.merge_centroid_threshold,
         merge_color_threshold: mp.merge_color_threshold,
-        _pad2: 0,
         _pad3: 0,
         step_multipliers: mp.step_multipliers(),
         _reserved: [0u32; 12],

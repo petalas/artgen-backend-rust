@@ -204,6 +204,7 @@ pub fn ParamsEditor(
             <ProbSlider params={params} on_change={on_change} label="Move point" field="move_point_prob"/>
             <ProbSlider params={params} on_change={on_change} label="Medium move" field="medium_move_prob"/>
             <ProbSlider params={params} on_change={on_change} label="Micro adjust" field="micro_adjust_prob"/>
+            <ProbSlider params={params} on_change={on_change} label="Micro color" field="micro_color_prob"/>
         </div>
         <div class="mutation-section">
             <div class="mutation-section-title">"Color"</div>
@@ -480,6 +481,7 @@ fn get_prob_field(mp: &MutationParams, field: &str) -> f32 {
         "merge_polygon_prob" => mp.merge_polygon_prob,
         "clone_polygon_prob" => mp.clone_polygon_prob,
         "medium_move_prob" => mp.medium_move_prob,
+        "micro_color_prob" => mp.micro_color_prob,
         "swap_colors_prob" => mp.swap_colors_prob,
         "crossover_prob" => mp.crossover_prob,
         _ => 0.0,
@@ -504,6 +506,7 @@ fn set_prob_field(mp: &mut MutationParams, field: &str, val: f32) {
         "merge_polygon_prob" => mp.merge_polygon_prob = val,
         "clone_polygon_prob" => mp.clone_polygon_prob = val,
         "medium_move_prob" => mp.medium_move_prob = val,
+        "micro_color_prob" => mp.micro_color_prob = val,
         "swap_colors_prob" => mp.swap_colors_prob = val,
         "crossover_prob" => mp.crossover_prob = val,
         _ => {}

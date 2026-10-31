@@ -1177,6 +1177,7 @@ fn params_detail_view(p: &MutationParams, resolution: u32, pass_timings: &Option
                 {pv("move", fmt_prob(p.move_point_prob), p.move_point_prob != d.move_point_prob)}
                 {pv("medium", fmt_prob(p.medium_move_prob), p.medium_move_prob != d.medium_move_prob)}
                 {pv("micro", fmt_prob(p.micro_adjust_prob), p.micro_adjust_prob != d.micro_adjust_prob)}
+                {pv("µcolor", fmt_prob(p.micro_color_prob), p.micro_color_prob != d.micro_color_prob)}
             </div>
             <div class="bench-params-row">
                 <span class="bench-params-group">"Color: "</span>

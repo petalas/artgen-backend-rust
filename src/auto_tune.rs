@@ -610,6 +610,7 @@ fn get_param_by_name(params: &MutationParams, name: &str) -> f32 {
         "merge_polygon_prob" => params.merge_polygon_prob,
         "clone_polygon_prob" => params.clone_polygon_prob,
         "medium_move_prob" => params.medium_move_prob,
+        "micro_color_prob" => params.micro_color_prob,
         "swap_colors_prob" => params.swap_colors_prob,
         "move_point_max_delta" => params.move_point_max_delta,
         "micro_adjust_delta" => params.micro_adjust_delta,
@@ -645,6 +646,7 @@ fn set_param_by_name(params: &mut MutationParams, name: &str, value: f32) {
         "merge_polygon_prob" => params.merge_polygon_prob = value,
         "clone_polygon_prob" => params.clone_polygon_prob = value,
         "medium_move_prob" => params.medium_move_prob = value,
+        "micro_color_prob" => params.micro_color_prob = value,
         "swap_colors_prob" => params.swap_colors_prob = value,
         "move_point_max_delta" => params.move_point_max_delta = value,
         "micro_adjust_delta" => params.micro_adjust_delta = value,
@@ -681,6 +683,7 @@ pub fn default_param_specs() -> Vec<ParamSpec> {
         ParamSpec { name: "merge_polygon_prob".into(), kind: ParamKind::LogScale { min: 1e-4, max: 0.1 }, enabled: true },
         ParamSpec { name: "clone_polygon_prob".into(), kind: ParamKind::LogScale { min: 1e-4, max: 0.5 }, enabled: true },
         ParamSpec { name: "medium_move_prob".into(), kind: ParamKind::LogScale { min: 1e-4, max: 0.5 }, enabled: true },
+        ParamSpec { name: "micro_color_prob".into(), kind: ParamKind::LogScale { min: 1e-4, max: 0.5 }, enabled: true },
         ParamSpec { name: "swap_colors_prob".into(), kind: ParamKind::LogScale { min: 1e-4, max: 0.1 }, enabled: true },
         // Deltas (Linear)
         ParamSpec { name: "move_point_max_delta".into(), kind: ParamKind::Linear { min: 0.01, max: 0.5 }, enabled: true },

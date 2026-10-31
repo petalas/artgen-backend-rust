@@ -101,6 +101,7 @@ fn no_op_params() -> MutationParams {
         move_point_prob: 0.0,
         remove_point_prob: 0.0,
         micro_adjust_prob: 0.0,
+        micro_color_prob: 0.0,
         change_color_prob: 0.0,
         adjust_brightness_prob: 0.0,
         adjust_saturation_prob: 0.0,

@@ -16,6 +16,7 @@ fn default_adjacent_swap_prob() -> f32 { settings::ADJACENT_SWAP_PROB }
 fn default_merge_polygon_prob() -> f32 { settings::MERGE_POLYGON_PROB }
 fn default_clone_polygon_prob() -> f32 { settings::CLONE_POLYGON_PROB }
 fn default_medium_move_prob() -> f32 { settings::MEDIUM_MOVE_PROBABILITY }
+fn default_micro_color_prob() -> f32 { settings::MICRO_COLOR_PROBABILITY }
 fn default_swap_colors_prob() -> f32 { settings::SWAP_COLORS_PROB }
 fn default_medium_move_delta() -> f32 { settings::MEDIUM_MOVE_DELTA }
 fn default_merge_centroid_threshold() -> f32 { settings::MERGE_CENTROID_THRESHOLD }
@@ -75,6 +76,10 @@ pub struct MutationParams {
     pub medium_move_prob: f32,
     #[serde(default = "default_swap_colors_prob")]
     pub swap_colors_prob: f32,
+    /// Weight of micro_adjust's color branch (micro_adjust_prob weighs its
+    /// vertex branch).
+    #[serde(default = "default_micro_color_prob")]
+    pub micro_color_prob: f32,
 
     // Deltas / magnitudes
     pub move_point_max_delta: f32,
@@ -181,6 +186,7 @@ impl MutationParams {
         self.clone_polygon_prob = self.clone_polygon_prob.clamp(0.0, 1.0);
         self.medium_move_prob = self.medium_move_prob.clamp(0.0, 1.0);
         self.swap_colors_prob = self.swap_colors_prob.clamp(0.0, 1.0);
+        self.micro_color_prob = self.micro_color_prob.clamp(0.0, 1.0);
 
         // Deltas: non-negative
         self.move_point_max_delta = self.move_point_max_delta.max(0.0);
@@ -255,6 +261,7 @@ impl Default for MutationParams {
             merge_polygon_prob: settings::MERGE_POLYGON_PROB,
             clone_polygon_prob: settings::CLONE_POLYGON_PROB,
             medium_move_prob: settings::MEDIUM_MOVE_PROBABILITY,
+            micro_color_prob: settings::MICRO_COLOR_PROBABILITY,
             swap_colors_prob: settings::SWAP_COLORS_PROB,
             move_point_max_delta: settings::MOVE_POINT_MAX_DELTA,
             micro_adjust_delta: settings::MICRO_ADJUSTMENT_DELTA,
