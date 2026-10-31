@@ -659,3 +659,25 @@ micro_adjust 0.00433, change_color 0.001631, saturation 0.000667, brightness
 value is omitted when writing, so the frozen v1 fixtures and earlier records
 keep their meaning (hillclimb against the previous commit: replay and lifecycle
 same).
+
+## Penalty exponent from blank, 2026-10-31
+
+`14da72f`, flat (`penalty_exponent` 0) vs k15 (1.5) and k1 (1), from blank,
+300 s, seeds 1–3, one image per invocation, pooled with `--combine` (evidence
+`.cache/quality/runs/20261031T140538Z-o2a59s1v` ff,
+`20261031T145140Z-ce26r50e` mona, `20261031T153744Z-m3_eza1m` darwin). The
+sides' penalties differ, so the unpenalized lines decide.
+
+| side | unpenalized r ratio at 10 s / 60 s / 120 s / 300 s | time to flat's unpenalized 60 s result | triangles at 300 s, ff / mona / darwin |
+| --- | --- | --- | --- |
+| flat | 1 | 1 | 1170 / 1268 / 1313 |
+| k15 | 0.916 / 0.974 / 0.991 / 1.027 WORSE | 0.62 [0.58, 0.66] | 1124 / 1204 / 1213 |
+| k1 | 0.927 / 0.974 / 0.989 / 1.016 [1.006, 1.025] | 0.68 [0.61, 0.75] | 1127 / 1222 / 1229 |
+
+- Cheap early triangles speed up the start: both curves are BETTER from 2 s
+  to 60 s on every image.
+- The advantage shrinks steadily and turns into a loss by 300 s: drawings sit
+  at 1100–1300 triangles, where both curves charge 1.1–1.5× today's
+  next-triangle cost, so they end 4–8% smaller and 1.6–2.7% worse in
+  unpenalized error. That is the trade of a stronger flat penalty, not a free
+  gain; the early speed-up is the new part.
