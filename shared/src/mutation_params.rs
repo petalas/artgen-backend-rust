@@ -16,13 +16,13 @@ fn default_adjacent_swap_prob() -> f32 { settings::ADJACENT_SWAP_PROB }
 fn default_merge_polygon_prob() -> f32 { settings::MERGE_POLYGON_PROB }
 fn default_clone_polygon_prob() -> f32 { settings::CLONE_POLYGON_PROB }
 fn default_medium_move_prob() -> f32 { settings::MEDIUM_MOVE_PROBABILITY }
-fn default_micro_color_prob() -> f32 { settings::MICRO_COLOR_PROBABILITY }
 fn default_swap_colors_prob() -> f32 { settings::SWAP_COLORS_PROB }
 fn default_medium_move_delta() -> f32 { settings::MEDIUM_MOVE_DELTA }
 fn default_merge_centroid_threshold() -> f32 { settings::MERGE_CENTROID_THRESHOLD }
 fn default_merge_color_threshold() -> f32 { settings::MERGE_COLOR_THRESHOLD }
 fn default_per_point_penalty() -> f32 { settings::PER_POINT_PENALTY }
 fn no_step_spread() -> f32 { settings::STEP_SPREAD_NONE }
+fn legacy_micro_color_prob() -> f32 { settings::LEGACY_MICRO_COLOR_PROBABILITY }
 // Records and frozen fixtures from before the field omit it; leaving the default
 // out keeps their exact parameter maps (effective-parameter gates compare them).
 #[allow(clippy::trivially_copy_pass_by_ref)] // skip_serializing_if passes a reference
@@ -34,6 +34,12 @@ fn is_default_per_point_penalty(value: &f32) -> bool {
 #[allow(clippy::trivially_copy_pass_by_ref)] // skip_serializing_if passes a reference
 fn is_no_step_spread(value: &f32) -> bool {
     value.to_bits() == settings::STEP_SPREAD_NONE.to_bits()
+}
+// Omitted at the legacy weight (absent means it), for the same reason as
+// `per_point_penalty`.
+#[allow(clippy::trivially_copy_pass_by_ref)] // skip_serializing_if passes a reference
+fn is_legacy_micro_color_prob(value: &f32) -> bool {
+    value.to_bits() == settings::LEGACY_MICRO_COLOR_PROBABILITY.to_bits()
 }
 
 /// A step-spread end as `sanitize` keeps it: within
@@ -77,8 +83,9 @@ pub struct MutationParams {
     #[serde(default = "default_swap_colors_prob")]
     pub swap_colors_prob: f32,
     /// Weight of micro_adjust's color branch (micro_adjust_prob weighs its
-    /// vertex branch).
-    #[serde(default = "default_micro_color_prob")]
+    /// vertex branch). Missing in settings saved before the split, it reads as
+    /// the default it then shared with micro_adjust_prob.
+    #[serde(default = "legacy_micro_color_prob", skip_serializing_if = "is_legacy_micro_color_prob")]
     pub micro_color_prob: f32,
 
     // Deltas / magnitudes

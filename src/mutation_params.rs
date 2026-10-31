@@ -101,4 +101,16 @@ mod tests {
         assert_eq!((json["stepSpreadMin"].as_f64(), json["stepSpreadMax"].as_f64()), (Some(0.25), Some(4.0)));
         assert_eq!(serde_json::from_value::<MutationParams>(json).unwrap(), default);
     }
+
+    #[test]
+    fn legacy_micro_color_weight_is_omitted_and_a_missing_one_reads_as_legacy() {
+        let legacy = MutationParams { micro_color_prob: 0.002786, ..MutationParams::default() };
+        let json = serde_json::to_value(&legacy).unwrap();
+        assert!(json.get("microColorProb").is_none());
+        assert_eq!(serde_json::from_value::<MutationParams>(json).unwrap(), legacy);
+        let default = MutationParams::default();
+        let json = serde_json::to_value(&default).unwrap();
+        assert_eq!(json["microColorProb"].as_f64(), Some(f64::from(0.000697f32)));
+        assert_eq!(serde_json::from_value::<MutationParams>(json).unwrap(), default);
+    }
 }

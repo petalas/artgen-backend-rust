@@ -1,6 +1,6 @@
 use crate::settings::{
     ADJUST_BRIGHTNESS_PROB, ADJUST_SATURATION_PROB, CHANGE_COLOR_PROB, MAX_ALPHA,
-    MICRO_ADJUSTMENT_PROBABILITY, MIN_ALPHA,
+    MICRO_COLOR_PROBABILITY, MIN_ALPHA,
 };
 use crate::utils::{randomf32, randomu8};
 use serde::{Deserialize, Serialize};
@@ -70,19 +70,19 @@ impl Color {
         }
 
         //// same but micro adjustments
-        if randomf32() < MICRO_ADJUSTMENT_PROBABILITY {
+        if randomf32() < MICRO_COLOR_PROBABILITY {
             self.r = Color::micro_adjust(self.r);
             mutation_happened = true;
         }
-        if randomf32() < MICRO_ADJUSTMENT_PROBABILITY {
+        if randomf32() < MICRO_COLOR_PROBABILITY {
             self.g = Color::micro_adjust(self.g);
             mutation_happened = true;
         }
-        if randomf32() < MICRO_ADJUSTMENT_PROBABILITY {
+        if randomf32() < MICRO_COLOR_PROBABILITY {
             self.b = Color::micro_adjust(self.b);
             mutation_happened = true;
         }
-        if randomf32() < MICRO_ADJUSTMENT_PROBABILITY {
+        if randomf32() < MICRO_COLOR_PROBABILITY {
             self.a = Color::micro_adjust(self.a).clamp(MIN_ALPHA, MAX_ALPHA);
             mutation_happened = true;
         }

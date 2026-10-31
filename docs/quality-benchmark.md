@@ -637,3 +637,10 @@ reorder 0.004).
 reorder2's late-game gain does not survive the blank start. mcquarter is never
 worse and is ahead from blank early and on every image at 120 s, but its
 late-game advantage on held-out seeds is within noise.
+
+mcquarter's weights became the default on 2026-10-31 (micro_color 0.000697,
+micro_adjust 0.00433, change_color 0.001631, saturation 0.000667, brightness
+0.000237). A missing `microColorProb` reads as the legacy 0.002786 and that
+value is omitted when writing, so the frozen v1 fixtures and earlier records
+keep their meaning (hillclimb against the previous commit: replay and lifecycle
+same).

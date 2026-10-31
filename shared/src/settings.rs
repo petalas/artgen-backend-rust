@@ -5,12 +5,16 @@ pub const REORDER_POLYGON_PROB: f32 = 0.002;
 pub const OFFSET_POLYGON_PROBABILITY: f32 = 0.000565;
 pub const MOVE_POINT_PROBABILITY: f32 = 0.000294;
 pub const REMOVE_POINT_PROBABILITY: f32 = 0.002;
-pub const MICRO_ADJUSTMENT_PROBABILITY: f32 = 0.002786;
-// Micro color's weight; it shared MICRO_ADJUSTMENT_PROBABILITY until they were split.
-pub const MICRO_COLOR_PROBABILITY: f32 = 0.002786;
-pub const CHANGE_COLOR_PROB: f32 = 0.000473;
-pub const ADJUST_BRIGHTNESS_PROB: f32 = 0.000473;
-pub const ADJUST_SATURATION_PROB: f32 = 0.001333;
+// Micro color, saturation and brightness cut, their weight moved to micro moves
+// and color changes (docs/quality-benchmark.md, operator weight A/B).
+pub const MICRO_ADJUSTMENT_PROBABILITY: f32 = 0.00433;
+pub const MICRO_COLOR_PROBABILITY: f32 = 0.000697;
+// Micro color's weight when settings predate the field: it shared
+// micro_adjust_prob's value, 0.002786 by default, until they were split.
+pub const LEGACY_MICRO_COLOR_PROBABILITY: f32 = 0.002786;
+pub const CHANGE_COLOR_PROB: f32 = 0.001631;
+pub const ADJUST_BRIGHTNESS_PROB: f32 = 0.000237;
+pub const ADJUST_SATURATION_PROB: f32 = 0.000667;
 
 pub const SCALE_POLYGON_PROB: f32 = 0.005650;
 pub const ROTATE_POLYGON_PROB: f32 = 0.002;

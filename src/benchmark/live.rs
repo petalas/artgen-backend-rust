@@ -1324,11 +1324,17 @@ mod tests {
                 max_buffer_size: 0,
             },
             // The frozen v1 manifest's settings, which predate the 2000 cap,
-            // the 2026-10-30 operator weights and micro step, and the step spread.
+            // the 2026-10-30 operator weights and micro step, the step spread and
+            // the 2026-10-31 micro color cut.
             params: MutationParams {
                 max_polygons: 1000,
                 offset_polygon_prob: 0.00565,
                 medium_move_prob: 0.004,
+                micro_adjust_prob: 0.002786,
+                micro_color_prob: 0.002786,
+                change_color_prob: 0.000473,
+                adjust_brightness_prob: 0.000473,
+                adjust_saturation_prob: 0.001333,
                 micro_adjust_delta: 0.001,
                 step_spread_min: 1.0,
                 step_spread_max: 1.0,
