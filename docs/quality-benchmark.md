@@ -615,3 +615,25 @@ Weights: mchalf micro_color 0.001393, micro_adjust 0.003715, change_color
   exclude 1. mcquarter is ahead on every image; mchalf loses on ff; reorder2
   gains most on ff and is level on mona.
 - reorder2 is slower at 5 s (1.10 [1.02, 1.20]); its gain is late.
+
+## Operator weight hold-out and blank check, 2026-10-31
+
+`de7a2f9`, control vs mcquarter, reorder2 and both (mcquarter's weights with
+reorder 0.004).
+
+- Hold-out seeds 4–5, 90 s from `s120v2` (evidence
+  `.cache/quality/runs/20261031T100909Z-tsrht24s`): time ratio mcquarter 0.87
+  [0.71, 1.06], reorder2 0.90 [0.83, 0.98], both 0.95 [0.80, 1.13]; r ratios
+  1.0004, 0.9988 and 1.0003 (SCREEN, two seeds). Only reorder2's interval
+  excludes 1.
+- From blank, 120 s, seeds 1–3 (evidence
+  `.cache/quality/runs/20261031T104803Z-0wp4d5qq`): mcquarter BETTER at 5 s
+  (0.9313) and 30 s (0.9775), level at 120 s (0.9957 [0.9870, 1.0042]), lower
+  median r on every image (ff 1.227 → 1.216, mona 2.119 → 2.099, darwin 1.233
+  → 1.204); time ratio 0.95 [0.85, 1.06]. reorder2 is level to slightly worse
+  at 120 s (1.0062 [1.0001, 1.0128], mona 2.119 → 2.143). both is BETTER at 5 s
+  only.
+
+reorder2's late-game gain does not survive the blank start. mcquarter is never
+worse and is ahead from blank early and on every image at 120 s, but its
+late-game advantage on held-out seeds is within noise.
