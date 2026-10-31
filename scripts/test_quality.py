@@ -298,6 +298,10 @@ class QualityCli(unittest.TestCase):
         line = next(x for x in out.splitlines()
                     if "control-worst unpenalized fitness at T=20s" in x)
         self.assertAlmostEqual(float(line.split("): ")[1].split()[0]), 0.64, delta=0.03)
+        # At equal quality the fake's candidate is at an earlier batch: fewer polygons.
+        line = next(x for x in out.splitlines()
+                    if "triangles at equal unpenalized fitness (control-worst at T=20s)" in x)
+        self.assertLess(float(line.split("): ")[1].split()[0]), 1.0)
 
     def test_combine_reports_per_image_runs_as_one_comparison(self):
         sides = ("--side", f"control={self.fake()}", "--side", f"cand={self.fake(scale=0.8)}")

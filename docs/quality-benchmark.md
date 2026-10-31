@@ -239,6 +239,12 @@ At checkpoint T, which is each fixed second below the budget plus the budget:
   Judge sides whose point penalties differ (`per_point_penalty`,
   `penalty_exponent`) by the unpenalized lines: their penalized fitness is on
   different scales.
+- **Triangles at equal quality:** at each unpenalized target, the candidate's
+  triangle count when it first reached it over the control's (paired by image
+  and seed, interpolated like the times). Pairs where either side missed the
+  target are left out and counted; a rank is shown only when every image has a
+  pair. It says whether a change reaches the same quality with fewer triangles,
+  which the final counts cannot: a side that stops earlier also has fewer.
 - **Final polygons:** the median per image, control → candidate.
 
 `sd ln r` sets how many seeds a comparison needs. The paired ratio of one seed

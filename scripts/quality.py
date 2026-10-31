@@ -363,6 +363,39 @@ def determinism(runs, resolved, sides):
     return compared, shared, mismatches
 
 
+def polygons_at(trajectory, target, key="raw_fitness"):
+    """Triangles when `key` first reached `target`, interpolated like time_to; None if never."""
+    previous = None
+    for point in trajectory:
+        if point[key] >= target:
+            if previous is None:
+                return point["polygons"]
+            r0, r1 = 100 - previous[key], 100 - point[key]
+            share = (math.log(r0) - math.log(100 - target)) / (math.log(r0) - math.log(r1))
+            return previous["polygons"] + share * (point["polygons"] - previous["polygons"])
+        previous = point
+    return None
+
+
+def polygon_ratios(runs, control, name, image_targets):
+    """Per target rank: {image: [triangles_name / triangles_control]} when both reached the
+    unpenalized target, so drawings are compared at equal quality; and the misses."""
+    by_key = {(r["side"], r["image"], r["seed"]): r for r in runs}
+    ratios, missed = {}, 0
+    for (side, image, seed), run in by_key.items():
+        if side != name:
+            continue
+        base = by_key[(control, image, seed)]
+        for rank, (_, target) in enumerate(image_targets[image]):
+            ours = polygons_at(run["trajectory"], target)
+            theirs = polygons_at(base["trajectory"], target)
+            if ours is None or not theirs:
+                missed += 1
+                continue
+            ratios.setdefault(rank, {}).setdefault(image, []).append(max(ours, 1) / theirs)
+    return ratios, missed
+
+
 def quartiles(values):
     ordered = sorted(values)
     return hc.percentile(ordered, 0.25), statistics.median(ordered), hc.percentile(ordered, 0.75)
@@ -495,6 +528,17 @@ def comparison_table(runs, args):
         if censored:
             lines.append(f"  {censored} candidate runs missed a target; their time counts as "
                          "the full run (a lower bound)")
+        ratios, missed = polygon_ratios(runs, control, name, raw_targets)
+        for rank, by_image in sorted(ratios.items()):
+            if len(by_image) < len(args.images):
+                continue
+            point, low, high = hc.aggregate(by_image)
+            lines.append(f"  triangles at equal unpenalized fitness "
+                         f"(control-worst at T={raw_targets[args.images[0]][rank][0]:g}s): "
+                         f"{point:.4f} [{low:.4f}, {high:.4f}]")
+        if missed:
+            lines.append(f"  {missed} run pairs missed an unpenalized target and have no "
+                         "triangle ratio there")
         lines.append("  final polygons (median), control -> candidate: " + ", ".join(
             f"{image} " + " -> ".join(
                 f"{statistics.median(r['polygons'] for r in runs if r['side'] == side and r['image'] == image):.0f}"
