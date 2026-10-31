@@ -521,7 +521,7 @@ impl GpuEvolver {
     }
 
     /// Clamp `params` to what this engine was constructed for: chains and
-    /// offspring per iteration, and the installed programs' polygon limit.
+    /// offspring per iteration, and the polygon capacity.
     /// Returns whether anything changed. `run_batch` panics on settings past
     /// capacity, so the app applies this to settings it receives.
     pub fn fit_to_capacity(&self, params: &mut MutationParams) -> bool {
@@ -529,8 +529,7 @@ impl GpuEvolver {
         let before = (params.chain_count, params.max_polygons);
         let by_offspring = p.offspring_capacity / params.lambda.max(1);
         params.chain_count = params.chain_count.min(p.chain_count).min(by_offspring).max(1);
-        let limit = u32::try_from(p.programs.polygon_limit()).unwrap_or(u32::MAX);
-        params.max_polygons = params.max_polygons.min(limit);
+        params.max_polygons = params.max_polygons.min(crate::settings::POLYGON_CAPACITY as u32);
         before != (params.chain_count, params.max_polygons)
     }
 

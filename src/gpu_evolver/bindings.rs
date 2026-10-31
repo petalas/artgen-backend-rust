@@ -95,17 +95,6 @@ pub(super) const BIN_POLYGONS: Stage = Stage {
     ],
 };
 
-/// The worklist pass that shader-variant binners without `raster_work` need.
-pub(super) const RASTER_WORKLIST: Stage = Stage {
-    name: "raster_worklist",
-    bindings: &[
-        (WorkingStates, Read),
-        (ChainStates, Read),
-        (TileCounts, Read),
-        (RasterWork, Write),
-    ],
-};
-
 pub(super) const SELECT: Stage = Stage {
     name: "select",
     bindings: &[
@@ -146,11 +135,10 @@ pub(super) const UPDATE_FRAMEBUFFERS: Stage = Stage {
     ],
 };
 
-const STAGES: [Stage; 7] = [
+const STAGES: [Stage; 6] = [
     MUTATE,
     RASTERIZE_ERROR,
     BIN_POLYGONS,
-    RASTER_WORKLIST,
     SELECT,
     INIT_FRAMEBUFFERS,
     UPDATE_FRAMEBUFFERS,
@@ -280,7 +268,7 @@ mod tests {
 
     use super::{
         layout_entries, Stage, BIN_POLYGONS, INIT_FRAMEBUFFERS, MUTATE, PARAMS, RASTERIZE_ERROR,
-        RASTER_WORKLIST, SELECT, UPDATE_FRAMEBUFFERS,
+        SELECT, UPDATE_FRAMEBUFFERS,
     };
     use crate::gpu_evolver::programs::{bundled_shader_source, BundledShader, TileStage};
 
@@ -371,7 +359,6 @@ mod tests {
             (BundledShader::Mutate, MUTATE),
             (tile(TileStage::RasterizeError), RASTERIZE_ERROR),
             (tile(TileStage::BinPolygons), BIN_POLYGONS),
-            (tile(TileStage::RasterWorklist), RASTER_WORKLIST),
             (BundledShader::Select, SELECT),
             (tile(TileStage::InitFramebuffers), INIT_FRAMEBUFFERS),
             (tile(TileStage::UpdateFramebuffers), UPDATE_FRAMEBUFFERS),

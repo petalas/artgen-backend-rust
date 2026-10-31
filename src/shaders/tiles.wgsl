@@ -1,5 +1,5 @@
 // Shared by the tile-group stages (rasterize_error, bin_polygons,
-// raster_worklist, init_framebuffers, update_framebuffers). programs.rs appends
+// init_framebuffers, update_framebuffers). programs.rs appends
 // it after common.wgsl and changes.wgsl. TILE_W x TILE_H is the installed raster
 // tile, from the generated constants.
 

@@ -89,8 +89,7 @@ give the offspring of a chain a ladder of step sizes. Offspring with local
 index i uses rung k = i % `STEP_RUNGS` (8) and multiplier
 `min * (max/min)^(k/7)`, computed once on the host
 (`MutationParams::step_multipliers`) and passed in `GpuParams::step_multipliers`
-(vec4s 11–12, formerly reserved; historical shader variants still see
-reserved words there). With λ below 8 only the first λ rungs run. mutate multiplies offset, move-point, medium-move and
+(vec4s 11–12, formerly reserved). With λ below 8 only the first λ rungs run. mutate multiplies offset, move-point, medium-move and
 micro vertex sizes by `mutation_scale * step_multiplier(rung)`. The working
 state's `mutation_scale` stays the adaptive scale alone, and select's adaptive
 update reads and writes the chain's scale, never an offspring's, so the rung
@@ -117,35 +116,40 @@ replacement markers. CPU tests validate every assembled program at every
 supported tile through naga and its SPIR-V writer, and compare the reflected
 struct layouts with `gpu_evolver::buffers`. `examples/emit-bundled-shaders`
 writes the complete sources for tools that read a shader file; it emits tile
-stages at 16x16, the variants' marker form. Shader variants (historical
-and candidate sources, diagnostic instrumentation, their caches and the worklist
-pass older binners need) sit behind one seam, `programs/variants.rs`, reached
-through `GpuPipeline::shader_variants()`. Production never installs a variant.
-Variants are complete sources without the prelude, specialized by their
-16x16 tile-size markers: `WG_X`/`WG_Y` or `TILE_W`/`TILE_H` for raster,
-`TILE_W`/`TILE_H` for binning, and by their polygon storage
-(`specialize_polygon_storage`). Historical sources declare
-`polygons: array<Polygon, 1000>,` in `DrawingState`; only that member is widened
-to the engine's stride, since the buffers hold `POLYGON_CAPACITY` slots and a
-1000-slot struct would address every state but the first at the wrong offset.
-Their own workgroup arrays (mutate's parent copy, the binners' `polygon_bounds`)
-stay at 1000, so such a variant's polygon limit is 1000: `GpuPipeline::workload`
-panics and benchmark preparation errors when `max_polygons` exceeds the
-installed programs' limit. An emitted bundled source declares
-`POLYGON_CAPACITY`; one emitted by a build with a smaller capacity N takes this
-build's, with limit N (its code was written for N). A larger one, or any other
-polygon array declaration, is rejected. `check-gpu-mutation` and `check-gpu-binning` apply the
-same specialization to the frozen sources they compile themselves. An emitted bundled raster or binner specializes to
+stages at 16x16, the variants' marker form. Shader variants (candidate
+sources, diagnostic instrumentation and their caches) sit behind one seam,
+`programs/variants.rs`, reached through `GpuPipeline::shader_variants()`.
+Production never installs a variant. Variants are complete current-tree
+sources as `emit-bundled-shaders` writes them, prelude included, specialized by
+their 16x16 `TILE_W`/`TILE_H` markers. `validate_polygon_storage` requires a
+`DrawingState` declared with this build's `POLYGON_CAPACITY` (or none), so every
+state is addressed at the buffers' stride; `check-gpu-mutation` applies the same
+check to the sources it compiles itself. Raster and binning variants must also
+bind their stage's `raster_work` slot, and a mutation variant must declare its
+`OFFSPRING_GROUP_SIZE`. An emitted bundled raster or binner specializes to
 exactly the installed source. Mutation's logical group width and initialization
-policy stay attached to its selected program. The raster, binning, initial framebuffer and
+policy stay attached to its selected program.
+
+Support for historical (frozen) sources was removed after `c0ad387`, so GPU
+struct layouts can change without keeping old shaders compiling: the 1000-slot
+`DrawingState` widening and per-program polygon limits, `WG_X`/`WG_Y` raster
+markers, binners and rasters without `raster_work` (the separate
+`raster_worklist.wgsl` pass and full-grid raster they needed), plain-count and
+`atomicAdd` diagnostic instrumentation, and the marker-free mutation group
+width of 64. The frozen fixtures under
+`benchmarks/evolution/overnight-20261024/fixtures/` and
+`benchmarks/evolution/v1/experiments/reference-bin-dd52d50.wgsl` remain in git
+history at `c0ad387`.
+
+The raster, binning, initial framebuffer and
 framebuffer-update programs form one installed tile group. A failed change must
 preserve the entire preceding group.
 
 `GpuPipeline` owns storage, binding and the concrete device. Its program accessors
 borrow the installed handles; ordinary batches do not look up caches or allocate
-program state. Stage-specific policies remain explicit. In particular, historical
-mutation programs retain their initialization default, and raster initialization
-continues to depend on the backend.
+program state. Stage-specific policies remain explicit. In particular, mutation
+has its own initialization policy, and raster initialization depends on the
+backend.
 
 `gpu_evolver::bindings` declares what each stage binds, once: an ordered list
 of (resource, access) whose position is the binding number. The list builds the
@@ -161,9 +165,9 @@ The binner writes counts and indices only for consumed tiles, those that meet
 each offspring's dirty rectangle, the tiles rasterize_error and
 update_framebuffers read. Other tiles keep stale words from earlier iterations,
 so a new consumer of the tile lists must use `tile_consumed` (or its per-axis
-forms) from `tiles.wgsl`, which the binner, worklist pass and framebuffer update
-share. Validate binner changes with `check-gpu-binning --scope consumed-only`; `full-buffers` compares stale words
-with the frozen full binner and no longer applies to the production shader.
+forms) from `tiles.wgsl`, which the binner and framebuffer update share.
+Validate binner changes with `check-gpu-binning`, whose scalar oracle checks
+consumed tiles and that skipped tiles keep their stale words.
 Each offspring is dispatched as `BIN_ROW_BANDS` workgroups over bands of tile
 rows, so full-image (crossover) offspring do not bound the dispatch alone.
 
@@ -174,15 +178,10 @@ over the list. On the v1 fixtures, about 7–10% of the former 73.7k-workgroup g
 had work. The test must match the raster shortcut exactly, because skipped tiles
 used to return before adding to the error sums. update_framebuffers empties the
 list at the end of every iteration, and `evaluate_chain_fitness` resets it from
-the host because it runs no update. A binning variant that declares no
-`raster_work` binding gets a separate `raster_worklist.wgsl` pass with the same
-test. A raster variant without that binding keeps the full grid. The variant
-seam decides this `RasterSchedule` from the declared bindings when a variant is
-installed; command recording only matches on it. That extra pass made
-512-batch runs host-bound and 5% slower, so production keeps the list in the
-binner.
+the host because it runs no update. A separate worklist pass made 512-batch
+runs host-bound and 5% slower, so the binner builds the list.
 
-Bundled programs, historical programs and diagnostic binners are existing reasons
+Bundled programs, candidate programs and diagnostic binners are existing reasons
 for the installation seam. A generic cache abstraction or another GPU adapter
 would add no needed variation.
 
@@ -224,15 +223,14 @@ exact), but offspring changing those tiles are rejected until the chain is
 re-uploaded. init_framebuffers scans every polygon, and update_framebuffers
 keeps its full-scan fallback for an overflowed list.
 
-Shader variants (`programs/variants.rs`) predate the flag: a historical raster
-variant never sets it, so its runs keep the old truncating behavior. select is
-always bundled; the flag needs a bundled raster.
+select is always bundled; a raster variant must set the flag as the bundled
+raster does.
 
 ## Stage schedule
 
 `gpu_evolver::schedule` records the stages; no other engine code begins a
-compute pass. Raster's dispatches come from `GpuPipeline::record_raster`, which
-matches on the installed `RasterSchedule`. `record_batch` records a batch of search
+compute pass. Raster's dispatch comes from `GpuPipeline::record_raster`.
+`record_batch` records a batch of search
 iterations (mutate, bin, raster, select, `update_framebuffers`), each as two
 compute passes, mutate+bin+raster and select+update: the pass boundaries are the
 error-sum barriers, since wgpu inserts none for RW→RW use inside a pass. A timed
@@ -261,9 +259,8 @@ and compare the shader constants and the `ChainChange` layout.
 
 - The offspring record lives in a working state: the dirty rectangle in
   `fitness_bits`/`stagnation_counter` and the changed-index words in
-  `rng_state[1..3]`. mutate writes it; select, the binner, the worklist pass and
-  raster read it through `offspring_changes.wgsl`. Historical shader variants
-  read and write these words in place, so they stay where they are.
+  `rng_state[1..3]`. mutate writes it; select, the binner and raster read it
+  through `offspring_changes.wgsl`.
 - The chain record is a `GpuChainChange` per chain in `chain_changes`: the
   accepted winner's changed-index words, a mask and the parent versions of those
   polygons. select writes it before copying the winner; update_framebuffers
@@ -322,10 +319,10 @@ checks that mutate stores every one.
   and the host totals after draining; construction allocates them zeroed. Seeded
   warmup batches are therefore not counted.
 
-Shader variants do not declare either binding; the explicit layouts still bind
-them. A historical mutate leaves `offspring_ops` at zero, so its runs count
-every offspring as `add`, but offered still sums to the evaluations, since
-select is always bundled; it records no rungs. Cost: hillclimb 0.9970 [0.9954,
+The explicit layouts bind both buffers whether or not a shader variant declares
+them. A mutate variant that does not write `offspring_ops` leaves it at zero, so
+its runs count every offspring as `add`, but offered still sums to the
+evaluations, since select is always bundled; it records no rungs. Cost: hillclimb 0.9970 [0.9954,
 0.9985] against `874047a`; the rung blocks and step multiply 0.9993 [0.9964,
 1.0018] (NOISE) against `7eb5cac`.
 

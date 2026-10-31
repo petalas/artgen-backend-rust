@@ -1058,13 +1058,9 @@ mod tests {
     use super::*;
     use artgen_backend_rust::gpu_evolver::benchmark::{BenchmarkControl, BenchmarkPackedState};
 
-    const HISTORICAL_MUTATE: &str = include_str!(
-        "../benchmarks/evolution/overnight-20261024/fixtures/mutate-e133-reference.wgsl"
-    );
-    const GROUPED_MUTATE_G1: &str = include_str!(
-        "../benchmarks/evolution/overnight-20261024/fixtures/mutate-g1-wg64-copy64.wgsl"
-    );
     // Preflight/schema fixtures only; empty kernels do not test mutation equivalence.
+    const GROUPED_MUTATE_G1: &str = "const OFFSPRING_GROUP_SIZE: u32 = 1u;\n\
+        @compute @workgroup_size(64) fn main() {}";
     const GROUPED_MUTATE_G64: &str = "const OFFSPRING_GROUP_SIZE: u32 = 64u;\n\
         @compute @workgroup_size(64) fn main() {}";
     const GROUPED_MUTATE_G4: &str = "// candidate λ\n\
@@ -1502,7 +1498,9 @@ mod tests {
             .join(format!("engine-lab-ordinary-source-{}", uuid::Uuid::new_v4()));
         fs::create_dir(&directory)?;
         let result = (|| -> Result<()> {
-            let reference = "@compute @workgroup_size(1) fn main() {}";
+            // Mutation sources must declare their logical group width.
+            let reference =
+                "const OFFSPRING_GROUP_SIZE: u32 = 1u;\n@compute @workgroup_size(1) fn main() {}";
             let candidate = format!("{reference}\n// arbitrary valid candidate\n");
             for stage in ["bin", "raster", "mutate"] {
                 let mut selected = args();
@@ -1570,7 +1568,6 @@ mod tests {
             let bundled_group =
                 benchmark_mutate_group_size_from_source(bundled).map_err(anyhow::Error::msg)?;
             for (original, group) in [
-                (HISTORICAL_MUTATE, 64),
                 (GROUPED_MUTATE_G1, 1),
                 (GROUPED_MUTATE_G64, 64),
                 (bundled, bundled_group),

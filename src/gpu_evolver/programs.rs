@@ -11,7 +11,7 @@ mod variants;
 use std::path::PathBuf;
 
 use wgpu::{
-    AdapterInfo, Backend, BindGroup, BindGroupLayout, ComputePipeline,
+    AdapterInfo, Backend, BindGroupLayout, ComputePipeline,
     ComputePipelineDescriptor, Device, ErrorFilter, ErrorScopeGuard, PipelineCache,
     PipelineCacheDescriptor, PipelineCompilationOptions, PipelineLayout,
     PipelineLayoutDescriptor, ShaderModuleDescriptor, ShaderSource,
@@ -19,14 +19,12 @@ use wgpu::{
 
 pub use bundled::{bundled_shader_source, BundledShader, TileStage};
 use variants::{BenchmarkMutateKey, ShaderVariants};
-pub(super) use variants::WorklistStorage;
 pub use variants::{
     benchmark_mutate_compilation_options, benchmark_mutate_group_size_from_source,
-    specialize_polygon_storage, BenchmarkMutateOptions, ShaderVariantInstaller, VariantStorage,
-    HISTORICAL_POLYGON_CAPACITY,
+    validate_polygon_storage, BenchmarkMutateOptions, ShaderVariantInstaller,
 };
 
-// Bundled policy is separate from the historical-source default.
+// Bundled policy is separate from the benchmark default.
 const BUNDLED_MUTATE_OPTIONS: BenchmarkMutateOptions = BenchmarkMutateOptions {
     zero_initialize_workgroup_memory: true,
 };
@@ -35,8 +33,6 @@ const BUNDLED_MUTATE_OPTIONS: BenchmarkMutateOptions = BenchmarkMutateOptions {
 pub(super) struct MutationProgram {
     key: BenchmarkMutateKey,
     pub(super) pipeline: ComputePipeline,
-    /// The largest `max_polygons` its source supports (`specialize_polygon_storage`).
-    polygon_limit: usize,
 }
 
 impl MutationProgram {
@@ -186,7 +182,6 @@ impl ProgramCompiler {
         TileStages {
             bin: self.bundled_bin(wg),
             raster: self.bundled_raster(wg),
-            schedule: RasterSchedule::ListedByBinner,
         }
     }
 
@@ -196,7 +191,6 @@ impl ProgramCompiler {
             wg,
             raster: stages.raster,
             bin: stages.bin,
-            schedule: stages.schedule,
             init_framebuffers_pipeline: self.tile_stage(
                 "init_framebuffers",
                 &self.layouts.init,
@@ -210,32 +204,28 @@ impl ProgramCompiler {
         }
     }
 
+    /// Create a tile-geometry compute pipeline (`main` entry point) from a
+    /// source already specialized for its workgroup. The labels name the stage.
     fn tile_stage(&self, label: &str, layout: &PipelineLayout, source: &str) -> ComputePipeline {
-        create_tile_pipeline(&self.device, layout, label, source, &self.cache)
+        let shader = self.device.create_shader_module(ShaderModuleDescriptor {
+            label: Some(&format!("{label}_shader")),
+            source: ShaderSource::Wgsl(source.into()),
+        });
+        self.device.create_compute_pipeline(&ComputePipelineDescriptor {
+            label: Some(&format!("{label}_pipeline")),
+            layout: Some(layout),
+            module: &shader,
+            entry_point: Some("main"),
+            compilation_options: rasterize_compilation_options(&self.device),
+            cache: Some(&self.cache),
+        })
     }
-}
-
-/// How `rasterize_error` finds the (offspring, tile) pairs it must run. Decided
-/// when a program is installed; command recording only matches on it.
-#[derive(Clone)]
-pub(super) enum RasterSchedule {
-    /// The binner appends the list and raster loops over it (bundled programs).
-    ListedByBinner,
-    /// A shader-variant binner lists nothing, so a separate pass lists the pairs
-    /// with the same test before raster loops over them.
-    ListedByPass {
-        pipeline: ComputePipeline,
-        bind_group: BindGroup,
-    },
-    /// A shader-variant raster indexes tiles by workgroup id over the full grid.
-    FullGrid,
 }
 
 /// The raster and binning programs of one tile group, before framebuffer stages.
 struct TileStages {
     raster: ComputePipeline,
     bin: ComputePipeline,
-    schedule: RasterSchedule,
 }
 
 // A tile transition replaces this whole value only after every stage succeeds.
@@ -244,7 +234,6 @@ pub(super) struct TilePrograms {
     pub wg: [u32; 2],
     pub raster: ComputePipeline,
     pub bin: ComputePipeline,
-    pub schedule: RasterSchedule,
     pub init_framebuffers_pipeline: ComputePipeline,
     pub update_framebuffers_pipeline: ComputePipeline,
 }
@@ -271,14 +260,13 @@ impl GpuPrograms {
         let mutation = MutationProgram {
             pipeline: compiler.mutate(&key.source, key.options),
             key,
-            polygon_limit: crate::settings::POLYGON_CAPACITY,
         };
         let tiles = compiler.tiles(wg, compiler.bundled_stages(wg));
         Self {
             mutation,
             tiles,
             select: compiler.select(),
-            variants: ShaderVariants::new(device, bindings.params),
+            variants: ShaderVariants::new(),
             compiler,
         }
     }
@@ -368,29 +356,6 @@ fn finish_compilation(scopes: [ErrorScopeGuard; 3]) -> Result<(), String> {
     } else {
         Err(errors.join("; "))
     }
-}
-
-/// Create a tile-geometry compute pipeline (`main` entry point) from a source
-/// already specialized for its workgroup. The labels name the stage.
-fn create_tile_pipeline(
-    device: &Device,
-    layout: &PipelineLayout,
-    label: &str,
-    source: &str,
-    cache: &PipelineCache,
-) -> ComputePipeline {
-    let shader = device.create_shader_module(ShaderModuleDescriptor {
-        label: Some(&format!("{label}_shader")),
-        source: ShaderSource::Wgsl(source.into()),
-    });
-    device.create_compute_pipeline(&ComputePipelineDescriptor {
-        label: Some(&format!("{label}_pipeline")),
-        layout: Some(layout),
-        module: &shader,
-        entry_point: Some("main"),
-        compilation_options: rasterize_compilation_options(device),
-        cache: Some(cache),
-    })
 }
 
 /// A bundled tile-group stage with the generated constants for tile `wg`.

@@ -4,8 +4,8 @@
 //! `changes.wgsl`, for the stages that read offspring change records
 //! `offspring_changes.wgsl` and, for the tile group, `tiles.wgsl`. WGSL
 //! module-scope declarations may follow their uses, so the stage body comes
-//! first and naga's line numbers match its file. Shader variants never receive
-//! the prelude.
+//! first and naga's line numbers match its file. Shader variants are complete
+//! emitted sources and never receive the prelude again.
 
 use crate::gpu_evolver::changes::CHANGED_INDICES;
 use crate::gpu_evolver::execution::{RASTER_WORK_HEADER_BYTES, TILE_OVERFLOW_ERROR};
@@ -25,17 +25,14 @@ const _: () = assert!(POLYGON_CAPACITY <= u32::MAX as usize);
 pub enum TileStage {
     RasterizeError,
     BinPolygons,
-    /// The separate worklist pass for binning variants that list no raster work.
-    RasterWorklist,
     InitFramebuffers,
     UpdateFramebuffers,
 }
 
 impl TileStage {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 4] = [
         Self::RasterizeError,
         Self::BinPolygons,
-        Self::RasterWorklist,
         Self::InitFramebuffers,
         Self::UpdateFramebuffers,
     ];
@@ -49,10 +46,6 @@ impl TileStage {
             Self::BinPolygons => (
                 "bin_polygons.wgsl",
                 include_str!("../../shaders/bin_polygons.wgsl"),
-            ),
-            Self::RasterWorklist => (
-                "raster_worklist.wgsl",
-                include_str!("../../shaders/raster_worklist.wgsl"),
             ),
             Self::InitFramebuffers => (
                 "init_framebuffers.wgsl",
@@ -91,10 +84,7 @@ impl BundledShader {
     fn reads_offspring_changes(self) -> bool {
         match self {
             Self::Select
-            | Self::Tile(
-                TileStage::RasterizeError | TileStage::BinPolygons | TileStage::RasterWorklist,
-                _,
-            ) => true,
+            | Self::Tile(TileStage::RasterizeError | TileStage::BinPolygons, _) => true,
             Self::Mutate
             | Self::Tile(TileStage::InitFramebuffers | TileStage::UpdateFramebuffers, _) => false,
         }
@@ -141,7 +131,7 @@ fn push_part(source: &mut String, name: &str, part: &str) {
 
 /// Constants shared with Rust. The tile size uses the variants' marker form
 /// (`const TILE_W: u32 = 16;`), so a 16x16 source emitted for benchmarks
-/// installs as a shader variant and specializes like a historical source.
+/// installs as a shader variant and specializes to the bundled source at any tile.
 fn generated_constants(tile: Option<[u32; 2]>) -> String {
     let common = format!(
         "const POLYGON_CAPACITY: u32 = {POLYGON_CAPACITY}u; // settings::POLYGON_CAPACITY\n\

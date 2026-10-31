@@ -1,5 +1,5 @@
 // Readers of the offspring change record (changes.wgsl), for the stages that
-// read it: select, bin_polygons, raster_worklist and rasterize_error. Each binds
+// read it: select, bin_polygons and rasterize_error. Each binds
 // working_states and chain_states. gpu_evolver::programs appends this file
 // after changes.wgsl. mutate is the only writer (write_dirty_box and
 // write_changed_words there).

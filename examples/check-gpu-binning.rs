@@ -1,44 +1,18 @@
 //! Main-thread checks of GPU binning through the real `GpuPipeline`.
-//! With no arguments, checks the 01/04 dirty-binning experiments, whose skipped
-//! bins must retain stale words. The restored reference intentionally fails
-//! that strict contract.
+//! Checks the dirty-binning contract against a scalar oracle: consumed tiles get
+//! their count and ordered indices, skipped tiles retain stale words.
 //! Run with `timeout 600s cargo run --release --locked --example check-gpu-binning`.
-//! `--scope consumed-only` instead compares consumed counts and ordered valid
-//! prefixes with the frozen dd52d50 GPU binner. Unread words are ignored only in
-//! that explicit mode. The original no-argument strict checks are unchanged.
-//! `--scope full-buffers` also compares every count/index word with that frozen
-//! N1 baseline, including unconsumed counts and unwritten poison/stale indices.
-//! This diagnoses an N2 baseline probe that repeats the complete reset/scatter
-//! body twice inside the existing one-lane workgroup: final buffers must match
-//! N1. Both paired modes retain the consumed-prefix and analytical truth checks.
-//! They also check one 384x384 image at raster tile size 32x16, outside the
-//! workgroup/image crossproduct. Its 288 tiles exercise the second tile stripe
-//! for an internal 256-lane binner. Internal bin lanes do not change raster tiles.
+//! The paired consumed-only and full-buffers scopes compared against the frozen
+//! dd52d50 GPU binner; they were removed with that source (see
+//! benchmarks/evolution/v1/experiments/02-packed-rejection.md).
 //!
-//! Bounds: five supported workgroups, three original images plus four narrow
-//! 512/513-axis images in either paired mode, three offspring, at most 1000
-//! polygons, 195 tiles per offspring in the original grid, exactly 288 in the
-//! targeted configuration, and 20 checks per buffer fixture. A consumed
-//! or full-buffer check dispatches both GPU binners. Only one image's buffers
-//! are live at once.
-//! Each workgroup/image has 17 standard checks and six packed-edge checks in
-//! either paired mode: 805 paired checks and 1610 GPU dispatches in that grid.
-//! The targeted configuration adds 17 standard, six packed-edge, and four
-//! cache-stripe checks: 832 paired checks and 1664 GPU dispatches in total.
-//! Its stripe batches have polygon counts 31/32/33, 63/64/65, 127/128/129,
-//! and 255/256/257. Standard and packed checks retain empty/500/999/1000
-//! coverage and overflow-to-empty history. Each targeted count/index readback
-//! is 888192 bytes for all three offspring, below 1 MiB.
-//! A separate 384x704 grid has 528 tiles and checks 511/512/513 polygons,
-//! smaller counts, then empty states, exercising both 512-lane striped loops.
-//! Its readback is 1628352 bytes, below 2 MiB. Paired modes total 835 checks
-//! and 1670 GPU dispatches; all earlier cases remain. Buffer histories
-//! persist within each fixture. Use full-buffers to validate shader variants;
-//! consumed-only does not prove equality of stale suffixes or skipped counts.
-//! Strict mode runs only the standard checks, for 255 GPU dispatches in total.
+//! Bounds: five supported workgroups, three images, three offspring, at most
+//! 1000 polygons, 195 tiles per offspring, and 20 checks per buffer fixture:
+//! 255 GPU dispatches in total. Only one image's buffers are live at once.
+//! Buffer histories persist within each fixture.
 //! Each mapping/poll has a 120-second limit. GPU work stays on this main thread.
 //! Rule 3 deviation: wgpu and the scalar oracle allocate during this finite
-//! checker, with one fixture live at a time and at most 528 tiles per offspring.
+//! checker, with one fixture live at a time and at most 195 tiles per offspring.
 //! Rule 7 deviation: existing `GpuPipeline` construction has internal unbounded
 //! adapter/compilation waits; the outer process timeout bounds the whole run.
 //! Rules 8/9 deviation: formatting/assertion macros and wgpu's single mapping
@@ -48,11 +22,10 @@
 //! `--shader PATH` installs a 1..262144-byte UTF-8 WGSL source through the
 //! actual engine factory before fixture work. CLI and CPU WGSL validation run
 //! before GPU initialization. The installed source survives all workgroup changes.
-//! Shader runs require `--output NEWDIR` and retain exact source bytes, SHA-256,
-//! scope and completion evidence there. NEWDIR must not exist and its parent
+//! Shader runs require `--output NEWDIR` and retain exact source bytes, SHA-256
+//! and completion evidence there. NEWDIR must not exist and its parent
 //! must exist. A metadata record alone is not a pass; only `result.json` records
-//! completed GPU checks. No output directory is created for legacy runs.
-//! No-argument runs retain their original output and strict candidate contract.
+//! completed GPU checks. No output directory is created for runs without a shader.
 //! Rule 10 deviation: this source preparation runs rustfmt and static inspection
 //! only. The parent owns Cargo compilation and GPU proof before adoption.
 
@@ -69,7 +42,7 @@ use anyhow::{bail, ensure, Context, Result};
 use artgen_backend_rust::{
     gpu_evolver::{
         buffers::{default_gpu_params, GpuDrawingState, GpuPolygon},
-        pipeline::{specialize_polygon_storage, GpuPipeline, HISTORICAL_POLYGON_CAPACITY},
+        pipeline::GpuPipeline,
         EngineCapacity,
     },
     settings::{BIN_ROW_BANDS, TILE_MAX_POLYS},
@@ -80,34 +53,18 @@ use wgpu::util::DeviceExt;
 
 const WORKGROUPS: [[u32; 2]; 5] = [[32, 16], [16, 16], [32, 8], [16, 8], [8, 8]];
 const IMAGE_SIZES: [[u32; 2]; 3] = [[64, 48], [65, 51], [17, 19]];
-const GUARD_SIZES: [[u32; 2]; 4] = [[512, 19], [513, 19], [19, 512], [19, 513]];
-const STRIPE_SIZE: [u32; 2] = [384, 384];
-const STRIPE_RASTER_WG: [u32; 2] = [32, 16];
-const STRIPE_TILES: usize = 288;
-const WIDE_STRIPE_SIZE: [u32; 2] = [384, 704];
-const WIDE_STRIPE_TILES: usize = 528;
-const STRIPE_COUNTS: [[usize; 3]; 4] =
-    [[31, 32, 33], [63, 64, 65], [127, 128, 129], [255, 256, 257]];
 const OFFSPRING: usize = 3;
 const BIN_CAPACITY: usize = 256;
 const TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_SOURCE_BYTES: usize = 256 * 1024;
 const USAGE: &str =
-    "usage: check-gpu-binning [--scope consumed-only|full-buffers] [--shader PATH --output NEWDIR]\n\
+    "usage: check-gpu-binning [--shader PATH --output NEWDIR]\n\
      --shader requires a nonempty UTF-8 WGSL file at most 256 KiB and --output.\n\
-     NEWDIR must not exist and its parent must exist. No arguments select the legacy strict checks.";
-const REFERENCE_SHA256: &str = "27bbf8473e9ae1f68cb7ccb3a747e6f6fb8b9106bd7a42e16e88ea017a88f61f";
+     NEWDIR must not exist and its parent must exist.";
+const CHECKS: usize = 255;
 type DirtyBox = [u32; 4];
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Scope {
-    Strict,
-    ConsumedOnly,
-    FullBuffers,
-}
-
 struct Config {
-    scope: Scope,
     shader: Option<OptionalSource>,
 }
 
@@ -125,16 +82,9 @@ struct BinBuffers {
     bind_group: wgpu::BindGroup,
 }
 
-struct ReferenceBins {
-    pipeline: wgpu::ComputePipeline,
-    buffers: BinBuffers,
-}
-
 struct Bins {
     image_size: [u32; 2],
-    scope: Scope,
     buffers: BinBuffers,
-    reference: Option<ReferenceBins>,
     expected: Vec<u32>,
     dispatches: usize,
 }
@@ -144,7 +94,6 @@ fn main() -> Result<()> {
         println!("{USAGE}");
         return Ok(());
     };
-    let scope = config.scope;
     ensure!(usize::try_from(TILE_MAX_POLYS)? == BIN_CAPACITY);
     let reference = [0, 0, 0, 255].repeat(65 * 51);
     let initial = vec![GpuDrawingState::zeroed()];
@@ -163,65 +112,37 @@ fn main() -> Result<()> {
             .set_bin_shader(&source.text)
             .map_err(anyhow::Error::msg)
             .context("invalid bin shader for the actual GPU factory")?;
-        Some((retain_source(source, scope)?, source))
+        Some((retain_source(source)?, source))
     } else {
         None
     };
     let mut dispatches = 0;
     for workgroup in WORKGROUPS {
         pipeline.set_rasterize_wg(workgroup);
-        let reference = (scope != Scope::Strict).then(|| reference_pipeline(&pipeline));
         for image_size in IMAGE_SIZES {
-            dispatches += check_fixture(&pipeline, image_size, reference.as_ref(), scope)?;
-            if let Some(reference) = &reference {
-                dispatches += check_packed_edges(&pipeline, image_size, reference, scope)?;
-            }
-        }
-        if let Some(reference) = &reference {
-            for image_size in GUARD_SIZES {
-                dispatches += check_fixture(&pipeline, image_size, Some(reference), scope)?;
-                dispatches += check_packed_edges(&pipeline, image_size, reference, scope)?;
-            }
+            dispatches += check_fixture(&pipeline, image_size)?;
         }
     }
-    if scope != Scope::Strict {
-        pipeline.set_rasterize_wg(STRIPE_RASTER_WG);
-        let reference = reference_pipeline(&pipeline);
-        dispatches += check_stripe_grid(&pipeline, &reference, scope)?;
-        dispatches += check_wide_stripe_grid(&pipeline, &reference, scope)?;
-    }
+    ensure!(dispatches == CHECKS, "check count changed");
     if let Some((directory, source)) = evidence {
-        record_result(&directory, source, scope, dispatches)?;
+        record_result(&directory, source, dispatches)?;
     }
-    match scope {
-        Scope::Strict => println!("GPU dirty-binning candidate checks passed: 5 workgroups, 3 images, {dispatches} dispatches"),
-        Scope::ConsumedOnly => println!("GPU consumed-only checks passed: 5 workgroups, 7 images plus 2 targeted configurations, {dispatches} paired checks, {} GPU dispatches", dispatches * 2),
-        Scope::FullBuffers => println!("GPU full-buffers checks passed: 5 workgroups, 7 images plus 2 targeted configurations, {dispatches} paired checks, {} GPU dispatches", dispatches * 2),
-    }
+    println!("GPU dirty-binning checks passed: 5 workgroups, 3 images, {dispatches} dispatches");
     Ok(())
 }
 
 fn parse_config(args: impl Iterator<Item = OsString>) -> Result<Option<Config>> {
-    let args: Vec<_> = args.take(7).collect();
+    let args: Vec<_> = args.take(5).collect();
     if args.len() == 1 && (args[0] == "--help" || args[0] == "-h") {
         return Ok(None);
     }
-    ensure!(args.len() <= 6 && args.len().is_multiple_of(2), USAGE);
-    let mut scope = None;
+    ensure!(args.len() <= 4 && args.len().is_multiple_of(2), USAGE);
     let mut path = None;
     let mut output = None;
     for pair in args.as_chunks::<2>().0 {
         let flag = pair[0].to_str().context("CLI flags must be UTF-8")?;
         let value = pair[1].to_str().context("CLI values must be UTF-8")?;
         match flag {
-            "--scope" => {
-                ensure!(scope.is_none(), "duplicate --scope");
-                scope = Some(match value {
-                    "consumed-only" => Scope::ConsumedOnly,
-                    "full-buffers" => Scope::FullBuffers,
-                    _ => bail!("invalid scope; {USAGE}"),
-                });
-            }
             "--shader" => {
                 ensure!(path.is_none(), "duplicate --shader");
                 ensure!(
@@ -246,10 +167,7 @@ fn parse_config(args: impl Iterator<Item = OsString>) -> Result<Option<Config>> 
         (Some(path), Some(output)) => Some(read_source(path, output)?),
         _ => bail!("--shader and --output must be supplied together; {USAGE}"),
     };
-    Ok(Some(Config {
-        scope: scope.unwrap_or(Scope::Strict),
-        shader,
-    }))
+    Ok(Some(Config { shader }))
 }
 
 fn read_source(path: PathBuf, output: PathBuf) -> Result<OptionalSource> {
@@ -296,15 +214,6 @@ fn read_source(path: PathBuf, output: PathBuf) -> Result<OptionalSource> {
         fs::metadata(parent)?.is_dir(),
         "output parent must be an existing directory"
     );
-    ensure!(
-        format!(
-            "{:x}",
-            Sha256::digest(include_bytes!(
-                "../benchmarks/evolution/v1/experiments/reference-bin-dd52d50.wgsl"
-            ))
-        ) == REFERENCE_SHA256,
-        "frozen GPU reference source changed"
-    );
     Ok(OptionalSource {
         path,
         output,
@@ -313,26 +222,16 @@ fn read_source(path: PathBuf, output: PathBuf) -> Result<OptionalSource> {
     })
 }
 
-fn scope_name(scope: Scope) -> &'static str {
-    match scope {
-        Scope::Strict => "strict",
-        Scope::ConsumedOnly => "consumed-only",
-        Scope::FullBuffers => "full-buffers",
-    }
-}
-
-fn retain_source(source: &OptionalSource, scope: Scope) -> Result<PathBuf> {
+fn retain_source(source: &OptionalSource) -> Result<PathBuf> {
     let directory = &source.output;
     fs::create_dir(directory)?;
     write_new(&directory.join("source.wgsl"), source.text.as_bytes())?;
     let metadata = serde_json::json!({
-        "status": "source-installed-checks-not-complete", "scope": scope_name(scope),
+        "status": "source-installed-checks-not-complete",
         "source_path": source.path, "source_sha256": source.sha256,
         "source_bytes": source.text.len(), "source_copy": "source.wgsl",
-        "reference_sha256": REFERENCE_SHA256,
         "benchmark_validation": false, "compilation_options": "production-default",
-        "expected_checks": if scope == Scope::Strict { 255 } else { 835 },
-        "expected_gpu_dispatches": if scope == Scope::Strict { 255 } else { 1670 },
+        "expected_checks": CHECKS, "expected_gpu_dispatches": CHECKS,
     });
     write_new(
         &directory.join("metadata.json"),
@@ -341,15 +240,10 @@ fn retain_source(source: &OptionalSource, scope: Scope) -> Result<PathBuf> {
     Ok(directory.clone())
 }
 
-fn record_result(
-    directory: &Path,
-    source: &OptionalSource,
-    scope: Scope,
-    checks: usize,
-) -> Result<()> {
+fn record_result(directory: &Path, source: &OptionalSource, checks: usize) -> Result<()> {
     let result = serde_json::json!({
-        "status": "passed", "scope": scope_name(scope), "source_sha256": source.sha256,
-        "checks": checks, "gpu_dispatches": checks * if scope == Scope::Strict { 1 } else { 2 },
+        "status": "passed", "source_sha256": source.sha256,
+        "checks": checks, "gpu_dispatches": checks,
     });
     write_new(
         &directory.join("result.json"),
@@ -365,87 +259,26 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn reference_pipeline(p: &GpuPipeline) -> wgpu::ComputePipeline {
-    // The frozen binner's drawing state takes the engine's stride; its own
-    // bounds array keeps 1000 polygons, the most any fixture here holds.
-    let storage = specialize_polygon_storage(include_str!(
-        "../benchmarks/evolution/v1/experiments/reference-bin-dd52d50.wgsl"
-    ))
-    .expect("the frozen binner declares a historical drawing state");
-    assert_eq!(storage.polygon_limit, HISTORICAL_POLYGON_CAPACITY);
-    let source = storage
-        .source
-        .replace(
-            "const TILE_W: u32 = 16;",
-            &format!("const TILE_W: u32 = {};", p.rasterize_wg()[0]),
-        )
-        .replace(
-            "const TILE_H: u32 = 16;",
-            &format!("const TILE_H: u32 = {};", p.rasterize_wg()[1]),
-        );
-    let shader = p.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("checker frozen full binner"),
-        source: wgpu::ShaderSource::Wgsl(source.into()),
-    });
-    let layouts = [
-        p.bin_polygons_pipeline().get_bind_group_layout(0),
-        p.bin_polygons_pipeline().get_bind_group_layout(1),
-    ];
-    let layout = p
-        .device
-        .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("checker compatible reference layout"),
-            bind_group_layouts: &[Some(&layouts[0]), Some(&layouts[1])],
-            immediate_size: 0,
-        });
-    p.device
-        .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("checker original full binner"),
-            layout: Some(&layout),
-            module: &shader,
-            entry_point: Some("main"),
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-            cache: None,
-        })
-}
-
-fn new_bins(
-    p: &GpuPipeline,
-    image_size: [u32; 2],
-    reference: Option<&wgpu::ComputePipeline>,
-    scope: Scope,
-) -> Bins {
-    let stripe_grid =
-        [STRIPE_SIZE, WIDE_STRIPE_SIZE].contains(&image_size) && p.rasterize_wg() == STRIPE_RASTER_WG;
-    assert!(IMAGE_SIZES.contains(&image_size) || GUARD_SIZES.contains(&image_size) || stripe_grid);
+fn new_bins(p: &GpuPipeline, image_size: [u32; 2]) -> Bins {
+    assert!(IMAGE_SIZES.contains(&image_size));
     assert!(WORKGROUPS.contains(&p.rasterize_wg()));
     let tiles =
         image_size[0].div_ceil(p.rasterize_wg()[0]) * image_size[1].div_ceil(p.rasterize_wg()[1]);
-    assert!(tiles <= 195 || (stripe_grid && [288, 528].contains(&tiles)));
-    let slots = usize::try_from(tiles).expect("at most 528 tiles") * OFFSPRING;
+    assert!(tiles <= 195);
+    let slots = usize::try_from(tiles).expect("at most 195 tiles") * OFFSPRING;
     let expected: Vec<u32> = (0..slots * (BIN_CAPACITY + 1))
         .map(|i| 0xA000_0000 | u32::try_from(i).expect("bounded buffer word index"))
         .collect();
     Bins {
         image_size,
-        scope,
         buffers: new_bin_buffers(p, &expected, slots),
-        // Both binners start with identical poison and keep their own history.
-        // Neither buffer set is re-poisoned between paired dispatches.
-        reference: reference.map(|pipeline| ReferenceBins {
-            pipeline: pipeline.clone(),
-            buffers: new_bin_buffers(p, &expected, slots),
-        }),
         expected,
         dispatches: 0,
     }
 }
 
 fn new_bin_buffers(p: &GpuPipeline, poison: &[u32], slots: usize) -> BinBuffers {
-    assert!(
-        slots <= 195 * OFFSPRING
-            || [STRIPE_TILES * OFFSPRING, WIDE_STRIPE_TILES * OFFSPRING].contains(&slots)
-    );
+    assert!(slots <= 195 * OFFSPRING);
     assert_eq!(poison.len(), slots * (BIN_CAPACITY + 1));
     assert!(std::mem::size_of_val(poison) < 2 * 1024 * 1024);
     let usage =
@@ -533,9 +366,7 @@ fn dispatch(
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &bins.bind_group, &[]);
         pass.set_bind_group(1, &p.params_bind_group, &[]);
-        // The frozen reference ignores workgroup y; production bins row bands.
-        let bands = if std::ptr::eq(pipeline, p.bin_polygons_pipeline()) { BIN_ROW_BANDS } else { 1 };
-        pass.dispatch_workgroups(u32::try_from(OFFSPRING)?, bands, 1);
+        pass.dispatch_workgroups(u32::try_from(OFFSPRING)?, BIN_ROW_BANDS, 1);
     }
     encoder.copy_buffer_to_buffer(&bins.counts, 0, &bins.staging, 0, bins.counts.size());
     encoder.copy_buffer_to_buffer(
@@ -594,21 +425,6 @@ fn check_dispatch(
         p.bin_polygons_pipeline(),
         states,
     )?;
-    if let Some(reference) = &bins.reference {
-        let expected = dispatch(
-            p,
-            bins.image_size,
-            &reference.buffers,
-            &reference.pipeline,
-            states,
-        )?;
-        check_consumed_gpu(p, bins, states, &actual, &expected, label)?;
-        if bins.scope == Scope::FullBuffers {
-            check_full_buffers(p, bins, &actual, &expected, label)?;
-        }
-        bins.dispatches += 1;
-        return Ok(());
-    }
     let slots = usize::try_from(bins.buffers.counts.size() / 4)?;
     let tiles = slots / OFFSPRING;
     for (offspring, state) in states.iter().enumerate() {
@@ -636,77 +452,6 @@ fn check_dispatch(
         }
     }
     bins.dispatches += 1;
-    Ok(())
-}
-
-fn check_full_buffers(
-    p: &GpuPipeline,
-    bins: &Bins,
-    actual: &[u32],
-    expected: &[u32],
-    label: &str,
-) -> Result<()> {
-    ensure!(actual.len() == bins.expected.len() && expected.len() == actual.len());
-    for (word, (&value, &reference)) in actual.iter().zip(expected).enumerate() {
-        ensure!(
-            value == reference,
-            "size={:?}, wg={:?}, {label}, word={word}: got {value}, reference {reference}",
-            bins.image_size,
-            p.rasterize_wg()
-        );
-    }
-    Ok(())
-}
-
-fn check_consumed_gpu(
-    p: &GpuPipeline,
-    bins: &Bins,
-    states: &[GpuDrawingState],
-    actual: &[u32],
-    expected: &[u32],
-    label: &str,
-) -> Result<()> {
-    ensure!(actual.len() == bins.expected.len() && expected.len() == actual.len());
-    let slots = usize::try_from(bins.buffers.counts.size() / 4)?;
-    let tiles = slots / OFFSPRING;
-    for (offspring, state) in states.iter().enumerate() {
-        for tile in 0..tiles {
-            if !consumed(state, tile, bins.image_size, p.rasterize_wg()) {
-                continue;
-            }
-            let global = offspring * tiles + tile;
-            ensure!(
-                actual[global] == expected[global],
-                "size={:?}, wg={:?}, {label}, offspring={offspring}, tile={tile}: count {}, reference {}",
-                bins.image_size, p.rasterize_wg(), actual[global], expected[global]
-            );
-            ensure!(
-                expected[global] <= state.polygon_count,
-                "invalid reference count"
-            );
-            let count = usize::try_from(expected[global])?.min(BIN_CAPACITY);
-            let start = slots + global * BIN_CAPACITY;
-            ensure!(
-                actual[start..start + count] == expected[start..start + count],
-                "size={:?}, wg={:?}, {label}, offspring={offspring}, tile={tile}: ordered prefix differs",
-                bins.image_size, p.rasterize_wg()
-            );
-            // The 500/999/1000-layer fixtures contain only full-image triangles.
-            // Check their reference truth as well as agreement between binners.
-            if [500, 999, 1000].contains(&state.polygon_count) {
-                ensure!(
-                    expected[global] == state.polygon_count,
-                    "reference lost overlapping layers"
-                );
-                for (layer, &index) in expected[start..start + BIN_CAPACITY].iter().enumerate() {
-                    ensure!(
-                        index == u32::try_from(layer)?,
-                        "reference layer order changed"
-                    );
-                }
-            }
-        }
-    }
     Ok(())
 }
 
@@ -805,13 +550,8 @@ fn drawing(polygons: &[GpuPolygon], bounds: DirtyBox) -> GpuDrawingState {
     state
 }
 
-fn check_fixture(
-    p: &GpuPipeline,
-    size: [u32; 2],
-    reference: Option<&wgpu::ComputePipeline>,
-    scope: Scope,
-) -> Result<usize> {
-    let mut bins = new_bins(p, size, reference, scope);
+fn check_fixture(p: &GpuPipeline, size: [u32; 2]) -> Result<usize> {
+    let mut bins = new_bins(p, size);
     let full = [0, 0, size[0], size[1]];
     let polygons = layered_polygons();
     let mut states: Vec<_> = (0..OFFSPRING).map(|_| drawing(&polygons, full)).collect();
@@ -823,66 +563,6 @@ fn check_fixture(
     println!(
         "size={size:?}, wg={:?}: {} dispatches passed",
         p.rasterize_wg(), bins.dispatches
-    );
-    Ok(bins.dispatches)
-}
-
-fn check_stripe_grid(
-    p: &GpuPipeline,
-    reference: &wgpu::ComputePipeline,
-    scope: Scope,
-) -> Result<usize> {
-    assert!(p.rasterize_wg() == STRIPE_RASTER_WG && scope != Scope::Strict);
-    let mut checks = check_fixture(p, STRIPE_SIZE, Some(reference), scope)?;
-    checks += check_packed_edges(p, STRIPE_SIZE, reference, scope)?;
-    let mut bins = new_bins(p, STRIPE_SIZE, Some(reference), scope);
-    let full = [0, 0, STRIPE_SIZE[0], STRIPE_SIZE[1]];
-    let polygons = [polygon([[0, 0], [65535, 0], [0, 65535]]); 257];
-    // Keep the same poison/stale history across all four partial cache stripes.
-    for counts in STRIPE_COUNTS {
-        let states: Vec<_> = counts
-            .into_iter()
-            .map(|count| drawing(&polygons[..count], full))
-            .collect();
-        check_dispatch(
-            p,
-            &mut bins,
-            &states,
-            &format!("cache stripe polygon counts {counts:?}, full image"),
-        )?;
-    }
-    checks += bins.dispatches;
-    ensure!(checks == 27, "targeted configuration check count changed");
-    println!(
-        "size={STRIPE_SIZE:?}, wg={STRIPE_RASTER_WG:?}: {checks} targeted paired checks passed"
-    );
-    Ok(checks)
-}
-
-fn check_wide_stripe_grid(
-    p: &GpuPipeline,
-    reference: &wgpu::ComputePipeline,
-    scope: Scope,
-) -> Result<usize> {
-    assert!(p.rasterize_wg() == STRIPE_RASTER_WG && scope != Scope::Strict);
-    let mut bins = new_bins(p, WIDE_STRIPE_SIZE, Some(reference), scope);
-    let full = [0, 0, WIDE_STRIPE_SIZE[0], WIDE_STRIPE_SIZE[1]];
-    let polygons = [polygon([[0, 0], [65535, 0], [0, 65535]]); 1000];
-    for counts in [[511, 512, 513], [0, 500, 1000], [0, 0, 0]] {
-        let states: Vec<_> = counts
-            .into_iter()
-            .map(|count| drawing(&polygons[..count], full))
-            .collect();
-        check_dispatch(
-            p,
-            &mut bins,
-            &states,
-            &format!("wide grid: polygon counts {counts:?}"),
-        )?;
-    }
-    ensure!(bins.dispatches == 3, "wide stripe check count changed");
-    println!(
-        "size={WIDE_STRIPE_SIZE:?}, wg={STRIPE_RASTER_WG:?}: 3 wide stripe paired checks passed"
     );
     Ok(bins.dispatches)
 }
@@ -938,136 +618,6 @@ fn check_overflow_and_empty(p: &GpuPipeline, bins: &mut Bins) -> Result<()> {
     let empty: Vec<_> = (0..OFFSPRING).map(|_| drawing(&[], full)).collect();
     check_dispatch(p, bins, &empty, "empty drawing resets old overflowing bins")?;
     Ok(())
-}
-
-fn tile_probe_starts(dim: u32, tile: u32) -> [u32; 3] {
-    assert!(dim > 0 && dim <= 513 && [8, 16, 32].contains(&tile));
-    let last = (dim - 1) / tile * tile;
-    [tile.min(last), dim / 2 / tile * tile, last]
-}
-
-fn packed_axis_probes(dim: u32, tile: u32) -> Vec<u16> {
-    let mut values = Vec::with_capacity(64);
-    values.extend([0, 1, 65534, 65535]);
-    for start in tile_probe_starts(dim, tile) {
-        let end = (start + tile).min(dim);
-        // Probe each tile edge and the adjacent guarded pixel boundaries.
-        for pixel in [
-            start.saturating_sub(1),
-            start,
-            (start + 1).min(dim),
-            end,
-            (end + 1).min(dim),
-        ] {
-            let q = pixel * 65535 / dim;
-            for value in [
-                q.saturating_sub(1),
-                q,
-                (q + 1).min(65535),
-                (q + 2).min(65535),
-            ] {
-                values.push(u16::try_from(value).expect("packed coordinate"));
-            }
-        }
-    }
-    assert!(values.len() <= 64);
-    values.sort_unstable();
-    values.dedup();
-    values
-}
-
-fn packed_edge_polygons(size: [u32; 2], wg: [u32; 2]) -> Vec<GpuPolygon> {
-    let mut polygons = Vec::with_capacity(128);
-    for (axis, (&dim, &tile)) in size.iter().zip(&wg).enumerate() {
-        for q in packed_axis_probes(dim, tile) {
-            let vertices = if axis == 0 {
-                [[q, 0], [q, 65535], [q, 0]]
-            } else {
-                [[0, q], [65535, q], [0, q]]
-            };
-            polygons.push(polygon(vertices));
-        }
-    }
-    assert!(polygons.len() <= 128);
-    polygons
-}
-
-fn check_packed_edges(
-    p: &GpuPipeline,
-    size: [u32; 2],
-    reference: &wgpu::ComputePipeline,
-    scope: Scope,
-) -> Result<usize> {
-    let mut bins = new_bins(p, size, Some(reference), scope);
-    let polygons = packed_edge_polygons(size, p.rasterize_wg());
-    let full = [0, 0, size[0], size[1]];
-    let mut states: Vec<_> = (0..OFFSPRING).map(|_| drawing(&polygons, full)).collect();
-    states[1].polygons[..polygons.len()].reverse();
-    check_dispatch(p, &mut bins, &states, "packed edges, full image bypass")?;
-    let starts_x = tile_probe_starts(size[0], p.rasterize_wg()[0]);
-    let starts_y = tile_probe_starts(size[1], p.rasterize_wg()[1]);
-    for (state, (x, y)) in states.iter_mut().zip(starts_x.into_iter().zip(starts_y)) {
-        let x = (x + 1).min(size[0] - 1);
-        let y = (y + 1).min(size[1] - 1);
-        set_dirty(state, [x, y, x + 1, y + 1]);
-    }
-    check_dispatch(
-        p,
-        &mut bins,
-        &states,
-        "packed edges, first/middle/final tiles",
-    )?;
-    for (state, (x, y)) in states.iter_mut().zip(starts_x.into_iter().zip(starts_y)) {
-        let x = (x + 1).min(size[0] - 1);
-        let y = (y + 1).min(size[1] - 1);
-        set_dirty(state, [x, y, x, y]);
-    }
-    check_dispatch(p, &mut bins, &states, "packed edges, zero-width boxes")?;
-    for (state, (x, y)) in states.iter_mut().zip(starts_x.into_iter().zip(starts_y)) {
-        let x = (x + 1).min(size[0] - 1);
-        let y = (y + 1).min(size[1] - 1);
-        set_dirty(state, [x + 1, y + 1, x, y]);
-    }
-    check_dispatch(p, &mut bins, &states, "packed edges, inverted boxes")?;
-    check_packed_overlap(p, &mut bins, &mut states)?;
-    println!(
-        "size={size:?}, wg={:?}: {} packed-edge paired checks passed",
-        p.rasterize_wg(), bins.dispatches
-    );
-    Ok(bins.dispatches)
-}
-
-fn check_packed_overlap(
-    p: &GpuPipeline,
-    bins: &mut Bins,
-    states: &mut [GpuDrawingState],
-) -> Result<()> {
-    let size = bins.image_size;
-    let full = [0, 0, size[0], size[1]];
-    let polygons = [polygon([[0, 0], [65535, 0], [0, 65535]]); 500];
-    for (state, bounds) in states.iter_mut().zip([
-        full,
-        [size[0] - 1, size[1] - 1, size[0], size[1]],
-        [1, 1, 1, 1],
-    ]) {
-        *state = drawing(&polygons, bounds);
-    }
-    check_dispatch(
-        p,
-        bins,
-        states,
-        "500 raw count and first 256 ordered indices",
-    )?;
-    let polygons = [polygon([[0, 0], [65535, 0], [0, 65535]]); 1000];
-    for (state, count) in states.iter_mut().zip([500, 999, 1000]) {
-        *state = drawing(&polygons[..count], full);
-    }
-    check_dispatch(
-        p,
-        bins,
-        states,
-        "500/999/1000 raw counts and first 256 ordered indices, full image",
-    )
 }
 
 fn dirty_boxes([w, h]: [u32; 2], [tw, th]: [u32; 2]) -> [DirtyBox; 30] {
@@ -1139,16 +689,9 @@ mod tests {
     }
 
     #[test]
-    fn legacy_cli_and_help() -> Result<()> {
-        for (args, scope) in [
-            (vec![], Scope::Strict),
-            (vec!["--scope", "consumed-only"], Scope::ConsumedOnly),
-            (vec!["--scope", "full-buffers"], Scope::FullBuffers),
-        ] {
-            let config = parse_config(args.into_iter().map(OsString::from))?.unwrap();
-            assert_eq!(config.scope, scope);
-            assert!(config.shader.is_none());
-        }
+    fn default_cli_and_help() -> Result<()> {
+        let config = parse_config(std::iter::empty())?.unwrap();
+        assert!(config.shader.is_none());
         for flag in ["--help", "-h"] {
             assert!(parse_config([OsString::from(flag)].into_iter())?.is_none());
         }
@@ -1160,8 +703,8 @@ mod tests {
         let cases: &[&[&str]] = &[
             &["--scope"],
             &["--scope", "strict"],
+            &["--scope", "full-buffers"],
             &["--unknown", "x"],
-            &["--scope", "full-buffers", "--scope", "consumed-only"],
             &["--shader", "a", "--shader", "b"],
             &["--output", "a", "--output", "b"],
             &["--shader", "a"],
@@ -1169,16 +712,8 @@ mod tests {
             &["--shader", "", "--output", "a"],
             &["--shader", "--output", "--output", "a"],
             &["--shader", "a", "--output", ""],
-            &["--help", "--scope", "full-buffers"],
-            &[
-                "--scope",
-                "full-buffers",
-                "--shader",
-                "a",
-                "--output",
-                "b",
-                "extra",
-            ],
+            &["--help", "--shader", "a"],
+            &["--shader", "a", "--output", "b", "extra"],
         ];
         for args in cases {
             assert!(
@@ -1189,47 +724,33 @@ mod tests {
     }
 
     #[test]
-    fn selected_source_and_scope_retain_exact_evidence() -> Result<()> {
+    fn selected_source_retains_exact_evidence() -> Result<()> {
         let directory = TestDirectory::new()?;
         let path = directory.0.join("input.wgsl");
         fs::write(&path, VALID)?;
-        for scope in [Scope::Strict, Scope::ConsumedOnly, Scope::FullBuffers] {
-            let output = directory.0.join(scope_name(scope));
-            let mut args = shader_args(&path, &output);
-            if scope != Scope::Strict {
-                args.extend(["--scope".into(), scope_name(scope).into()]);
-            }
-            let config = parse_config(args.into_iter())?.unwrap();
-            assert_eq!(config.scope, scope);
-            let source = config.shader.unwrap();
-            assert_eq!(source.sha256, VALID_SHA256);
-            assert_eq!(source.text.as_bytes(), VALID.as_bytes());
-            assert!(!output.exists());
-            fs::write(&path, "changed after validation")?;
-            let retained = retain_source(&source, scope)?;
-            assert_eq!(fs::read(retained.join("source.wgsl"))?, VALID.as_bytes());
-            let metadata: serde_json::Value =
-                serde_json::from_slice(&fs::read(retained.join("metadata.json"))?)?;
-            assert_eq!(metadata["scope"], scope_name(scope));
-            assert_eq!(metadata["source_sha256"], VALID_SHA256);
-            assert_eq!(metadata["source_bytes"], VALID.len());
-            assert_eq!(metadata["reference_sha256"], REFERENCE_SHA256);
-            assert_eq!(metadata["benchmark_validation"], false);
-            assert!(!retained.join("result.json").exists());
-            let checks = if scope == Scope::Strict { 255 } else { 835 };
-            record_result(&retained, &source, scope, checks)?;
-            let result: serde_json::Value =
-                serde_json::from_slice(&fs::read(retained.join("result.json"))?)?;
-            assert_eq!(result["status"], "passed");
-            assert_eq!(result["scope"], scope_name(scope));
-            assert_eq!(result["source_sha256"], VALID_SHA256);
-            assert_eq!(result["checks"], checks);
-            assert_eq!(
-                result["gpu_dispatches"],
-                if scope == Scope::Strict { 255 } else { 1670 }
-            );
-            fs::write(&path, VALID)?;
-        }
+        let output = directory.0.join("proof");
+        let config = parse_config(shader_args(&path, &output).into_iter())?.unwrap();
+        let source = config.shader.unwrap();
+        assert_eq!(source.sha256, VALID_SHA256);
+        assert_eq!(source.text.as_bytes(), VALID.as_bytes());
+        assert!(!output.exists());
+        fs::write(&path, "changed after validation")?;
+        let retained = retain_source(&source)?;
+        assert_eq!(fs::read(retained.join("source.wgsl"))?, VALID.as_bytes());
+        let metadata: serde_json::Value =
+            serde_json::from_slice(&fs::read(retained.join("metadata.json"))?)?;
+        assert_eq!(metadata["source_sha256"], VALID_SHA256);
+        assert_eq!(metadata["source_bytes"], VALID.len());
+        assert_eq!(metadata["benchmark_validation"], false);
+        assert_eq!(metadata["expected_checks"], CHECKS);
+        assert!(!retained.join("result.json").exists());
+        record_result(&retained, &source, CHECKS)?;
+        let result: serde_json::Value =
+            serde_json::from_slice(&fs::read(retained.join("result.json"))?)?;
+        assert_eq!(result["status"], "passed");
+        assert_eq!(result["source_sha256"], VALID_SHA256);
+        assert_eq!(result["checks"], CHECKS);
+        assert_eq!(result["gpu_dispatches"], CHECKS);
         Ok(())
     }
 
@@ -1239,15 +760,12 @@ mod tests {
         let path = directory.0.join("input.wgsl");
         fs::write(&path, VALID)?;
         let args = vec![
-            "--scope".into(),
-            "full-buffers".into(),
             "--output".into(),
             directory.0.join("proof").into_os_string(),
             "--shader".into(),
             path.into_os_string(),
         ];
         let config = parse_config(args.into_iter())?.unwrap();
-        assert_eq!(config.scope, Scope::FullBuffers);
         assert_eq!(config.shader.unwrap().sha256, VALID_SHA256);
         Ok(())
     }
@@ -1349,6 +867,6 @@ mod tests {
             .into_iter()
         )
         .is_err());
-        assert!(parse_config(["--scope".into(), invalid].into_iter()).is_err());
+        assert!(parse_config(["--output".into(), invalid].into_iter()).is_err());
     }
 }

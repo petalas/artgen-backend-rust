@@ -1,93 +1,44 @@
-//! Shader variants: historical and candidate programs that benchmarks install in
-//! place of the bundled ones. Production never installs one; the state is empty.
+//! Shader variants: candidate programs that benchmarks install in place of the
+//! bundled ones. Production never installs one; the state is empty.
 //!
 //! Variants keep their exact source, tile and policy identities in bounded caches
-//! and survive tile changes. They are complete sources without the bundled
-//! prelude; raster and binning variants mark their tile size for specialization. Binning variants can be instrumented for diagnostic
-//! occupancy. A binning variant that does not list raster work gets a separate
-//! worklist pass; a raster variant that does not read the list uses the full grid.
+//! and survive tile changes. They are complete current-tree sources, as
+//! `examples/emit-bundled-shaders` writes them: raster and binning variants mark
+//! their 16x16 tile size for specialization and bind their stage's `raster_work`
+//! slot, since the binner lists raster work and raster loops over the list. The
+//! binning program can be instrumented for diagnostic occupancy.
 
 use std::sync::Arc;
 
 use wgpu::naga::{front::wgsl, ResourceBinding};
-use wgpu::{
-    BindGroup, BindGroupLayout, Buffer, ComputePipeline, Device, PipelineCompilationOptions,
-    PipelineLayout,
-};
+use wgpu::{ComputePipeline, Device, PipelineCompilationOptions};
 
 use super::{
-    compilation_scopes, create_tile_pipeline, finish_compilation, stage_layout, tile_source,
-    GpuPrograms, MutationProgram, ProgramCompiler, RasterSchedule, TileStage, TileStages,
+    compilation_scopes, finish_compilation, tile_source, GpuPrograms, MutationProgram,
+    ProgramCompiler, TileStage, TileStages,
 };
-use crate::gpu_evolver::bindings::{
-    self, Resource, BIN_POLYGONS, RASTERIZE_ERROR, RASTER_WORKLIST,
-};
+use crate::gpu_evolver::bindings::{self, Resource, BIN_POLYGONS, RASTERIZE_ERROR};
 use crate::settings::POLYGON_CAPACITY;
 
-/// Polygons a historical variant's drawing state declares, as a literal.
-pub const HISTORICAL_POLYGON_CAPACITY: usize = 1000;
-const HISTORICAL_STATE_MEMBER: &str = "polygons: array<Polygon, 1000>,";
-const BUNDLED_STATE_MEMBER: &str = "polygons: array<Polygon, POLYGON_CAPACITY>,";
+const STATE_MEMBER: &str = "polygons: array<Polygon, POLYGON_CAPACITY>,";
 const CAPACITY_DECLARATION: &str = "const POLYGON_CAPACITY: u32 = ";
 
-/// A variant source whose drawing-state stride is the engine's, and the largest
-/// `max_polygons` its own logic was written for.
-#[derive(Debug, PartialEq, Eq)]
-pub struct VariantStorage {
-    pub source: String,
-    pub polygon_limit: usize,
-}
-
-/// Give a variant the engine's `DrawingState` stride. Historical sources declare
-/// `polygons: array<Polygon, 1000>,`; only that member is widened to
-/// `POLYGON_CAPACITY`, and their workgroup arrays and loops keep the 1000-polygon
-/// semantics, so their limit is 1000. Emitted bundled sources declare
-/// `const POLYGON_CAPACITY: u32 = Nu;`; one emitted by a build with a smaller
-/// capacity N takes this build's, and its limit is N, the capacity its code was
-/// written for. A source with no `Polygon` array binds no drawing state. Anything
-/// else would address states at a stride other than the buffers', so it is
-/// rejected.
+/// Check that a variant's drawing state has the engine's stride. Emitted bundled
+/// sources declare `polygons: array<Polygon, POLYGON_CAPACITY>,` with
+/// `const POLYGON_CAPACITY: u32 = Nu;`, where N must be this build's capacity. A
+/// source with no `Polygon` array binds no drawing state.
 ///
 /// # Errors
 /// Rejects any other polygon storage declaration.
-pub fn specialize_polygon_storage(source: &str) -> Result<VariantStorage, String> {
-    let counts = [HISTORICAL_STATE_MEMBER, BUNDLED_STATE_MEMBER, CAPACITY_DECLARATION]
+pub fn validate_polygon_storage(source: &str) -> Result<(), String> {
+    let declaration = format!("{CAPACITY_DECLARATION}{POLYGON_CAPACITY}u;");
+    let counts = [STATE_MEMBER, CAPACITY_DECLARATION, declaration.as_str()]
         .map(|marker| source.matches(marker).count());
-    let capacity = POLYGON_CAPACITY;
     match counts {
-        [1, 0, 0] => Ok(VariantStorage {
-            source: source.replace(
-                HISTORICAL_STATE_MEMBER,
-                &format!("polygons: array<Polygon, {POLYGON_CAPACITY}>,"),
-            ),
-            polygon_limit: HISTORICAL_POLYGON_CAPACITY,
-        }),
-        [0, 1, 1] => {
-            let declared = source
-                .split_once(CAPACITY_DECLARATION)
-                .and_then(|(_, rest)| rest.split_once("u;"))
-                .and_then(|(literal, _)| literal.parse::<usize>().ok());
-            match declared {
-                Some(declared) if (1..=capacity).contains(&declared) => Ok(VariantStorage {
-                    source: source.replace(
-                        &format!("{CAPACITY_DECLARATION}{declared}u;"),
-                        &format!("{CAPACITY_DECLARATION}{capacity}u;"),
-                    ),
-                    polygon_limit: declared,
-                }),
-                _ => Err(format!(
-                    "the variant's POLYGON_CAPACITY is {}, outside this build's 1..={capacity}",
-                    declared.map_or_else(|| "not a u32 literal".to_owned(), |value| value.to_string())
-                )),
-            }
-        }
-        [0, 0, 0] if !source.contains("array<Polygon") => Ok(VariantStorage {
-            source: source.to_owned(),
-            polygon_limit: capacity,
-        }),
+        [1, 1, 1] => Ok(()),
+        [0, 0, 0] if !source.contains("array<Polygon") => Ok(()),
         _ => Err(format!(
-            "a variant's drawing state must declare `{HISTORICAL_STATE_MEMBER}` once, or \
-             `{BUNDLED_STATE_MEMBER}` with `{CAPACITY_DECLARATION}{capacity}u;`"
+            "a variant's drawing state must declare `{STATE_MEMBER}` with `{declaration}`"
         )),
     }
 }
@@ -103,7 +54,7 @@ const BIN_RASTER_WORK_BINDING: u32 = bindings::binding(&BIN_POLYGONS, Resource::
 const RASTER_RASTER_WORK_BINDING: u32 =
     bindings::binding(&RASTERIZE_ERROR, Resource::RasterWork);
 
-/// Mutation-only compiler policy. Historical benchmark sources require zeroing.
+/// Mutation-only compiler policy. Workgroup-memory zeroing is the default.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct BenchmarkMutateOptions {
     pub zero_initialize_workgroup_memory: bool,
@@ -181,137 +132,19 @@ struct BenchmarkBinPipeline {
     pipeline: ComputePipeline,
 }
 
-/// An installed raster or binning variant. Whether it binds its stage's
-/// `raster_work` slot is decided once, when the variant is installed.
-struct TileVariant {
-    source: Arc<str>,
-    raster_work: bool,
-    polygon_limit: usize,
-}
-
-impl TileVariant {
-    /// Older binners declare no `raster_work` binding and list nothing; older
-    /// rasters declare none and index tiles by workgroup id.
-    fn new(source: Arc<str>, binding: u32) -> Result<Self, String> {
-        let polygon_limit = specialize_polygon_storage(&source)?.polygon_limit;
-        let module = wgsl::parse_str(&source).map_err(|error| error.emit_to_string(&source))?;
-        let slot = Some(ResourceBinding { group: 0, binding });
-        let raster_work = module
-            .global_variables
-            .iter()
-            .any(|(_, global)| global.binding == slot);
-        Ok(Self {
-            source,
-            raster_work,
-            polygon_limit,
-        })
-    }
-}
-
-/// Buffers read and written by the separate worklist pass.
-pub(in crate::gpu_evolver) struct WorklistStorage<'a> {
-    pub working_states: &'a Buffer,
-    pub chain_states: &'a Buffer,
-    pub tile_counts: &'a Buffer,
-    pub raster_work: &'a Buffer,
-}
-
-/// The `raster_worklist.wgsl` pass for binning variants that do not list raster
-/// work. A sixth dispatch per iteration made 512-batch runs host-bound, so the
-/// bundled binner lists the pairs itself and production never runs this pass.
-struct WorklistAdapter {
-    bind_group_layout: BindGroupLayout,
-    layout: PipelineLayout,
-    bind_group: Option<BindGroup>,
-    compiled: Option<([u32; 2], ComputePipeline)>,
-}
-
-impl WorklistAdapter {
-    fn new(device: &Device, params: &BindGroupLayout) -> Self {
-        let bind_group_layout = bindings::layout(device, &RASTER_WORKLIST);
-        let layout = stage_layout(device, "raster_worklist_layout", &bind_group_layout, params);
-        Self {
-            bind_group_layout,
-            layout,
-            bind_group: None,
-            compiled: None,
-        }
-    }
-
-    fn bind(&mut self, device: &Device, storage: &WorklistStorage<'_>) {
-        if self.bind_group.is_some() {
-            return;
-        }
-        let buffer = |resource| match resource {
-            Resource::WorkingStates => storage.working_states,
-            Resource::ChainStates => storage.chain_states,
-            Resource::TileCounts => storage.tile_counts,
-            Resource::RasterWork => storage.raster_work,
-            other => unreachable!("the worklist pass binds no {other:?}"),
-        };
-        self.bind_group = Some(bindings::bind_group(
-            device,
-            &RASTER_WORKLIST,
-            &self.bind_group_layout,
-            |resource| buffer(resource).as_entire_binding(),
-        ));
-    }
-
-    /// Schedule for the selected raster and binning programs (`None` is bundled).
-    fn schedule(
-        &mut self,
-        compiler: &ProgramCompiler,
-        raster: Option<&TileVariant>,
-        bin: Option<&TileVariant>,
-        wg: [u32; 2],
-    ) -> Result<RasterSchedule, String> {
-        if !raster.is_none_or(|variant| variant.raster_work) {
-            return Ok(RasterSchedule::FullGrid);
-        }
-        if bin.is_none_or(|variant| variant.raster_work) {
-            return Ok(RasterSchedule::ListedByBinner);
-        }
-        let bind_group = self
-            .bind_group
-            .clone()
-            .ok_or("worklist storage must be bound before a variant is installed")?;
-        let pipeline = match &self.compiled {
-            Some((compiled_wg, pipeline)) if *compiled_wg == wg => pipeline.clone(),
-            _ => {
-                let source = tile_source(TileStage::RasterWorklist, wg);
-                checked(&compiler.device, || {
-                    create_tile_pipeline(
-                        &compiler.device,
-                        &self.layout,
-                        "raster_worklist",
-                        &source,
-                        &compiler.cache,
-                    )
-                })?
-            }
-        };
-        self.compiled = Some((wg, pipeline.clone()));
-        Ok(RasterSchedule::ListedByPass {
-            pipeline,
-            bind_group,
-        })
-    }
-}
-
 /// Benchmark-installed programs and their compiled caches. `None` selects the
 /// bundled raster or binning source; diagnostic validation instruments either.
 pub(super) struct ShaderVariants {
     mutate: Vec<MutationProgram>,
     raster: Vec<BenchmarkRasterPipeline>,
     bin: Vec<BenchmarkBinPipeline>,
-    raster_variant: Option<TileVariant>,
-    bin_variant: Option<TileVariant>,
+    raster_variant: Option<Arc<str>>,
+    bin_variant: Option<Arc<str>>,
     validation: bool,
-    worklist: WorklistAdapter,
 }
 
 impl ShaderVariants {
-    pub(super) fn new(device: &Device, params: &BindGroupLayout) -> Self {
+    pub(super) fn new() -> Self {
         Self {
             mutate: Vec::new(),
             raster: Vec::new(),
@@ -319,7 +152,6 @@ impl ShaderVariants {
             raster_variant: None,
             bin_variant: None,
             validation: false,
-            worklist: WorklistAdapter::new(device, params),
         }
     }
 
@@ -341,33 +173,18 @@ impl ShaderVariants {
         compiler: &ProgramCompiler,
         wg: [u32; 2],
     ) -> Result<TileStages, String> {
-        let bin_source = self.bin_variant.as_ref().map(|variant| Arc::clone(&variant.source));
-        let bin = match bin_source {
+        let bin = match self.bin_variant.clone() {
             Some(source) => {
                 self.cached_bin(compiler, BinSource::Variant(source), wg, self.validation)?
             }
             None if self.validation => self.cached_bin(compiler, BinSource::Bundled, wg, true)?,
             None => compiler.bundled_bin(wg),
         };
-        let raster_source = self
-            .raster_variant
-            .as_ref()
-            .map(|variant| Arc::clone(&variant.source));
-        let raster = match raster_source {
+        let raster = match self.raster_variant.clone() {
             Some(source) => self.cached_raster(compiler, source, wg)?,
             None => compiler.bundled_raster(wg),
         };
-        let schedule = self.worklist.schedule(
-            compiler,
-            self.raster_variant.as_ref(),
-            self.bin_variant.as_ref(),
-            wg,
-        )?;
-        Ok(TileStages {
-            raster,
-            bin,
-            schedule,
-        })
+        Ok(TileStages { raster, bin })
     }
 
     fn cached_raster(
@@ -383,7 +200,7 @@ impl ShaderVariants {
         if self.raster.len() == MAX_BENCHMARK_RASTER_PIPELINES {
             return Err("benchmark raster pipeline cache is full".into());
         }
-        let specialized = specialize_raster_source(&specialize_polygon_storage(&key.source)?.source, wg);
+        let specialized = specialize_tile_source(&key.source, wg);
         let pipeline = checked(&compiler.device, || compiler.raster(&specialized))?;
         self.raster.push(BenchmarkRasterPipeline {
             key,
@@ -428,29 +245,14 @@ fn checked<T>(device: &Device, compile: impl FnOnce() -> T) -> Result<T, String>
 }
 
 impl GpuPrograms {
-    /// Open the variant seam. Binds the worklist pass's storage on first use.
-    pub(in crate::gpu_evolver) fn shader_variants(
-        &mut self,
-        storage: &WorklistStorage<'_>,
-    ) -> ShaderVariantInstaller<'_> {
-        self.variants.worklist.bind(&self.compiler.device, storage);
+    /// Open the variant seam.
+    pub(in crate::gpu_evolver) fn shader_variants(&mut self) -> ShaderVariantInstaller<'_> {
         ShaderVariantInstaller { programs: self }
     }
 
     /// Whether the installed binner records diagnostic tile occupancy.
     pub(in crate::gpu_evolver) fn benchmark_validation(&self) -> bool {
         self.variants.validation
-    }
-
-    /// The largest `max_polygons` every installed program supports: the
-    /// polygon capacity, or a historical variant's 1000.
-    pub(in crate::gpu_evolver) fn polygon_limit(&self) -> usize {
-        let variants = [&self.variants.raster_variant, &self.variants.bin_variant];
-        variants
-            .into_iter()
-            .flatten()
-            .map(|variant| variant.polygon_limit)
-            .fold(self.mutation.polygon_limit, usize::min)
     }
 }
 
@@ -467,14 +269,15 @@ impl ShaderVariantInstaller<'_> {
     /// comes from the source; physical lanes do not change lambda.
     ///
     /// # Errors
-    /// Rejects invalid group metadata, an exhausted cache or GPU errors.
+    /// Rejects invalid group metadata or polygon storage, an exhausted cache or
+    /// GPU errors.
     pub fn set_mutate_shader(
         &mut self,
         source: &str,
         options: BenchmarkMutateOptions,
     ) -> Result<(), String> {
         let key = BenchmarkMutateKey::new(source, options)?;
-        let storage = specialize_polygon_storage(source)?;
+        validate_polygon_storage(source)?;
         let p = &mut *self.programs;
         let cache = &mut p.variants.mutate;
         if let Some(entry) = cache.iter().find(|entry| entry.key == key) {
@@ -487,13 +290,9 @@ impl ShaderVariantInstaller<'_> {
         let pipeline = if cache.is_empty() && p.mutation.matches(source, options) {
             p.mutation.pipeline.clone()
         } else {
-            checked(&p.compiler.device, || p.compiler.mutate(&storage.source, options))?
+            checked(&p.compiler.device, || p.compiler.mutate(source, options))?
         };
-        let selected = MutationProgram {
-            key,
-            pipeline,
-            polygon_limit: storage.polygon_limit,
-        };
+        let selected = MutationProgram { key, pipeline };
         cache.push(selected.clone());
         p.mutation = selected;
         Ok(())
@@ -502,10 +301,10 @@ impl ShaderVariantInstaller<'_> {
     /// Install a raster/error source for the current tile size.
     ///
     /// # Errors
-    /// Rejects invalid source bounds or specialization markers, an exhausted
-    /// cache or GPU errors.
+    /// Rejects invalid source bounds, specialization markers or bindings, an
+    /// exhausted cache or GPU errors.
     pub fn set_raster_shader(&mut self, source: &str) -> Result<(), String> {
-        validate_benchmark_raster_source(source)?;
+        validate_tile_source("raster", source, RASTER_RASTER_WORK_BINDING)?;
         let p = &mut *self.programs;
         let variants = &mut p.variants;
         let source = variants
@@ -513,27 +312,18 @@ impl ShaderVariantInstaller<'_> {
             .iter()
             .find(|entry| entry.key.source.as_ref() == source)
             .map_or_else(|| Arc::from(source), |entry| Arc::clone(&entry.key.source));
-        let pipeline = variants.cached_raster(&p.compiler, Arc::clone(&source), p.tiles.wg)?;
-        let variant = TileVariant::new(source, RASTER_RASTER_WORK_BINDING)?;
-        let schedule = variants.worklist.schedule(
-            &p.compiler,
-            Some(&variant),
-            variants.bin_variant.as_ref(),
-            p.tiles.wg,
-        )?;
-        p.tiles.raster = pipeline;
-        p.tiles.schedule = schedule;
-        variants.raster_variant = Some(variant);
+        p.tiles.raster = variants.cached_raster(&p.compiler, Arc::clone(&source), p.tiles.wg)?;
+        variants.raster_variant = Some(source);
         Ok(())
     }
 
     /// Install a binning source for the current tile size and validation mode.
     ///
     /// # Errors
-    /// Rejects invalid source bounds or specialization markers, a full cache,
-    /// failed instrumentation or GPU errors.
+    /// Rejects invalid source bounds, specialization markers or bindings, a full
+    /// cache, failed instrumentation or GPU errors.
     pub fn set_bin_shader(&mut self, source: &str) -> Result<(), String> {
-        validate_benchmark_bin_source(source)?;
+        validate_tile_source("bin", source, BIN_RASTER_WORK_BINDING)?;
         let p = &mut *self.programs;
         let variants = &mut p.variants;
         let source = variants
@@ -544,22 +334,13 @@ impl ShaderVariantInstaller<'_> {
                 _ => None,
             })
             .unwrap_or_else(|| Arc::from(source));
-        let pipeline = variants.cached_bin(
+        p.tiles.bin = variants.cached_bin(
             &p.compiler,
             BinSource::Variant(Arc::clone(&source)),
             p.tiles.wg,
             variants.validation,
         )?;
-        let variant = TileVariant::new(source, BIN_RASTER_WORK_BINDING)?;
-        let schedule = variants.worklist.schedule(
-            &p.compiler,
-            variants.raster_variant.as_ref(),
-            Some(&variant),
-            p.tiles.wg,
-        )?;
-        p.tiles.bin = pipeline;
-        p.tiles.schedule = schedule;
-        variants.bin_variant = Some(variant);
+        variants.bin_variant = Some(source);
         Ok(())
     }
 
@@ -573,9 +354,10 @@ impl ShaderVariantInstaller<'_> {
         if enabled == variants.validation {
             return Ok(());
         }
-        let source = variants.bin_variant.as_ref().map_or(BinSource::Bundled, |variant| {
-            BinSource::Variant(Arc::clone(&variant.source))
-        });
+        let source = variants
+            .bin_variant
+            .clone()
+            .map_or(BinSource::Bundled, BinSource::Variant);
         p.tiles.bin = variants.cached_bin(&p.compiler, source, p.tiles.wg, enabled)?;
         variants.validation = enabled;
         Ok(())
@@ -590,7 +372,7 @@ fn validate_benchmark_mutate_source(source: &str) -> Result<(), String> {
 }
 
 /// Read the exact logical offspring width without compiling or rewriting WGSL.
-/// Marker-free historical sources use 64, independently of physical lane count.
+/// Every mutation source declares it, independently of physical lane count.
 ///
 /// # Errors
 /// Rejects oversized/empty sources and missing, duplicate or nonliteral markers.
@@ -598,9 +380,6 @@ pub fn benchmark_mutate_group_size_from_source(source: &str) -> Result<u32, Stri
     const NAME: &str = "OFFSPRING_GROUP_SIZE";
     const PREFIX: &str = "const OFFSPRING_GROUP_SIZE: u32 = ";
     validate_benchmark_mutate_source(source)?;
-    if !source.contains(NAME) {
-        return Ok(64);
-    }
     let mut group_size = None;
     let mut offset = 0;
     let mut previous = (0, "");
@@ -635,7 +414,7 @@ pub fn benchmark_mutate_group_size_from_source(source: &str) -> Result<u32, Stri
         previous = (start, token);
     }
     group_size
-        .ok_or_else(|| "OFFSPRING_GROUP_SIZE is present without its exact const declaration".into())
+        .ok_or_else(|| "missing exact `const OFFSPRING_GROUP_SIZE: u32 = Nu;` declaration".into())
 }
 
 // Each cursor advance consumes at least one source byte, bounded by the 256 KiB
@@ -689,65 +468,56 @@ fn next_mutate_source_token<'a>(
     Ok(None)
 }
 
-// Tile-size markers. Historical rasters use the first pair; historical binners
-// and bundled sources emitted at 16x16 (programs::bundled) use the second.
-const RASTER_TILE_MARKERS: [[&str; 2]; 2] = [
-    ["const WG_X: u32 = 16;", "const WG_Y: u32 = 16;"],
-    BIN_TILE_MARKERS,
-];
-const BIN_TILE_MARKERS: [&str; 2] = ["const TILE_W: u32 = 16;", "const TILE_H: u32 = 16;"];
+// Tile-size markers of raster and binning sources emitted at 16x16
+// (programs::bundled).
+const TILE_MARKERS: [&str; 2] = ["const TILE_W: u32 = 16;", "const TILE_H: u32 = 16;"];
 
-fn validate_benchmark_raster_source(source: &str) -> Result<(), String> {
+/// Check a raster or binning variant: its size, polygon storage, one of each
+/// tile marker, and its stage's `raster_work` binding.
+fn validate_tile_source(stage: &str, source: &str, raster_work: u32) -> Result<(), String> {
     if source.is_empty() || source.len() > MAX_BENCHMARK_SOURCE_BYTES {
-        return Err("raster shader must contain 1..262144 bytes".into());
+        return Err(format!("{stage} shader must contain 1..262144 bytes"));
     }
-    specialize_polygon_storage(source)?;
-    let counts = RASTER_TILE_MARKERS.map(|pair| pair.map(|marker| source.matches(marker).count()));
-    match counts {
-        [[1, 1], [0, 0]] | [[0, 0], [1, 1]] => Ok(()),
-        _ => Err(format!(
-            "raster specialization must match one marker pair of {RASTER_TILE_MARKERS:?} exactly once"
-        )),
-    }
-}
-
-fn validate_benchmark_bin_source(source: &str) -> Result<(), String> {
-    if source.is_empty() || source.len() > MAX_BENCHMARK_SOURCE_BYTES {
-        return Err("bin shader must contain 1..262144 bytes".into());
-    }
-    specialize_polygon_storage(source)?;
-    for marker in BIN_TILE_MARKERS {
+    validate_polygon_storage(source)?;
+    for marker in TILE_MARKERS {
         if source.matches(marker).count() != 1 {
             return Err(format!(
-                "bin specialization must match {marker:?} exactly once"
+                "{stage} specialization must match {marker:?} exactly once"
             ));
         }
+    }
+    if !declares_binding(source, raster_work)? {
+        return Err(format!(
+            "{stage} shader must bind raster_work at @group(0) @binding({raster_work})"
+        ));
     }
     Ok(())
 }
 
-/// Specialize a validated raster variant's tile-size markers for `wg`. Naga
-/// supports no override constants in `@workgroup_size` or const expressions.
-fn specialize_raster_source(source: &str, wg: [u32; 2]) -> String {
-    let [wg_markers, tile_markers] = RASTER_TILE_MARKERS;
-    replace_tile_markers(&replace_tile_markers(source, wg_markers, wg), tile_markers, wg)
+/// Whether `source` declares a resource at group 0, `binding`. Only a
+/// declaration counts, not a mention in text.
+fn declares_binding(source: &str, binding: u32) -> Result<bool, String> {
+    let module = wgsl::parse_str(source).map_err(|error| error.emit_to_string(source))?;
+    let slot = Some(ResourceBinding { group: 0, binding });
+    let declared = module
+        .global_variables
+        .iter()
+        .any(|(_, global)| global.binding == slot);
+    Ok(declared)
 }
 
-/// Specialize a validated binning variant's tile-size markers for `wg`.
-fn specialize_bin_source(source: &str, wg: [u32; 2]) -> String {
-    replace_tile_markers(source, BIN_TILE_MARKERS, wg)
-}
-
-/// Replace `const NAME: u32 = 16;` markers with the tile's width and height.
-fn replace_tile_markers(source: &str, markers: [&str; 2], wg: [u32; 2]) -> String {
-    let [width, height] = markers.map(|marker| {
+/// Replace a validated variant's `const NAME: u32 = 16;` tile markers with the
+/// tile's width and height. Naga supports no override constants in
+/// `@workgroup_size` or const expressions.
+fn specialize_tile_source(source: &str, wg: [u32; 2]) -> String {
+    let [width, height] = TILE_MARKERS.map(|marker| {
         marker
             .strip_suffix("16;")
             .expect("tile markers end with their 16 default")
     });
     source
-        .replace(markers[0], &format!("{width}{};", wg[0]))
-        .replace(markers[1], &format!("{height}{};", wg[1]))
+        .replace(TILE_MARKERS[0], &format!("{width}{};", wg[0]))
+        .replace(TILE_MARKERS[1], &format!("{height}{};", wg[1]))
 }
 
 /// The binning program for `wg`, instrumented when `validation` is set.
@@ -758,9 +528,7 @@ fn specialize_benchmark_bin_source(
 ) -> Result<String, String> {
     let specialized = match source {
         BinSource::Bundled => tile_source(TileStage::BinPolygons, wg),
-        BinSource::Variant(source) => {
-            specialize_bin_source(&specialize_polygon_storage(source)?.source, wg)
-        }
+        BinSource::Variant(source) => specialize_tile_source(source, wg),
     };
     if validation {
         benchmark_bin_source(&specialized)
@@ -770,105 +538,54 @@ fn specialize_benchmark_bin_source(
 }
 
 fn benchmark_bin_source(source: &str) -> Result<String, String> {
-    let add = "let slot = atomicAdd(&tile_counts[tile_global], 1u);";
     let store = "atomicStore(&tile_counts[tile_global], raw_count);";
-    let plain_store = "tile_counts[tile_global] = raw_count;";
     // The reserved last word records uncapped occupancy over ALL iterations.
-    // Recognize exactly one known counting mechanism in the installed source.
-    match (
-        source.matches(add).count(),
-        source.matches(store).count(),
-        source.matches(plain_store).count(),
-    ) {
-        (1, 0, 0) => Ok(source.replace(add, &format!("{add}\n                atomicMax(&tile_counts[arrayLength(&tile_counts) - 1u], slot + 1u);"))),
-        (0, 1, 0) => Ok(source.replace(store, &format!("atomicMax(&tile_counts[arrayLength(&tile_counts) - 1u], raw_count);\n        {store}"))),
-        (0, 0, 1) => {
-            let plain_binding = "@group(0) @binding(2) var<storage, read_write> tile_counts:    array<u32>;";
-            if source.matches(plain_binding).count() != 1
-                || source.matches("tile_counts:").count() != 1
-            {
-                return Err("plain-count instrumentation requires exactly one binding-2 array<u32> declaration".into());
-            }
-            Ok(source.replace(plain_binding,
-                "@group(0) @binding(2) var<storage, read_write> tile_counts:    array<atomic<u32>>;"
-            ).replace(plain_store, &format!("atomicMax(&tile_counts[arrayLength(&tile_counts) - 1u], raw_count);\n        {store}")))
-        }
-        _ => Err("benchmark bin instrumentation requires exactly one recognized count marker".into()),
+    if source.matches(store).count() != 1 {
+        return Err(format!(
+            "benchmark bin instrumentation requires exactly one `{store}`"
+        ));
     }
+    Ok(source.replace(store, &format!("atomicMax(&tile_counts[arrayLength(&tile_counts) - 1u], raw_count);\n        {store}")))
 }
 
 #[cfg(test)]
 mod benchmark_tests {
-    use sha2::{Digest, Sha256};
-
     use super::super::{
         bundled_shader_source, tile_source, BundledShader, TileStage, BUNDLED_MUTATE_OPTIONS,
     };
     use super::{
         benchmark_bin_source, benchmark_mutate_compilation_options,
-        benchmark_mutate_group_size_from_source, specialize_benchmark_bin_source,
-        specialize_bin_source, specialize_polygon_storage, specialize_raster_source,
-        validate_benchmark_bin_source, validate_benchmark_mutate_source,
-        validate_benchmark_raster_source, BenchmarkMutateKey, BenchmarkMutateOptions,
-        BenchmarkRasterKey, BinSource, TileVariant, BIN_RASTER_WORK_BINDING,
-        HISTORICAL_POLYGON_CAPACITY, MAX_BENCHMARK_SOURCE_BYTES, POLYGON_CAPACITY,
-        RASTER_RASTER_WORK_BINDING,
+        benchmark_mutate_group_size_from_source, declares_binding,
+        specialize_benchmark_bin_source, specialize_tile_source, validate_benchmark_mutate_source,
+        validate_polygon_storage, validate_tile_source, BenchmarkMutateKey,
+        BenchmarkMutateOptions, BenchmarkRasterKey, BinSource, BIN_RASTER_WORK_BINDING,
+        MAX_BENCHMARK_SOURCE_BYTES, POLYGON_CAPACITY, RASTER_RASTER_WORK_BINDING,
     };
-    use wgpu::naga::front::wgsl;
 
     const TILES: [[u32; 2]; 5] = [[32, 16], [16, 16], [32, 8], [16, 8], [8, 8]];
-    const HISTORICAL_RASTER: &str = include_str!(
-        "../../../benchmarks/evolution/overnight-20261024/fixtures/raster-ae1-reference.wgsl"
-    );
-
-    const HISTORICAL_MUTATE: &str = include_str!(
-        "../../../benchmarks/evolution/overnight-20261024/fixtures/mutate-e133-reference.wgsl"
-    );
-    const GROUPED_MUTATE_G1: &str = include_str!(
-        "../../../benchmarks/evolution/overnight-20261024/fixtures/mutate-g1-wg64-copy64.wgsl"
-    );
-    // Metadata/cache fixture only; this empty kernel does not test mutation equivalence.
+    // Metadata/cache fixtures only; these empty kernels do not test mutation equivalence.
+    const GROUPED_MUTATE_G1: &str = "const OFFSPRING_GROUP_SIZE: u32 = 1u;\n\
+        @compute @workgroup_size(64) fn main() {}";
     const GROUPED_MUTATE_G64: &str = "const OFFSPRING_GROUP_SIZE: u32 = 64u;\n\
         @compute @workgroup_size(64) fn main() {}";
 
-    /// Every historical source takes the engine's state stride, validates, and
-    /// keeps its 1000-polygon limit; the change touches only the state member.
-    #[test]
-    fn historical_sources_take_the_engine_state_stride() {
-        use crate::gpu_evolver::buffers::GPU_DRAWING_STATE_SIZE;
-        use wgpu::naga::{valid, TypeInner};
-        const FIXTURES: [&str; 8] = [
-            include_str!("../../../benchmarks/evolution/v1/experiments/reference-bin-dd52d50.wgsl"),
-            include_str!("../../../benchmarks/evolution/overnight-20261024/fixtures/raster-direct-t2.wgsl"),
-            include_str!("../../../benchmarks/evolution/overnight-20261024/fixtures/raster-direct-t4.wgsl"),
-            include_str!("../../../benchmarks/evolution/overnight-20261024/fixtures/raster-ae1-reference.wgsl"),
-            include_str!("../../../benchmarks/evolution/overnight-20261024/fixtures/bin-tile32-reference.wgsl"),
-            include_str!("../../../benchmarks/evolution/overnight-20261024/fixtures/bin-plain-count-reference.wgsl"),
-            HISTORICAL_MUTATE,
-            GROUPED_MUTATE_G1,
-        ];
-        for source in FIXTURES {
-            let storage = specialize_polygon_storage(source).unwrap();
-            assert_eq!(storage.polygon_limit, HISTORICAL_POLYGON_CAPACITY);
-            let changed: Vec<_> = source
-                .lines()
-                .zip(storage.source.lines())
-                .filter(|(before, after)| before != after)
-                .collect();
-            assert_eq!(changed.len(), 1, "{changed:?}");
-            let module = wgsl::parse_str(&storage.source).unwrap();
-            valid::Validator::new(valid::ValidationFlags::all(), valid::Capabilities::all())
-                .validate(&module)
-                .unwrap();
-            let state = module
-                .types
-                .iter()
-                .find(|(_, ty)| ty.name.as_deref() == Some("DrawingState"))
-                .map(|(_, ty)| ty.inner.clone())
-                .unwrap();
-            let TypeInner::Struct { span, .. } = state else { panic!("DrawingState") };
-            assert_eq!(span as usize, GPU_DRAWING_STATE_SIZE);
-        }
+    fn validate_raster(source: &str) -> Result<(), String> {
+        validate_tile_source("raster", source, RASTER_RASTER_WORK_BINDING)
+    }
+
+    fn validate_bin(source: &str) -> Result<(), String> {
+        validate_tile_source("bin", source, BIN_RASTER_WORK_BINDING)
+    }
+
+    fn validated_module(source: &str) -> wgpu::naga::Module {
+        let module = wgpu::naga::front::wgsl::parse_str(source).unwrap();
+        wgpu::naga::valid::Validator::new(
+            wgpu::naga::valid::ValidationFlags::all(),
+            wgpu::naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap();
+        module
     }
 
     #[test]
@@ -876,61 +593,24 @@ mod benchmark_tests {
         let capacity = POLYGON_CAPACITY;
         for shader in [BundledShader::Mutate, BundledShader::Tile(TileStage::BinPolygons, [16, 16])] {
             let source = bundled_shader_source(shader);
-            let storage = specialize_polygon_storage(&source).unwrap();
-            assert_eq!((storage.source.as_str(), storage.polygon_limit), (source.as_str(), capacity));
-            // Emitted by a build with a smaller capacity: this build's stride,
-            // and the limit its code was written for.
+            validate_polygon_storage(&source).unwrap();
+            // Another build's capacity would address states at another stride.
             let declaration = format!("const POLYGON_CAPACITY: u32 = {capacity}u;");
-            let older = source.replace(&declaration, "const POLYGON_CAPACITY: u32 = 1000u;");
-            let storage = specialize_polygon_storage(&older).unwrap();
-            assert_eq!((storage.source.as_str(), storage.polygon_limit), (source.as_str(), 1000));
-            let larger = source.replace(&declaration, "const POLYGON_CAPACITY: u32 = 4096u;");
-            assert!(specialize_polygon_storage(&larger).unwrap_err().contains("4096"));
+            for other in ["1000u", "4096u"] {
+                let changed =
+                    source.replace(&declaration, &format!("const POLYGON_CAPACITY: u32 = {other};"));
+                assert!(validate_polygon_storage(&changed).is_err(), "{other}");
+            }
+            let literal = source.replace(
+                "polygons: array<Polygon, POLYGON_CAPACITY>,",
+                "polygons: array<Polygon, 1000>,",
+            );
+            assert!(validate_polygon_storage(&literal).is_err());
+            let twice = format!("{source}\nstruct Again {{ polygons: array<Polygon, POLYGON_CAPACITY>, }}");
+            assert!(validate_polygon_storage(&twice).is_err());
         }
-        let unknown = HISTORICAL_RASTER.replace("array<Polygon, 1000>,", "array<Polygon, 512>,");
-        assert!(specialize_polygon_storage(&unknown).is_err());
-        let twice = format!("{HISTORICAL_RASTER}\nstruct Again {{ polygons: array<Polygon, 1000>, }}");
-        assert!(specialize_polygon_storage(&twice).is_err());
         // A program that binds no drawing state needs no specialization.
-        let storage = specialize_polygon_storage(GROUPED_MUTATE_G64).unwrap();
-        assert_eq!(storage.source, GROUPED_MUTATE_G64);
-    }
-
-    #[test]
-    fn mutate_fixtures_pin_historical_and_grouped_valid_wgsl() {
-        for (source, expected_sha256) in [
-            (
-                HISTORICAL_MUTATE,
-                "e13308a7cc59071043a3f5750a7f25214933ae4645cd016875f2dfa12c3dfe73",
-            ),
-            (
-                GROUPED_MUTATE_G1,
-                "3a36417746ab19b0c800c718e8c87795c17d9bff78114fd65bc8369b016578d8",
-            ),
-        ] {
-            assert_eq!(
-                format!("{:x}", Sha256::digest(source.as_bytes())),
-                expected_sha256
-            );
-        }
-        assert!(!HISTORICAL_MUTATE.contains("OFFSPRING_GROUP_SIZE"));
-        for (source, group) in [
-            (HISTORICAL_MUTATE, 64),
-            (GROUPED_MUTATE_G1, 1),
-            (GROUPED_MUTATE_G64, 64),
-        ] {
-            assert_eq!(
-                benchmark_mutate_group_size_from_source(source).unwrap(),
-                group
-            );
-            let module = wgpu::naga::front::wgsl::parse_str(source).unwrap();
-            wgpu::naga::valid::Validator::new(
-                wgpu::naga::valid::ValidationFlags::all(),
-                wgpu::naga::valid::Capabilities::all(),
-            )
-            .validate(&module)
-            .unwrap();
-        }
+        validate_polygon_storage(GROUPED_MUTATE_G64).unwrap();
     }
 
     #[test]
@@ -938,8 +618,6 @@ mod benchmark_tests {
         let original = &bundled_shader_source(BundledShader::Mutate);
         assert!(!original.contains("const TILE_W"));
         assert!(!original.contains("const TILE_H"));
-        assert!(!original.contains("const WG_X"));
-        assert!(!original.contains("const WG_Y"));
         validate_benchmark_mutate_source(original).unwrap();
         assert!(validate_benchmark_mutate_source("").is_err());
         let maximum = format!("//{}", " ".repeat(MAX_BENCHMARK_SOURCE_BYTES - 2));
@@ -954,7 +632,6 @@ mod benchmark_tests {
         let bundled = &bundled_shader_source(BundledShader::Mutate);
         let bundled_group = benchmark_mutate_group_size_from_source(bundled).unwrap();
         for (original, group) in [
-            (HISTORICAL_MUTATE, 64),
             (GROUPED_MUTATE_G1, 1),
             (GROUPED_MUTATE_G64, 64),
             (bundled, bundled_group),
@@ -984,7 +661,7 @@ mod benchmark_tests {
         assert_eq!(grouped.group_size, 4);
         assert_ne!(
             grouped,
-            BenchmarkMutateKey::new(HISTORICAL_MUTATE, BenchmarkMutateOptions::default()).unwrap()
+            BenchmarkMutateKey::new(GROUPED_MUTATE_G64, BenchmarkMutateOptions::default()).unwrap()
         );
         assert_ne!(
             BenchmarkMutateKey::new(GROUPED_MUTATE_G1, BenchmarkMutateOptions::default()).unwrap(),
@@ -1027,12 +704,7 @@ mod benchmark_tests {
             installed.group_size,
             benchmark_mutate_group_size_from_source(bundled).unwrap()
         );
-        for source in [
-            HISTORICAL_MUTATE,
-            GROUPED_MUTATE_G1,
-            GROUPED_MUTATE_G64,
-            bundled,
-        ] {
+        for source in [GROUPED_MUTATE_G1, GROUPED_MUTATE_G64, bundled] {
             for zero_initialize_workgroup_memory in [true, false] {
                 let options = BenchmarkMutateOptions {
                     zero_initialize_workgroup_memory,
@@ -1056,7 +728,7 @@ mod benchmark_tests {
     }
 
     #[test]
-    fn future_bundled_false_policy_cannot_reuse_initial_pipeline_for_historical_true() {
+    fn future_bundled_false_policy_cannot_reuse_initial_pipeline_for_default_true() {
         let bundled = &bundled_shader_source(BundledShader::Mutate);
         let future_options = BenchmarkMutateOptions {
             zero_initialize_workgroup_memory: false,
@@ -1075,11 +747,7 @@ mod benchmark_tests {
     }
 
     #[test]
-    fn mutate_group_source_accepts_only_supported_exact_literals_and_historical_sources() {
-        assert_eq!(
-            benchmark_mutate_group_size_from_source(HISTORICAL_MUTATE).unwrap(),
-            64
-        );
+    fn mutate_group_source_accepts_only_supported_exact_literals() {
         for group in [1, 2, 4, 8, 16, 32, 64] {
             let source = format!(
                 "// λ\n/* outer /* nested */ comment */\n\
@@ -1091,7 +759,11 @@ mod benchmark_tests {
                 group
             );
         }
-        let maximum = format!("//{}", " ".repeat(MAX_BENCHMARK_SOURCE_BYTES - 2));
+        let declaration = "const OFFSPRING_GROUP_SIZE: u32 = 64u;";
+        let maximum = format!(
+            "{declaration}//{}",
+            " ".repeat(MAX_BENCHMARK_SOURCE_BYTES - declaration.len() - 2)
+        );
         assert_eq!(
             benchmark_mutate_group_size_from_source(&maximum).unwrap(),
             64
@@ -1126,6 +798,7 @@ mod benchmark_tests {
             );
         }
         for source in [
+            "@compute @workgroup_size(64) fn main() {}",
             "OFFSPRING_GROUP_SIZE",
             "// const OFFSPRING_GROUP_SIZE: u32 = 4u;",
             "/* const OFFSPRING_GROUP_SIZE: u32 = 4u; */",
@@ -1150,21 +823,15 @@ mod benchmark_tests {
 
     #[test]
     fn raster_source_specialization_preserves_candidate_and_cache_identity() {
-        let original = HISTORICAL_RASTER;
+        let original = tile_source(TileStage::RasterizeError, [16, 16]);
         let candidate = format!("{original}\n// actual candidate");
-        validate_benchmark_raster_source(&candidate).unwrap();
+        validate_raster(&candidate).unwrap();
         for wg in TILES {
-            let source = specialize_raster_source(&candidate, wg);
+            let source = specialize_tile_source(&candidate, wg);
             assert!(source.ends_with("// actual candidate"));
-            assert!(source.contains(&format!("const WG_X: u32 = {};", wg[0])));
-            assert!(source.contains(&format!("const WG_Y: u32 = {};", wg[1])));
-            let module = wgpu::naga::front::wgsl::parse_str(&source).unwrap();
-            wgpu::naga::valid::Validator::new(
-                wgpu::naga::valid::ValidationFlags::all(),
-                wgpu::naga::valid::Capabilities::all(),
-            )
-            .validate(&module)
-            .unwrap();
+            assert!(source.contains(&format!("const TILE_W: u32 = {};", wg[0])));
+            assert!(source.contains(&format!("const TILE_H: u32 = {};", wg[1])));
+            validated_module(&source);
             let key = BenchmarkRasterKey {
                 source: candidate.as_str().into(),
                 wg,
@@ -1179,7 +846,7 @@ mod benchmark_tests {
             assert_ne!(
                 key,
                 BenchmarkRasterKey {
-                    source: original.into(),
+                    source: original.as_str().into(),
                     wg
                 }
             );
@@ -1196,28 +863,16 @@ mod benchmark_tests {
     #[test]
     fn raster_source_boundaries_and_marker_cardinality_fail_closed() {
         let emitted = tile_source(TileStage::RasterizeError, [16, 16]);
-        assert!(validate_benchmark_raster_source("").is_err());
-        assert!(
-            validate_benchmark_raster_source(&" ".repeat(MAX_BENCHMARK_SOURCE_BYTES + 1)).is_err()
-        );
-        for (original, markers) in [
-            (HISTORICAL_RASTER, ["const WG_X: u32 = 16;", "const WG_Y: u32 = 16;"]),
-            (&emitted, ["const TILE_W: u32 = 16;", "const TILE_H: u32 = 16;"]),
-        ] {
-            validate_benchmark_raster_source(original).unwrap();
-            for marker in markers {
-                assert!(validate_benchmark_raster_source(&original.replace(marker, "")).is_err());
-                assert!(
-                    validate_benchmark_raster_source(&format!("{original}\n{marker}")).is_err()
-                );
-            }
+        assert!(validate_raster("").is_err());
+        assert!(validate_raster(&" ".repeat(MAX_BENCHMARK_SOURCE_BYTES + 1)).is_err());
+        validate_raster(&emitted).unwrap();
+        for marker in ["const TILE_W: u32 = 16;", "const TILE_H: u32 = 16;"] {
+            assert!(validate_raster(&emitted.replace(marker, "")).is_err());
+            assert!(validate_raster(&format!("{emitted}\n{marker}")).is_err());
         }
-        // A source may not mark its tile with both pairs.
-        let both = format!("{HISTORICAL_RASTER}\nconst TILE_W: u32 = 16;\nconst TILE_H: u32 = 16;");
-        assert!(validate_benchmark_raster_source(&both).is_err());
         // The installed bundled source is not a variant.
         let installed = tile_source(TileStage::RasterizeError, [32, 16]);
-        assert!(validate_benchmark_raster_source(&installed).is_err());
+        assert!(validate_raster(&installed).is_err());
     }
 
     /// Bundled raster and binning sources emitted at 16x16 install as variants
@@ -1226,14 +881,14 @@ mod benchmark_tests {
     fn emitted_bundled_sources_specialize_like_installed_ones() {
         let raster = tile_source(TileStage::RasterizeError, [16, 16]);
         let bin = tile_source(TileStage::BinPolygons, [16, 16]);
-        validate_benchmark_raster_source(&raster).unwrap();
-        validate_benchmark_bin_source(&bin).unwrap();
+        validate_raster(&raster).unwrap();
+        validate_bin(&bin).unwrap();
         for wg in TILES {
             assert_eq!(
-                specialize_raster_source(&raster, wg),
+                specialize_tile_source(&raster, wg),
                 tile_source(TileStage::RasterizeError, wg)
             );
-            assert_eq!(specialize_bin_source(&bin, wg), tile_source(TileStage::BinPolygons, wg));
+            assert_eq!(specialize_tile_source(&bin, wg), tile_source(TileStage::BinPolygons, wg));
         }
     }
 
@@ -1245,78 +900,43 @@ mod benchmark_tests {
             assert!(!normal.contains("atomicMax"));
             let source = specialize_benchmark_bin_source(&BinSource::Bundled, wg, true).unwrap();
             assert_eq!(source, benchmark_bin_source(&normal).unwrap());
-            let module = wgpu::naga::front::wgsl::parse_str(&source).unwrap();
-            wgpu::naga::valid::Validator::new(
-                wgpu::naga::valid::ValidationFlags::all(),
-                wgpu::naga::valid::Capabilities::all(),
-            )
-            .validate(&module)
-            .unwrap();
+            validated_module(&source);
         }
     }
 
     #[test]
-    fn candidate_sources_keep_workgroup_and_validation_specialization() {
-        // Keep the legacy atomic-add fixture independent of the production winner.
-        // The variants test validates the currently installed source separately.
-        let original = include_str!(
-            "../../../benchmarks/evolution/overnight-20261024/fixtures/bin-tile32-reference.wgsl"
-        );
-        let annotation = original
-            .lines()
-            .find(|line| line.starts_with("@compute @workgroup_size("))
-            .unwrap();
-        for internal_wg in [32, 64, 128, 256] {
-            let candidate = original
-                .replace(
-                    annotation,
-                    &format!("@compute @workgroup_size({internal_wg}, 1, 1)"),
-                )
-                .replace("+= 32u", &format!("+= {internal_wg}u"));
-            validate_benchmark_bin_source(&candidate).unwrap();
-            for wg in TILES {
-                let specialized = specialize_bin_source(&candidate, wg);
-                assert!(specialized.contains(&format!("@workgroup_size({internal_wg}, 1, 1)")));
-                assert!(specialized.contains(&format!("const TILE_W: u32 = {};", wg[0])));
-                assert!(specialized.contains(&format!("const TILE_H: u32 = {};", wg[1])));
-                let validation = benchmark_bin_source(&specialized).unwrap();
-                assert!(validation.contains(
-                    "atomicMax(&tile_counts[arrayLength(&tile_counts) - 1u], slot + 1u)"
-                ));
-                let module = wgpu::naga::front::wgsl::parse_str(&validation).unwrap();
-                wgpu::naga::valid::Validator::new(
-                    wgpu::naga::valid::ValidationFlags::all(),
-                    wgpu::naga::valid::Capabilities::all(),
-                )
-                .validate(&module)
-                .unwrap();
-            }
+    fn candidate_sources_keep_tile_and_validation_specialization() {
+        let original = tile_source(TileStage::BinPolygons, [16, 16]);
+        let candidate = format!("{original}\n// actual candidate");
+        validate_bin(&candidate).unwrap();
+        let variant = BinSource::Variant(candidate.as_str().into());
+        for wg in TILES {
+            let normal = specialize_benchmark_bin_source(&variant, wg, false).unwrap();
+            assert_eq!(normal, specialize_tile_source(&candidate, wg));
+            assert!(normal.ends_with("// actual candidate"));
+            assert!(normal.contains(&format!("const TILE_W: u32 = {};", wg[0])));
+            assert!(normal.contains(&format!("const TILE_H: u32 = {};", wg[1])));
+            let validation = specialize_benchmark_bin_source(&variant, wg, true).unwrap();
+            assert_eq!(validation, benchmark_bin_source(&normal).unwrap());
+            assert_eq!(validation.matches("atomicMax(").count(), 1);
+            validated_module(&validation);
         }
     }
 
     #[test]
     fn candidate_source_boundaries_and_instrumentation_fail_closed() {
         let original = &tile_source(TileStage::BinPolygons, [16, 16]);
-        assert!(validate_benchmark_bin_source("").is_err());
-        assert!(
-            validate_benchmark_bin_source(&" ".repeat(MAX_BENCHMARK_SOURCE_BYTES + 1)).is_err()
-        );
-        assert!(
-            validate_benchmark_bin_source(&original.replace("const TILE_W: u32 = 16;", ""))
-                .is_err()
-        );
-        assert!(
-            validate_benchmark_bin_source(&format!("{original}\nconst TILE_H: u32 = 16;")).is_err()
-        );
-        assert!(benchmark_bin_source("no atomicAdd marker").is_err());
+        assert!(validate_bin("").is_err());
+        assert!(validate_bin(&" ".repeat(MAX_BENCHMARK_SOURCE_BYTES + 1)).is_err());
+        assert!(validate_bin(&original.replace("const TILE_W: u32 = 16;", "")).is_err());
+        assert!(validate_bin(&format!("{original}\nconst TILE_H: u32 = 16;")).is_err());
+        assert!(benchmark_bin_source("no count marker").is_err());
         assert!(benchmark_bin_source(&format!("{original}\n{original}")).is_err());
     }
 
     #[test]
     fn local_count_validation_uses_uncapped_actual_store() {
         let source = r"
-const TILE_W: u32 = 16;
-const TILE_H: u32 = 16;
 @group(0) @binding(0) var<storage, read_write> tile_counts: array<atomic<u32>>;
 @compute @workgroup_size(32, 1, 1)
 fn main() {
@@ -1324,218 +944,30 @@ fn main() {
     let raw_count = 257u;
     atomicStore(&tile_counts[tile_global], raw_count);
 }";
-        validate_benchmark_bin_source(source).unwrap();
         let instrumented = benchmark_bin_source(source).unwrap();
         assert!(instrumented
             .contains("atomicMax(&tile_counts[arrayLength(&tile_counts) - 1u], raw_count);"));
         assert!(instrumented.contains("atomicStore(&tile_counts[tile_global], raw_count);"));
-        let module = wgpu::naga::front::wgsl::parse_str(&instrumented).unwrap();
-        wgpu::naga::valid::Validator::new(
-            wgpu::naga::valid::ValidationFlags::all(),
-            wgpu::naga::valid::Capabilities::all(),
-        )
-        .validate(&module)
-        .unwrap();
-        let mixed = format!("{source}\nlet slot = atomicAdd(&tile_counts[tile_global], 1u);");
-        assert!(benchmark_bin_source(&mixed).is_err());
+        validated_module(&instrumented);
         assert!(benchmark_bin_source(&format!("{source}\n{source}")).is_err());
     }
 
-    const PLAIN_COUNT_BINDING: &str =
-        "@group(0) @binding(2) var<storage, read_write> tile_counts:    array<u32>;";
-    const ATOMIC_COUNT_BINDING: &str =
-        "@group(0) @binding(2) var<storage, read_write> tile_counts:    array<atomic<u32>>;";
-    const PLAIN_COUNT_STORE: &str = "tile_counts[tile_global] = raw_count;";
-    const DIAGNOSTIC_COUNT_STORE: &str = "atomicMax(&tile_counts[arrayLength(&tile_counts) - 1u], raw_count);\n        atomicStore(&tile_counts[tile_global], raw_count);";
-
-    fn plain_count_candidate() -> String {
-        use sha2::Digest;
-
-        // Keep historical instrumentation input independent of future shader tuning.
-        let source = include_str!(
-            "../../../benchmarks/evolution/overnight-20261024/fixtures/bin-plain-count-reference.wgsl"
-        )
-        .to_owned();
-        assert_eq!(
-            format!("{:x}", sha2::Sha256::digest(source.as_bytes())),
-            "dc8ac3971a96e0ad90bc4ce113675c11ac3352323e586bc806a5a0f3f3a3e105",
-            "must match bin-micros/manifest.json candidate C"
-        );
-        source
-    }
-
-    fn validated_bin_module(source: &str) -> wgpu::naga::Module {
-        let module = wgpu::naga::front::wgsl::parse_str(source).unwrap();
-        wgpu::naga::valid::Validator::new(
-            wgpu::naga::valid::ValidationFlags::all(),
-            wgpu::naga::valid::Capabilities::all(),
-        )
-        .validate(&module)
-        .unwrap();
-        module
-    }
-
     #[test]
-    fn plain_count_candidate_preserves_normal_source_and_validates_all_tile_shapes() {
-        let candidate = plain_count_candidate();
-        validate_benchmark_bin_source(&candidate).unwrap();
-        let variant = BinSource::Variant(candidate.as_str().into());
-        // Its drawing state takes the engine's stride (see specialize_polygon_storage).
-        let stored = specialize_polygon_storage(&candidate).unwrap().source;
-        for wg in TILES {
-            let normal = specialize_benchmark_bin_source(&variant, wg, false).unwrap();
-            for (axis, size) in [("W", wg[0]), ("H", wg[1])] {
-                assert_eq!(
-                    normal
-                        .matches(&format!("const TILE_{axis}: u32 = {size};"))
-                        .count(),
-                    1
-                );
-            }
-            // Only the requested tile dimensions may differ in normal mode.
-            assert_eq!(
-                normal
-                    .replace(
-                        &format!("const TILE_W: u32 = {};", wg[0]),
-                        "const TILE_W: u32 = 16;"
-                    )
-                    .replace(
-                        &format!("const TILE_H: u32 = {};", wg[1]),
-                        "const TILE_H: u32 = 16;"
-                    ),
-                stored
-            );
-            if wg == [16, 16] {
-                assert_eq!(normal.as_bytes(), stored.as_bytes());
-            }
-            validated_bin_module(&normal);
-            let diagnostic = specialize_benchmark_bin_source(&variant, wg, true).unwrap();
-            assert_eq!(
-                diagnostic,
-                normal
-                    .replace(PLAIN_COUNT_BINDING, ATOMIC_COUNT_BINDING)
-                    .replace(PLAIN_COUNT_STORE, DIAGNOSTIC_COUNT_STORE)
-            );
-            assert_eq!(diagnostic.matches(ATOMIC_COUNT_BINDING).count(), 1);
-            assert_eq!(diagnostic.matches("atomicMax(").count(), 1);
-            validated_bin_module(&diagnostic);
-        }
-    }
-
-    #[test]
-    fn plain_count_diagnostic_tail_is_uncapped_and_never_reset() {
-        use wgpu::naga::{AtomicFunction, Expression, Literal, Statement};
-
-        for raw_count in [257u32, 1000, 0] {
-            let source = format!(
-                "{PLAIN_COUNT_BINDING}
-@compute @workgroup_size(1)
-fn main() {{
-    let tile_global = 0u;
-    let raw_count = {raw_count}u;
-    {PLAIN_COUNT_STORE}
-}}"
-            );
-            let diagnostic = benchmark_bin_source(&source).unwrap();
-            assert_eq!(diagnostic.matches(DIAGNOSTIC_COUNT_STORE).count(), 1);
-            let module = validated_bin_module(&diagnostic);
-            let function = &module.entry_points[0].function;
-            let mut maxima = 0;
-            let mut stores = 0;
-            // Inspect parsed effects too: no cap and no assignment can clear the tail.
-            for statement in &function.body {
-                match *statement {
-                    Statement::Atomic { fun, value, .. } => {
-                        assert_eq!(fun, AtomicFunction::Max);
-                        assert!(matches!(function.expressions[value],
-                            Expression::Literal(Literal::U32(value)) if value == raw_count));
-                        maxima += 1;
-                    }
-                    Statement::Store { value, .. } => {
-                        assert!(matches!(function.expressions[value],
-                            Expression::Literal(Literal::U32(value)) if value == raw_count));
-                        stores += 1;
-                    }
-                    Statement::Emit(_) | Statement::Return { .. } => {}
-                    _ => panic!("unexpected diagnostic effect: {statement:?}"),
-                }
-            }
-            assert_eq!((maxima, stores), (1, 1));
-        }
-    }
-
-    #[test]
-    fn count_instrumentation_rejects_missing_duplicate_and_mixed_markers() {
-        let candidate = plain_count_candidate();
-        let markers = [
-            "let slot = atomicAdd(&tile_counts[tile_global], 1u);",
-            "atomicStore(&tile_counts[tile_global], raw_count);",
-            PLAIN_COUNT_STORE,
-        ];
-        assert!(benchmark_bin_source(&candidate.replace(PLAIN_COUNT_STORE, "")).is_err());
-        for marker in markers {
-            let source = candidate.replace(PLAIN_COUNT_STORE, marker);
-            for extra in markers {
-                assert!(
-                    benchmark_bin_source(&format!("{source}\n{extra}")).is_err(),
-                    "accepted duplicate or mixed markers: {marker}, {extra}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn plain_count_instrumentation_rejects_binding_mismatches() {
-        let candidate = plain_count_candidate();
-        for binding in [
-            String::new(),
-            ATOMIC_COUNT_BINDING.to_owned(),
-            PLAIN_COUNT_BINDING.replace("@group(0)", "@group(1)"),
-            PLAIN_COUNT_BINDING.replace("@binding(2)", "@binding(3)"),
-            PLAIN_COUNT_BINDING.replace("read_write", "read"),
-            format!("{PLAIN_COUNT_BINDING}\n{PLAIN_COUNT_BINDING}"),
-            format!("{PLAIN_COUNT_BINDING}\n{ATOMIC_COUNT_BINDING}"),
-            format!(
-                "{PLAIN_COUNT_BINDING}\n{}",
-                PLAIN_COUNT_BINDING.replace("@binding(2)", "@binding(3)")
-            ),
-        ] {
-            assert!(
-                benchmark_bin_source(&candidate.replace(PLAIN_COUNT_BINDING, &binding)).is_err(),
-                "accepted count binding mismatch: {binding}"
-            );
-        }
-    }
-
-    #[test]
-    fn raster_work_role_follows_declared_binding_not_text() {
-        let fixture = |name: &str| {
-            std::fs::read_to_string(format!(
-                "{}/benchmarks/evolution/overnight-20261024/fixtures/{name}",
-                env!("CARGO_MANIFEST_DIR")
-            ))
-            .unwrap()
-        };
-        let role = |source: &str, binding| {
-            TileVariant::new(source.into(), binding).unwrap().raster_work
-        };
+    fn tile_variants_must_declare_raster_work() {
         let bin = tile_source(TileStage::BinPolygons, [16, 16]);
         let raster = tile_source(TileStage::RasterizeError, [16, 16]);
-        assert!(role(&bin, BIN_RASTER_WORK_BINDING));
-        assert!(role(&raster, RASTER_RASTER_WORK_BINDING));
-        for name in ["bin-tile32-reference.wgsl", "bin-plain-count-reference.wgsl"] {
-            assert!(!role(&fixture(name), BIN_RASTER_WORK_BINDING), "{name}");
-        }
-        for name in [
-            "raster-ae1-reference.wgsl",
-            "raster-direct-t2.wgsl",
-            "raster-direct-t4.wgsl",
-        ] {
-            assert!(!role(&fixture(name), RASTER_RASTER_WORK_BINDING), "{name}");
-        }
+        assert!(declares_binding(&bin, BIN_RASTER_WORK_BINDING).unwrap());
+        assert!(declares_binding(&raster, RASTER_RASTER_WORK_BINDING).unwrap());
         // A mention outside a binding declaration does not make a source list work.
-        let mention = format!("// writes raster_work\n{}", fixture("bin-tile32-reference.wgsl"));
-        assert!(!role(&mention, BIN_RASTER_WORK_BINDING));
-        assert!(TileVariant::new("fn".into(), BIN_RASTER_WORK_BINDING).is_err());
+        let unbound = "// writes raster_work\nconst TILE_W: u32 = 16;\nconst TILE_H: u32 = 16;\n\
+            @compute @workgroup_size(1) fn main() {}";
+        assert!(!declares_binding(unbound, BIN_RASTER_WORK_BINDING).unwrap());
+        assert!(validate_bin(unbound).is_err());
+        assert!(validate_raster(unbound).is_err());
+        let bound = format!(
+            "@group(0) @binding({BIN_RASTER_WORK_BINDING}) var<storage, read_write> raster_work: array<u32>;\n{unbound}"
+        );
+        validate_bin(&bound).unwrap();
+        assert!(declares_binding("fn", BIN_RASTER_WORK_BINDING).is_err());
     }
 }

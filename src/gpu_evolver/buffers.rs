@@ -86,7 +86,7 @@ pub struct GpuParams {
 
     // vec4[7] — chain count + lambda + adaptive mutation
     pub chain_count_param: u32,
-    // Always 1: historical benchmark shaders branch on it; bundled shaders ignore it.
+    // Always 1; no shader reads it.
     pub single_mutation_mode: u32,
     pub lambda: u32,
     pub adaptive_mutation: u32,
@@ -106,12 +106,10 @@ pub struct GpuParams {
     // vec4[10] — merge thresholds, micro color weight + padding
     pub merge_centroid_threshold: f32,
     pub merge_color_threshold: f32,
-    // Historical shader variants see padding here.
     pub micro_color_prob: f32,
     pub _pad3: u32,
 
-    // vec4[11-12] — step-size multiplier per rung (`MutationParams::step_multipliers`);
-    // historical shader variants see reserved words here.
+    // vec4[11-12] — step-size multiplier per rung (`MutationParams::step_multipliers`).
     pub step_multipliers: [f32; STEP_RUNGS],
 
     // vec4[13-15] — reserved padding to fill 256 bytes

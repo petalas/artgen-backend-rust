@@ -315,8 +315,8 @@ pub rng_state: [u32; 4],  // offset 16 -- [0] RNG state; [1..3] offspring change
 
 The PCG-RXS-M-XS RNG uses a single u32 state. Offspring keep their change
 record's changed-index words in `rng_state[1..3]`, read by binning, raster and
-select (`gpu_evolver::changes`); historical shader variants use those words in
-place. Only `rng_state[3]`, and all three words of a parent state, are free.
+select (`gpu_evolver::changes`). Only `rng_state[3]`, and all three words of a
+parent state, are free.
 
 ### Optimization: Use Padding for Metadata
 

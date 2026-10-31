@@ -9,14 +9,14 @@
 //!
 //! Sources are compiled once through the public mutation pipeline's
 //! actual bind-group layouts, with mutation-only compilation options. Reference zeroing stays true; candidate
-//! zeroing defaults to true and can be disabled explicitly. The only rewrite is
-//! the engine's `specialize_polygon_storage`, which gives a historical source's
-//! `DrawingState` the engine's `POLYGON_CAPACITY` stride; every source must
-//! support the fixtures' 1000-polygon cap. No other engine API, solver, source
-//! rewriting, or scored campaign is involved. In particular,
-//! marker-free physical workgroups of 128/256/512 lanes retain dispatch(4, 1, 1).
-//! An exact `OFFSPRING_GROUP_SIZE` declaration changes only dispatch Y to
-//! `ceil(fixture.lambda / source_group_size)`, using the engine's checked parser.
+//! zeroing defaults to true and can be disabled explicitly. Sources are not
+//! rewritten; the engine's `validate_polygon_storage` checks that each declares
+//! this build's `POLYGON_CAPACITY` stride, as emitted current-tree sources do.
+//! No other engine API, solver, source rewriting, or scored campaign is
+//! involved. Every source declares an exact `OFFSPRING_GROUP_SIZE`, read by the
+//! engine's checked parser; it sets only dispatch Y to
+//! `ceil(fixture.lambda / source_group_size)`, so a group of 64 dispatches
+//! (4, 1, 1) whatever the physical lane count.
 //! A candidate can clone in 2/4/8 lanes per child, `storageBarrier()`, then run the
 //! original RNG/mutation body in the first 64 lanes. This tool does not assume
 //! that implementation. Every header bit and every active polygon word must
@@ -83,7 +83,7 @@ use artgen_backend_rust::{
             BenchmarkMutateOptions,
         },
         buffers::{default_gpu_params, GpuDrawingState, GpuParams, GPU_DRAWING_STATE_SIZE},
-        pipeline::{specialize_polygon_storage, GpuPipeline},
+        pipeline::{validate_polygon_storage, GpuPipeline},
         EngineCapacity,
     },
     settings::POLYGON_CAPACITY,
@@ -97,7 +97,7 @@ const ACTIVE_CHAINS: usize = 4;
 const PARENTS: usize = 1024;
 const MAX_LAMBDA: usize = 64;
 const OFFSPRING: usize = ACTIVE_CHAINS * MAX_LAMBDA;
-// The fixtures' polygon cap and largest drawing, the historical reference's limit.
+// The fixtures' polygon cap and largest drawing.
 const POLYGONS: usize = 1000;
 // Physical polygon slots per state: the engine's storage stride.
 const SLOTS: usize = POLYGON_CAPACITY;
@@ -417,15 +417,9 @@ fn load_sources(options: &Options, evidence: &mut Evidence) -> Result<Vec<Source
         let mutate_group_size = benchmark_mutate_group_size_from_source(&text)
             .map_err(anyhow::Error::msg)
             .with_context(|| format!("mutation group metadata for {}", arg.name))?;
-        let storage = specialize_polygon_storage(&text)
+        validate_polygon_storage(&text)
             .map_err(anyhow::Error::msg)
             .with_context(|| format!("polygon storage of {}", arg.name))?;
-        ensure!(
-            storage.polygon_limit >= POLYGONS,
-            "{} supports {} polygons; the fixtures need {POLYGONS}",
-            arg.name,
-            storage.polygon_limit
-        );
         let copy = format!("{}.wgsl", arg.name);
         let mut destination = OpenOptions::new()
             .write(true)
@@ -435,12 +429,12 @@ fn load_sources(options: &Options, evidence: &mut Evidence) -> Result<Vec<Source
         destination.flush()?;
         evidence.event(&json!({"event":"source", "name":arg.name, "path":path_text,
             "copy":copy, "sha256":sha256, "bytes":text.len(),
-            "mutate_group_size":mutate_group_size, "polygon_limit":storage.polygon_limit,
+            "mutate_group_size":mutate_group_size,
             "constants":benchmark_mutate_compilation_options(compilation_options).constants,
             "zero_initialize_workgroup_memory":compilation_options.zero_initialize_workgroup_memory}))?;
         sources.push(Source {
             name: arg.name.clone(),
-            compiled: storage.source,
+            compiled: text,
             sha256,
             mutate_group_size,
             options: compilation_options,
@@ -1337,13 +1331,9 @@ fn compare_produced(reference: &[u32], actual: &[u32], slot: usize, result: &mut
 mod tests {
     use super::*;
 
-    const HISTORICAL_MUTATE: &str = include_str!(
-        "../benchmarks/evolution/overnight-20261024/fixtures/mutate-e133-reference.wgsl"
-    );
-    const GROUPED_MUTATE_G1: &str = include_str!(
-        "../benchmarks/evolution/overnight-20261024/fixtures/mutate-g1-wg64-copy64.wgsl"
-    );
-    // Source/evidence metadata only; this empty kernel does not test GPU equivalence.
+    // Source/evidence metadata only; these empty kernels do not test GPU equivalence.
+    const GROUPED_MUTATE_G1: &str = "const OFFSPRING_GROUP_SIZE: u32 = 1u;\n\
+        @compute @workgroup_size(64) fn main() {}";
     const GROUPED_MUTATE_G64: &str = "const OFFSPRING_GROUP_SIZE: u32 = 64u;\n\
         @compute @workgroup_size(64) fn main() {}";
 
@@ -1361,7 +1351,6 @@ mod tests {
             let bundled_group =
                 benchmark_mutate_group_size_from_source(bundled).map_err(anyhow::Error::msg)?;
             let inputs = [
-                (HISTORICAL_MUTATE, 64),
                 (GROUPED_MUTATE_G1, 1),
                 (GROUPED_MUTATE_G64, 64),
                 (bundled, bundled_group),
@@ -1395,11 +1384,11 @@ mod tests {
                 ..fixtures()[0]
             };
             assert_eq!(
-                mutation_dispatch(case, sources[1].mutate_group_size),
+                mutation_dispatch(case, sources[0].mutate_group_size),
                 [4, 33, 1]
             );
             assert_eq!(
-                mutation_dispatch(case, sources[2].mutate_group_size),
+                mutation_dispatch(case, sources[1].mutate_group_size),
                 [4, 1, 1]
             );
             Ok(())
@@ -1415,7 +1404,7 @@ mod tests {
         line: &str,
         output: &Path,
     ) -> Result<()> {
-        assert_eq!(source.compiled, specialize_polygon_storage(text).unwrap().source);
+        assert_eq!(source.compiled, text);
         assert_eq!(source.sha256, hash(text.as_bytes()));
         assert_eq!(source.mutate_group_size, group);
         assert_eq!(
@@ -1474,10 +1463,10 @@ mod tests {
     }
 
     #[test]
-    fn fixture_matrix_keeps_all_lambda_modes_historical_dispatch_and_parent_bounds() {
+    fn fixture_matrix_keeps_all_lambda_modes_group64_dispatch_and_parent_bounds() {
         let cases = fixtures();
         assert_eq!(cases.len(), FIXTURES);
-        let baseline = benchmark_mutate_group_size_from_source(HISTORICAL_MUTATE).unwrap();
+        let baseline = benchmark_mutate_group_size_from_source(GROUPED_MUTATE_G64).unwrap();
         assert_eq!(baseline, 64);
         for lambda in 1..=64 {
             let modes: Vec<_> = cases

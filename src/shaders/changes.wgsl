@@ -8,9 +8,8 @@
 // that no changed polygon can cover; an unknown record turns them off.
 //
 // The offspring record (written by mutate; read by bin_polygons,
-// raster_worklist, rasterize_error and select through offspring_changes.wgsl)
-// lives in otherwise unused words of the working state, which historical
-// shader variants read and write in place:
+// rasterize_error and select through offspring_changes.wgsl) lives in
+// otherwise unused words of the working state:
 //   fitness_bits, stagnation_counter: the dirty rectangle's min and max
 //     corners, x | y << 16 pixels, max exclusive;
 //   rng_state.y, rng_state.z: the changed-index words.

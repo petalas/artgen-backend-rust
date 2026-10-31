@@ -243,13 +243,6 @@ impl GpuEvolver {
                 params.lambda, p.chain_count, p.offspring_capacity
             ));
         }
-        let limit = p.programs.polygon_limit();
-        if params.max_polygons as usize > limit {
-            return Err(format!(
-                "max_polygons {} exceeds the installed shader variants' polygon limit {limit}",
-                params.max_polygons
-            ));
-        }
         validate_dispatch(p, params)?;
         validate_resources(p, params)
     }

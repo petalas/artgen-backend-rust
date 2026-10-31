@@ -6,9 +6,7 @@
 //! the [`GpuChainChange`] layout with this module.
 //!
 //! The offspring record lives in otherwise unused words of a working
-//! [`GpuDrawingState`]. mutate writes it; select, binning and raster read it.
-//! Historical shader variants read and write these words in place, so their
-//! location is fixed:
+//! [`GpuDrawingState`]. mutate writes it; select, binning and raster read it:
 //! - `fitness_bits`, `stagnation_counter`: the dirty rectangle's min and max
 //!   corners, `x | y << 16` pixels, max exclusive;
 //! - `rng_state[1]`, `rng_state[2]`: the changed-index words.

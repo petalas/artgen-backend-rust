@@ -14,12 +14,11 @@ use super::changes::{
     pack_dirty_box, ChangedIndices, CHANGED_WORDS_OFFSET, DIRTY_MAX_OFFSET, DIRTY_MIN_OFFSET,
 };
 
-use super::programs::{GpuPrograms, ProgramBindings, RasterSchedule, WorklistStorage};
+use super::programs::{GpuPrograms, ProgramBindings};
 
 pub use super::programs::{
     benchmark_mutate_compilation_options, benchmark_mutate_group_size_from_source,
-    specialize_polygon_storage, BenchmarkMutateOptions, ShaderVariantInstaller, VariantStorage,
-    HISTORICAL_POLYGON_CAPACITY,
+    validate_polygon_storage, BenchmarkMutateOptions, ShaderVariantInstaller,
 };
 
 pub struct GpuPipeline {
@@ -568,12 +567,11 @@ impl GpuPipeline {
     }
 
     /// # Panics
-    /// Panics beyond the engine's capacity or the installed programs' polygon limit.
+    /// Panics beyond the engine's capacity or the polygon capacity.
     pub(super) fn workload(&self, params: &crate::mutation_params::MutationParams) -> Workload {
-        let limit = self.programs.polygon_limit();
-        assert!(params.max_polygons as usize <= limit,
-            "max_polygons {} exceeds the installed programs' polygon limit {limit}",
-            params.max_polygons);
+        assert!(params.max_polygons as usize <= crate::settings::POLYGON_CAPACITY,
+            "max_polygons {} exceeds the polygon capacity {}",
+            params.max_polygons, crate::settings::POLYGON_CAPACITY);
         Workload::for_batch(params, [self.image_width, self.image_height],
             self.chain_count, self.offspring_capacity, self.programs.mutation().group_size())
     }
@@ -605,30 +603,17 @@ impl GpuPipeline {
 
     /// Record raster/error for `offspring` offspring over `grid` tiles.
     ///
-    /// The bundled raster program runs a fixed number of raster workgroups
-    /// that share the (offspring, tile) pairs listed by the bundled binner, or
-    /// by a separate worklist pass after a shader-variant binner that lists none.
-    /// An indirect dispatch sized to the list cut throughput about 6x on Dozen
-    /// (the host fell behind; see LEARNINGS). Raster variants that do not read
-    /// the list keep the full grid. The pass must already have the params bind
-    /// group at 1.
+    /// The raster program runs a fixed number of raster workgroups that share
+    /// the (offspring, tile) pairs the binner listed. An indirect dispatch sized
+    /// to the list cut throughput about 6x on Dozen (the host fell behind; see
+    /// LEARNINGS). The pass must already have the params bind group at 1.
     pub(super) fn record_raster(&self, pass: &mut ComputePass<'_>, grid: [u32; 2], offspring: u32) {
-        let tiles = self.programs.tiles();
-        if let RasterSchedule::ListedByPass { pipeline, bind_group } = &tiles.schedule {
-            pass.set_pipeline(pipeline);
-            pass.set_bind_group(0, bind_group, &[]);
-            pass.dispatch_workgroups(offspring, 1, 1);
-        }
-        pass.set_pipeline(&tiles.raster);
+        pass.set_pipeline(&self.programs.tiles().raster);
         pass.set_bind_group(0, &self.rasterize_error_bind_group, &[]);
-        if let RasterSchedule::FullGrid = tiles.schedule {
-            pass.dispatch_workgroups(grid[0], grid[1], offspring);
-        } else {
-            let pairs = u64::from(grid[0]) * u64::from(grid[1]) * u64::from(offspring);
-            let groups = u32::try_from(pairs.min(u64::from(RASTER_WORKGROUPS)))
-                .expect("raster workgroups fit u32");
-            pass.dispatch_workgroups(groups, 1, 1);
-        }
+        let pairs = u64::from(grid[0]) * u64::from(grid[1]) * u64::from(offspring);
+        let groups = u32::try_from(pairs.min(u64::from(RASTER_WORKGROUPS)))
+            .expect("raster workgroups fit u32");
+        pass.dispatch_workgroups(groups, 1, 1);
     }
 
     /// Empty the raster worklist outside the batch loop (update_framebuffers
@@ -743,14 +728,8 @@ impl GpuPipeline {
     }
 
     /// Install benchmark shader variants in place of the bundled programs.
-    /// Supplies the storage of the worklist pass that older binners need.
     pub fn shader_variants(&mut self) -> ShaderVariantInstaller<'_> {
-        self.programs.shader_variants(&WorklistStorage {
-            working_states: &self.working_states_buf,
-            chain_states: &self.chain_states_buf,
-            tile_counts: &self.tile_counts_buf,
-            raster_work: &self.raster_work_buf,
-        })
+        self.programs.shader_variants()
     }
 
     /// Save pipeline cache data to disk for faster startup next time.

@@ -51,9 +51,11 @@ poison/stale-word and rational-oracle contract.
 
 Cases include 512 and 513 on both axes, partial image edges, threshold-adjacent
 packed coordinates, zero/inverted dirty boxes, full-image bypass, changing dirty
-regions and 500 overlapping polygons. The frozen original binner is
-[reference-bin-dd52d50.wgsl](reference-bin-dd52d50.wgsl), SHA-256
-`27bbf8473e9ae1f68cb7ccb3a747e6f6fb8b9106bd7a42e16e88ea017a88f61f`.
+regions and 500 overlapping polygons. The frozen original binner was
+`benchmarks/evolution/v1/experiments/reference-bin-dd52d50.wgsl`, SHA-256
+`27bbf8473e9ae1f68cb7ccb3a747e6f6fb8b9106bd7a42e16e88ea017a88f61f`; it was
+removed with the checker's paired scopes after `c0ad387` and remains in git
+history (`git show c0ad387:benchmarks/evolution/v1/experiments/reference-bin-dd52d50.wgsl`).
 Reference output is not inferred from CPU floating-point behavior.
 
 The differential GPU run passed 770 paired checks, or 1,540 actual dispatches,
