@@ -33,7 +33,7 @@ use crate::{
         GpuEvolver,
     },
     models::drawing::Drawing,
-    mutation_params::MutationParams,
+    mutation_params::{MutationParams, PointPenalty},
     settings::{STEP_RUNGS, TILE_MAX_POLYS},
 };
 
@@ -89,7 +89,8 @@ pub struct Point {
     pub evaluations: u64,
     /// GPU fitness percent as delivered, including the point penalty.
     pub fitness: f64,
-    /// `fitness / (1 - per_point_penalty * points)`: the error-only fitness.
+    /// `fitness / (1 - P(polygons))`, `P` the run's `PointPenalty::fraction`:
+    /// the error-only fitness.
     pub raw_fitness: f64,
     pub polygons: u32,
     pub points: u32,
@@ -250,10 +251,12 @@ pub struct QualityRecord {
 /// Rejects unknown keys, ill-typed values and values that production's
 /// `sanitize` would silently change.
 pub fn params_with(overrides: &Map<String, Value>) -> Result<MutationParams> {
-    // `per_point_penalty` and the step spread are serialized only away from
-    // their defaults, so name them from parameters that hold other values.
+    // `per_point_penalty`, `penalty_exponent` and the step spread are serialized
+    // only away from their defaults, so name them from parameters that hold
+    // other values.
     let every_field = MutationParams {
         per_point_penalty: 0.0,
+        penalty_exponent: 1.0,
         step_spread_min: 0.5,
         step_spread_max: 2.0,
         ..MutationParams::default()
@@ -342,26 +345,26 @@ struct Recorder {
     best: Drawing,
     schedule: Schedule,
     points: Vec<Point>,
-    /// The run's `per_point_penalty`, removed for `raw_fitness`.
-    per_point_penalty: f32,
+    /// The run's penalty, removed for `raw_fitness`.
+    penalty: PointPenalty,
 }
 
 impl Recorder {
     /// `start` scored `initial_fitness` on the GPU.
-    fn new(start: &Drawing, initial_fitness: f32, per_point_penalty: f32) -> Self {
+    fn new(start: &Drawing, initial_fitness: f32, penalty: PointPenalty) -> Self {
         let best = Drawing {
             polygons: start.polygons.clone(),
             is_dirty: false,
             fitness: initial_fitness,
         };
         let mut points = Vec::with_capacity(MAX_POINTS);
-        points.push(point_of(&best, per_point_penalty, 0.0, 0, 0));
+        points.push(point_of(&best, penalty, 0.0, 0, 0));
         let schedule = Schedule::new(100.0 - f64::from(initial_fitness));
         Self {
             best,
             schedule,
             points,
-            per_point_penalty,
+            penalty,
         }
     }
 
@@ -382,7 +385,7 @@ impl Recorder {
     }
 
     fn point(&self, seconds: f64, batches: u64, evaluations: u64) -> Point {
-        point_of(&self.best, self.per_point_penalty, seconds, batches, evaluations)
+        point_of(&self.best, self.penalty, seconds, batches, evaluations)
     }
 
     fn push(&mut self, point: Point) -> Result<()> {
@@ -406,7 +409,7 @@ impl Recorder {
 
 fn point_of(
     best: &Drawing,
-    per_point_penalty: f32,
+    penalty: PointPenalty,
     seconds: f64,
     batches: u64,
     evaluations: u64,
@@ -418,13 +421,12 @@ fn point_of(
         .map(|polygon| u32::try_from(polygon.points.len()).unwrap_or(u32::MAX))
         .fold(0u32, u32::saturating_add);
     let fitness = f64::from(best.fitness);
-    let penalty = 1.0 - f64::from(per_point_penalty) * f64::from(points);
     Point {
         seconds,
         batches,
         evaluations,
         fitness,
-        raw_fitness: fitness / penalty,
+        raw_fitness: fitness / (1.0 - penalty.fraction(polygons)),
         polygons,
         points,
     }
@@ -537,7 +539,7 @@ fn final_check(
     let count = usize::try_from(state.polygon_count)?;
     let polygons: Vec<[u32; 4]> = state.polygons[..count].iter().map(|p| p.data).collect();
     let (width, height) = (input.fixture.width, input.fixture.height);
-    let scalar = reference::evaluate(&polygons, &input.rgba, width, height, params.per_point_penalty)?;
+    let scalar = reference::evaluate(&polygons, &input.rgba, width, height, params.point_penalty())?;
     let scalar = f64::from(scalar.fitness);
     let complexity = reference::complexity(&polygons, width, height, params.rasterize_wg)?;
     let delivered = f64::from(best.fitness);
@@ -567,7 +569,7 @@ fn evolve(
     let initial = evolver
         .prepare_seeded_benchmark(start, params, spec.seed, spec.warmup_batches, true)
         .map_err(anyhow::Error::msg)?;
-    let mut recorder = Recorder::new(start, initial, params.per_point_penalty);
+    let mut recorder = Recorder::new(start, initial, params.point_penalty());
     let mut operators = OperatorLog::new();
     let start = Instant::now();
     let mut batches = 0u64;
@@ -624,6 +626,8 @@ mod tests {
             .to_string()
             .contains("sanitize"));
         assert!(set(r#"{"perPointPenalty":1.0}"#).is_err());
+        assert_eq!(set(r#"{"penaltyExponent":1.5}"#).unwrap().penalty_exponent, 1.5);
+        assert!(set(r#"{"penaltyExponent":2.5}"#).is_err());
         let spread = set(r#"{"stepSpreadMin":0.25,"stepSpreadMax":4}"#).unwrap();
         assert_eq!((spread.step_spread_min, spread.step_spread_max), (0.25, 4.0));
         assert!(set(r#"{"stepSpreadMin":2,"stepSpreadMax":1}"#)
@@ -718,14 +722,20 @@ mod tests {
             is_dirty: false,
             fitness: 99.0,
         };
-        let point = point_of(&best, crate::settings::PER_POINT_PENALTY, 1.0, 1, 1);
+        let flat = PointPenalty { per_point: crate::settings::PER_POINT_PENALTY, exponent: 0.0 };
+        let point = point_of(&best, flat, 1.0, 1, 1);
         assert_eq!((point.polygons, point.points), (1000, 3000));
         let expected = 99.0 / (1.0 - 3000.0 / 5_000_000.0);
         assert!((point.raw_fitness - expected).abs() < 1e-9);
         // The run's own penalty is removed.
-        let strong = 16.0 * crate::settings::PER_POINT_PENALTY;
+        let strong = PointPenalty { per_point: 16.0 * flat.per_point, ..flat };
         let point = point_of(&best, strong, 1.0, 1, 1);
-        let expected = 99.0 / (1.0 - f64::from(strong) * 3000.0);
+        let expected = 99.0 / (1.0 - f64::from(strong.per_point) * 3000.0);
         assert!((point.raw_fitness - expected).abs() < 1e-9);
+        // A scaled penalty: at N0 = 1000 triangles, P = 3 p N0 / (k + 1).
+        let scaled = PointPenalty { exponent: 1.0, ..strong };
+        let point = point_of(&best, scaled, 1.0, 1, 1);
+        let expected = 99.0 / (1.0 - f64::from(strong.per_point) * 3000.0 / 2.0);
+        assert!((point.raw_fitness - expected).abs() < 1e-6, "{}", point.raw_fitness);
     }
 }

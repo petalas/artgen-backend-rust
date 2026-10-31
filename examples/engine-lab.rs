@@ -981,10 +981,13 @@ fn check_pixels(
             })
             .sum();
         let stored_error = state.parent_total_errors[chain];
-        let mut expected = 100.0
-            * (1.0
-                - rounded_f32(stored_error) / (765.0 * rounded_f32(u32::try_from(pixels.len())?)));
-        expected -= expected * params.per_point_penalty * rounded_f32(parent.polygon_count * 3);
+        let expected = params.point_penalty().apply(
+            100.0
+                * (1.0
+                    - rounded_f32(stored_error)
+                        / (765.0 * rounded_f32(u32::try_from(pixels.len())?))),
+            parent.polygon_count,
+        );
         let fitness = f32::from_bits(parent.fitness_bits);
         if error != u64::from(stored_error)
             || !fitness.is_finite()

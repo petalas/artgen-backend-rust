@@ -57,6 +57,18 @@ pub const PER_POINT_PENALTY: f32 = 1.0 / 5_000_000.0;
 /// Largest accepted `per_point_penalty`. At `POLYGON_CAPACITY` triangles it
 /// removes 61% of the fitness, so fitness stays positive.
 pub const MAX_PER_POINT_PENALTY: f32 = 1.0e-4;
+/// Default `MutationParams::penalty_exponent`: every triangle costs the same,
+/// `3 * per_point_penalty`.
+pub const PENALTY_EXPONENT: f32 = 0.0;
+/// Triangle count at which a scaled penalty's next triangle costs exactly
+/// `3 * per_point_penalty`. With exponent `k` the next triangle costs
+/// `3 p (n / N0)^k`, so `n` triangles remove the fraction
+/// `3 p N0 / (k + 1) * (n / N0)^(k + 1)` of the fitness.
+pub const PENALTY_REFERENCE_TRIANGLES: u32 = 1000;
+/// Largest accepted `penalty_exponent`. With `MAX_PER_POINT_PENALTY` the
+/// fraction at `POLYGON_CAPACITY` triangles grows with the exponent above
+/// about 0.4; at 2 it removes 86% of the fitness, so fitness stays positive.
+pub const MAX_PENALTY_EXPONENT: f32 = 2.0;
 
 // GPU evolution settings
 pub const GPU_MAX_CHAIN_COUNT: u32 = 1024;

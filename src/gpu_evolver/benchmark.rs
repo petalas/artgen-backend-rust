@@ -16,7 +16,7 @@ use super::execution::ResourceSizes;
 use crate::models::drawing::Drawing;
 use crate::mutation_params::MutationParams;
 use crate::settings::{
-    GPU_MAX_BATCH_ITERS, GPU_MAX_LAMBDA, MAX_PER_POINT_PENALTY, POLYGON_CAPACITY,
+    GPU_MAX_BATCH_ITERS, GPU_MAX_LAMBDA, MAX_PENALTY_EXPONENT, MAX_PER_POINT_PENALTY, POLYGON_CAPACITY,
 };
 
 pub use super::pipeline::{
@@ -596,6 +596,9 @@ fn validate_shape(params: &MutationParams) -> Result<(), String> {
     }
     if !(0.0..=MAX_PER_POINT_PENALTY).contains(&params.per_point_penalty) {
         return Err(format!("per_point_penalty is outside 0..={MAX_PER_POINT_PENALTY}"));
+    }
+    if !(0.0..=MAX_PENALTY_EXPONENT).contains(&params.penalty_exponent) {
+        return Err(format!("penalty_exponent is outside 0..={MAX_PENALTY_EXPONENT}"));
     }
     Ok(())
 }

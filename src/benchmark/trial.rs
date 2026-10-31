@@ -26,7 +26,7 @@ use crate::{
         EngineCapacity, GpuEvolver,
     },
     models::drawing::Drawing,
-    mutation_params::MutationParams,
+    mutation_params::{MutationParams, PointPenalty},
     settings::TILE_MAX_POLYS,
 };
 
@@ -489,7 +489,7 @@ fn compare_chain(
     input: &LoadedFixture,
 ) -> Result<ChainQuality> {
     // Trials run the fixture's parameters.
-    let penalty = input.manifest.params.per_point_penalty;
+    let penalty = input.manifest.params.point_penalty();
     let reference = reference::evaluate(
         &parent.polygons,
         &input.rgba,
@@ -593,10 +593,8 @@ fn pixel_difference(actual: &[u32], expected: &[u32]) -> (u32, u32, u64) {
     (count, maximum, total)
 }
 
-fn fitness(error: u32, triangles: u32, pixels: usize, per_point_penalty: f32) -> f32 {
-    let mut result = 100.0 * (1.0 - error as f32 / (765.0 * pixels as f32));
-    result -= result * per_point_penalty * (triangles * 3) as f32;
-    result
+fn fitness(error: u32, triangles: u32, pixels: usize, penalty: PointPenalty) -> f32 {
+    penalty.apply(100.0 * (1.0 - error as f32 / (765.0 * pixels as f32)), triangles)
 }
 
 /// Export the canonical endpoint and its inspection drawings.

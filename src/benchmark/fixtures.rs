@@ -151,7 +151,7 @@ fn import(root: &Path, id: &str, resolution: u32) -> Result<(Fixture, Vec<u8>, V
         &rgba,
         width,
         height,
-        MutationParams::default().per_point_penalty,
+        MutationParams::default().point_penalty(),
     )?;
     let fixture = Fixture {
         id: id.into(),

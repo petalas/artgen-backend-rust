@@ -74,6 +74,20 @@ engine-lab and the quality recorder take it from the run's parameters. Serialize
 parameters omit it at its default, so frozen fixtures, trial records and
 effective-parameter gates keep their exact maps.
 
+`MutationParams::penalty_exponent` k (default 0, `settings::PENALTY_EXPONENT`;
+`sanitize` bounds it to 0..=`MAX_PENALTY_EXPONENT`, 2, NaN to 0) scales the
+penalty with the triangle count n: the next triangle costs `3 p (n / N0)^k`,
+N0 = `settings::PENALTY_REFERENCE_TRIANGLES` (1000, a generated WGSL f32
+constant), so fitness is multiplied by `1 - P(n)` with
+`P(n) = 3 p N0 / (k + 1) * (n / N0)^(k + 1)`. At k = 0 select.wgsl
+(`compute_fitness`, `improvement_gain`) and every CPU mirror branch to the
+historical flat expression, so scores and replay hashes keep every bit;
+k > 0 goes through select.wgsl `penalty_fraction` (f32 `pow`). The CPU mirror
+is `PointPenalty` (`MutationParams::point_penalty()`): `apply` follows the
+shader's f32 operation order, `fraction` gives `P(n)` for removing the
+penalty. GPU `pow` and Rust `powf` may differ by a few ulps at k > 0, far
+inside the fitness checks' tolerances. Serialized parameters omit k at 0.
+
 `ResourceSizes` includes the reserved diagnostic word in required tile-count
 storage, and allocation includes it too, since an engine sized exactly for its
 workload has no unused worst-case slack to hold it. The requested device
@@ -109,8 +123,9 @@ adaptive mutation scale and the stagnation counter it used were removed, so
 canonical state and replay hashes from before that change do not compare.
 
 `GpuParams` (WGSL `Params`) is a 256-byte uniform of vec4 groups: image size
-and polygon bounds; chain count, λ, `max_error_per_pixel` and the point
-penalty; crossover (`crossover_prob`, `tournament_size`); four groups of
+and polygon bounds; chain count, λ and crossover (`crossover_prob`,
+`tournament_size`); fitness (`max_error_per_pixel`, `per_point_penalty`,
+`penalty_exponent`, one pad); four groups of
 operator weights; `micro_color_prob` with the alpha range; the four
 step-scaled sizes; new-vertex spread and merge thresholds; two groups of step
 multipliers; four reserved. Every field is read by a bundled shader. The layout test in

@@ -442,7 +442,7 @@ impl GpuEvolver {
     ///
     /// This is synchronous — blocks until the GPU readback completes.
     /// Returns the best fitness across `params.chain_count` chains, penalized
-    /// by `params.per_point_penalty` as select.wgsl's compute_fitness does.
+    /// by `params.point_penalty()` as select.wgsl's compute_fitness does.
     pub fn evaluate_chain_fitness(&mut self, params: &MutationParams) -> f32 {
         self.flush_pending();
 
@@ -479,15 +479,14 @@ impl GpuEvolver {
         // Compute fitness from errors with point penalty (matching select.wgsl's compute_fitness)
         let max_error = crate::settings::MAX_ERROR_PER_PIXEL
             * (p.image_width * p.image_height) as f32;
-        let per_point_penalty = params.per_point_penalty;
+        let penalty = params.point_penalty();
 
         let mut best_fitness = 0.0f32;
         for i in 0..active as usize {
             let total_error = errors[i]; // already extracted from stride-2
             let polygon_count = polygon_counts[i];
-            let mut fitness = 100.0 * (1.0 - total_error as f32 / max_error);
-            let num_points = polygon_count * 3;
-            fitness -= fitness * per_point_penalty * num_points as f32;
+            let fitness =
+                penalty.apply(100.0 * (1.0 - total_error as f32 / max_error), polygon_count);
             self.readback.chain_fitness[i] = fitness;
             if fitness > best_fitness {
                 best_fitness = fitness;

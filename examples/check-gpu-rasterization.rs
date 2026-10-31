@@ -11,8 +11,8 @@ use artgen_backend_rust::{
         EngineCapacity, GpuEvolver,
     },
     models::{color::Color, drawing::Drawing, point::Point, polygon::Polygon},
-    mutation_params::MutationParams,
-    settings::{MAX_ERROR_PER_PIXEL, PER_POINT_PENALTY, POLYGON_CAPACITY, TILE_MAX_POLYS},
+    mutation_params::{MutationParams, PointPenalty},
+    settings::{MAX_ERROR_PER_PIXEL, MAX_PER_POINT_PENALTY, PER_POINT_PENALTY, POLYGON_CAPACITY, TILE_MAX_POLYS},
 };
 
 fn layered_drawing() -> Drawing {
@@ -46,10 +46,13 @@ fn layered_drawing() -> Drawing {
 }
 
 fn main() {
-    verify_visible_layer_acceptance(PER_POINT_PENALTY);
+    let flat = PointPenalty { per_point: PER_POINT_PENALTY, exponent: 0.0 };
+    verify_visible_layer_acceptance(flat);
     // The penalty is a parameter: the host's full evaluation and select's
-    // compute_fitness must both apply it.
-    verify_visible_layer_acceptance(16.0 * PER_POINT_PENALTY);
+    // compute_fitness must both apply it, flat or scaled by the triangle count.
+    let strong = PointPenalty { per_point: 16.0 * PER_POINT_PENALTY, ..flat };
+    verify_visible_layer_acceptance(strong);
+    verify_visible_layer_acceptance(PointPenalty { exponent: 1.5, ..strong });
     // Odd dimensions exercise threads outside the image. At 8x8, the drawing
     // crosses the old 192-entry chunk boundary but stays below the tile-bin
     // limit of 256, so late layers exercise the complete loaded prefix.
@@ -80,8 +83,11 @@ fn main() {
     verify_mixed_reference(&empty);
     verify_full_recompute_after_evolution();
     // The default search cap, then the storage capacity above it.
-    verify_shortcuts_near_polygon_capacity(1000);
-    verify_shortcuts_near_polygon_capacity(u32::try_from(POLYGON_CAPACITY).unwrap());
+    verify_shortcuts_near_polygon_capacity(1000, 0.0);
+    verify_shortcuts_near_polygon_capacity(u32::try_from(POLYGON_CAPACITY).unwrap(), 0.0);
+    // A scaled penalty at a triangle count where it is no longer negligible:
+    // select's and the host's scores must follow the CPU mirror.
+    verify_shortcuts_near_polygon_capacity(u32::try_from(POLYGON_CAPACITY).unwrap(), 1.5);
     verify_tile_list_overflow();
     verify_operator_stats();
     println!("GPU rasterization checks passed");
@@ -149,14 +155,18 @@ fn visible_small_layer() -> Drawing {
     drawing
 }
 
-fn verify_visible_layer_acceptance(per_point_penalty: f32) {
+fn verify_visible_layer_acceptance(penalty: PointPenalty) {
     // This layer has normalized twice-area 4e-6 but covers the center pixel.
     // A neutral acceptance must preserve the evaluated geometry, cached error
     // and point penalty. Darwin's first traced failure was iteration 2997.
     let mut reference = [255, 255, 255, 255].repeat(17 * 19);
     reference[(9 * 17 + 8) * 4..(9 * 17 + 8) * 4 + 3].fill(0);
     let drawing = visible_small_layer();
-    let params = MutationParams { per_point_penalty, ..no_op_params() };
+    let params = MutationParams {
+        per_point_penalty: penalty.per_point,
+        penalty_exponent: penalty.exponent,
+        ..no_op_params()
+    };
     let mut evolver = futures_lite::future::block_on(GpuEvolver::new(
         &reference,
         17,
@@ -168,7 +178,7 @@ fn verify_visible_layer_acceptance(per_point_penalty: f32) {
         .prepare_seeded_benchmark(&drawing, &params, 7, 0, true)
         .expect("visible-layer preparation failed");
     let initial =
-        assert_cached_byte_l1(&mut evolver, &reference, per_point_penalty, "visible layer, initial");
+        assert_cached_byte_l1(&mut evolver, &reference, penalty, "visible layer, initial");
     assert_eq!(initial.parent_total_errors, [0, 0]);
     assert!(initial.parents.iter().all(|p| p.polygon_count == 2));
     let mut accepted = false;
@@ -189,7 +199,7 @@ fn verify_visible_layer_acceptance(per_point_penalty: f32) {
         let checked = assert_cached_byte_l1(
             &mut evolver,
             &reference,
-            per_point_penalty,
+            penalty,
             "visible layer, after no-op",
         );
         assert_eq!(checked.parent_total_errors, [0, 0]);
@@ -206,7 +216,7 @@ fn verify_visible_layer_acceptance(per_point_penalty: f32) {
     let full = assert_cached_byte_l1(
         &mut evolver,
         &reference,
-        per_point_penalty,
+        penalty,
         "visible layer, full recompute",
     );
     assert_eq!(full.parent_total_errors, [0, 0]);
@@ -288,7 +298,7 @@ fn verify_mixed_reference(empty: &Drawing) {
             evolver
                 .prepare_seeded_benchmark(drawing, &params, 0x0123_4567_89ab_cdef, 0, false)
                 .expect("mixed-reference preparation failed");
-            let penalty = params.per_point_penalty;
+            let penalty = params.point_penalty();
             let initialized = assert_cached_byte_l1(&mut evolver, &reference, penalty, &context);
             evolver.evaluate_chain_fitness(&params);
             let evaluated = assert_cached_byte_l1(&mut evolver, &reference, penalty, &context);
@@ -312,21 +322,21 @@ fn verify_mixed_reference(empty: &Drawing) {
 fn assert_cached_byte_l1(
     evolver: &mut GpuEvolver,
     reference: &[u8],
-    per_point_penalty: f32,
+    penalty: PointPenalty,
     context: &str,
 ) -> BenchmarkSnapshot {
     assert_eq!(reference.len(), 17 * 19 * 4);
-    assert_chains_cached_byte_l1(evolver, reference, [2, 1], per_point_penalty, context)
+    assert_chains_cached_byte_l1(evolver, reference, [2, 1], penalty, context)
 }
 
 /// Every cached parent framebuffer's byte L1 from `reference` equals its cached
-/// total, and its fitness follows with the run's `per_point_penalty`.
+/// total, and its fitness follows with the run's penalty.
 /// `[chains, lambda]` is the run's workload.
 fn assert_chains_cached_byte_l1(
     evolver: &mut GpuEvolver,
     reference: &[u8],
     [chains, lambda]: [u32; 2],
-    per_point_penalty: f32,
+    penalty: PointPenalty,
     context: &str,
 ) -> BenchmarkSnapshot {
     let snapshot = evolver.benchmark_snapshot(chains, lambda).expect("snapshot failed");
@@ -347,10 +357,10 @@ fn assert_chains_cached_byte_l1(
             snapshot.parent_total_errors[chain], raw_error,
             "{context}, chain {chain}: cached total"
         );
-        let mut expected =
-            100.0 * (1.0 - raw_error as f32 / (MAX_ERROR_PER_PIXEL * pixels.len() as f32));
-        expected -=
-            expected * per_point_penalty * (snapshot.parents[chain].polygon_count * 3) as f32;
+        let expected = penalty.apply(
+            100.0 * (1.0 - raw_error as f32 / (MAX_ERROR_PER_PIXEL * pixels.len() as f32)),
+            snapshot.parents[chain].polygon_count,
+        );
         let fitness = f32::from_bits(snapshot.parents[chain].fitness_bits);
         assert!(
             (fitness - expected).abs() < 0.0001,
@@ -479,7 +489,7 @@ fn verify_full_recompute_after_evolution() {
     }
 }
 
-fn verify_shortcuts_near_polygon_capacity(max_polygons: u32) {
+fn verify_shortcuts_near_polygon_capacity(max_polygons: u32, penalty_exponent: f32) {
     // Parents one polygon below the cap: select's chain change record no longer
     // lives in polygon slots 996..999, so the framebuffer update keeps its
     // unchanged-pixel shortcut at capacity. Accepted winners must leave cached
@@ -499,9 +509,10 @@ fn verify_shortcuts_near_polygon_capacity(max_polygons: u32) {
         chain_count: CHAINS,
         gpu_batch_iters: 16,
         max_polygons,
+        penalty_exponent,
         ..Default::default()
     };
-    let penalty = params.per_point_penalty;
+    let penalty = params.point_penalty();
     let workload = [CHAINS, params.lambda];
     let mut evolver = futures_lite::future::block_on(GpuEvolver::new(
         &reference,
@@ -542,7 +553,10 @@ fn verify_shortcuts_near_polygon_capacity(max_polygons: u32) {
         cached.parent_total_errors, full.parent_total_errors,
         "incremental and full totals near capacity (counts {counts:?})"
     );
-    println!("near-capacity shortcut check: counts {counts:?}, totals {:?}", full.parent_total_errors);
+    println!(
+        "near-capacity shortcut check (penalty exponent {penalty_exponent}): counts {counts:?}, totals {:?}",
+        full.parent_total_errors
+    );
 }
 
 /// A triangle covering normalized x in [x0, x1] over the full image height.
@@ -559,7 +573,7 @@ fn column_triangle(x0: f32, x1: f32, color: Color) -> Polygon {
 
 /// The scalar renderer's fitness for packed polygons.
 fn reference_fitness(polygons: &[[u32; 4]], reference: &[u8], [w, h]: [u32; 2]) -> f32 {
-    reference::evaluate(polygons, reference, w, h, PER_POINT_PENALTY)
+    reference::evaluate(polygons, reference, w, h, MutationParams::default().point_penalty())
         .expect("reference evaluation")
         .fitness
 }
@@ -608,7 +622,7 @@ fn verify_tile_list_overflow() {
         ..no_op_params()
     };
     let workload = [CHAINS, params.lambda];
-    let penalty = params.per_point_penalty;
+    let penalty = params.point_penalty();
     let mut evolver = futures_lite::future::block_on(GpuEvolver::new(
         &reference,
         IMAGE[0],
@@ -690,45 +704,9 @@ fn verify_operator_stats() {
         &drawing,
         EngineCapacity::for_params(&params),
     ));
-    evolver
-        .prepare_seeded_benchmark(&drawing, &params, 13, 2, true)
-        .expect("operator stats preparation failed");
-    assert_eq!(*evolver.operator_stats(), OperatorStats::default(), "warmup was not forgotten");
-
-    // One iteration per batch, so each snapshot shows one select: its accept
-    // flags, and the chains' fitness before and after. The baseline is a GPU
-    // select's fitness, not the host's evaluation of the start.
-    evolver.run_batch(&params, true);
-    let mut before = evolver.benchmark_snapshot(CHAINS, LAMBDA).expect("snapshot").fitness_packed;
-    let base = evolver.operator_stats().clone();
-    let (mut improved, mut neutral) = (0u64, 0u64);
-    // Gain is in error units: fitness percentage points times M / 100.
-    let units_per_point = f64::from(MAX_ERROR_PER_PIXEL) * f64::from(SIDE * SIDE) / 100.0;
-    let mut fitness_gain = 0.0f64;
-    for _ in 0..48 {
-        evolver.run_batch(&params, true);
-        let after = evolver.benchmark_snapshot(CHAINS, LAMBDA).expect("snapshot");
-        for (chain, flags) in after.chain_update_flags.iter().enumerate() {
-            let (old, new) = (f32::from_bits(before[chain]), f32::from_bits(after.fitness_packed[chain]));
-            if flags[0] == 1 {
-                assert!(new >= old, "chain {chain} accepted a worse winner: {old} -> {new}");
-                improved += u64::from(new > old);
-                neutral += u64::from(new == old);
-                fitness_gain += (f64::from(new) - f64::from(old)) * units_per_point;
-            }
-        }
-        before = after.fitness_packed;
-    }
+    let (improved, neutral, gain, fitness_gain) =
+        assert_gain_follows_fitness(&mut evolver, &drawing, &params, [SIDE, CHAINS, LAMBDA]);
     let stats = evolver.operator_stats();
-    let delta = |now: &[u64], then: &[u64]| -> u64 { now.iter().sum::<u64>() - then.iter().sum::<u64>() };
-    assert_eq!(delta(&stats.offered, &base.offered), 48 * u64::from(CHAINS * LAMBDA));
-    assert_eq!(delta(&stats.improved, &base.improved), improved, "improved winners");
-    assert_eq!(delta(&stats.neutral, &base.neutral), neutral, "neutral winners");
-    let gain = stats.gain.iter().sum::<i64>() - base.gain.iter().sum::<i64>();
-    // Each f32 fitness is within half an ulp (under one unit here) and each
-    // penalty term within half a unit of rounding.
-    assert!((gain as f64 - fitness_gain).abs() <= 3.0 * improved as f64,
-        "gain {gain} units; the chains' fitness rose by {fitness_gain:.1} units over {improved} improvements");
     let counters = evolver.benchmark_counters();
     assert_eq!(stats.offered.iter().sum::<u64>(), counters.completed_evaluations);
     let offered_by = |op: Operator| stats.offered[op as usize];
@@ -739,6 +717,17 @@ fn verify_operator_stats() {
     assert_rungs_cover_the_scaled_operators(stats, "no spread");
     let summary = format!("{} improved (gain {gain} units, fitness {fitness_gain:.1}), {neutral} neutral of {} offered",
         improved, stats.offered.iter().sum::<u64>());
+
+    // A scaled penalty: improvement_gain's penalty change follows P(n).
+    let scaled = MutationParams {
+        per_point_penalty: MAX_PER_POINT_PENALTY,
+        penalty_exponent: 1.5,
+        ..params.clone()
+    };
+    let (scaled_improved, _, scaled_gain, scaled_fitness) =
+        assert_gain_follows_fitness(&mut evolver, &drawing, &scaled, [SIDE, CHAINS, LAMBDA]);
+    assert!(scaled_improved > 0, "no chain improved under the scaled penalty");
+    let summary = format!("{summary}; scaled penalty {scaled_improved} improved (gain {scaled_gain} units, fitness {scaled_fitness:.1})");
 
     // A step spread: the rungs still count exactly the step-scaled operators,
     // and λ 64 gives every rung its share of their offspring.
@@ -792,6 +781,57 @@ fn verify_operator_stats() {
     assert_eq!(stats.gain, [0; OPERATOR_COUNT]);
     assert!(stats.neutral[unchanged] > 0, "no neutral acceptance of an unchanged copy");
     println!("operator stats check: {summary}");
+}
+
+/// Run one batch, then 48 single-iteration batches from a seeded start, and
+/// check the operator stats' gain against the chains' fitness rise.
+/// Returns (improved, neutral, gain units, fitness rise in units).
+fn assert_gain_follows_fitness(
+    evolver: &mut GpuEvolver,
+    drawing: &Drawing,
+    params: &MutationParams,
+    [side, chains, lambda]: [u32; 3],
+) -> (u64, u64, i64, f64) {
+    evolver
+        .prepare_seeded_benchmark(drawing, params, 13, 2, true)
+        .expect("operator stats preparation failed");
+    assert_eq!(*evolver.operator_stats(), OperatorStats::default(), "warmup was not forgotten");
+
+    // One iteration per batch, so each snapshot shows one select: its accept
+    // flags, and the chains' fitness before and after. The baseline is a GPU
+    // select's fitness, not the host's evaluation of the start.
+    evolver.run_batch(params, true);
+    let mut before = evolver.benchmark_snapshot(chains, lambda).expect("snapshot").fitness_packed;
+    let base = evolver.operator_stats().clone();
+    let (mut improved, mut neutral) = (0u64, 0u64);
+    // Gain is in error units: fitness percentage points times M / 100.
+    let units_per_point = f64::from(MAX_ERROR_PER_PIXEL) * f64::from(side * side) / 100.0;
+    let mut fitness_gain = 0.0f64;
+    for _ in 0..48 {
+        evolver.run_batch(params, true);
+        let after = evolver.benchmark_snapshot(chains, lambda).expect("snapshot");
+        for (chain, flags) in after.chain_update_flags.iter().enumerate() {
+            let (old, new) = (f32::from_bits(before[chain]), f32::from_bits(after.fitness_packed[chain]));
+            if flags[0] == 1 {
+                assert!(new >= old, "chain {chain} accepted a worse winner: {old} -> {new}");
+                improved += u64::from(new > old);
+                neutral += u64::from(new == old);
+                fitness_gain += (f64::from(new) - f64::from(old)) * units_per_point;
+            }
+        }
+        before = after.fitness_packed;
+    }
+    let stats = evolver.operator_stats();
+    let delta = |now: &[u64], then: &[u64]| -> u64 { now.iter().sum::<u64>() - then.iter().sum::<u64>() };
+    assert_eq!(delta(&stats.offered, &base.offered), 48 * u64::from(chains * lambda));
+    assert_eq!(delta(&stats.improved, &base.improved), improved, "improved winners");
+    assert_eq!(delta(&stats.neutral, &base.neutral), neutral, "neutral winners");
+    let gain = stats.gain.iter().sum::<i64>() - base.gain.iter().sum::<i64>();
+    // Each f32 fitness is within half an ulp (under one unit here) and each
+    // penalty term within half a unit of rounding.
+    assert!((gain as f64 - fitness_gain).abs() <= 3.0 * improved as f64,
+        "gain {gain} units; the chains' fitness rose by {fitness_gain:.1} units over {improved} improvements");
+    (improved, neutral, gain, fitness_gain)
 }
 
 /// Each rung block sums to the same block of the operators that scale with the step.

@@ -332,14 +332,14 @@ fn forensic(
             &input.rgba,
             input.fixture.width,
             input.fixture.height,
-            input.manifest.params.per_point_penalty,
+            input.manifest.params.point_penalty(),
         )?;
         let before_scalar = reference::evaluate(
             &before.parents[chain].polygons,
             &input.rgba,
             input.fixture.width,
             input.fixture.height,
-            input.manifest.params.per_point_penalty,
+            input.manifest.params.point_penalty(),
         )?;
         chains.push(json!({
             "chain": chain, "stored_error": after.parent_total_errors[chain],
@@ -387,7 +387,7 @@ fn matching_candidates(
             &input.rgba,
             input.fixture.width,
             input.fixture.height,
-            input.manifest.params.per_point_penalty,
+            input.manifest.params.point_penalty(),
         )?;
         matches.push(json!({
             "offspring_id": id, "exact_polygon_match": candidate.polygons == parent.polygons,

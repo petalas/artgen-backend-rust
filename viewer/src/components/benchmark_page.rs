@@ -1156,6 +1156,7 @@ fn params_detail_view(p: &MutationParams, resolution: u32, pass_timings: &Option
             <div class="bench-params-row">
                 {pv("Polygons", format!("{}\u{2013}{}", p.min_polygons, p.max_polygons), p.min_polygons != d.min_polygons || p.max_polygons != d.max_polygons)}
                 {pv("Alpha", format!("{}\u{2013}{}", p.min_alpha, p.max_alpha), p.min_alpha != d.min_alpha || p.max_alpha != d.max_alpha)}
+                {pv("Penalty exp", format!("{:.1}", p.penalty_exponent), p.penalty_exponent != d.penalty_exponent)}
             </div>
             <div class="bench-params-row">
                 <span class="bench-params-group">"Structure: "</span>

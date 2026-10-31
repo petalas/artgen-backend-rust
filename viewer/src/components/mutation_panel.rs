@@ -5,6 +5,7 @@ use crate::mutation_params::MutationParams;
 
 /// The GPU state's storage; `max_polygons` may not exceed it.
 const POLYGON_CAPACITY: i64 = artgen_shared::settings::POLYGON_CAPACITY as i64;
+use artgen_shared::settings::MAX_PENALTY_EXPONENT;
 use crate::ws::{send_ws_json, send_ws_loading, ViewerState};
 
 /// Format a probability as a decimal string with adaptive precision.
@@ -159,6 +160,8 @@ pub fn ParamsEditor(
             <div class="mutation-section-title">"Polygons"</div>
             <IntSlider params={params} on_change={on_change} label="Min polygons" get={|mp| mp.min_polygons as i64} set={|mp, v| { mp.min_polygons = v as u32; if mp.max_polygons < mp.min_polygons { mp.max_polygons = mp.min_polygons; } }} min=1 max={POLYGON_CAPACITY} step=1/>
             <IntSlider params={params} on_change={on_change} label="Max polygons" get={|mp| mp.max_polygons as i64} set={|mp, v| { mp.max_polygons = v as u32; if mp.min_polygons > mp.max_polygons { mp.min_polygons = mp.max_polygons; } }} min=1 max={POLYGON_CAPACITY} step=1/>
+            // 0 charges every triangle alike; k makes the next triangle cost (n / 1000)^k as much.
+            <DeltaSlider params={params} on_change={on_change} label="Penalty exponent" field="penalty_exponent" min=0.0 max={f64::from(MAX_PENALTY_EXPONENT)} step=0.1/>
         </div>
         <div class="mutation-section">
             <div class="mutation-section-title">"Structure"</div>
@@ -495,6 +498,7 @@ fn get_delta_field(mp: &MutationParams, field: &str) -> f32 {
         "medium_move_delta" => mp.medium_move_delta,
         "merge_centroid_threshold" => mp.merge_centroid_threshold,
         "merge_color_threshold" => mp.merge_color_threshold,
+        "penalty_exponent" => mp.penalty_exponent,
         _ => 0.0,
     }
 }
@@ -508,6 +512,7 @@ fn set_delta_field(mp: &mut MutationParams, field: &str, val: f32) {
         "medium_move_delta" => mp.medium_move_delta = val,
         "merge_centroid_threshold" => mp.merge_centroid_threshold = val,
         "merge_color_threshold" => mp.merge_color_threshold = val,
+        "penalty_exponent" => mp.penalty_exponent = val,
         _ => {}
     }
 }

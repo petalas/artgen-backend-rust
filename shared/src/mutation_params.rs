@@ -29,6 +29,12 @@ fn legacy_micro_color_prob() -> f32 { settings::LEGACY_MICRO_COLOR_PROBABILITY }
 fn is_default_per_point_penalty(value: &f32) -> bool {
     value.to_bits() == settings::PER_POINT_PENALTY.to_bits()
 }
+// Omitted at the flat penalty (absent means flat), for the same reason as
+// `per_point_penalty`.
+#[allow(clippy::trivially_copy_pass_by_ref)] // skip_serializing_if passes a reference
+fn is_flat_penalty(value: &f32) -> bool {
+    value.to_bits() == settings::PENALTY_EXPONENT.to_bits()
+}
 // Omitted at no spread (absent means no spread), for the same reason as
 // `per_point_penalty`.
 #[allow(clippy::trivially_copy_pass_by_ref)] // skip_serializing_if passes a reference
@@ -117,6 +123,11 @@ pub struct MutationParams {
         skip_serializing_if = "is_default_per_point_penalty"
     )]
     pub per_point_penalty: f32,
+    // Scales the cost of the next triangle by `(n / N0)^penalty_exponent`,
+    // N0 = `settings::PENALTY_REFERENCE_TRIANGLES`; 0 is the flat penalty.
+    // See `PointPenalty`.
+    #[serde(default, skip_serializing_if = "is_flat_penalty")]
+    pub penalty_exponent: f32,
 
     // Crossover parameters
     pub crossover_prob: f32,
@@ -165,6 +176,13 @@ impl MutationParams {
             0.0
         } else {
             self.per_point_penalty.clamp(0.0, settings::MAX_PER_POINT_PENALTY)
+        };
+
+        // Penalty exponent: [0, MAX_PENALTY_EXPONENT]; NaN becomes the flat penalty
+        self.penalty_exponent = if self.penalty_exponent.is_nan() {
+            settings::PENALTY_EXPONENT
+        } else {
+            self.penalty_exponent.clamp(0.0, settings::MAX_PENALTY_EXPONENT)
         };
 
         // Step spread: each end within [1/16, 16], NaN to 1; min <= max
@@ -225,6 +243,12 @@ impl MutationParams {
         self.gpu_batch_iters = 1u32 << self.gpu_batch_iters.ilog2();
     }
 
+    /// The fitness penalty these parameters configure.
+    #[must_use]
+    pub fn point_penalty(&self) -> PointPenalty {
+        PointPenalty { per_point: self.per_point_penalty, exponent: self.penalty_exponent }
+    }
+
     /// Step-size multiplier of each rung: rung `k` is
     /// `min * (max / min)^(k / (STEP_RUNGS - 1))`, so rung 0 is `min`, the last
     /// is `max` (to rounding) and the ratio between neighbours is constant.
@@ -277,6 +301,7 @@ impl Default for MutationParams {
             min_polygons: settings::MIN_POLYGONS_PER_IMAGE as u32,
             max_polygons: settings::DEFAULT_MAX_POLYGONS,
             per_point_penalty: settings::PER_POINT_PENALTY,
+            penalty_exponent: settings::PENALTY_EXPONENT,
             crossover_prob: settings::CROSSOVER_PROB,
             tournament_size: settings::TOURNAMENT_SIZE,
             chain_count: settings::GPU_DEFAULT_CHAIN_COUNT,
@@ -286,5 +311,56 @@ impl Default for MutationParams {
             rasterize_wg: [settings::RASTERIZE_WG_X_DEFAULT, settings::RASTERIZE_WG_Y_DEFAULT],
             gpu_batch_iters: settings::GPU_DEFAULT_BATCH_ITERS,
         }
+    }
+}
+
+/// The complexity penalty on fitness: the CPU mirror of select.wgsl's
+/// `penalty_fraction` and `compute_fitness`. With `n` triangles and exponent
+/// `k`, fitness is multiplied by `1 - P(n)`, where
+/// `P(n) = 3 p N0 / (k + 1) * (n / N0)^(k + 1)` and N0 is
+/// `settings::PENALTY_REFERENCE_TRIANGLES`: the next triangle costs
+/// `3 p (n / N0)^k`. At `k == 0` this is the flat `P(n) = p * 3n`, computed in
+/// the shader's historical operation order so scores keep every bit.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PointPenalty {
+    /// `MutationParams::per_point_penalty`, `p`.
+    pub per_point: f32,
+    /// `MutationParams::penalty_exponent`, `k`.
+    pub exponent: f32,
+}
+
+impl PointPenalty {
+    /// `fitness` penalized for `triangles`, in select.wgsl's f32 operation order.
+    #[must_use]
+    pub fn apply(self, fitness: f32, triangles: u32) -> f32 {
+        let mut fitness = fitness;
+        if self.exponent == 0.0 {
+            let num_points = triangles * 3;
+            fitness -= fitness * self.per_point * num_points as f32;
+        } else {
+            fitness -= fitness * self.scaled_fraction(triangles);
+        }
+        fitness
+    }
+
+    /// `P(n)`, the fraction of the fitness `triangles` remove; dividing a
+    /// penalized fitness by `1 - P(n)` recovers the error-only fitness.
+    #[must_use]
+    pub fn fraction(self, triangles: u32) -> f64 {
+        if self.exponent == 0.0 {
+            f64::from(self.per_point) * f64::from(triangles * 3)
+        } else {
+            f64::from(self.scaled_fraction(triangles))
+        }
+    }
+
+    /// `P(n)` for `k > 0`, as select.wgsl's `penalty_fraction` computes it.
+    fn scaled_fraction(self, triangles: u32) -> f32 {
+        if triangles == 0 {
+            return 0.0;
+        }
+        let reference = settings::PENALTY_REFERENCE_TRIANGLES as f32;
+        let power = self.exponent + 1.0;
+        3.0 * self.per_point * reference / power * (triangles as f32 / reference).powf(power)
     }
 }

@@ -25,16 +25,17 @@ struct Params {
     max_polygons: u32,
     min_polygons: u32,
 
-    // Population and fitness
+    // Population and crossover
     chain_count_param: u32,
     lambda: u32,
-    max_error_per_pixel: f32,
-    per_point_penalty: f32,
-
-    // Crossover
     crossover_prob: f32,
     tournament_size: u32,
-    _pad0: vec2<u32>,
+
+    // Fitness: error scale and the point penalty (select.wgsl penalty_fraction)
+    max_error_per_pixel: f32,
+    per_point_penalty: f32,
+    penalty_exponent: f32,
+    _pad0: u32,
 
     // Mutation operator weights
     add_polygon_prob: f32,

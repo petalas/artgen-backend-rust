@@ -69,16 +69,36 @@ fn count_winner(block: u32, word: u32, gain: i32) {
     }
 }
 
+// Fraction of the fitness that n triangles remove at penalty exponent k > 0:
+// P(n) = 3 p N0 / (k + 1) * (n / N0)^(k + 1), N0 = PENALTY_REFERENCE_TRIANGLES,
+// so the next triangle costs 3 p (n / N0)^k. PointPenalty mirrors it on the CPU
+// in this operation order. k == 0 (the flat P(n) = 3 p n) never calls this:
+// its callers keep their historical arithmetic so scores keep every bit.
+fn penalty_fraction(polygons: u32) -> f32 {
+    if polygons == 0u {
+        return 0.0;
+    }
+    let power = params.penalty_exponent + 1.0;
+    return 3.0 * params.per_point_penalty * PENALTY_REFERENCE_TRIANGLES / power
+        * pow(f32(polygons) / PENALTY_REFERENCE_TRIANGLES, power);
+}
+
 // Fitness gain from (old_error, old_polygons) to (new_error, new_polygons) in
 // error units: compute_fitness's difference times M / 100, M = max_total_error.
-// fitness = 100 (M - E) / M * (1 - 3 p n), so the gain is
-// (E_old - E_new) - 3 p ((M - E_new) n_new - (M - E_old) n_old): the error drop
-// exactly, the point penalty's change rounded.
+// fitness = 100 (M - E) / M * (1 - P(n)), so the gain is
+// (E_old - E_new) - ((M - E_new) P(n_new) - (M - E_old) P(n_old)): the error
+// drop exactly, the point penalty's change rounded. At k == 0, P(n) = 3 p n.
 fn improvement_gain(old_error: u32, old_polygons: u32, new_error: u32, new_polygons: u32) -> i32 {
     let max_total_error = params.max_error_per_pixel * f32(params.image_width * params.image_height);
-    let penalty = 3.0 * params.per_point_penalty * (
-        (max_total_error - f32(new_error)) * f32(new_polygons)
-        - (max_total_error - f32(old_error)) * f32(old_polygons));
+    var penalty: f32;
+    if params.penalty_exponent == 0.0 {
+        penalty = 3.0 * params.per_point_penalty * (
+            (max_total_error - f32(new_error)) * f32(new_polygons)
+            - (max_total_error - f32(old_error)) * f32(old_polygons));
+    } else {
+        penalty = (max_total_error - f32(new_error)) * penalty_fraction(new_polygons)
+            - (max_total_error - f32(old_error)) * penalty_fraction(old_polygons);
+    }
     return i32(old_error) - i32(new_error) - i32(round(penalty));
 }
 
@@ -105,8 +125,12 @@ fn compute_fitness(total_error: u32, polygon_count: u32) -> f32 {
     let h = params.image_height;
     let max_total_error = params.max_error_per_pixel * f32(w * h);
     var fitness = 100.0 * (1.0 - f32(total_error) / max_total_error);
-    let num_points = polygon_count * 3u;
-    fitness -= fitness * params.per_point_penalty * f32(num_points);
+    if params.penalty_exponent == 0.0 {
+        let num_points = polygon_count * 3u;
+        fitness -= fitness * params.per_point_penalty * f32(num_points);
+    } else {
+        fitness -= fitness * penalty_fraction(polygon_count);
+    }
     return fitness;
 }
 

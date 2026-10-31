@@ -14,6 +14,8 @@
 use anyhow::{ensure, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::mutation_params::PointPenalty;
+
 const MAX_DIMENSION: u32 = 1024;
 const MAX_TRIANGLES: usize = crate::settings::POLYGON_CAPACITY;
 const TILE_CAPACITY: u32 = 256;
@@ -114,7 +116,7 @@ impl Triangle {
 }
 
 /// Render and score packed triangles against exactly width * height RGBA bytes,
-/// penalized by `per_point_penalty` as `compute_fitness` is by its params.
+/// penalized by `penalty` as `compute_fitness` is by its params.
 /// Rejects empty/oversized dimensions and drawings exceeding the GPU state's
 /// `POLYGON_CAPACITY` triangles.
 /// # Errors
@@ -124,7 +126,7 @@ pub fn evaluate(
     reference: &[u8],
     width: u32,
     height: u32,
-    per_point_penalty: f32,
+    penalty: PointPenalty,
 ) -> Result<ReferenceEvaluation> {
     let pixel_count = validate(polygons, width, height)?;
     ensure!(
@@ -153,9 +155,12 @@ pub fn evaluate(
     debug_assert!(raw_error <= max_error);
     let raw_similarity = 100.0 * (1.0 - raw_error as f64 / max_error as f64);
     // Preserve compute_fitness's operation order and production parameters.
-    let mut fitness = 100.0
-        * (1.0 - raw_error as f32 / (crate::settings::MAX_ERROR_PER_PIXEL * pixel_count as f32));
-    fitness -= fitness * per_point_penalty * (polygons.len() * 3) as f32;
+    let fitness = penalty.apply(
+        100.0
+            * (1.0
+                - raw_error as f32 / (crate::settings::MAX_ERROR_PER_PIXEL * pixel_count as f32)),
+        u32::try_from(polygons.len())?,
+    );
     Ok(ReferenceEvaluation {
         pixels,
         raw_error,
@@ -302,7 +307,9 @@ fn rank_index(count: usize, percentile: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    const PENALTY: f32 = crate::settings::PER_POINT_PENALTY;
+    use crate::mutation_params::PointPenalty;
+    const PENALTY: PointPenalty =
+        PointPenalty { per_point: crate::settings::PER_POINT_PENALTY, exponent: 0.0 };
     use super::{complexity, evaluate, AreaDistribution, MAX_TRIANGLES};
 
     fn triangle(color: [u8; 4], vertices: [[u16; 2]; 3]) -> [u32; 4] {
@@ -339,9 +346,11 @@ mod tests {
         assert_eq!(result.raw_similarity, 100.0);
         assert_eq!(result.fitness, 99.99988);
         // The penalty is the caller's: none, or 16 times the default.
-        assert_eq!(evaluate(&polygons, &[0; 16], 2, 2, 0.0).unwrap().fitness, 100.0);
-        let strong = evaluate(&polygons, &[0; 16], 2, 2, 16.0 * PENALTY).unwrap();
-        assert_eq!(strong.fitness, 100.0 - 100.0 * (16.0 * PENALTY) * 6.0);
+        let none = PointPenalty { per_point: 0.0, ..PENALTY };
+        assert_eq!(evaluate(&polygons, &[0; 16], 2, 2, none).unwrap().fitness, 100.0);
+        let per_point = 16.0 * PENALTY.per_point;
+        let strong = evaluate(&polygons, &[0; 16], 2, 2, PointPenalty { per_point, ..PENALTY });
+        assert_eq!(strong.unwrap().fitness, 100.0 - 100.0 * per_point * 6.0);
         let metrics = complexity(&polygons, 2, 2, [8, 8]).unwrap();
         assert_eq!((metrics.triangles, metrics.vertices), (2, 6));
         assert_eq!(

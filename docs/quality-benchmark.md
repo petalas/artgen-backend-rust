@@ -31,8 +31,13 @@ scripts/quality.py --start .cache/quality/starts/s120 --side control=HEAD --side
   2000 since the cap sweep below; 1000 before, at most the polygon capacity 2048; see
   [engine architecture](engine-architecture.md#polygon-capacity-and-the-search-cap)),
   and `per_point_penalty` (default 2e-7 = 1/5e6, at most 1e-4), the fitness
-  factor `1 - penalty * points`. One build serves every cap and penalty, so such
-  sides differ by settings only. Each side's engine is allocated for its own
+  factor `1 - penalty * points`. `penalty_exponent` k (default 0, at most 2)
+  scales that penalty with the triangle count n: the next triangle costs
+  `3 p (n / 1000)^k`, so the factor is `1 - 3 p 1000 / (k + 1) * (n / 1000)^(k + 1)`
+  (k = 0 is the flat penalty; see
+  [engine architecture](engine-architecture.md#per-point-penalty)). Example:
+  `--params 'k15={"penalty_exponent":1.5}'`. One build serves every cap and
+  penalty, so such sides differ by settings only. Each side's engine is allocated for its own
   chain count and λ.
 - `step_spread_min` and `step_spread_max` (default 0.25 and 4; 1 each is no
   spread, and a record or setting without them reads as no spread; each within
@@ -80,12 +85,13 @@ points`) are recorded:
 - at the end, after the drain.
 
 `batches` and `evaluations` count submitted work, which runs one batch ahead of
-the delivered drawing. `raw_fitness = fitness / (1 - per_point_penalty *
-points)` removes the run's point penalty from `compute_fitness`, so `raw r`
-compares sides with different penalties on error alone.
+the delivered drawing. `raw_fitness = fitness / (1 - P(polygons))`, `P` the
+run's penalty fraction (`PointPenalty::fraction`; `per_point_penalty * points`
+at exponent 0), removes the run's point penalty from `compute_fitness`, so
+`raw r` compares sides with different penalties on error alone.
 
 After the clock stops, the final delivered drawing is rendered by the scalar
-renderer (`reference::evaluate`, with the run's `per_point_penalty`) and
+renderer (`reference::evaluate`, with the run's `PointPenalty`) and
 described by `reference::complexity`. A gap
 above 0.05 fitness points, or any wgpu device error, makes the run invalid, and
 the script stops. `DIR` gets `result.json` (the full record) and `best.json`.
