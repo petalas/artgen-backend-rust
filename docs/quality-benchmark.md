@@ -721,3 +721,61 @@ was invalid.
   stay at 450–550k/s with fewer, larger triangles. The deletion itself is not
   the cost (see "Change records" in
   [engine architecture](engine-architecture.md#change-records)).
+
+## Deleting operators late game; exact penalized selection adopted, 2026-10-31
+
+**Deleting operators from s120v2.** `b8454c0`, defaults vs
+`merge_polygon_prob`, `absorb_polygon_prob` or `remove_polygon_prob` 0.3
+(0.7% of offspring), 90 s, seeds 1–3, pooled (evidence
+`.cache/quality/runs/20261031T183957Z-mcw4lvua` ff, `20261031T185914Z-eugq4dkz`
+mona, `20261031T191831Z-h9bto_da` darwin). None of the three won a single
+improvement; each evaluated 11–28% fewer offspring and took 1.15–1.22× the
+control's time to its 90 s result, with equal triangles at equal unpenalized
+fitness.
+
+**Cause: selection ranked raw error.** select.wgsl min-reduced the offspring's
+raw error and applied the point penalty only when accepting. A removal raises
+raw error slightly while saving one triangle's price (about 66 error units at
+384 px and 99%), so it almost never had the batch's lowest raw error: nearly
+every batch holds an equal-error copy or neutral move. An exact per-triangle
+removal cost (a throwaway scalar renderer) found 9 of mona seed1's 1137
+mature triangles cheaper than their price and 21 within twice it, yet none of
+about 1.7M removal offspring won. Acceptance also compared f32 fitness, whose
+ulp near 99% is about 9 error units, so small gains and small losses both
+fell to the 50% neutral coin.
+
+**Fix:** offspring are ranked, accepted and credited (operator gain) by the
+integer `penalized_error` = E + round((M − E) P(n)), which orders exactly as
+fitness does; the f32 fitness is only reported.
+
+**Accepted deletions break crossover.** With the fix at default weights the
+late game got worse (unpenalized r 1.016 at 90 s; mona and darwin evaluated
+about half as many offspring; crossover's share of the gain fell from 75% to
+33%): uniform crossover pairs two chains slot by slot, and an ordered delete
+shifts every slot above the deleted one, so once one chain deletes, its
+crossovers with the others differ almost everywhere (whole-image dirty
+regions, mostly worthless children). Evidence
+`.cache/quality/runs/20261031T201425Z-ea3oanyb`, `20261031T203340Z-fjy7xgvv`,
+`20261031T205300Z-7_1l5huc`.
+
+**Exact selection without deletions** (`remove_polygon_prob` and
+`merge_polygon_prob` 0) vs defaults:
+
+| start | evidence | r ratio | time to control's result | triangles at equal unpenalized fitness |
+| --- | --- | --- | --- | --- |
+| s120v2, 90 s, seeds 1–3 | `20261031T211344Z-l888rkcc`, `20261031T212325Z-phjft88w`, `20261031T213302Z-en43opk1` | 0.998 at 90 s, NOISE | 0.84 [0.77, 0.90] at 90 s | 0.996 [0.992, 0.999] |
+| blank, 120 s, seeds 1–3 | `20261031T214322Z-euqkfaw5`, `20261031T215600Z-s3c5ll29`, `20261031T220838Z-nsvbxlju` | 1.035 WORSE at 10 s, 0.996 at 120 s | 0.98 [0.88, 1.09] at 120 s | 0.965 [0.941, 0.990] at 30 s, 0.984 at 120 s |
+| blank, 30 s, seeds 1–5 | `20261031T222132Z-ne8xmxu9`, `20261031T223034Z-l_etdozp`, `20261031T223938Z-5_f_zxlb` | exact 1.044 WORSE at 10 s, 0.998 at 30 s; deletions off alone 0.977 BETTER at 30 s | | exact 0.976 [0.958, 0.993] at 30 s |
+
+- Throughput is unchanged at the new defaults. Exact selection accepts 45%
+  more improvements and 35% fewer neutral moves. It now charges a new
+  triangle its full price from the first second, so drawings start 4–6%
+  smaller and the first 10 s are slower; from 30 s on they reach the same
+  quality with 1.6–3.5% fewer triangles, and late they get there in 0.84× the
+  time.
+- The default removal and merge weights hurt even with the old selection
+  (0.977 at 30 s from blank once off), so both defaults are 0.
+- hillclimb (`.cache/hillclimb/runs/20261031T225232Z-ruczb245`) reads 0.89×:
+  its frozen v1 params keep removal and merge on, so under exact selection
+  the frozen workload deletes and loses crossover alignment. This is a change
+  to the workload, not to the engine's speed.

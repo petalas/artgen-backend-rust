@@ -719,7 +719,7 @@ fn verify_operator_stats() {
     let summary = format!("{} improved (gain {gain} units, fitness {fitness_gain:.1}), {neutral} neutral of {} offered",
         improved, stats.offered.iter().sum::<u64>());
 
-    // A scaled penalty: improvement_gain's penalty change follows P(n).
+    // A scaled penalty: the penalized error's penalty change follows P(n).
     let scaled = MutationParams {
         per_point_penalty: MAX_PER_POINT_PENALTY,
         penalty_exponent: 1.5,

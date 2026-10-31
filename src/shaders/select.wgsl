@@ -29,7 +29,7 @@ struct ControlFlags {
 // Operator stats (gpu_evolver::operators): mutate's code (and step rung + 1 above
 // OP_RUNG_SHIFT) per offspring, and cumulative counters [offered | improved |
 // neutral], OPERATOR_COUNT each, then the same three blocks of STEP_RUNGS, then
-// the improvements' summed fitness gain (signed, see improvement_gain) per
+// the improvements' summed fitness gain (signed, in error units: the penalized_error drop) per
 // operator and per rung.
 @group(0) @binding(8) var<storage, read>       offspring_ops:      array<u32>;
 @group(0) @binding(9) var<storage, read_write> operator_stats:     array<atomic<u32>>;
@@ -39,10 +39,11 @@ var<workgroup> shared_accept: u32;
 var<workgroup> shared_copy_count: u32;
 var<workgroup> shared_best_offspring_id: u32;
 
-// Shared memory for parallel min-reduction across offspring errors
-// Each entry holds (error, local_offspring_index) packed so min on error also selects the index
+// Min-reduction over the offspring's penalized errors (see penalized_error),
+// carrying the local offspring index; raw_err keeps each lane's pixel error.
 var<workgroup> reduction_err: array<u32, 64>;
 var<workgroup> reduction_idx: array<u32, 64>;
+var<workgroup> raw_err: array<u32, 64>;
 
 // This chain's offspring per operator code, then per step rung, added to
 // operator_stats once.
@@ -83,23 +84,21 @@ fn penalty_fraction(polygons: u32) -> f32 {
         * pow(f32(polygons) / PENALTY_REFERENCE_TRIANGLES, power);
 }
 
-// Fitness gain from (old_error, old_polygons) to (new_error, new_polygons) in
-// error units: compute_fitness's difference times M / 100, M = max_total_error.
-// fitness = 100 (M - E) / M * (1 - P(n)), so the gain is
-// (E_old - E_new) - ((M - E_new) P(n_new) - (M - E_old) P(n_old)): the error
-// drop exactly, the point penalty's change rounded. At k == 0, P(n) = 3 p n.
-fn improvement_gain(old_error: u32, old_polygons: u32, new_error: u32, new_polygons: u32) -> i32 {
+// The error with the point penalty added, in whole error units, which every
+// selection decision compares. fitness = 100 (M - E) / M * (1 - P(n)), M =
+// max_total_error, equals 100 (1 - (E + (M - E) P(n)) / M), so ordering by
+// E + round((M - E) P(n)) orders by fitness, exactly where the f32 fitness
+// (one ulp is about 9 error units near 99%) rounds differences away. Below
+// 2^32 because P(n) < 1 and M fits u32. At k == 0, P(n) = 3 p n.
+fn penalized_error(error: u32, polygons: u32) -> u32 {
     let max_total_error = params.max_error_per_pixel * f32(params.image_width * params.image_height);
-    var penalty: f32;
+    var fraction: f32;
     if params.penalty_exponent == 0.0 {
-        penalty = 3.0 * params.per_point_penalty * (
-            (max_total_error - f32(new_error)) * f32(new_polygons)
-            - (max_total_error - f32(old_error)) * f32(old_polygons));
+        fraction = 3.0 * params.per_point_penalty * f32(polygons);
     } else {
-        penalty = (max_total_error - f32(new_error)) * penalty_fraction(new_polygons)
-            - (max_total_error - f32(old_error)) * penalty_fraction(old_polygons);
+        fraction = penalty_fraction(polygons);
     }
-    return i32(old_error) - i32(new_error) - i32(round(penalty));
+    return error + u32(round((max_total_error - f32(error)) * fraction));
 }
 
 // Unchanged-pixel note for update_framebuffers (ChainChange in changes.wgsl):
@@ -165,7 +164,10 @@ fn select_main(@builtin(global_invocation_id) gid: vec3<u32>,
         // Saturating subtraction to avoid underflow
         let base = select(parent_total - old_err, 0u, old_err > parent_total);
         let overflowed = (new_err & TILE_OVERFLOW_ERROR) != 0u;
-        reduction_err[local_id] = select(base + new_err, REJECTED_ERROR, overflowed);
+        let error = base + new_err;
+        raw_err[local_id] = error;
+        reduction_err[local_id] = select(penalized_error(error, working_states[oid].polygon_count),
+            REJECTED_ERROR, overflowed);
         reduction_idx[local_id] = local_id;
         op = offspring_ops[oid];
     } else {
@@ -200,42 +202,40 @@ fn select_main(@builtin(global_invocation_id) gid: vec3<u32>,
 
     // Phase 3: Thread 0 reads the reduction result and does all decision logic
     if local_id == 0u {
-        let best_error = reduction_err[0];
+        let best_penalized = reduction_err[0];
         let best_local = reduction_idx[0];
         let best_offspring_id = chain_id * lambda + best_local;
+        let best_error = raw_err[best_local];
+        let best_polygons = working_states[best_offspring_id].polygon_count;
 
-        let fitness = compute_fitness(best_error, working_states[best_offspring_id].polygon_count);
-        let fitness_bits = bitcast<u32>(fitness);
-
-        // Compare against chain's current best.
-        // Recompute parent fitness from chain_total_errors (quantized precision)
-        // so it's consistent with offspring error computation.
+        // Compare penalized errors; the f32 fitness is only reported.
         let parent_error = atomicLoad(&chain_total_errors[chain_id]);
-        let current_fitness = compute_fitness(parent_error, chain_states[chain_id].polygon_count);
-        chain_states[chain_id].fitness_bits = bitcast<u32>(current_fitness);
+        let parent_polygons = chain_states[chain_id].polygon_count;
+        let parent_penalized = penalized_error(parent_error, parent_polygons);
+        chain_states[chain_id].fitness_bits = bitcast<u32>(compute_fitness(parent_error, parent_polygons));
 
         // Accept if strictly better, or with 50% probability if equal (plateau traversal)
         // Use the best offspring's RNG for neutral acceptance. An exact copy of
         // the parent (a crossover that kept every slot: NO_CHANGES) is never
         // accepted; it would leave the chain as it is at the cost of the
         // polygon copy and framebuffer update.
-        let dominated = fitness > current_fitness;
-        let copy = offspring_changed_words(best_offspring_id).x == NO_CHANGES;
-        let neutral = fitness == current_fitness && !copy
-            && (working_states[best_offspring_id].rng_state.x & 1u) == 1u;
         // Every offspring was rejected when the minimum is REJECTED_ERROR.
-        let should_accept = best_error != REJECTED_ERROR && (dominated || neutral);
+        let dominated = best_penalized < parent_penalized;
+        let copy = offspring_changed_words(best_offspring_id).x == NO_CHANGES;
+        let neutral = best_penalized == parent_penalized && !copy
+            && (working_states[best_offspring_id].rng_state.x & 1u) == 1u;
+        let should_accept = best_penalized != REJECTED_ERROR && (dominated || neutral);
 
         if should_accept {
             // Improved, else neutral: operator_stats' second or third block.
-            let gain = improvement_gain(parent_error, chain_states[chain_id].polygon_count,
-                best_error, working_states[best_offspring_id].polygon_count);
+            // The gain is in error units: the penalized error's drop.
+            let gain = i32(parent_penalized) - i32(best_penalized);
             count_winner(select(2u, 1u, dominated), offspring_ops[best_offspring_id], gain);
-            record_chain_change(chain_id, best_offspring_id, chain_states[chain_id].polygon_count);
-            chain_states[chain_id].polygon_count = working_states[best_offspring_id].polygon_count;
-            chain_states[chain_id].fitness_bits = fitness_bits;
+            record_chain_change(chain_id, best_offspring_id, parent_polygons);
+            chain_states[chain_id].polygon_count = best_polygons;
+            chain_states[chain_id].fitness_bits = bitcast<u32>(compute_fitness(best_error, best_polygons));
             shared_accept = 1u;
-            shared_copy_count = working_states[best_offspring_id].polygon_count;
+            shared_copy_count = best_polygons;
             shared_best_offspring_id = best_offspring_id;
 
             // Store total error + write update flags for update_framebuffers

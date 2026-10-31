@@ -80,13 +80,26 @@ penalty with the triangle count n: the next triangle costs `3 p (n / N0)^k`,
 N0 = `settings::PENALTY_REFERENCE_TRIANGLES` (1000, a generated WGSL f32
 constant), so fitness is multiplied by `1 - P(n)` with
 `P(n) = 3 p N0 / (k + 1) * (n / N0)^(k + 1)`. At k = 0 select.wgsl
-(`compute_fitness`, `improvement_gain`) and every CPU mirror branch to the
+(`compute_fitness`, `penalized_error`) and every CPU mirror branch to the
 historical flat expression, so scores and replay hashes keep every bit;
 k > 0 goes through select.wgsl `penalty_fraction` (f32 `pow`). The CPU mirror
 is `PointPenalty` (`MutationParams::point_penalty()`): `apply` follows the
 shader's f32 operation order, `fraction` gives `P(n)` for removing the
 penalty. GPU `pow` and Rust `powf` may differ by a few ulps at k > 0, far
 inside the fitness checks' tolerances. Serialized parameters omit k at 0.
+
+### Selection compares penalized error
+
+select.wgsl ranks a chain's offspring, accepts the winner and credits its
+operator by the integer `penalized_error` = E + round((M − E) P(n)), M the
+maximum total error: fitness = 100 (1 − penalized / M), so the order is
+fitness's, without the f32 rounding that makes about 9 error units one ulp
+near 99%. A winner is accepted when its penalized error is lower than the
+parent's, or equal with the 50% coin unless it is an exact copy. The f32
+`compute_fitness` is only reported (chain `fitness_bits`, the global best).
+Ranking raw error and penalizing only at acceptance, as before 2026-10-31,
+let a removal win only when it also had the batch's lowest raw error, which
+in practice was never (docs/quality-benchmark.md).
 
 `ResourceSizes` includes the reserved diagnostic word in required tile-count
 storage, and allocation includes it too, since an engine sized exactly for its
@@ -361,7 +374,7 @@ select writes it, so forgetting it is a guard, not a batch-loop step.
 
 `gpu_evolver::operators` counts, per search operator, the offspring it
 produced (offered) and the winners select accepted from it, as a strict
-improvement (improved) or at equal fitness (neutral). `Operator` lists the
+improvement (improved) or at equal penalized error (neutral). `Operator` lists the
 codes once; the bundled prelude gets them as `OP_*` constants, and a CPU test
 checks that mutate stores every one. New operators are appended (absorb is 19,
 after unchanged), so older records keep their codes.
@@ -382,8 +395,8 @@ after unchanged), so older records keep their codes.
   rungs in workgroup memory and adds the nonzero totals, at most 27 atomics per
   chain and iteration; thread 0 adds its accepted winner under its operator
   and, if it has one, its rung. An improving winner also adds its fitness gain
-  in error units (`improvement_gain`: the error drop less the point penalty's
-  change, rounded), as two's complement, to both gain blocks. The rung blocks
+  in error units (the drop in `penalized_error`: the error drop less the
+  point penalty's change, rounded), as two's complement, to both gain blocks. The rung blocks
   therefore sum to the step-scaled operators' blocks; rungs are counted with or
   without a spread. Counters are cumulative and wrap.
 - Readback: `run_batch` copies `operator_stats` into the batch's control

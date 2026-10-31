@@ -1,6 +1,10 @@
 // Mutation probability defaults
 pub const ADD_POLYGON_PROB: f32 = 0.5;
-pub const REMOVE_POLYGON_PROB: f32 = 0.000862;
+// Off: crossover pairs chains slot by slot, and an accepted removal shifts every
+// slot above it, so the chain no longer lines up with the others (late-game
+// evaluations halved and quality fell once selection let removals win;
+// docs/quality-benchmark.md). Was 0.000862.
+pub const REMOVE_POLYGON_PROB: f32 = 0.0;
 pub const REORDER_POLYGON_PROB: f32 = 0.002;
 pub const OFFSET_POLYGON_PROBABILITY: f32 = 0.000565;
 pub const MOVE_POINT_PROBABILITY: f32 = 0.000294;
@@ -19,7 +23,8 @@ pub const ADJUST_SATURATION_PROB: f32 = 0.000667;
 pub const SCALE_POLYGON_PROB: f32 = 0.005650;
 pub const ROTATE_POLYGON_PROB: f32 = 0.002;
 pub const ADJACENT_SWAP_PROB: f32 = 0.002;
-pub const MERGE_POLYGON_PROB: f32 = 0.000667;
+// Off for the reason REMOVE_POLYGON_PROB is. Was 0.000667.
+pub const MERGE_POLYGON_PROB: f32 = 0.0;
 pub const CLONE_POLYGON_PROB: f32 = 0.071429;
 pub const MEDIUM_MOVE_PROBABILITY: f32 = 0.001;
 pub const SWAP_COLORS_PROB: f32 = 0.005650;

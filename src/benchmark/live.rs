@@ -1325,9 +1325,11 @@ mod tests {
             },
             // The frozen v1 manifest's settings, which predate the 2000 cap,
             // the 2026-10-30 operator weights and micro step, the step spread and
-            // the 2026-10-31 micro color cut.
+            // the 2026-10-31 micro color cut and removal default.
             params: MutationParams {
                 max_polygons: 1000,
+                remove_polygon_prob: 0.000862,
+                merge_polygon_prob: 0.000667,
                 offset_polygon_prob: 0.00565,
                 medium_move_prob: 0.004,
                 micro_adjust_prob: 0.002786,
