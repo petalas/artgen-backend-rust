@@ -1085,8 +1085,7 @@ mod tests {
             parents: vec![BenchmarkPackedState {
                 polygon_count: 0,
                 fitness_bits: 100.0f32.to_bits(),
-                mutation_scale_bits: 1.0f32.to_bits(),
-                stagnation_counter: 0,
+                dirty_max: 0,
                 rng_state: 7,
                 polygons: Vec::new(),
             }],

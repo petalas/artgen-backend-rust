@@ -89,14 +89,33 @@ give the offspring of a chain a ladder of step sizes. Offspring with local
 index i uses rung k = i % `STEP_RUNGS` (8) and multiplier
 `min * (max/min)^(k/7)`, computed once on the host
 (`MutationParams::step_multipliers`) and passed in `GpuParams::step_multipliers`
-(vec4s 11–12, formerly reserved). With λ below 8 only the first λ rungs run. mutate multiplies offset, move-point, medium-move and
-micro vertex sizes by `mutation_scale * step_multiplier(rung)`. The working
-state's `mutation_scale` stays the adaptive scale alone, and select's adaptive
-update reads and writes the chain's scale, never an offspring's, so the rung
-does not feed back into adaptation. With equal ends every rung is exactly that
-value, so the defaults multiply by 1.0 and replay is bit-identical
+(vec4s 10–11). With λ below 8 only the first λ rungs run. mutate multiplies
+offset, move-point, medium-move and micro vertex sizes by
+`step_multiplier(rung)`; nothing else scales them (the adaptive mutation scale
+was removed). With equal ends every rung is exactly that value, so the defaults
+multiply by 1.0 and replay was bit-identical when the spread was added
 (`check-gpu-mutation` 220/220 against the previous mutate; hillclimb `replay
 same`, `lifecycle same`).
+
+### State and parameter layout
+
+`GpuDrawingState` (WGSL `DrawingState`) has a 32-byte header, so polygons stay
+16-byte aligned: `polygon_count`, `fitness_bits`, `dirty_max`, `_pad`, then
+`rng_state` (`.x` the PCG state, `.yz` an offspring's changed-index words, `.w`
+unused). A parent's `fitness_bits` is its fitness and its `dirty_max` stays
+zero; an offspring's `fitness_bits` and `dirty_max` hold its dirty rectangle
+(see Change records). No word carries search state besides the RNG: the
+adaptive mutation scale and the stagnation counter it used were removed, so
+canonical state and replay hashes from before that change do not compare.
+
+`GpuParams` (WGSL `Params`) is a 256-byte uniform of vec4 groups: image size
+and polygon bounds; chain count, λ, `max_error_per_pixel` and the point
+penalty; crossover (`crossover_prob`, `spatial_crossover_weight`,
+`tournament_size`); four groups of operator weights; `micro_color_prob` with
+the alpha range; the four step-scaled sizes; new-vertex spread and merge
+thresholds; two groups of step multipliers; four reserved. Every field but
+`spatial_crossover_weight` is read by a bundled shader. The layout test in
+`programs/bundled.rs` maps both structs field by field.
 
 ## Shader installation
 
@@ -258,7 +277,7 @@ those; no stage repeats them. CPU tests check a Rust reference of the encoding
 and compare the shader constants and the `ChainChange` layout.
 
 - The offspring record lives in a working state: the dirty rectangle in
-  `fitness_bits`/`stagnation_counter` and the changed-index words in
+  `fitness_bits`/`dirty_max` and the changed-index words in
   `rng_state[1..3]`. mutate writes it; select, the binner and raster read it
   through `offspring_changes.wgsl`.
 - The chain record is a `GpuChainChange` per chain in `chain_changes`: the

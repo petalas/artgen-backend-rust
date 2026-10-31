@@ -15,7 +15,7 @@ Updated analysis of data layout, memory efficiency, and algorithmic complexity i
 - Compute pass consolidation (bulk iterations in single pass, separate passes only for timestamps)
 - Parallel min-reduction in select shader (O(log2(64)) binary tree)
 - L1 error metric (no sqrt; `abs(dr) + abs(dg) + abs(db)`)
-- Adaptive mutation scale, per-offspring persistent PCG RNG
+- Per-offspring persistent PCG RNG
 - Configurable rasterize workgroup size (8x8, 16x8, 16x16) via string replacement
 - Incremental evaluation with dirty bounding boxes
 - Double-buffered async staging readback

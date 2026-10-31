@@ -12,7 +12,6 @@ These are implemented in the current codebase and not discussed further:
 - Tiled polygon prefetch into shared memory (TILE_CAP = THREAD_COUNT * 3 polygons per tile)
 - Cooperative parent loading via shared memory in mutate shader
 - Parallel min-reduction in select shader (binary tree across 64 threads)
-- Adaptive mutation scale (1.2x accept, pow(0.99, 1/lambda) reject, burst to 1.5 on stagnation)
 - Double-buffered async staging readback
 - Per-offspring persistent PCG RNG (in working_states, not copied from parent)
 - Pipeline cache for shader binaries

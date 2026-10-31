@@ -121,7 +121,6 @@ fn no_op_params() -> MutationParams {
         chain_count: 2,
         lambda: 1,
         gpu_batch_iters: 1,
-        adaptive_mutation: false,
         ..Default::default()
     }
 }

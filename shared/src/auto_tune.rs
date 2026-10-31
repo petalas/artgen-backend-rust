@@ -12,8 +12,6 @@ pub enum ParamKind {
     Linear { min: f32, max: f32 },
     /// Power-of-2 integer: 2^min_exp .. 2^max_exp.
     Pow2 { min_exp: u32, max_exp: u32 },
-    /// Boolean: <0.5 = false, >=0.5 = true.
-    Boolean,
 }
 
 /// One tunable parameter in the search space.

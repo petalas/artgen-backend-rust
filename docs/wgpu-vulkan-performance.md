@@ -185,7 +185,7 @@ BindGroupLayoutEntry {
 ## 5. Pre-encoded Command Buffers for Repeated Iterations (Medium Impact)
 
 ### Current State
-Every `run_batch()` call encodes a fresh command buffer with 50 iterations of the 4-pass loop. Since the dispatch dimensions, pipeline bindings, and workgroup counts are identical across iterations (only `params.iteration_number` changes), much of this encoding is redundant.
+Every `run_batch()` call encodes a fresh command buffer with 50 iterations of the 4-pass loop. Since the dispatch dimensions, pipeline bindings, and workgroup counts are identical across iterations (the params do not change within a batch), much of this encoding is redundant.
 
 ### Opportunity: Reusable Render Bundles / Command Buffer Templates
 While wgpu does not directly support Vulkan secondary command buffers for compute, there are two approaches:

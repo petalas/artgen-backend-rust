@@ -304,42 +304,27 @@ mod tests {
             &module,
             "DrawingState",
             &rust_layout!(GpuDrawingState {
-                polygon_count, fitness_bits, mutation_scale_bits, stagnation_counter,
-                rng_state, polygons,
+                polygon_count, fitness_bits, dirty_max, _pad, rng_state, polygons,
             }),
-            |member| match member {
-                "mutation_scale" => ("mutation_scale_bits".into(), 0),
-                _ => same(member),
-            },
+            same,
         );
         assert_layout(
             &module,
             "Params",
             &rust_layout!(GpuParams {
                 image_width, image_height, max_polygons, min_polygons,
-                max_error_per_pixel, per_point_penalty, iteration_number, _pad0,
+                chain_count_param, lambda, max_error_per_pixel, per_point_penalty,
+                crossover_prob, spatial_crossover_weight, tournament_size, _pad0,
                 add_polygon_prob, remove_polygon_prob, reorder_polygon_prob, offset_polygon_prob,
                 move_point_prob, micro_adjust_prob, change_color_prob, adjust_brightness_prob,
-                adjust_saturation_prob, move_point_max_delta, micro_adjust_delta,
-                new_point_max_distance,
-                offset_polygon_magnitude, min_alpha_norm, max_alpha_norm, crossover_prob,
-                spatial_crossover_weight, tournament_size, incremental_eval, tile_culling,
-                chain_count_param, single_mutation_mode, lambda, adaptive_mutation,
-                scale_polygon_prob, rotate_polygon_prob, adjacent_swap_prob, merge_polygon_prob,
-                clone_polygon_prob, medium_move_prob, medium_move_delta, swap_colors_prob,
-                merge_centroid_threshold, merge_color_threshold, micro_color_prob, _pad3,
+                adjust_saturation_prob, scale_polygon_prob, rotate_polygon_prob, adjacent_swap_prob,
+                merge_polygon_prob, clone_polygon_prob, medium_move_prob, swap_colors_prob,
+                micro_color_prob, min_alpha_norm, max_alpha_norm, _pad1,
+                offset_polygon_magnitude, move_point_max_delta, medium_move_delta, micro_adjust_delta,
+                new_point_max_distance, merge_centroid_threshold, merge_color_threshold, _pad2,
                 step_multipliers, _reserved,
             }),
-            |member| match member {
-                // Shaders ignore these words.
-                "_pad_ie" => ("incremental_eval".into(), 0),
-                "_pad_tc" => ("tile_culling".into(), 0),
-                "_pad_sm" => ("single_mutation_mode".into(), 0),
-                _ => match member.strip_prefix("_reserved") {
-                    Some(k) => ("_reserved".into(), 16 * k.parse::<usize>().unwrap()),
-                    None => same(member),
-                },
-            },
+            same,
         );
         let (select, _) = validated(BundledShader::Select);
         assert_layout(

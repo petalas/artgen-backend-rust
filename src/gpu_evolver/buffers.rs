@@ -19,11 +19,11 @@ pub struct GpuPolygon {
 }
 
 /// Per-chain drawing state on GPU, for parents and offspring alike.
-/// polygon_count + fitness + mutation_scale + stagnation_counter + rng_state = 32 bytes header
+/// polygon_count + fitness + dirty_max + padding + rng_state = 32 bytes header
 /// polygons: `POLYGON_CAPACITY` * 16 = 32768 bytes
 /// Total: 32800 bytes. The stride is storage capacity; the runtime search cap is
 /// `GpuParams::max_polygons`.
-/// An offspring keeps its change record in `fitness_bits`, `stagnation_counter`
+/// An offspring keeps its change record in `fitness_bits`, `dirty_max`
 /// and `rng_state[1..3]` (see [`super::changes`]); parents carry none there.
 /// Polygons beyond `polygon_count` carry nothing.
 #[repr(C)]
@@ -31,8 +31,8 @@ pub struct GpuPolygon {
 pub struct GpuDrawingState {
     pub polygon_count: u32,           // offset 0
     pub fitness_bits: u32,            // offset 4 — bitcast f32 for atomicMax compatibility
-    pub mutation_scale_bits: u32,     // offset 8 — bitcast f32, adaptive mutation scale
-    pub stagnation_counter: u32,      // offset 12 — iterations since last improvement
+    pub dirty_max: u32,               // offset 8 — offspring: dirty rectangle's max corner; parents: 0
+    pub _pad: u32,                    // offset 12
     pub rng_state: [u32; 4],          // offset 16 — [0] RNG state; [1..3] offspring changed-index words; [3] unused
     pub polygons: [GpuPolygon; POLYGON_CAPACITY], // offset 32
 }
@@ -47,17 +47,25 @@ unsafe impl Pod for GpuDrawingState {}
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 pub struct GpuParams {
+    // vec4[0] — image size and polygon-count bounds
     pub image_width: u32,
     pub image_height: u32,
     pub max_polygons: u32,
     pub min_polygons: u32,
 
+    // vec4[1] — population and fitness
+    pub chain_count_param: u32,
+    pub lambda: u32,
     pub max_error_per_pixel: f32,
     pub per_point_penalty: f32,
-    pub iteration_number: u32,
+
+    // vec4[2] — crossover
+    pub crossover_prob: f32,
+    pub spatial_crossover_weight: f32,
+    pub tournament_size: u32,
     pub _pad0: u32,
 
-    // Mutation probabilities
+    // vec4[3-6] — mutation operator weights
     pub add_polygon_prob: f32,
     pub remove_polygon_prob: f32,
     pub reorder_polygon_prob: f32,
@@ -69,51 +77,38 @@ pub struct GpuParams {
     pub adjust_brightness_prob: f32,
 
     pub adjust_saturation_prob: f32,
-    pub move_point_max_delta: f32,
-    pub micro_adjust_delta: f32,
-    pub new_point_max_distance: f32,
-
-    pub offset_polygon_magnitude: f32,
-    pub min_alpha_norm: f32,
-    pub max_alpha_norm: f32,
-    pub crossover_prob: f32,
-
-    // vec4[6] — crossover params
-    pub spatial_crossover_weight: f32,
-    pub tournament_size: u32,
-    pub incremental_eval: u32,
-    pub tile_culling: u32,
-
-    // vec4[7] — chain count + lambda + adaptive mutation
-    pub chain_count_param: u32,
-    // Always 1; no shader reads it.
-    pub single_mutation_mode: u32,
-    pub lambda: u32,
-    pub adaptive_mutation: u32,
-
-    // vec4[8] — new mutation probabilities
     pub scale_polygon_prob: f32,
     pub rotate_polygon_prob: f32,
     pub adjacent_swap_prob: f32,
-    pub merge_polygon_prob: f32,
 
-    // vec4[9] — more new mutation probabilities + deltas
+    pub merge_polygon_prob: f32,
     pub clone_polygon_prob: f32,
     pub medium_move_prob: f32,
-    pub medium_move_delta: f32,
     pub swap_colors_prob: f32,
 
-    // vec4[10] — merge thresholds, micro color weight + padding
+    // vec4[7] — last operator weight, alpha range of new and recolored polygons
+    pub micro_color_prob: f32,
+    pub min_alpha_norm: f32,
+    pub max_alpha_norm: f32,
+    pub _pad1: u32,
+
+    // vec4[8] — step sizes, multiplied by the offspring's step multiplier
+    pub offset_polygon_magnitude: f32,
+    pub move_point_max_delta: f32,
+    pub medium_move_delta: f32,
+    pub micro_adjust_delta: f32,
+
+    // vec4[9] — new vertex spread (add, clone) and merge thresholds
+    pub new_point_max_distance: f32,
     pub merge_centroid_threshold: f32,
     pub merge_color_threshold: f32,
-    pub micro_color_prob: f32,
-    pub _pad3: u32,
+    pub _pad2: u32,
 
-    // vec4[11-12] — step-size multiplier per rung (`MutationParams::step_multipliers`).
+    // vec4[10-11] — step-size multiplier per rung (`MutationParams::step_multipliers`).
     pub step_multipliers: [f32; STEP_RUNGS],
 
-    // vec4[13-15] — reserved padding to fill 256 bytes
-    pub _reserved: [u32; 12],
+    // vec4[12-15] — reserved padding to fill 256 bytes
+    pub _reserved: [u32; 16],
 }
 
 // WGSL `Params` holds the multipliers as two vec4s.
@@ -140,9 +135,13 @@ pub fn gpu_params_from(mp: &MutationParams, w: u32, h: u32, chain_count: u32) ->
         image_height: h,
         max_polygons: mp.max_polygons.min(POLYGON_CAPACITY as u32),
         min_polygons: mp.min_polygons,
+        chain_count_param: chain_count,
+        lambda: mp.lambda,
         max_error_per_pixel: MAX_ERROR_PER_PIXEL,
         per_point_penalty: mp.per_point_penalty,
-        iteration_number: 0,
+        crossover_prob: mp.crossover_prob,
+        spatial_crossover_weight: mp.spatial_crossover_weight,
+        tournament_size: mp.tournament_size,
         _pad0: 0,
         add_polygon_prob: mp.add_polygon_prob,
         remove_polygon_prob: mp.remove_polygon_prob,
@@ -153,35 +152,27 @@ pub fn gpu_params_from(mp: &MutationParams, w: u32, h: u32, chain_count: u32) ->
         change_color_prob: mp.change_color_prob,
         adjust_brightness_prob: mp.adjust_brightness_prob,
         adjust_saturation_prob: mp.adjust_saturation_prob,
-        move_point_max_delta: mp.move_point_max_delta,
-        micro_adjust_delta: mp.micro_adjust_delta,
-        new_point_max_distance: mp.new_point_max_distance,
-        offset_polygon_magnitude: mp.offset_polygon_magnitude,
-        min_alpha_norm: mp.min_alpha as f32 / 255.0,
-        max_alpha_norm: mp.max_alpha as f32 / 255.0,
-        crossover_prob: mp.crossover_prob,
-        spatial_crossover_weight: mp.spatial_crossover_weight,
-        tournament_size: mp.tournament_size,
-        incremental_eval: 1,
-        tile_culling: 1,
-        chain_count_param: chain_count,
-        single_mutation_mode: 1,
-        lambda: mp.lambda,
-        adaptive_mutation: if mp.adaptive_mutation { 1 } else { 0 },
         scale_polygon_prob: mp.scale_polygon_prob,
         rotate_polygon_prob: mp.rotate_polygon_prob,
         adjacent_swap_prob: mp.adjacent_swap_prob,
         merge_polygon_prob: mp.merge_polygon_prob,
         clone_polygon_prob: mp.clone_polygon_prob,
         medium_move_prob: mp.medium_move_prob,
-        micro_color_prob: mp.micro_color_prob,
-        medium_move_delta: mp.medium_move_delta,
         swap_colors_prob: mp.swap_colors_prob,
+        micro_color_prob: mp.micro_color_prob,
+        min_alpha_norm: mp.min_alpha as f32 / 255.0,
+        max_alpha_norm: mp.max_alpha as f32 / 255.0,
+        _pad1: 0,
+        offset_polygon_magnitude: mp.offset_polygon_magnitude,
+        move_point_max_delta: mp.move_point_max_delta,
+        medium_move_delta: mp.medium_move_delta,
+        micro_adjust_delta: mp.micro_adjust_delta,
+        new_point_max_distance: mp.new_point_max_distance,
         merge_centroid_threshold: mp.merge_centroid_threshold,
         merge_color_threshold: mp.merge_color_threshold,
-        _pad3: 0,
+        _pad2: 0,
         step_multipliers: mp.step_multipliers(),
-        _reserved: [0u32; 12],
+        _reserved: [0u32; 16],
     }
 }
 
@@ -212,8 +203,6 @@ pub fn drawing_to_gpu(drawing: &Drawing, seed: u64) -> GpuDrawingState {
     seed_state(&mut state, seed);
 
     state.fitness_bits = 0; // will be computed on GPU
-    state.mutation_scale_bits = 1.0f32.to_bits(); // start at scale 1.0
-    state.stagnation_counter = 0;
 
     let mut gpu_idx = 0;
     for polygon in &drawing.polygons {

@@ -71,9 +71,6 @@ pub const CROSSOVER_PROB: f32 = 0.2;
 pub const SPATIAL_CROSSOVER_WEIGHT: f32 = 0.66;
 pub const TOURNAMENT_SIZE: u32 = 3;
 
-// Adaptive mutation default
-pub const ADAPTIVE_MUTATION: bool = false;
-
 // Step spread
 /// Step-size rungs: offspring with local index `i` scale offset, point-move and
 /// micro vertex step sizes by rung `i % STEP_RUNGS`'s multiplier, log-spaced

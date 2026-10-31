@@ -210,7 +210,6 @@ fn select_main(@builtin(global_invocation_id) gid: vec3<u32>,
             record_chain_change(chain_id, best_offspring_id, chain_states[chain_id].polygon_count);
             chain_states[chain_id].polygon_count = working_states[best_offspring_id].polygon_count;
             chain_states[chain_id].fitness_bits = fitness_bits;
-            chain_states[chain_id].stagnation_counter = 0u;
             shared_accept = 1u;
             shared_copy_count = working_states[best_offspring_id].polygon_count;
             shared_best_offspring_id = best_offspring_id;
@@ -223,31 +222,7 @@ fn select_main(@builtin(global_invocation_id) gid: vec3<u32>,
             chain_update_flags[chain_id * 4u + 2u] = dirty.y;
             // Winner whose tile lists update_framebuffers reuses; outside canonical state.
             chain_update_flags[chain_id * 4u + 3u] = best_offspring_id;
-
-            // Adaptive mutation scale: only update when enabled
-            if params.adaptive_mutation == 1u {
-                let new_scale = min(chain_states[chain_id].mutation_scale * 1.2, 2.0);
-                chain_states[chain_id].mutation_scale = new_scale;
-            }
         } else {
-            if params.adaptive_mutation == 1u {
-                // Gentle decay on rejection
-                // pow(0.99, 1/λ) — at 5% acceptance rate, geometric mean ≈ 1.0 (stable)
-                let decay = pow(0.99, 1.0 / f32(lambda));
-                let new_scale = max(chain_states[chain_id].mutation_scale * decay, 0.2);
-                chain_states[chain_id].mutation_scale = new_scale;
-
-                // Stagnation counter
-                let stagnation = chain_states[chain_id].stagnation_counter + 1u;
-                let stagnation_threshold = 10000u / lambda;
-                if stagnation > stagnation_threshold {
-                    chain_states[chain_id].mutation_scale = 1.5;
-                    chain_states[chain_id].stagnation_counter = 0u;
-                } else {
-                    chain_states[chain_id].stagnation_counter = stagnation;
-                }
-            }
-
             shared_accept = 0u;
             chain_update_flags[chain_id * 4u] = 0u;  // not accepted
         }

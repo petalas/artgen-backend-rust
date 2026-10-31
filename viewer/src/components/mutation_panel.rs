@@ -139,7 +139,7 @@ fn MutationPanelBody(state: RwSignal<ViewerState>) -> impl IntoView {
                     </select>
                 </div>
             </div>
-            <ParamsEditor params={params} on_change={on_change} disabled={disabled}/>
+            <ParamsEditor params={params} on_change={on_change}/>
             <div class="mutation-section mutation-section-actions">
                 <button class="btn btn-secondary" disabled={move || disabled.get()} on:click={on_reset}>"Reset to Defaults"</button>
             </div>
@@ -153,34 +153,8 @@ fn MutationPanelBody(state: RwSignal<ViewerState>) -> impl IntoView {
 pub fn ParamsEditor(
     params: RwSignal<MutationParams>,
     #[prop(optional)] on_change: Option<Callback<()>>,
-    #[prop(optional)] disabled: Option<Signal<bool>>,
 ) -> impl IntoView {
-    let notify = move || {
-        if let Some(cb) = on_change {
-            cb.run(());
-        }
-    };
-
-    let is_disabled = move || disabled.map_or(false, |d| d.get());
-
     view! {
-        <div class="mutation-section">
-            <div class="mutation-section-title">"Mode"</div>
-            <div class="mutation-row">
-                <label class="bench-checkbox-label">
-                    <input
-                        type="checkbox"
-                        disabled={move || is_disabled()}
-                        prop:checked={move || params.get().adaptive_mutation}
-                        on:change={move |_| {
-                            params.update(|p| p.adaptive_mutation = !p.adaptive_mutation);
-                            notify();
-                        }}
-                    />
-                    "Adaptive mutation scale (\u{03BB}>1 offspring only)"
-                </label>
-            </div>
-        </div>
         <div class="mutation-section">
             <div class="mutation-section-title">"Polygons"</div>
             <IntSlider params={params} on_change={on_change} label="Min polygons" get={|mp| mp.min_polygons as i64} set={|mp, v| { mp.min_polygons = v as u32; if mp.max_polygons < mp.min_polygons { mp.max_polygons = mp.min_polygons; } }} min=1 max={POLYGON_CAPACITY} step=1/>

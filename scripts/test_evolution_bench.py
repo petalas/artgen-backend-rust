@@ -162,8 +162,7 @@ if MODE == "cache_check":
     assert Path("pipeline_cache_test.bin").read_bytes() == b"fixed cache seed"
     Path("pipeline_cache_test.bin").write_bytes(b"mutated child cache")
 Path("child-cwd.txt").write_text(str(Path.cwd()))
-parents = [{"polygon_count": 400, "fitness_bits": 1120206848,
-            "mutation_scale_bits": 1065353216, "stagnation_counter": 0,
+parents = [{"polygon_count": 400, "fitness_bits": 1120206848, "dirty_max": 0,
             "rng_state": index, "polygons": [[0, 0, 0, 0]] * 400}
            for index in range(params["chainCount"])]
 state = {"parents": parents, "offspring": [], "parent_total_errors": [100] * len(parents),

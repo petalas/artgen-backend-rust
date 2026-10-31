@@ -1371,8 +1371,7 @@ mod tests {
                 "minAlpha": 10, "maxAlpha": 65, "minPolygons": 1,
                 "maxPolygons": 1000, "crossoverProb": 0.2,
                 "spatialCrossoverWeight": 0.66, "tournamentSize": 3,
-                "chainCount": 4, "lambda": 64,
-                "adaptiveMutation": false, "rasterizeWg": [32, 16], "gpuBatchIters": 64
+                "chainCount": 4, "lambda": 64, "rasterizeWg": [32, 16], "gpuBatchIters": 64
             }"#,
         )
         .unwrap();
@@ -2224,8 +2223,7 @@ mod tests {
         let parent = BenchmarkPackedState {
             polygon_count: 0,
             fitness_bits: 99.0f32.to_bits(),
-            mutation_scale_bits: 1.0f32.to_bits(),
-            stagnation_counter: 0,
+            dirty_max: 0,
             rng_state: 7,
             polygons: Vec::new(),
         };

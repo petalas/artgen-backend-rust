@@ -96,13 +96,12 @@ impl BenchmarkCounters {
 }
 
 /// Packed words that can affect evolution. Unused polygons and RNG .yzw are omitted.
-/// For offspring, `fitness_bits`/`stagnation_counter` encode the dirty bounding box.
+/// For offspring, `fitness_bits`/`dirty_max` encode the dirty bounding box.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct BenchmarkPackedState {
     pub polygon_count: u32,
     pub fitness_bits: u32,
-    pub mutation_scale_bits: u32,
-    pub stagnation_counter: u32,
+    pub dirty_max: u32,
     pub rng_state: u32,
     pub polygons: Vec<[u32; 4]>,
 }
@@ -115,8 +114,7 @@ impl BenchmarkPackedState {
         Ok(Self {
             polygon_count: state.polygon_count,
             fitness_bits: state.fitness_bits,
-            mutation_scale_bits: state.mutation_scale_bits,
-            stagnation_counter: state.stagnation_counter,
+            dirty_max: state.dirty_max,
             rng_state: state.rng_state[0],
             polygons: state.polygons[..state.polygon_count as usize]
                 .iter()
@@ -531,7 +529,6 @@ impl GpuEvolver {
             .map(|index| {
                 let mut state = GpuDrawingState::zeroed();
                 state.rng_state[0] = benchmark_seed(seed, index, 1);
-                state.mutation_scale_bits = 1.0f32.to_bits();
                 state
             })
             .collect();

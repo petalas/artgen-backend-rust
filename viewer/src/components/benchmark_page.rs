@@ -126,7 +126,6 @@ fn SnapshotsSection(state: RwSignal<ViewerState>) -> impl IntoView {
 
 fn auto_label(params: &MutationParams, resolution: u32) -> String {
     let lambda_str = if params.lambda > 1 { format!("-{}\u{03BB}", params.lambda) } else { String::new() };
-    let adaptive_str = if params.adaptive_mutation { "-adaptive" } else { "" };
     let defaults = MutationParams::default();
     let wg_str = format!("-wg{}x{}", params.rasterize_wg[0], params.rasterize_wg[1]);
     let batch_str = if params.gpu_batch_iters != defaults.gpu_batch_iters {
@@ -135,7 +134,7 @@ fn auto_label(params: &MutationParams, resolution: u32) -> String {
         String::new()
     };
     let res_str = format!("-{}px", resolution);
-    format!("{}c{}{}{}{}{}", params.chain_count, lambda_str, adaptive_str, wg_str, batch_str, res_str)
+    format!("{}c{}{}{}{}", params.chain_count, lambda_str, wg_str, batch_str, res_str)
 }
 
 fn deduplicate_label(base: &str, state: &ViewerState) -> String {
@@ -360,7 +359,7 @@ fn ConfigureSection(
                         }));
                     }}
                     disabled={move || is_active() || state.get().active_project.is_none()}
-                    title="4 chains, 64 lambda, single mutation, adaptive, 33s from random start"
+                    title="4 chains, 64 lambda, 33s from random start"
                 >
                     {move || {
                         match &state.get().active_project {
@@ -1148,7 +1147,6 @@ fn params_detail_view(p: &MutationParams, resolution: u32, pass_timings: &Option
         <div class="bench-params-detail">
             {timing_bar}
             <div class="bench-params-row">
-                {pv("Adaptive", if p.adaptive_mutation { "on" } else { "off" }.to_string(), p.adaptive_mutation != d.adaptive_mutation)}
                 {pv("Chains", p.chain_count.to_string(), p.chain_count != d.chain_count)}
                 {pv("Lambda", p.lambda.to_string(), p.lambda != d.lambda)}
                 {pv("Batch", p.gpu_batch_iters.to_string(), p.gpu_batch_iters != d.gpu_batch_iters)}

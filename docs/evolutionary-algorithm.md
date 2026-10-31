@@ -11,7 +11,7 @@ The system uses a **(1+lambda)-ES** running entirely on the GPU via wgpu compute
 - **Selection**: Strictly elitist -- offspring replaces parent only if fitness strictly improves, with 50% neutral acceptance for plateau traversal (coin flip using offspring RNG bit). An exact copy of the parent (a crossover that kept every slot) is never accepted.
 - **Crossover**: Tournament selection (size 3) across the entire population, uniform crossover that walks both parent polygon arrays in lockstep with per-slot coin flip. Probability 0.2 default.
 - **Mutation**: 17 mutation operators. Each offspring gets exactly one, picked by weighted roulette wheel (per-polygon operators weighted by polygon count). Mutations include: add/remove polygon, reorder (random swap), adjacent swap, scale, rotate, offset polygon, move point (large/medium/micro), change color (full/micro), adjust brightness, adjust saturation, merge polygons, clone+jitter, swap colors.
-- **Adaptive mutation scale**: 1.2x on accept (capped at 2.0), pow(0.99, 1/lambda) decay on reject (floor at 0.2), burst to 1.5 on stagnation (>10000/lambda iterations). Only affects offspring indices 1..lambda-1 when enabled; offspring 0 always uses scale 1.0.
+- **Step spread**: offspring with local index i scale offset, point-move, medium-move and micro vertex step sizes by rung i % 8 of a log-spaced ladder (`step_spread_min`..`step_spread_max`, default 1.0 each, so no spread). The step sizes have no adaptive scale; the former adaptive mutation scale and its stagnation counter were removed.
 - **Fitness**: L1 error per pixel (`abs(dr) + abs(dg) + abs(db)`, max 765 per pixel) summed across all pixels, converted to percentage, with a tiny complexity penalty (`per_point_penalty`, default 1/5000000 per vertex, a `MutationParams` setting).
 - **Degenerate triangle culling**: On acceptance, compacts polygon array by removing triangles with cross-product area < 0.00001.
 - **Tile culling**: Optional spatial binning pass assigns polygons to screen tiles; rasterize shader only processes polygons overlapping each tile.
@@ -56,7 +56,7 @@ In `mutate.wgsl`, add a branch at the top of the mutation path:
 if params.stratified_mutation == 1u && offspring_local_idx < STRATIFIED_SLOTS {
     // Deterministic mutation type based on offspring index
     let mutation_type = stratification_table[offspring_local_idx];
-    apply_specific_mutation(rng, oid, count, mutation_scale, mutation_type);
+    apply_specific_mutation(rng, oid, count, step_multiplier(rung), mutation_type);
 } else {
     // Existing roulette-wheel path
     ...
@@ -199,13 +199,13 @@ Low-Medium (4x4 grid version). Requires: 16 u32s added to chain state (or a smal
 
 ### Problem
 
-The current selection is strictly elitist with 50% neutral acceptance (equal-fitness coin flip). The stagnation response (burst mutation_scale to 1.5 after 10000/lambda rejections) is blunt: it destabilizes the solution without providing any mechanism to accept temporarily worse solutions that might lead to better basins.
+The current selection is strictly elitist with 50% neutral acceptance (equal-fitness coin flip). Nothing responds to stagnation: the former stagnation response (an adaptive mutation scale burst to 1.5 after 10000/lambda rejections) was removed with the adaptive scale, and it gave no way to accept temporarily worse solutions that might lead to better basins.
 
 In polygon art, the fitness landscape has many narrow valleys separated by small ridges. Reordering two overlapping polygons might decrease fitness by 0.001% but enable subsequent mutations that improve fitness by 0.1%. The current algorithm can never traverse such ridges.
 
 ### Solution
 
-Add **stagnation-triggered simulated annealing** in the select shader. When `stagnation_counter` exceeds a threshold, allow acceptance of slightly worse offspring with probability depending on the fitness gap:
+Add **stagnation-triggered simulated annealing** in the select shader. The parent state has no stagnation counter any more, so this needs one: a new per-chain `stagnation_counter` (in place of the drawing-state header's `_pad`) counting rejections since the last accept. When it exceeds a threshold, allow acceptance of slightly worse offspring with probability depending on the fitness gap:
 
 ```wgsl
 // In select shader, when fitness <= current_fitness and stagnation detected:
@@ -225,7 +225,7 @@ if stagnation > stagnation_threshold {
 }
 ```
 
-The key design choice: SA acceptance **only activates after stagnation**, not during normal operation. This means it cannot hurt convergence during productive phases. It only kicks in when the algorithm is already stuck, providing an escape mechanism that is strictly better than the current stagnation burst.
+The key design choice: SA acceptance **only activates after stagnation**, not during normal operation. This means it cannot hurt convergence during productive phases. It only kicks in when the algorithm is already stuck, providing an escape mechanism the search lacks today.
 
 ### Expected Impact
 
@@ -233,7 +233,7 @@ Moderate-High. The benefit is image-dependent: complex images with many overlapp
 
 ### Implementation Complexity
 
-Low. Changes are confined to ~20 lines in `select.wgsl`. No new buffers, no new passes. Could reuse the existing stagnation_counter and threshold.
+Low. Changes are confined to ~20 lines in `select.wgsl` plus a rejection counter in the parent header's spare word (and its reset on host uploads). No new buffers, no new passes.
 
 ---
 
@@ -283,7 +283,7 @@ Medium. New mutation type in `mutate.wgsl` (centroid and vertex computation are 
 
 ### Problem
 
-All spatial mutations use uniform random perturbations within a fixed delta range scaled by mutation_scale. The uniform distribution is thin-tailed: perturbations larger than delta * mutation_scale never occur. When the optimal move is further than the current delta allows, the algorithm cannot reach it in a single step. Multiple small steps through the fitness landscape are unreliable because each intermediate position must improve fitness.
+All spatial mutations use uniform random perturbations within a fixed delta range scaled by the offspring's step multiplier. The uniform distribution is thin-tailed: perturbations larger than delta * step_multiplier never occur. When the optimal move is further than the current delta allows, the algorithm cannot reach it in a single step. Multiple small steps through the fitness landscape are unreliable because each intermediate position must improve fitness.
 
 ### Solution
 
@@ -296,7 +296,7 @@ fn cauchy_sample(rng: ptr<function, u32>, gamma: f32) -> f32 {
 }
 
 // Usage in move_point:
-let delta = cauchy_sample(&rng, params.move_point_max_delta * mutation_scale);
+let delta = cauchy_sample(&rng, params.move_point_max_delta * ms);
 v0.x = clamp(v0.x + delta, 0.0, 1.0);
 ```
 
@@ -390,7 +390,7 @@ The mutation probability distribution is static (set by the user or auto-tuner).
 - **Middle** (70-90%): `move_point` and `offset_polygon` dominate.
 - **Late** (> 90%): Only `micro_adjust` (vertex and color) produces improvements.
 
-The existing adaptive mutation scale adjusts step *size* but not which *type* of mutation to apply.
+The step spread varies step *size* across offspring but not which *type* of mutation to apply.
 
 ### Solution
 

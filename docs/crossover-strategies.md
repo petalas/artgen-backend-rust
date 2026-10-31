@@ -13,13 +13,13 @@ Both currently write to offspring slots in the `working_states` buffer and are s
 ## Current Representation Summary
 
 ```
-GpuDrawingState (16032 bytes):
+GpuDrawingState (32800 bytes):
   polygon_count: u32
-  fitness_bits: u32
-  mutation_scale: f32
-  stagnation_counter: u32
+  fitness_bits: u32   // offspring: dirty rectangle min corner
+  dirty_max: u32      // offspring: dirty rectangle max corner
+  _pad: u32
   rng_state: vec4<u32>
-  polygons: array<Polygon, 1000>
+  polygons: array<Polygon, POLYGON_CAPACITY>  // 2048
 
 Polygon (16 bytes):
   data: vec4<u32>  // [color_packed, v0_packed, v1_packed, v2_packed]

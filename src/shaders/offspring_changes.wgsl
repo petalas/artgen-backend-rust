@@ -7,7 +7,7 @@
 // The dirty rectangle's corners, packed as in pack_dirty_box.
 fn offspring_dirty_words(offspring: u32) -> vec2<u32> {
     return vec2<u32>(working_states[offspring].fitness_bits,
-                     working_states[offspring].stagnation_counter);
+                     working_states[offspring].dirty_max);
 }
 
 fn offspring_dirty_min(offspring: u32) -> vec2<u32> {
@@ -15,7 +15,7 @@ fn offspring_dirty_min(offspring: u32) -> vec2<u32> {
 }
 
 fn offspring_dirty_max(offspring: u32) -> vec2<u32> {
-    return unpack_dirty_corner(working_states[offspring].stagnation_counter);
+    return unpack_dirty_corner(working_states[offspring].dirty_max);
 }
 
 // The changed-index words; the second is zero when the first is unknown.

@@ -562,9 +562,6 @@ fn normalize(native: f32, kind: &ParamKind) -> f32 {
                 (exp - min_exp) as f32 / (max_exp - min_exp) as f32
             }
         }
-        ParamKind::Boolean => {
-            if native >= 0.5 { 1.0 } else { 0.0 }
-        }
     }
 }
 
@@ -584,9 +581,6 @@ fn denormalize(v: f32, kind: &ParamKind) -> f32 {
             let exp = (*min_exp as f32 + v * range).round() as u32;
             let exp = exp.clamp(*min_exp, *max_exp);
             2u32.pow(exp) as f32
-        }
-        ParamKind::Boolean => {
-            if v >= 0.5 { 1.0 } else { 0.0 }
         }
     }
 }
@@ -622,7 +616,6 @@ fn get_param_by_name(params: &MutationParams, name: &str) -> f32 {
         "crossover_prob" => params.crossover_prob,
         "spatial_crossover_weight" => params.spatial_crossover_weight,
         "lambda" => params.lambda as f32,
-        "adaptive_mutation" => if params.adaptive_mutation { 1.0 } else { 0.0 },
         _ => 0.0,
     }
 }
@@ -658,7 +651,6 @@ fn set_param_by_name(params: &mut MutationParams, name: &str, value: f32) {
         "crossover_prob" => params.crossover_prob = value,
         "spatial_crossover_weight" => params.spatial_crossover_weight = value,
         "lambda" => params.lambda = value as u32,
-        "adaptive_mutation" => params.adaptive_mutation = value >= 0.5,
         _ => {}
     }
 }
@@ -698,7 +690,5 @@ pub fn default_param_specs() -> Vec<ParamSpec> {
         ParamSpec { name: "spatial_crossover_weight".into(), kind: ParamKind::Linear { min: 0.0, max: 1.0 }, enabled: true },
         // Lambda (Pow2)
         ParamSpec { name: "lambda".into(), kind: ParamKind::Pow2 { min_exp: 0, max_exp: 6 }, enabled: true },
-        // Booleans — disabled by default (adaptive always off)
-        ParamSpec { name: "adaptive_mutation".into(), kind: ParamKind::Boolean, enabled: false },
     ]
 }

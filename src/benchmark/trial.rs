@@ -650,8 +650,7 @@ mod tests {
         let parent = BenchmarkPackedState {
             polygon_count: 0,
             fitness_bits: 100.0f32.to_bits(),
-            mutation_scale_bits: 1.0f32.to_bits(),
-            stagnation_counter: 0,
+            dirty_max: 0,
             rng_state: 7,
             polygons: Vec::new(),
         };
@@ -833,7 +832,7 @@ mod tests {
         let initial = snapshot();
         let expected = state_hash(&initial).unwrap();
         assert_eq!(
-            expected, "57a29aaad3526be5f18ad438b112264fdb996b5f95da2a9bbb1625c965b54529",
+            expected, "75eae39e8be8d920e56a2005d784433879add3d313b50da671124c17d3eb1a78",
             "the persisted seven-field array encoding must remain byte-compatible"
         );
         let mut telemetry = initial.clone();
@@ -845,24 +844,23 @@ mod tests {
         assert_eq!(state_hash(&telemetry).unwrap(), expected);
         // GPU padding cannot enter BenchmarkSnapshot; its decoder has a separate
         // padding test. These mutations exercise the canonical hash itself.
-        for component in 0..12 {
+        for component in 0..11 {
             let mut changed = initial.clone();
             match component {
                 0 => changed.parents[0].rng_state += 1,
                 1 => changed.offspring[0].rng_state += 1,
                 2 => changed.parents[0].fitness_bits = 99.0f32.to_bits(),
-                3 => changed.parents[0].mutation_scale_bits = 1.5f32.to_bits(),
-                4 => changed.parents[0].stagnation_counter = 1,
-                5 => {
+                3 => changed.offspring[0].dirty_max = 1,
+                4 => {
                     changed.parents[0].polygon_count = 1;
                     changed.parents[0].polygons.push([1, 2, 3, 4]);
                 }
-                6 => changed.offspring[0].fitness_bits = 1,
-                7 => changed.parent_total_errors[0] = 1,
-                8 => changed.parent_framebuffers[0][0] = 0xfffe_ffff,
-                9 => changed.offspring_errors[0][0] = 1,
-                10 => changed.chain_update_flags[0][0] = 1,
-                11 => changed.fitness_packed[0] = 99.0f32.to_bits(),
+                5 => changed.offspring[0].fitness_bits = 1,
+                6 => changed.parent_total_errors[0] = 1,
+                7 => changed.parent_framebuffers[0][0] = 0xfffe_ffff,
+                8 => changed.offspring_errors[0][0] = 1,
+                9 => changed.chain_update_flags[0][0] = 1,
+                10 => changed.fitness_packed[0] = 99.0f32.to_bits(),
                 _ => unreachable!("bounded component list"),
             }
             assert_ne!(

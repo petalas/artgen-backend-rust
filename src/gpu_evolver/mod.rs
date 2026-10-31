@@ -233,8 +233,7 @@ impl GpuEvolver {
         // maps may still hold the other.
         let write_idx = self.readback.next_staging_index();
 
-        let mut params = gpu_params_from(mutation_params, p.image_width, p.image_height, active);
-        params.iteration_number = self.iteration;
+        let params = gpu_params_from(mutation_params, p.image_width, p.image_height, active);
         p.queue.write_buffer(&p.params_buf, 0, bytemuck::bytes_of(&params));
 
         // Reset control flags before batch — preserve best_fitness_bits so atomicMax
@@ -424,7 +423,7 @@ impl GpuEvolver {
         // Reinitialize offspring RNG states
         init_offspring_rng(&self.pipeline, self.iteration);
 
-        // Reset framebuffers so they get re-initialized on next incremental_eval batch
+        // Reset framebuffers so they get re-initialized on the next batch
         self.framebuffers_initialized = false;
 
         self.iteration = 0;
@@ -754,7 +753,7 @@ fn gpu_memory_bytes(p: &GpuPipeline) -> u64 {
 /// Each offspring slot gets a unique persistent RNG seed.
 fn init_offspring_rng(pipeline: &GpuPipeline, iteration: u32) {
     let capacity = pipeline.offspring_capacity as usize;
-    // Create zeroed states with unique RNG seeds — only the rng_state and mutation_scale matter
+    // Create zeroed states with unique RNG seeds — only the rng_state matters
     let states: Vec<GpuDrawingState> = (0..capacity)
         .map(|i| {
             let mut s = GpuDrawingState::zeroed();
@@ -764,7 +763,6 @@ fn init_offspring_rng(pipeline: &GpuPipeline, iteration: u32) {
             // Only [0] is used by the 32-bit PCG hash; [1..3] start as an unknown
             // change record, which mutate replaces before any reader runs
             s.rng_state[0] = seed as u32;
-            s.mutation_scale_bits = 1.0f32.to_bits();
             s
         })
         .collect();

@@ -3,8 +3,8 @@
 `scripts/quality.py` measures how far evolution gets from a blank drawing, or
 from a saved mature drawing, over minutes of wall clock. Throughput screens (`scripts/hillclimb.py`) time 64–512
 batches from mature fixtures and cannot show late-game behavior. Use this
-benchmark for evolution settings (mutation probabilities and sizes, adaptive
-mutation, polygon penalty, chains vs lambda, crossover and tournament) and for
+benchmark for evolution settings (mutation probabilities and sizes, step
+spread, polygon penalty, chains vs lambda, crossover and tournament) and for
 search changes. Sides can differ by build, by settings, or both.
 
 ```sh
@@ -38,7 +38,7 @@ scripts/quality.py --start .cache/quality/starts/s120 --side control=HEAD --side
   spread, and a record or setting without them reads as no spread; each within
   [1/16, 16], min at most max) spread offset and vertex move sizes over
   each chain's offspring: offspring i uses rung i mod 8, multiplier
-  `min * (max/min)^(rung/7)`, on top of the adaptive scale (see
+  `min * (max/min)^(rung/7)` (see
   [engine architecture](engine-architecture.md#step-spread)). A side with a
   spread gets a step rung table (below).
 - `--images` (default ff,mona,darwin; see darwin under Limits), `--seeds` (default 5),

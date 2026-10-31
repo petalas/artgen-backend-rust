@@ -129,9 +129,6 @@ pub struct MutationParams {
     // Lambda: offspring per chain per iteration (1+λ)-ES
     pub lambda: u32,
 
-    // Adaptive mutation scale (only applies to offspring indices 1..λ-1)
-    pub adaptive_mutation: bool,
-
     // Step spread: offspring with local index i multiply their offset, point-move
     // and micro vertex step sizes by rung i % STEP_RUNGS of a log-spaced ladder
     // from min to max (see `step_multipliers`). Both 1: no spread.
@@ -287,7 +284,6 @@ impl Default for MutationParams {
             tournament_size: settings::TOURNAMENT_SIZE,
             chain_count: settings::GPU_DEFAULT_CHAIN_COUNT,
             lambda: settings::GPU_DEFAULT_LAMBDA,
-            adaptive_mutation: settings::ADAPTIVE_MUTATION,
             step_spread_min: settings::STEP_SPREAD_MIN_DEFAULT,
             step_spread_max: settings::STEP_SPREAD_MAX_DEFAULT,
             rasterize_wg: [settings::RASTERIZE_WG_X_DEFAULT, settings::RASTERIZE_WG_Y_DEFAULT],

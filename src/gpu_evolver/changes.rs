@@ -5,10 +5,11 @@
 //! `offspring_changes.wgsl` its readers; CPU tests compare their constants and
 //! the [`GpuChainChange`] layout with this module.
 //!
-//! The offspring record lives in otherwise unused words of a working
-//! [`GpuDrawingState`]. mutate writes it; select, binning and raster read it:
-//! - `fitness_bits`, `stagnation_counter`: the dirty rectangle's min and max
-//!   corners, `x | y << 16` pixels, max exclusive;
+//! The offspring record lives in the `dirty_max` and otherwise unused words of
+//! a working [`GpuDrawingState`]. mutate writes it; select, binning and raster
+//! read it:
+//! - `fitness_bits`, `dirty_max`: the dirty rectangle's min and max corners,
+//!   `x | y << 16` pixels, max exclusive;
 //! - `rng_state[1]`, `rng_state[2]`: the changed-index words.
 //!
 //! The chain record is a [`GpuChainChange`], one per chain in its own buffer.
@@ -28,7 +29,7 @@ const _: () = assert!(CHANGED_INDICES == 2 * 2);
 /// Byte offset of the dirty rectangle's min corner in a working state.
 pub const DIRTY_MIN_OFFSET: u64 = offset_of!(GpuDrawingState, fitness_bits) as u64;
 /// Byte offset of the dirty rectangle's max corner in a working state.
-pub const DIRTY_MAX_OFFSET: u64 = offset_of!(GpuDrawingState, stagnation_counter) as u64;
+pub const DIRTY_MAX_OFFSET: u64 = offset_of!(GpuDrawingState, dirty_max) as u64;
 /// Byte offset of the two changed-index words in a working state.
 pub const CHANGED_WORDS_OFFSET: u64 =
     (offset_of!(GpuDrawingState, rng_state) + size_of::<u32>()) as u64;
@@ -59,13 +60,13 @@ impl GpuDrawingState {
     /// The offspring dirty rectangle as `[min_x, min_y, max_x, max_y]` pixels.
     #[must_use]
     pub fn dirty_box(&self) -> [u32; 4] {
-        let [lo, hi] = [self.fitness_bits, self.stagnation_counter];
+        let [lo, hi] = [self.fitness_bits, self.dirty_max];
         [lo & 0xFFFF, lo >> 16, hi & 0xFFFF, hi >> 16]
     }
 
     /// Set the offspring dirty rectangle; see [`pack_dirty_box`].
     pub fn set_dirty_box(&mut self, corners: [u32; 4]) {
-        [self.fitness_bits, self.stagnation_counter] = pack_dirty_box(corners);
+        [self.fitness_bits, self.dirty_max] = pack_dirty_box(corners);
     }
 
     /// The offspring changed-index words.
@@ -195,7 +196,7 @@ mod tests {
         let mut state = GpuDrawingState::zeroed();
         state.set_dirty_box([3, 4, 383, 384]);
         assert_eq!(pack_dirty_box([3, 4, 383, 384]), [0x0004_0003, 0x0180_017F]);
-        assert_eq!([state.fitness_bits, state.stagnation_counter], [0x0004_0003, 0x0180_017F]);
+        assert_eq!([state.fitness_bits, state.dirty_max], [0x0004_0003, 0x0180_017F]);
         assert_eq!(state.dirty_box(), [3, 4, 383, 384]);
         state.rng_state = [7, 0, 0, 9];
         state.set_changed_indices(encode(&[1, 2, 3]));

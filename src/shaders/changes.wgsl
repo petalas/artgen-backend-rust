@@ -8,10 +8,10 @@
 // that no changed polygon can cover; an unknown record turns them off.
 //
 // The offspring record (written by mutate; read by bin_polygons,
-// rasterize_error and select through offspring_changes.wgsl) lives in
-// otherwise unused words of the working state:
-//   fitness_bits, stagnation_counter: the dirty rectangle's min and max
-//     corners, x | y << 16 pixels, max exclusive;
+// rasterize_error and select through offspring_changes.wgsl) lives in the
+// working state's dirty_max and otherwise unused words:
+//   fitness_bits, dirty_max: the dirty rectangle's min and max corners,
+//     x | y << 16 pixels, max exclusive;
 //   rng_state.y, rng_state.z: the changed-index words.
 // The chain record (ChainChange, one per chain in chain_changes) is written by
 // select when it accepts a winner and read by update_framebuffers in the same

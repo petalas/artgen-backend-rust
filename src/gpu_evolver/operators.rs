@@ -130,9 +130,8 @@ impl Operator {
         Self::ALL.map(Self::name)
     }
 
-    /// Whether the operator's size is multiplied by the offspring's step (the
-    /// adaptive scale times its rung's multiplier): offset and the three vertex
-    /// moves. Only these count in the rung blocks.
+    /// Whether the operator's size is multiplied by the offspring's step (its
+    /// rung's multiplier): offset and the three vertex moves. Only these count in the rung blocks.
     #[must_use]
     pub const fn scales_with_step(self) -> bool {
         matches!(self, Self::Offset | Self::MovePoint | Self::MediumMove | Self::MicroMove)

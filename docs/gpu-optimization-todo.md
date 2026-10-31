@@ -16,7 +16,7 @@ The earlier startup comparison covers one fixture and short runs; retain it as e
 
 Qualification exposed two source correctness defects before reference capture: approximate reference-byte reconstruction undercounted integer L1, and post-selection cleanup removed visible triangles after their error was cached. The corrected engine recovers exact reference bytes and preserves the evaluated candidate's geometry. These repairs establish the reference behavior and do not count toward the proposed throughput target.
 
-Freeze the reference image, resolution, active population, offspring count, batch size, workgroup size, mutation parameters, adaptive settings, precision, fitness and selection rules, and seed schedule for every before/after comparison. Faster execution must preserve the same logical evaluations. Exact reuse of equivalent work is allowed; counting unfinished or skipped evolution steps is invalid.
+Freeze the reference image, resolution, active population, offspring count, batch size, workgroup size, mutation parameters, precision, fitness and selection rules, and seed schedule for every before/after comparison. Faster execution must preserve the same logical evaluations. Exact reuse of equivalent work is allowed; counting unfinished or skipped evolution steps is invalid.
 
 Proposed first-campaign target: a 20% improvement in the fixed suite's aggregate throughput after at least six valid, isolated experiments. This is a planning target, not a measured opportunity. Review the attempt and GPU-time budget after environment qualification, before starting a sustained run. Stop on the agreed predicate or an evidence-backed plateau; keep the original predicate in the report.
 
@@ -55,7 +55,7 @@ campaign proposal, rather than an achieved adoption result.
 | Observed fact | Consequence for the environment | Evidence at the audited revision |
 |---|---|---|
 | The Divan GPU benchmark uses the older renderer. | Retain component benchmarks, and measure evolution through `GpuEvolver::run_batch`. | `benches/bench.rs:28` |
-| The CLI uses a blank start at 256px and enables adaptive mutation; production defaults differ. | Replace implicit defaults with a complete, versioned trial specification. | `src/main.rs:1639`; `shared/src/settings.rs` |
+| The CLI uses a blank start at 256px and enables adaptive mutation (since removed); production defaults differ. | Replace implicit defaults with a complete, versioned trial specification. | `src/main.rs:1639`; `shared/src/settings.rs` |
 | Evaluation totals advance after submission; the CLI does not drain its last batch before reporting. | Time completed work through a final checked drain, and distinguish submitted and completed work in records. | `src/gpu_evolver/mod.rs:512`; `src/main.rs:1736` |
 | Warmup performs two batches, then reseeds from the accumulated iteration count. | Add explicit trial seeds and state restoration independent of warmup history and batch partitioning. | `src/gpu_evolver/mod.rs:815`; `src/gpu_evolver/mod.rs:1068` |
 | CLI, warmup, viewer benchmark, and live evolution use different timestamp policies. | Warm and measure the same declared production path. Keep separate attribution runs. | `src/main.rs:1714`; `src/main.rs:2088`; `src/gpu_evolver/mod.rs:1087` |
@@ -78,11 +78,11 @@ Start with at least one frozen mature checkpoint from each of `ff`, `mona`, and 
 
 Add distinct mature checkpoints per project to cover different polygon complexity and similarity levels above 97%, aiming for six scored cases when suitable states are available. Additional 256px or 512px cases must qualify independently at their own resolution. Freeze the chosen matrix before measuring candidates. A checkpoint that fails qualification must be replaced by a genuinely mature state generated with the unchanged baseline in an isolated copy, rather than a blank start, reduced polygon count, or relabeled score. Local project assets can remain in an untracked, hashed corpus when their redistribution status is unclear.
 
-For every checkpoint record packed triangle and vertex counts, normalized polygon area and bounding-box distributions, per-tile overlap counts and overflow status, and per-chain similarity. Also retain adaptive mutation scales and stagnation counters. During trials record acceptance rates and dirty-region coverage with a declared sampling policy. These describe why evaluations have different costs; do not divide throughput by polygon count or blend cases at different evolution stages. Compare each candidate against the exact same frozen starting population and completed-work budget.
+For every checkpoint record packed triangle and vertex counts, normalized polygon area and bounding-box distributions, per-tile overlap counts and overflow status, and per-chain similarity. During trials record acceptance rates and dirty-region coverage with a declared sampling policy. These describe why evaluations have different costs; do not divide throughput by polygon count or blend cases at different evolution stages. Compare each candidate against the exact same frozen starting population and completed-work budget.
 
 All three named projects are scored development workloads. Reserve separate mature checkpoints and disjoint seeds for confirmation. These test unseen states of known projects, not unseen image families. Add held-out image families when available, keeping every state and resolution of an unseen family out of development; any held-out performance workload must also exceed 97%. Simple synthetic targets remain outside the throughput score.
 
-Include true continuation checkpoints with diverse active chains, offspring RNG state, mutation scales, stagnation counters, and relevant control state. Single-drawing restarts remain useful as separately labeled cases. Define the checkpoint by a successful next-step replay, rather than guessing which fields are sufficient. Rebuild derivable caches outside the timed interval and verify them before use.
+Include true continuation checkpoints with diverse active chains, offspring RNG state and relevant control state. Single-drawing restarts remain useful as separately labeled cases. Define the checkpoint by a successful next-step replay, rather than guessing which fields are sufficient. Rebuild derivable caches outside the timed interval and verify them before use.
 
 Keep correctness fixtures separate from scored workloads. Cover odd dimensions such as 17x19, shared polygon chunk boundaries, 255/256/257 overlapping tile entries, empty and near-capacity drawings, alpha extremes, winding, shared edges, degenerate triangles, reset/reload, and long incremental sequences. Exercise supported workgroups and control combinations without multiplying every dimension into the scored matrix.
 
@@ -202,7 +202,7 @@ Synthesized from 6 expert analyses (GPU compute, evolutionary algorithm, CPU-GPU
 - [x] Shared memory polygon tiling (768 polys/tile cooperative prefetch)
 - [x] Reference image stored as GPU texture (2D cache-friendly)
 - [x] GpuParams via uniform buffer (shared bind group across pipelines)
-- [x] Adaptive mutation scale (1.2x accept, pow(0.99,1/lambda) reject, burst on stagnation)
+- [x] Adaptive mutation scale (1.2x accept, pow(0.99,1/lambda) reject, burst on stagnation); removed 2026-10-31
 - [x] (1+lambda)-ES with configurable lambda (1-64, power-of-2)
 - [x] Island model with intra/inter-island ring migration
 - [x] 13+ mutation operators (structural, geometric, vertex, color, crossover)

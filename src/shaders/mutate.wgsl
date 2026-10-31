@@ -46,7 +46,7 @@ fn full_image_bbox() -> vec4<u32> {
 fn write_dirty_box(oid: u32, bb: vec4<u32>) {
     let packed = pack_dirty_box(bb);
     working_states[oid].fitness_bits = packed.x;
-    working_states[oid].stagnation_counter = packed.y;
+    working_states[oid].dirty_max = packed.y;
 }
 
 fn write_changed_words(oid: u32, words: vec2<u32>) {
@@ -62,13 +62,11 @@ fn write_changed_words(oid: u32, words: vec2<u32>) {
 @group(0) @binding(2) var<storage, read_write>  offspring_ops:  array<u32>;
 @group(1) @binding(0) var<uniform>              params:         Params;
 
-// The parent's header, broadcast to the workgroup. Its polygons are read from
+// The parent's polygon count, broadcast to the workgroup. Its polygons are read from
 // chain_states, which no stage writes during mutate: each workgroup serves one
 // offspring, so a workgroup copy of the parent (16 bytes per POLYGON_CAPACITY
 // slot) would be read about once and cost more to fill than it saves.
 var<workgroup> shared_parent_poly_count: u32;
-var<workgroup> shared_parent_fitness_bits: u32;
-var<workgroup> shared_parent_mutation_scale: f32;
 
 // Cooperative crossover: lane 0 decides and broadcasts; tail keep bits (one per
 // polygon slot) give each kept tail slot its output rank.
@@ -322,10 +320,9 @@ fn crossover_dirty_box(out_count: u32) -> vec4<u32> {
     return bb;
 }
 
-// --- Mutation: exactly one operator per offspring, picked by weighted roulette
-// (offspring-aware, with adaptive mutation scale) ---
-// `ms` multiplies offset, point-move and micro vertex step sizes: the adaptive
-// scale times the offspring's step rung multiplier (op_scales_with_step).
+// --- Mutation: exactly one operator per offspring, picked by weighted roulette ---
+// `ms` multiplies offset, point-move, medium-move and micro vertex step sizes:
+// the offspring's step rung multiplier (op_scales_with_step).
 // Returns dirty bbox as vec4<u32>(min_x, min_y, max_x, max_y) in pixel coords.
 // `op` receives the branch that ran (OP_*); a pick whose guard fails falls
 // through to a later branch, which is the one recorded.
@@ -724,8 +721,6 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
         poly_count = min(chain_states[chain_id].polygon_count, params.max_polygons);
         if lid.x == 0u {
             shared_parent_poly_count = poly_count;
-            shared_parent_fitness_bits = chain_states[chain_id].fitness_bits;
-            shared_parent_mutation_scale = chain_states[chain_id].mutation_scale;
         }
     }
 
@@ -743,7 +738,6 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
     let offspring_id = chain_id * lambda + group_base;
 
     var rng = 0u;
-    var mutation_scale = 1.0;
     for (var w = lid.x; w < CROSSOVER_KEEP_WORDS; w += PHYSICAL_WG_SIZE) {
         atomicStore(&shared_crossover_keep[w], 0u);
     }
@@ -758,21 +752,10 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
             // Load per-offspring RNG from working_states (persistent across iterations)
             rng = working_states[offspring_id].rng_state.x;
 
-            // Adaptive mutation scale: only for offspring 1..λ-1 when enabled
-            // Offspring 0 always uses scale 1.0 so (1+1) behavior is unchanged
-            if params.adaptive_mutation == 1u && offspring_local_idx > 0u {
-                mutation_scale = shared_parent_mutation_scale;
-            }
-
             if params.crossover_prob > 0.0 && rand_f32(&rng) < params.crossover_prob && params.chain_count_param >= 2u {
                 shared_crossover_parent_b = tournament_select(&rng, chain_id, params.chain_count_param);
                 shared_crossover_rng = rng;
                 crossover = 1u;
-
-                // Initialize working state header from the broadcast parent header
-                working_states[offspring_id].fitness_bits = shared_parent_fitness_bits;
-                working_states[offspring_id].mutation_scale = mutation_scale;
-                working_states[offspring_id].stagnation_counter = 0u;
             }
         }
         shared_crossover_flag = crossover;
@@ -797,22 +780,16 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
 
     // --- Normal mutation path ---
 
-    // The parent's header; copy_parent_prefix copied its polygons
+    // The parent's count; copy_parent_prefix copied its polygons
     working_states[offspring_id].polygon_count = poly_count;
-    working_states[offspring_id].fitness_bits = shared_parent_fitness_bits;
-    working_states[offspring_id].mutation_scale = mutation_scale;
-    working_states[offspring_id].stagnation_counter = 0u;
 
-    // Apply exactly one mutation. The working state keeps the adaptive scale
-    // (select reads the chain's own scale, never an offspring's); only the
-    // sizes inside mutate_offspring see the rung's multiplier, which is
-    // exactly 1.0 on every rung without a spread.
+    // Apply exactly one mutation. The step sizes inside mutate_offspring see
+    // the rung's multiplier, which is exactly 1.0 on every rung without a spread.
     let rung = offspring_local_idx % STEP_RUNGS;
     var count = working_states[offspring_id].polygon_count;
     var changed = 0u;
     var op = OP_UNCHANGED;
-    let step = mutation_scale * step_multiplier(rung);
-    let dirty_bbox = mutate_offspring(&rng, offspring_id, &count, step, &changed, &op);
+    let dirty_bbox = mutate_offspring(&rng, offspring_id, &count, step_multiplier(rung), &changed, &op);
     write_dirty_box(offspring_id, dirty_bbox);
     working_states[offspring_id].rng_state.x = rng;
     write_changed_words(offspring_id, vec2<u32>(changed, 0u));

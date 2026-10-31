@@ -310,9 +310,9 @@ The expensive `readback_chains()` exists for benchmarks and project switches, wh
 
 **Problem**: Every batch writes the full 256-byte `GpuParams` via `queue.write_buffer()` (`src/gpu_evolver/mod.rs` lines 228-231), even when nothing has changed since the last batch. This is a DMA transfer that may contend with compute dispatch on some drivers.
 
-The `iteration_number` field changes every batch, so a naive "did params change?" check won't work. However, `iteration_number` is only used by the mutate shader for RNG seeding -- it could be moved to a separate small buffer or push constant.
+`GpuParams` no longer has a per-batch field (the unread `iteration_number` was removed), so the params only change when a setting or the active chain count does.
 
-**Proposal**: Split `iteration_number` out of `GpuParams` and into a 4-byte push constant or a separate tiny uniform. Then only re-upload the full 256-byte params when the user changes a setting (tracked by a generation counter on `MutationParams`). The 4-byte iteration counter is written every batch but costs almost nothing.
+**Proposal**: Only re-upload the 256-byte params when the user changes a setting (tracked by a generation counter on `MutationParams`) or the active chain count changes.
 
 **Impact**: Low. The 256-byte write is already cheap. More of an architectural cleanliness improvement.
 

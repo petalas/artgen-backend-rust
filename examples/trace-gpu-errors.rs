@@ -414,8 +414,8 @@ fn region_errors(
     let bbox = [
         candidate.fitness_bits & 65535,
         candidate.fitness_bits >> 16,
-        candidate.stagnation_counter & 65535,
-        candidate.stagnation_counter >> 16,
+        candidate.dirty_max & 65535,
+        candidate.dirty_max >> 16,
     ];
     let [wg_x, wg_y] = input.manifest.params.rasterize_wg;
     let tiles = [
