@@ -139,10 +139,13 @@ canonical state and replay hashes from before that change do not compare.
 and polygon bounds; chain count, λ and crossover (`crossover_prob`,
 `tournament_size`); fitness (`max_error_per_pixel`, `per_point_penalty`,
 `penalty_exponent`, one pad); four groups of
-operator weights; `micro_color_prob` with the alpha range and
-`absorb_polygon_prob`; the four step-scaled sizes; new-vertex spread and three
+operator weights (`_pad3` first in the fourth); `micro_color_prob` with the
+alpha range and `_pad4`; the four step-scaled sizes; new-vertex spread and three
 pad words (the merge thresholds were removed); two groups of step
-multipliers; four reserved. Every field is read by a bundled shader. The layout test in
+multipliers; four reserved. `_pad3` and `_pad4` held the removed merge and
+absorb weights; keeping them as zero pads leaves every other offset unchanged,
+so `check-gpu-mutation` can compare a mutate shader from before the removal.
+Every field is read by a bundled shader. The layout test in
 `programs/bundled.rs` maps both structs field by field.
 
 ## Shader installation
@@ -328,30 +331,28 @@ the parent versions. The truncation guard (`changes_shortcut`) needs room for
 one polygon per listed index because neither list may be truncated; a deletion
 only shortens lists.
 
-remove, merge and absorb delete a slot in order (`delete_slot_ordered` in
+remove deletes a slot in order (`delete_slot_ordered` in
 mutate.wgsl: slots above it shift down one, so every other polygon keeps its
 relative order; it used to swap the topmost polygon into the slot, which also
 moved that polygon to the middle of the stack). A shift renumbers every slot
 above the deleted one, which the slot-wise list cannot name, but it need not:
 the shifted polygons cover the same pixels in the same order. Listing the
-deleted index suffices, because its parent version is the deleted polygon. For
-merge and absorb, which also rewrite a surviving polygon at parent slot k,
-`delete_and_change_indices` lists the deleted index, k (its parent version)
-and, when the deletion was below k, k - 1 (the rewritten polygon's new slot):
-at most three, in both words. The dirty rectangle is the deleted polygon's
-pixel bounds, joined with both versions of the rewritten one; the binner
-rebuilds only the tiles it meets, and update_framebuffers reuses the winner's
-lists, which index the winner's shifted slots, in those tiles only.
+deleted index suffices, because its parent version is the deleted polygon.
+The dirty rectangle is the deleted polygon's pixel bounds; the binner rebuilds
+only the tiles it meets, and update_framebuffers reuses the winner's lists,
+which index the winner's shifted slots, in those tiles only. (The merge and
+absorb operators, removed after they never helped at any weight, also deleted
+in order; see [quality benchmark](quality-benchmark.md).)
 
 Unknown words with the same dirty rectangle would also be exact (every
 consumed tile is rastered and every dirty pixel re-blended), only slower.
-`check-gpu-rasterization` (`verify_deletion_operators`) runs only these three
-operators from 300 overlapping triangles and requires cached framebuffers and
+`check-gpu-rasterization` (`verify_ordered_remove`) runs only remove from 300
+overlapping triangles and requires cached framebuffers and
 totals to equal a full re-render exactly every 32 iterations, and each
 offspring to be its parent with one slot deleted in order.
 
 The shift is a serial loop on mutate's leader lane, up to `polygon_count`
-16-byte copies. Hillclimb at default weights (remove and merge are rare):
+16-byte copies. Hillclimb at the then default weights (remove and merge rare):
 1.0022 [0.9982, 1.0069], NOISE. With merge, absorb or remove at weight 0.7
 (about 5% of offspring) evals/s fall to about half of the defaults' by 30 s, but
 the 0–5 s rates match the defaults': the deleting sides keep 450–550 larger
@@ -376,8 +377,11 @@ select writes it, so forgetting it is a guard, not a batch-loop step.
 produced (offered) and the winners select accepted from it, as a strict
 improvement (improved) or at equal penalized error (neutral). `Operator` lists the
 codes once; the bundled prelude gets them as `OP_*` constants, and a CPU test
-checks that mutate stores every one. New operators are appended (absorb is 19,
-after unchanged), so older records keep their codes.
+checks that mutate stores every one. Codes are positions in that list and can
+change when an operator is removed (merge and absorb were, which renumbered the
+codes after adjacent swap); every quality record stores `operator_names` in code
+order, and `scripts/quality.py` reads counts through those names, so older
+records stay readable.
 
 - `offspring_ops` (one u32 per offspring slot): mutate writes the branch that
   ran, not the roulette's pick, since a pick whose guard fails (an add at the

@@ -320,12 +320,7 @@ fn crossover_dirty_box(out_count: u32) -> vec4<u32> {
     return bb;
 }
 
-// --- Ordered deletion and neighbours (remove, merge, absorb) ---
-
-// Random other slots merge and absorb examine for a partner, drawn with
-// replacement. More look further for a close one at more RNG draws and
-// global reads; 8 finds a partner among the closer ones without scanning.
-const NEIGHBOR_CANDIDATES: u32 = 8u;
+// --- Ordered deletion (remove) ---
 
 /// Delete slot `idx` of offspring `oid`'s `c` polygons by shifting slots
 /// idx+1..c-1 down one, so every other polygon keeps its relative order: the
@@ -349,91 +344,6 @@ fn delete_slot_ordered(oid: u32, idx: u32, c: u32) {
     working_states[oid].polygon_count = c - 1u;
 }
 
-/// Changed-index words after slot `kept` was rewritten and slot `deleted`
-/// removed with delete_slot_ordered: the rewritten polygon now sits at
-/// `kept - 1` when `deleted < kept`. Listing `deleted` and `kept` gives the
-/// parent versions of both changed polygons, and `kept - 1` the offspring
-/// version of the rewritten one; see delete_slot_ordered for why the shift
-/// needs nothing more.
-fn delete_and_change_indices(deleted: u32, kept: u32) -> vec2<u32> {
-    let moved = kept - select(0u, 1u, deleted < kept);
-    if moved == kept || moved == deleted {
-        return vec2<u32>(changed_indices(deleted, kept), 0u);
-    }
-    return vec2<u32>(changed_indices(deleted, kept), changed_indices(moved, NO_CHANGED_INDEX));
-}
-
-/// Area of a triangle in normalized units.
-fn triangle_area(poly: Polygon) -> f32 {
-    let v0 = unpack_vertex(poly.data.y);
-    let v1 = unpack_vertex(poly.data.z);
-    let v2 = unpack_vertex(poly.data.w);
-    return 0.5 * abs((v1.x - v0.x) * (v2.y - v0.y) - (v2.x - v0.x) * (v1.y - v0.y));
-}
-
-fn triangle_centroid(poly: Polygon) -> vec2<f32> {
-    return (unpack_vertex(poly.data.y) + unpack_vertex(poly.data.z) + unpack_vertex(poly.data.w)) / 3.0;
-}
-
-/// Of NEIGHBOR_CANDIDATES random slots other than `i` (c >= 2), the one whose
-/// centroid is nearest `i`'s (L1; ties: the first drawn). With `larger`, only
-/// slots whose triangle has a larger area than `i`'s qualify; when none does,
-/// the largest of the drawn slots. Uses the drawing only.
-fn nearest_neighbor(rng: ptr<function, u32>, oid: u32, c: u32, i: u32, larger: bool) -> u32 {
-    let own = working_states[oid].polygons[i];
-    let own_centroid = triangle_centroid(own);
-    let own_area = triangle_area(own);
-    var nearest = c;
-    var nearest_distance = 0.0;
-    var largest = c;
-    var largest_area = 0.0;
-    for (var k = 0u; k < NEIGHBOR_CANDIDATES; k++) {
-        var j = rand_u32(rng, c - 1u);
-        j += select(0u, 1u, j >= i);
-        let poly = working_states[oid].polygons[j];
-        let area = triangle_area(poly);
-        if largest == c || area > largest_area {
-            largest = j;
-            largest_area = area;
-        }
-        let d = triangle_centroid(poly) - own_centroid;
-        let distance = abs(d.x) + abs(d.y);
-        if (!larger || area > own_area) && (nearest == c || distance < nearest_distance) {
-            nearest = j;
-            nearest_distance = distance;
-        }
-    }
-    return select(nearest, largest, nearest == c);
-}
-
-/// One triangle for two: the largest-area triangle over their six vertices
-/// (C(6,3) = 20 candidates; ties: the first in lexicographic vertex order),
-/// coloured by the area-weighted mean of both colours (the plain mean when
-/// both are degenerate), alpha clamped to the configured range.
-fn merged_polygon(a: Polygon, b: Polygon) -> Polygon {
-    var words = array<u32, 6>(a.data.y, a.data.z, a.data.w, b.data.y, b.data.z, b.data.w);
-    var best = vec3<u32>(0u, 1u, 2u);
-    var best_area = -1.0;
-    for (var p = 0u; p < 4u; p++) {
-        for (var q = p + 1u; q < 5u; q++) {
-            for (var r = q + 1u; r < 6u; r++) {
-                let area = triangle_area(Polygon(vec4<u32>(0u, words[p], words[q], words[r])));
-                if area > best_area {
-                    best = vec3<u32>(p, q, r);
-                    best_area = area;
-                }
-            }
-        }
-    }
-    let area_a = triangle_area(a);
-    let area_b = triangle_area(b);
-    let total = area_a + area_b;
-    let t = select(0.5, area_b / total, total > 0.0);
-    var color = mix(unpack_color(a), unpack_color(b), t);
-    color.w = clamp(color.w, params.min_alpha_norm, params.max_alpha_norm);
-    return Polygon(vec4<u32>(pack_color(color), words[best.x], words[best.y], words[best.z]));
-}
-
 // --- Mutation: exactly one operator per offspring, picked by weighted roulette ---
 // `ms` multiplies offset, point-move, medium-move and micro vertex step sizes:
 // the offspring's step rung multiplier (op_scales_with_step).
@@ -451,8 +361,6 @@ fn mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<function, u32>
     let w_scale = params.scale_polygon_prob;
     let w_rotate = params.rotate_polygon_prob;
     let w_adjacent_swap = params.adjacent_swap_prob;
-    let w_merge = params.merge_polygon_prob;
-    let w_absorb = params.absorb_polygon_prob;
     let w_clone = params.clone_polygon_prob;
     let w_swap_colors = params.swap_colors_prob;
     let fc = f32(c);
@@ -465,7 +373,7 @@ fn mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<function, u32>
     let w_brightness = params.adjust_brightness_prob * fc;
     let w_saturation = params.adjust_saturation_prob * fc;
 
-    let total = w_add + w_remove + w_reorder + w_scale + w_rotate + w_adjacent_swap + w_merge + w_absorb + w_clone + w_swap_colors + w_offset + w_move_point + w_medium_move + w_micro_adjust + w_change_color + w_micro_color + w_brightness + w_saturation;
+    let total = w_add + w_remove + w_reorder + w_scale + w_rotate + w_adjacent_swap + w_clone + w_swap_colors + w_offset + w_move_point + w_medium_move + w_micro_adjust + w_change_color + w_micro_color + w_brightness + w_saturation;
 
     let r = rand_f32(rng) * total;
     var cumulative = 0.0;
@@ -570,51 +478,6 @@ fn mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<function, u32>
         *changed = vec2<u32>(changed_indices(ai, aj), 0u);
         *op = OP_ADJACENT_SWAP;
         return merge_bbox(bbox_ai, bbox_aj);
-    }
-
-    // Merge: a random triangle and the nearest of NEIGHBOR_CANDIDATES others
-    // become one triangle in the larger one's slot; the other slot is deleted.
-    cumulative += w_merge;
-    if r < cumulative && c >= 2u && c > params.min_polygons {
-        let mi = rand_u32(rng, c);
-        let mj = nearest_neighbor(rng, oid, c, mi, false);
-        let pi_poly = working_states[oid].polygons[mi];
-        let pj_poly = working_states[oid].polygons[mj];
-        let merged = merged_polygon(pi_poly, pj_poly);
-        // The larger triangle's slot keeps the merged one (ties: the first pick).
-        let keep_i = triangle_area(pi_poly) >= triangle_area(pj_poly);
-        let kept = select(mj, mi, keep_i);
-        let deleted = select(mi, mj, keep_i);
-        working_states[oid].polygons[kept] = merged;
-        delete_slot_ordered(oid, deleted, c);
-        *count = c - 1u;
-        *changed = delete_and_change_indices(deleted, kept);
-        *op = OP_MERGE;
-        return merge_bbox(merge_bbox(polygon_bbox_pixels(pi_poly, w, h), polygon_bbox_pixels(pj_poly, w, h)),
-                          polygon_bbox_pixels(merged, w, h));
-    }
-
-    // Absorb: delete a random triangle and move the colour of a nearby larger
-    // one (geometry unchanged) toward it, weighted by area.
-    cumulative += w_absorb;
-    if r < cumulative && c >= 2u && c > params.min_polygons {
-        let si = rand_u32(rng, c);
-        let li = nearest_neighbor(rng, oid, c, si, true);
-        let s_poly = working_states[oid].polygons[si];
-        var l_poly = working_states[oid].polygons[li];
-        let area_s = triangle_area(s_poly);
-        let area_l = triangle_area(l_poly);
-        let total_area = area_s + area_l;
-        let t = select(0.5, area_s / total_area, total_area > 0.0);
-        var color = mix(unpack_color(l_poly), unpack_color(s_poly), t);
-        color.w = clamp(color.w, params.min_alpha_norm, params.max_alpha_norm);
-        l_poly.data.x = pack_color(color);
-        working_states[oid].polygons[li] = l_poly;
-        delete_slot_ordered(oid, si, c);
-        *count = c - 1u;
-        *changed = delete_and_change_indices(si, li);
-        *op = OP_ABSORB;
-        return merge_bbox(polygon_bbox_pixels(s_poly, w, h), polygon_bbox_pixels(l_poly, w, h));
     }
 
     // Clone + jitter: duplicate a polygon with small perturbation

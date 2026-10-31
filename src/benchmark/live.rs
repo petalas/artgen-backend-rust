@@ -1325,11 +1325,12 @@ mod tests {
             },
             // The frozen v1 manifest's settings, which predate the 2000 cap,
             // the 2026-10-30 operator weights and micro step, the step spread and
-            // the 2026-10-31 micro color cut and removal default.
+            // the 2026-10-31 micro color cut and removal default. Its merge weight
+            // (0.000667) and merge thresholds are no longer fields, so they load
+            // and are dropped from the wire map.
             params: MutationParams {
                 max_polygons: 1000,
                 remove_polygon_prob: 0.000862,
-                merge_polygon_prob: 0.000667,
                 offset_polygon_prob: 0.00565,
                 medium_move_prob: 0.004,
                 micro_adjust_prob: 0.002786,
@@ -1364,7 +1365,7 @@ mod tests {
                 "microAdjustProb": 0.002786, "changeColorProb": 0.000473,
                 "adjustBrightnessProb": 0.000473, "adjustSaturationProb": 0.001333,
                 "scalePolygonProb": 0.00565, "rotatePolygonProb": 0.002,
-                "adjacentSwapProb": 0.002, "mergePolygonProb": 0.000667,
+                "adjacentSwapProb": 0.002,
                 "clonePolygonProb": 0.071429, "mediumMoveProb": 0.004,
                 "swapColorsProb": 0.00565, "movePointMaxDelta": 0.113,
                 "microAdjustDelta": 0.001, "newPointMaxDistance": 0.005,

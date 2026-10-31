@@ -396,7 +396,7 @@ This is already the delta evaluation optimization described in GPU_PERF_IDEAS.md
 
 The current incremental eval computes dirty bbox per mutation type:
 - Per-polygon mutations (move_point, micro_adjust, color changes): union of old and new polygon bbox.
-- Z-order mutations (reorder, adjacent_swap, swap_colors, remove, merge): full image bbox.
+- Z-order mutations (reorder, adjacent_swap, swap_colors, remove): full image bbox.
 - Crossover: full image bbox.
 
 **Opportunity:** For z-order mutations, the dirty region could be tightened:

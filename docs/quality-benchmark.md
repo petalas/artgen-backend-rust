@@ -46,13 +46,13 @@ scripts/quality.py --start .cache/quality/starts/s120 --side control=HEAD --side
   `min * (max/min)^(rung/7)` (see
   [engine architecture](engine-architecture.md#step-spread)). A side with a
   spread gets a step rung table (below).
-- `merge_polygon_prob` (default 0.000667) and `absorb_polygon_prob` (default
-  0, omitted from records at 0; within [0, 1]) are absolute weights, not
-  multiplied by the triangle count. Both delete a triangle in order (see
-  [evolutionary algorithm](evolutionary-algorithm.md)) and always act on a
-  drawing with at least two triangles above `min_polygons`. The merge distance
-  and colour thresholds were removed; records and settings that hold them still
-  load, and the values are ignored.
+- The merge and absorb operators were removed (they never helped at any
+  weight; see the last two sections), along with the merge distance and colour
+  thresholds. Records, settings and frozen fixtures that hold
+  `mergePolygonProb`, `absorbPolygonProb` or the thresholds still load and the
+  values are ignored; `--params` rejects them as unknown. The frozen v1
+  manifest's merge weight (0.000667) therefore no longer runs, so hillclimb's
+  frozen workload changed with the removal.
 - `--images` (default ff,mona,darwin; see darwin under Limits), `--seeds` (default 5),
   `--first-seed`, `--seconds` (default 120, at most 3600), `--min-effect` (default
   0.02), `--server-scope image|run`, `--build-only`, `--note`.

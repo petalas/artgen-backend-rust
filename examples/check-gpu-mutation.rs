@@ -27,8 +27,8 @@
 //! 1..64 at crossover .2; 10 small cases at lambdas 1/3/32/33/64 and crossover
 //! 0/1; 27 targeted dense cases plus 27 immediate small-parent history probes;
 //! 4 deletion cases (small and each dense parent set, lambda 64, no crossover)
-//! whose remove, merge and absorb weights dominate the roulette, since the
-//! default weights almost never pick them. Three candidates mean
+//! whose remove weight dominates the roulette, since the default weights
+//! never pick it. Three candidates mean
 //! 528 GPU dispatches; four mean 660. All 1024 parents remain bound because tournament
 //! selection uses arrayLength, although only four chains produce children.
 //! The maximum is 256 offspring, each with `POLYGON_CAPACITY` (2048) physical
@@ -158,7 +158,7 @@ struct Fixture {
     lambda: u32,
     crossover: f32,
     history_probe: bool,
-    /// Remove, merge and absorb dominate the operator weights.
+    /// Remove dominates the operator weights.
     deletions: bool,
 }
 
@@ -854,9 +854,7 @@ fn fixture_params(case: Fixture, index: usize) -> GpuParams {
     if case.deletions {
         // Absolute weights against about 0.03 per polygon for the per-polygon
         // operators: about half of the mutations at 1000 polygons.
-        params.remove_polygon_prob = 5.0;
-        params.merge_polygon_prob = 10.0;
-        params.absorb_polygon_prob = 10.0;
+        params.remove_polygon_prob = 25.0;
     }
     params
 }

@@ -57,7 +57,7 @@ are cached. An unknown record turns off the shortcuts that skip unchanged pixels
 **Ordered delete**:
 Removing a triangle by shifting the triangles above it down one slot, so the
 others keep their stacking order and only the removed triangle's pixels change.
-Remove, merge and absorb delete this way.
+Remove deletes this way.
 
 **Shader variant**:
 An alternative program for an evolution stage that preserves the search's fixed

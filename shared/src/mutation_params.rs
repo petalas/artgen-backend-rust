@@ -13,7 +13,6 @@ fn default_gpu_batch_iters() -> u32 {
 fn default_scale_polygon_prob() -> f32 { settings::SCALE_POLYGON_PROB }
 fn default_rotate_polygon_prob() -> f32 { settings::ROTATE_POLYGON_PROB }
 fn default_adjacent_swap_prob() -> f32 { settings::ADJACENT_SWAP_PROB }
-fn default_merge_polygon_prob() -> f32 { settings::MERGE_POLYGON_PROB }
 fn default_clone_polygon_prob() -> f32 { settings::CLONE_POLYGON_PROB }
 fn default_medium_move_prob() -> f32 { settings::MEDIUM_MOVE_PROBABILITY }
 fn default_swap_colors_prob() -> f32 { settings::SWAP_COLORS_PROB }
@@ -46,13 +45,6 @@ fn is_legacy_micro_color_prob(value: &f32) -> bool {
     value.to_bits() == settings::LEGACY_MICRO_COLOR_PROBABILITY.to_bits()
 }
 
-// Omitted at zero (absent means zero, the default), for the same reason as
-// `per_point_penalty`.
-#[allow(clippy::trivially_copy_pass_by_ref)] // skip_serializing_if passes a reference
-fn is_zero(value: &f32) -> bool {
-    value.to_bits() == 0.0f32.to_bits()
-}
-
 /// A step-spread end as `sanitize` keeps it: within
 /// [1 / STEP_SPREAD_LIMIT, STEP_SPREAD_LIMIT]; NaN becomes the default (no spread).
 fn clamp_step_spread(value: f32) -> f32 {
@@ -65,6 +57,8 @@ fn clamp_step_spread(value: f32) -> f32 {
 
 /// Runtime-configurable mutation parameters.
 /// Sent over WebSocket as JSON (camelCase) and used to build `GpuParams`.
+/// Unknown keys are ignored, so settings saved with removed fields (the merge
+/// and absorb weights, the merge thresholds) still load.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MutationParams {
@@ -85,8 +79,6 @@ pub struct MutationParams {
     pub rotate_polygon_prob: f32,
     #[serde(default = "default_adjacent_swap_prob")]
     pub adjacent_swap_prob: f32,
-    #[serde(default = "default_merge_polygon_prob")]
-    pub merge_polygon_prob: f32,
     #[serde(default = "default_clone_polygon_prob")]
     pub clone_polygon_prob: f32,
     #[serde(default = "default_medium_move_prob")]
@@ -98,10 +90,6 @@ pub struct MutationParams {
     /// the default it then shared with micro_adjust_prob.
     #[serde(default = "legacy_micro_color_prob", skip_serializing_if = "is_legacy_micro_color_prob")]
     pub micro_color_prob: f32,
-    /// Weight of absorb: delete a random triangle and move the colour of a
-    /// nearby larger one toward it. Absolute, like merge's weight.
-    #[serde(default, skip_serializing_if = "is_zero")]
-    pub absorb_polygon_prob: f32,
 
     // Deltas / magnitudes
     pub move_point_max_delta: f32,
@@ -206,12 +194,10 @@ impl MutationParams {
         self.scale_polygon_prob = self.scale_polygon_prob.clamp(0.0, 1.0);
         self.rotate_polygon_prob = self.rotate_polygon_prob.clamp(0.0, 1.0);
         self.adjacent_swap_prob = self.adjacent_swap_prob.clamp(0.0, 1.0);
-        self.merge_polygon_prob = self.merge_polygon_prob.clamp(0.0, 1.0);
         self.clone_polygon_prob = self.clone_polygon_prob.clamp(0.0, 1.0);
         self.medium_move_prob = self.medium_move_prob.clamp(0.0, 1.0);
         self.swap_colors_prob = self.swap_colors_prob.clamp(0.0, 1.0);
         self.micro_color_prob = self.micro_color_prob.clamp(0.0, 1.0);
-        self.absorb_polygon_prob = self.absorb_polygon_prob.clamp(0.0, 1.0);
 
         // Deltas: non-negative
         self.move_point_max_delta = self.move_point_max_delta.max(0.0);
@@ -284,11 +270,9 @@ impl Default for MutationParams {
             scale_polygon_prob: settings::SCALE_POLYGON_PROB,
             rotate_polygon_prob: settings::ROTATE_POLYGON_PROB,
             adjacent_swap_prob: settings::ADJACENT_SWAP_PROB,
-            merge_polygon_prob: settings::MERGE_POLYGON_PROB,
             clone_polygon_prob: settings::CLONE_POLYGON_PROB,
             medium_move_prob: settings::MEDIUM_MOVE_PROBABILITY,
             micro_color_prob: settings::MICRO_COLOR_PROBABILITY,
-            absorb_polygon_prob: settings::ABSORB_POLYGON_PROB,
             swap_colors_prob: settings::SWAP_COLORS_PROB,
             move_point_max_delta: settings::MOVE_POINT_MAX_DELTA,
             micro_adjust_delta: settings::MICRO_ADJUSTMENT_DELTA,

@@ -169,8 +169,6 @@ pub fn ParamsEditor(
             <ProbSlider params={params} on_change={on_change} label="Remove polygon" field="remove_polygon_prob"/>
             <ProbSlider params={params} on_change={on_change} label="Reorder polygon" field="reorder_polygon_prob"/>
             <ProbSlider params={params} on_change={on_change} label="Adjacent swap" field="adjacent_swap_prob"/>
-            <ProbSlider params={params} on_change={on_change} label="Merge polygons" field="merge_polygon_prob"/>
-            <ProbSlider params={params} on_change={on_change} label="Absorb polygon" field="absorb_polygon_prob"/>
             <ProbSlider params={params} on_change={on_change} label="Clone + jitter" field="clone_polygon_prob"/>
             <ProbSlider params={params} on_change={on_change} label="Swap colors" field="swap_colors_prob"/>
         </div>
@@ -453,8 +451,6 @@ fn get_prob_field(mp: &MutationParams, field: &str) -> f32 {
         "scale_polygon_prob" => mp.scale_polygon_prob,
         "rotate_polygon_prob" => mp.rotate_polygon_prob,
         "adjacent_swap_prob" => mp.adjacent_swap_prob,
-        "merge_polygon_prob" => mp.merge_polygon_prob,
-        "absorb_polygon_prob" => mp.absorb_polygon_prob,
         "clone_polygon_prob" => mp.clone_polygon_prob,
         "medium_move_prob" => mp.medium_move_prob,
         "micro_color_prob" => mp.micro_color_prob,
@@ -479,8 +475,6 @@ fn set_prob_field(mp: &mut MutationParams, field: &str, val: f32) {
         "scale_polygon_prob" => mp.scale_polygon_prob = val,
         "rotate_polygon_prob" => mp.rotate_polygon_prob = val,
         "adjacent_swap_prob" => mp.adjacent_swap_prob = val,
-        "merge_polygon_prob" => mp.merge_polygon_prob = val,
-        "absorb_polygon_prob" => mp.absorb_polygon_prob = val,
         "clone_polygon_prob" => mp.clone_polygon_prob = val,
         "medium_move_prob" => mp.medium_move_prob = val,
         "micro_color_prob" => mp.micro_color_prob = val,

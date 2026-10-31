@@ -53,17 +53,18 @@ struct Params {
     rotate_polygon_prob: f32,
     adjacent_swap_prob: f32,
 
-    merge_polygon_prob: f32,
+    // _pad3 and _pad4 held the removed merge and absorb weights; zero.
+    _pad3: u32,
     clone_polygon_prob: f32,
     medium_move_prob: f32,
     swap_colors_prob: f32,
 
     // Micro colour weight, the alpha range of new and recolored polygons, then
-    // the absorb weight
+    // padding
     micro_color_prob: f32,
     min_alpha_norm: f32,
     max_alpha_norm: f32,
-    absorb_polygon_prob: f32,
+    _pad4: u32,
 
     // Step sizes, multiplied by the offspring's step_multiplier()
     offset_polygon_magnitude: f32,

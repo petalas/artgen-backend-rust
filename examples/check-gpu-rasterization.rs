@@ -90,7 +90,7 @@ fn main() {
     verify_shortcuts_near_polygon_capacity(u32::try_from(POLYGON_CAPACITY).unwrap(), 1.5);
     verify_tile_list_overflow();
     verify_operator_stats();
-    verify_deletion_operators();
+    verify_ordered_remove();
     println!("GPU rasterization checks passed");
 }
 
@@ -115,7 +115,6 @@ fn no_op_params() -> MutationParams {
         scale_polygon_prob: 0.0,
         rotate_polygon_prob: 0.0,
         adjacent_swap_prob: 0.0,
-        merge_polygon_prob: 0.0,
         clone_polygon_prob: 0.0,
         medium_move_prob: 0.0,
         swap_colors_prob: 0.0,
@@ -880,13 +879,13 @@ fn overlapping_triangles(count: usize) -> Drawing {
     }
 }
 
-/// Remove, merge and absorb delete a slot in order, shifting the slots above
-/// it, and record changed indices rather than the shift. With only these
-/// operators and a strong point penalty (so deletions win), every cached
-/// framebuffer, cached total and fitness must equal the scalar renderer's for
-/// the accepted drawing after every batch, and the operator stats must count
-/// each operator's offspring and improvements.
-fn verify_deletion_operators() {
+/// Remove deletes a slot in order, shifting the slots above it, and records
+/// the deleted index rather than the shift. With only remove and a strong
+/// point penalty (so deletions win), every cached framebuffer, cached total
+/// and fitness must equal the scalar renderer's for the accepted drawing after
+/// every batch, and the operator stats must count remove's offspring and
+/// improvements.
+fn verify_ordered_remove() {
     const SIDE: u32 = 96;
     const CHAINS: u32 = 4;
     const LAMBDA: u32 = 64;
@@ -900,9 +899,7 @@ fn verify_deletion_operators() {
         .collect();
     let drawing = overlapping_triangles(300);
     let params = MutationParams {
-        remove_polygon_prob: 0.2,
-        merge_polygon_prob: 0.4,
-        absorb_polygon_prob: 0.4,
+        remove_polygon_prob: 1.0,
         per_point_penalty: MAX_PER_POINT_PENALTY,
         min_alpha: 30,
         max_alpha: 220,
@@ -960,26 +957,13 @@ fn verify_deletion_operators() {
     let stats = evolver.operator_stats().clone();
     let offered: u64 = stats.offered.iter().sum();
     assert_eq!(offered, evolver.benchmark_counters().completed_evaluations);
-    for op in [Operator::Remove, Operator::Merge, Operator::Absorb] {
-        let code = op as usize;
-        assert!(stats.offered[code] > 0, "{} produced no offspring", op.name());
-        assert!(stats.improved[code] > 0, "{} never improved", op.name());
-    }
-    let others = offered
-        - [Operator::Remove, Operator::Merge, Operator::Absorb]
-            .iter()
-            .map(|&op| stats.offered[op as usize])
-            .sum::<u64>();
-    assert_eq!(others, 0, "only remove, merge and absorb run: {:?}", stats.offered);
-    let shapes = verify_deletion_shapes(&mut evolver, &drawing, &params);
+    let remove = Operator::Remove as usize;
+    assert_eq!(stats.offered[remove], offered, "only remove runs: {:?}", stats.offered);
+    assert!(stats.improved[remove] > 0, "remove never improved");
+    let shapes = verify_remove_shape(&mut evolver, &drawing, &params);
     println!(
-        "deletion operators check: {shapes}; counts {start_counts:?} -> {counts:?}; offered/improved remove {}/{}, merge {}/{}, absorb {}/{}",
-        stats.offered[Operator::Remove as usize],
-        stats.improved[Operator::Remove as usize],
-        stats.offered[Operator::Merge as usize],
-        stats.improved[Operator::Merge as usize],
-        stats.offered[Operator::Absorb as usize],
-        stats.improved[Operator::Absorb as usize],
+        "ordered remove check: {shapes}; counts {start_counts:?} -> {counts:?}; offered/improved {}/{}",
+        stats.offered[remove], stats.improved[remove],
     );
 }
 
@@ -1016,81 +1000,29 @@ fn assert_parents_match_scalar(
     }
 }
 
-/// Twice the area of a packed triangle, from its 16-bit vertex coordinates.
-fn packed_twice_area(polygon: &[u32; 4]) -> i64 {
-    let v = |word: u32| [i64::from(word & 0xFFFF), i64::from(word >> 16)];
-    let [a, b, c] = [v(polygon[1]), v(polygon[2]), v(polygon[3])];
-    ((b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1])).abs()
-}
-
 /// The parent without slot `d`, in order.
 fn without(parent: &[[u32; 4]], d: usize) -> impl Iterator<Item = &[u32; 4]> {
     parent[..d].iter().chain(&parent[d + 1..])
 }
 
-/// One iteration with only remove, only merge, then only absorb: every
-/// offspring is its parent with one slot deleted in order (the others keep
-/// their relative order), and merge and absorb also rewrite exactly one
-/// surviving polygon. Merge's has vertices from the pair and an area at least
-/// either's; absorb's keeps its geometry and moves each colour channel to
-/// between its own and the deleted polygon's.
-fn verify_deletion_shapes(evolver: &mut GpuEvolver, drawing: &Drawing, params: &MutationParams) -> String {
+/// One iteration with only remove: every offspring is its parent with one
+/// slot deleted in order (the others keep their relative order).
+fn verify_remove_shape(evolver: &mut GpuEvolver, drawing: &Drawing, params: &MutationParams) -> String {
     let (chains, lambda) = (params.chain_count, params.lambda);
-    let mut summary = Vec::new();
-    for (op, seed) in [(Operator::Remove, 31), (Operator::Merge, 37), (Operator::Absorb, 41)] {
-        let only = MutationParams {
-            remove_polygon_prob: f32::from(u8::from(op == Operator::Remove)),
-            merge_polygon_prob: f32::from(u8::from(op == Operator::Merge)),
-            absorb_polygon_prob: f32::from(u8::from(op == Operator::Absorb)),
-            gpu_batch_iters: 1,
-            ..params.clone()
-        };
-        evolver.prepare_seeded_benchmark(drawing, &only, seed, 0, true).expect("shape preparation");
-        let before = evolver.benchmark_snapshot(chains, lambda).expect("snapshot");
-        evolver.run_batch(&only, true);
-        let after = evolver.benchmark_snapshot(chains, lambda).expect("snapshot");
-        let mut shifted = 0;
-        for (offspring, child) in after.offspring.iter().enumerate() {
-            let parent = &before.parents[offspring / lambda as usize].polygons;
-            let child = &child.polygons;
-            let context = format!("{} offspring {offspring}", op.name());
-            assert_eq!(child.len() + 1, parent.len(), "{context}: count");
-            let rewritten = |d: usize| -> Vec<usize> {
-                without(parent, d).zip(child).enumerate().filter(|(_, (p, c))| p != c).map(|(k, _)| k).collect()
-            };
-            // A deleted slot whose removal leaves the child, up to the one
-            // rewritten polygon of merge and absorb (at most one). Neighbouring slots can
-            // both qualify; one must also show the operator's shape.
-            let fits = |d: usize| -> bool {
-                let changed = rewritten(d);
-                // Merge and absorb leave the survivor as it was when the deleted
-                // triangle has no area (its colour weight is zero).
-                let Some(&moved) = changed.first() else { return true };
-                if op == Operator::Remove || changed.len() > 1 {
-                    return false;
-                }
-                // The rewritten polygon's slot in the parent.
-                let kept = moved + usize::from(moved >= d);
-                let (new, old, gone) = (&child[moved], &parent[kept], &parent[d]);
-                if op == Operator::Merge {
-                    let pair = [old[1], old[2], old[3], gone[1], gone[2], gone[3]];
-                    new[1..].iter().all(|v| pair.contains(v))
-                        && packed_twice_area(new) >= packed_twice_area(old).max(packed_twice_area(gone))
-                } else {
-                    new[1..] == old[1..]
-                        && (0..4).all(|channel| {
-                            let byte = |p: &[u32; 4]| (p[0] >> (8 * channel)) & 0xFF;
-                            let (lo, hi) = (byte(old).min(byte(gone)), byte(old).max(byte(gone)));
-                            (lo.saturating_sub(1)..=hi + 1).contains(&byte(new))
-                        })
-                }
-            };
-            let d = (0..parent.len())
-                .find(|&d| fits(d))
-                .unwrap_or_else(|| panic!("{context}: not an ordered {}", op.name()));
-            shifted += usize::from(d + 1 < parent.len());
-        }
-        summary.push(format!("{} {shifted}/{} shifted", op.name(), after.offspring.len()));
+    let only = MutationParams { gpu_batch_iters: 1, ..params.clone() };
+    evolver.prepare_seeded_benchmark(drawing, &only, 31, 0, true).expect("shape preparation");
+    let before = evolver.benchmark_snapshot(chains, lambda).expect("snapshot");
+    evolver.run_batch(&only, true);
+    let after = evolver.benchmark_snapshot(chains, lambda).expect("snapshot");
+    let mut shifted = 0;
+    for (offspring, child) in after.offspring.iter().enumerate() {
+        let parent = &before.parents[offspring / lambda as usize].polygons;
+        let child = &child.polygons;
+        assert_eq!(child.len() + 1, parent.len(), "remove offspring {offspring}: count");
+        let d = (0..parent.len())
+            .find(|&d| without(parent, d).eq(child))
+            .unwrap_or_else(|| panic!("remove offspring {offspring}: not an ordered remove"));
+        shifted += usize::from(d + 1 < parent.len());
     }
-    summary.join(", ")
+    format!("{shifted}/{} shifted", after.offspring.len())
 }

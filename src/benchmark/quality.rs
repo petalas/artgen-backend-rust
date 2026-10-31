@@ -251,15 +251,14 @@ pub struct QualityRecord {
 /// Rejects unknown keys, ill-typed values and values that production's
 /// `sanitize` would silently change.
 pub fn params_with(overrides: &Map<String, Value>) -> Result<MutationParams> {
-    // `per_point_penalty`, `penalty_exponent`, the step spread and the absorb
-    // weight are serialized only away from their defaults, so name them from
-    // parameters that hold other values.
+    // `per_point_penalty`, `penalty_exponent` and the step spread are serialized
+    // only away from their defaults, so name them from parameters that hold
+    // other values.
     let every_field = MutationParams {
         per_point_penalty: 0.0,
         penalty_exponent: 1.0,
         step_spread_min: 0.5,
         step_spread_max: 2.0,
-        absorb_polygon_prob: 0.5,
         ..MutationParams::default()
     };
     let known = serde_json::to_value(every_field)?;
@@ -636,10 +635,10 @@ mod tests {
             .to_string()
             .contains("sanitize"));
         assert!(set(r#"{"stepSpreadMax":32}"#).is_err());
-        assert_eq!(set(r#"{"absorbPolygonProb":0.7}"#).unwrap().absorb_polygon_prob, 0.7);
-        assert!(set(r#"{"absorbPolygonProb":1.5}"#).is_err());
         // Removed fields are unknown.
-        assert!(set(r#"{"mergeCentroidThreshold":0.15}"#).is_err());
+        for removed in ["mergeCentroidThreshold", "mergePolygonProb", "absorbPolygonProb"] {
+            assert!(set(&format!(r#"{{"{removed}":0.1}}"#)).is_err(), "{removed}");
+        }
     }
 
     #[test]

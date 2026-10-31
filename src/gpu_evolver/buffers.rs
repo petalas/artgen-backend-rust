@@ -81,17 +81,18 @@ pub struct GpuParams {
     pub rotate_polygon_prob: f32,
     pub adjacent_swap_prob: f32,
 
-    pub merge_polygon_prob: f32,
+    // `_pad3` and `_pad4` held the removed merge and absorb weights; zero.
+    pub _pad3: u32,
     pub clone_polygon_prob: f32,
     pub medium_move_prob: f32,
     pub swap_colors_prob: f32,
 
     // vec4[7] — micro colour weight, alpha range of new and recolored polygons,
-    // absorb weight
+    // one pad word
     pub micro_color_prob: f32,
     pub min_alpha_norm: f32,
     pub max_alpha_norm: f32,
-    pub absorb_polygon_prob: f32,
+    pub _pad4: u32,
 
     // vec4[8] — step sizes, multiplied by the offspring's step multiplier
     pub offset_polygon_magnitude: f32,
@@ -155,14 +156,14 @@ pub fn gpu_params_from(mp: &MutationParams, w: u32, h: u32, chain_count: u32) ->
         scale_polygon_prob: mp.scale_polygon_prob,
         rotate_polygon_prob: mp.rotate_polygon_prob,
         adjacent_swap_prob: mp.adjacent_swap_prob,
-        merge_polygon_prob: mp.merge_polygon_prob,
+        _pad3: 0,
         clone_polygon_prob: mp.clone_polygon_prob,
         medium_move_prob: mp.medium_move_prob,
         swap_colors_prob: mp.swap_colors_prob,
         micro_color_prob: mp.micro_color_prob,
         min_alpha_norm: mp.min_alpha as f32 / 255.0,
         max_alpha_norm: mp.max_alpha as f32 / 255.0,
-        absorb_polygon_prob: mp.absorb_polygon_prob,
+        _pad4: 0,
         offset_polygon_magnitude: mp.offset_polygon_magnitude,
         move_point_max_delta: mp.move_point_max_delta,
         medium_move_delta: mp.medium_move_delta,

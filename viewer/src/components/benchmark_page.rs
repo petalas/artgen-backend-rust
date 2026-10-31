@@ -1164,8 +1164,6 @@ fn params_detail_view(p: &MutationParams, resolution: u32, pass_timings: &Option
                 {pv("remove", fmt_prob(p.remove_polygon_prob), p.remove_polygon_prob != d.remove_polygon_prob)}
                 {pv("reorder", fmt_prob(p.reorder_polygon_prob), p.reorder_polygon_prob != d.reorder_polygon_prob)}
                 {pv("adj-swap", fmt_prob(p.adjacent_swap_prob), p.adjacent_swap_prob != d.adjacent_swap_prob)}
-                {pv("merge", fmt_prob(p.merge_polygon_prob), p.merge_polygon_prob != d.merge_polygon_prob)}
-                {pv("absorb", fmt_prob(p.absorb_polygon_prob), p.absorb_polygon_prob != d.absorb_polygon_prob)}
                 {pv("clone", fmt_prob(p.clone_polygon_prob), p.clone_polygon_prob != d.clone_polygon_prob)}
                 {pv("swap-col", fmt_prob(p.swap_colors_prob), p.swap_colors_prob != d.swap_colors_prob)}
             </div>
