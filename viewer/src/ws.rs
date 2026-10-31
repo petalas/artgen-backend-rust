@@ -99,7 +99,7 @@ impl Default for ViewerState {
             image_height: 0,
             engine_loading: false,
             init_received: false,
-            target_resolution: 384,
+            target_resolution: artgen_shared::settings::DEFAULT_TARGET_RESOLUTION,
             projects: vec![],
             active_project: None,
             project_error: None,

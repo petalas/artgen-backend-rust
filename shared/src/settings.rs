@@ -62,6 +62,10 @@ pub const MAX_PER_POINT_PENALTY: f32 = 1.0e-4;
 pub const GPU_MAX_CHAIN_COUNT: u32 = 1024;
 pub const GPU_DEFAULT_CHAIN_COUNT: u32 = 4;
 pub const GPU_DEFAULT_LAMBDA: u32 = 64;
+
+// Longest side, in pixels, the engine resizes a project's original image to
+// unless the viewer picks another resolution.
+pub const DEFAULT_TARGET_RESOLUTION: u32 = 512;
 pub const GPU_MAX_LAMBDA: u32 = 64;
 pub const GPU_DEFAULT_BATCH_ITERS: u32 = 64;
 pub const GPU_MAX_BATCH_ITERS: u32 = 4096;

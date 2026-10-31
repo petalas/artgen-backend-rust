@@ -8,8 +8,8 @@ use artgen_backend_rust::{
     mutation_params::MutationParams,
     projects,
     settings::{
-        DISPLAY_H, DISPLAY_W, MAX_IMAGE_HEIGHT, MAX_IMAGE_WIDTH, MIN_IMAGE_HEIGHT, MIN_IMAGE_WIDTH,
-        TARGET_FRAMETIME,
+        DEFAULT_TARGET_RESOLUTION, DISPLAY_H, DISPLAY_W, MAX_IMAGE_HEIGHT, MAX_IMAGE_WIDTH,
+        MIN_IMAGE_HEIGHT, MIN_IMAGE_WIDTH, TARGET_FRAMETIME,
     },
     utils::print_stats,
 };
@@ -1996,7 +1996,7 @@ fn gpu_main_loop_headless(legacy_image: Option<&str>, gpu_batch_iters_override: 
             switch_request: initial_project,
             reset_active: false,
             pending_delete: None,
-            target_resolution: 384,
+            target_resolution: DEFAULT_TARGET_RESOLUTION,
             mutation_params: initial_params,
             gpu_stats: None,
             benchmark_request: None,
