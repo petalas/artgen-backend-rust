@@ -68,7 +68,6 @@ pub const GPU_MAX_BATCH_ITERS: u32 = 4096;
 
 // Crossover defaults
 pub const CROSSOVER_PROB: f32 = 0.2;
-pub const SPATIAL_CROSSOVER_WEIGHT: f32 = 0.66;
 pub const TOURNAMENT_SIZE: u32 = 3;
 
 // Step spread

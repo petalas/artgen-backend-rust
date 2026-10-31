@@ -61,9 +61,8 @@ pub struct GpuParams {
 
     // vec4[2] — crossover
     pub crossover_prob: f32,
-    pub spatial_crossover_weight: f32,
     pub tournament_size: u32,
-    pub _pad0: u32,
+    pub _pad0: [u32; 2],
 
     // vec4[3-6] — mutation operator weights
     pub add_polygon_prob: f32,
@@ -140,9 +139,8 @@ pub fn gpu_params_from(mp: &MutationParams, w: u32, h: u32, chain_count: u32) ->
         max_error_per_pixel: MAX_ERROR_PER_PIXEL,
         per_point_penalty: mp.per_point_penalty,
         crossover_prob: mp.crossover_prob,
-        spatial_crossover_weight: mp.spatial_crossover_weight,
         tournament_size: mp.tournament_size,
-        _pad0: 0,
+        _pad0: [0; 2],
         add_polygon_prob: mp.add_polygon_prob,
         remove_polygon_prob: mp.remove_polygon_prob,
         reorder_polygon_prob: mp.reorder_polygon_prob,

@@ -4,11 +4,11 @@
 
 This project evolves drawings made of up to 1000 ordered, alpha-blended triangles. Polygon ordering is semantically meaningful: polygon `i+1` is rendered on top of polygon `i`, and alpha blending is order-dependent (non-commutative). Naively mixing polygon lists from two parents destroys the carefully evolved layering relationships and produces garbage images.
 
-The current codebase already has two crossover operators in `src/shaders/mutate.wgsl`:
+When this was written the codebase had two crossover operators in `src/shaders/mutate.wgsl`:
 - **Spatial crossover** (`crossover_spatial_offspring`): splits the image along a random axis/position, takes polygons whose centroid falls on side A from parent A and side B from parent B. Preserves relative ordering within each parent's contribution.
 - **Uniform crossover** (`crossover_uniform_offspring`): walks both parents' polygon arrays in lockstep, randomly picking each slot from parent A or B. Drops slots randomly when only one parent has a polygon at that index.
 
-Both currently write to offspring slots in the `working_states` buffer and are selected with probability `crossover_prob` (default 0.1) before the normal mutation path runs.
+Only uniform crossover remains today; it writes to offspring slots in the `working_states` buffer and is chosen with probability `crossover_prob` (default 0.2) before the normal mutation path runs. Spatial crossover and its `spatial_crossover_weight` parameter are gone. The strategies below are kept as research notes.
 
 ## Current Representation Summary
 
@@ -174,7 +174,7 @@ The current `crossover_uniform_offspring` implementation does the coin-flip sele
 
 ### Primary: Layer-Range Crossover (Strategy 1)
 
-**Implement first.** It is the simplest to add (~20 lines of shader code), has no auxiliary data structure requirements, preserves the most important invariant (relative layer ordering within each parent's contribution), and matches the well-studied one-point crossover operator from GA theory. It can be added as a third option alongside the existing spatial and uniform crossover modes, controlled by the `spatial_crossover_weight` parameter or a new parameter.
+**Implement first.** It is the simplest to add (~20 lines of shader code), has no auxiliary data structure requirements, preserves the most important invariant (relative layer ordering within each parent's contribution), and matches the well-studied one-point crossover operator from GA theory. It can be added as a second option alongside the existing uniform crossover, controlled by a new parameter (the unused `spatial_crossover_weight` was removed on 2026-10-31).
 
 Concrete design:
 - Pick random cut point `k` in `[0, max(count_A, count_B))`

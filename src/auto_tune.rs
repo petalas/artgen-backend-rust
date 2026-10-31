@@ -614,7 +614,6 @@ fn get_param_by_name(params: &MutationParams, name: &str) -> f32 {
         "merge_centroid_threshold" => params.merge_centroid_threshold,
         "merge_color_threshold" => params.merge_color_threshold,
         "crossover_prob" => params.crossover_prob,
-        "spatial_crossover_weight" => params.spatial_crossover_weight,
         "lambda" => params.lambda as f32,
         _ => 0.0,
     }
@@ -649,7 +648,6 @@ fn set_param_by_name(params: &mut MutationParams, name: &str, value: f32) {
         "merge_centroid_threshold" => params.merge_centroid_threshold = value,
         "merge_color_threshold" => params.merge_color_threshold = value,
         "crossover_prob" => params.crossover_prob = value,
-        "spatial_crossover_weight" => params.spatial_crossover_weight = value,
         "lambda" => params.lambda = value as u32,
         _ => {}
     }
@@ -687,7 +685,6 @@ pub fn default_param_specs() -> Vec<ParamSpec> {
         ParamSpec { name: "merge_color_threshold".into(), kind: ParamKind::Linear { min: 0.01, max: 0.5 }, enabled: true },
         // Crossover (Linear)
         ParamSpec { name: "crossover_prob".into(), kind: ParamKind::Linear { min: 0.0, max: 1.0 }, enabled: true },
-        ParamSpec { name: "spatial_crossover_weight".into(), kind: ParamKind::Linear { min: 0.0, max: 1.0 }, enabled: true },
         // Lambda (Pow2)
         ParamSpec { name: "lambda".into(), kind: ParamKind::Pow2 { min_exp: 0, max_exp: 6 }, enabled: true },
     ]

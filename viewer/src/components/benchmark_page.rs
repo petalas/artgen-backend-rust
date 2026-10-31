@@ -1196,7 +1196,6 @@ fn params_detail_view(p: &MutationParams, resolution: u32, pass_timings: &Option
             <div class="bench-params-row">
                 <span class="bench-params-group">"Crossover: "</span>
                 {pv("prob", fmt_prob(p.crossover_prob), p.crossover_prob != d.crossover_prob)}
-                {pv("spatial", format!("{:.2}", p.spatial_crossover_weight), p.spatial_crossover_weight != d.spatial_crossover_weight)}
                 {pv("tournament", p.tournament_size.to_string(), p.tournament_size != d.tournament_size)}
             </div>
             {is_all_default.then(|| view! {

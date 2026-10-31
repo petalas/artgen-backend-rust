@@ -110,11 +110,10 @@ canonical state and replay hashes from before that change do not compare.
 
 `GpuParams` (WGSL `Params`) is a 256-byte uniform of vec4 groups: image size
 and polygon bounds; chain count, λ, `max_error_per_pixel` and the point
-penalty; crossover (`crossover_prob`, `spatial_crossover_weight`,
-`tournament_size`); four groups of operator weights; `micro_color_prob` with
-the alpha range; the four step-scaled sizes; new-vertex spread and merge
-thresholds; two groups of step multipliers; four reserved. Every field but
-`spatial_crossover_weight` is read by a bundled shader. The layout test in
+penalty; crossover (`crossover_prob`, `tournament_size`); four groups of
+operator weights; `micro_color_prob` with the alpha range; the four
+step-scaled sizes; new-vertex spread and merge thresholds; two groups of step
+multipliers; four reserved. Every field is read by a bundled shader. The layout test in
 `programs/bundled.rs` maps both structs field by field.
 
 ## Shader installation

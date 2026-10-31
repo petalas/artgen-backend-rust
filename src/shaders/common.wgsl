@@ -33,9 +33,8 @@ struct Params {
 
     // Crossover
     crossover_prob: f32,
-    spatial_crossover_weight: f32,
     tournament_size: u32,
-    _pad0: u32,
+    _pad0: vec2<u32>,
 
     // Mutation operator weights
     add_polygon_prob: f32,

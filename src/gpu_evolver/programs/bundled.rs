@@ -314,7 +314,7 @@ mod tests {
             &rust_layout!(GpuParams {
                 image_width, image_height, max_polygons, min_polygons,
                 chain_count_param, lambda, max_error_per_pixel, per_point_penalty,
-                crossover_prob, spatial_crossover_weight, tournament_size, _pad0,
+                crossover_prob, tournament_size, _pad0,
                 add_polygon_prob, remove_polygon_prob, reorder_polygon_prob, offset_polygon_prob,
                 move_point_prob, micro_adjust_prob, change_color_prob, adjust_brightness_prob,
                 adjust_saturation_prob, scale_polygon_prob, rotate_polygon_prob, adjacent_swap_prob,

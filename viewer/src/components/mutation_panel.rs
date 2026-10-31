@@ -199,7 +199,6 @@ pub fn ParamsEditor(
         <div class="mutation-section">
             <div class="mutation-section-title">"Crossover"</div>
             <ProbSlider params={params} on_change={on_change} label="Crossover prob" field="crossover_prob"/>
-            <DeltaSlider params={params} on_change={on_change} label="Spatial weight" field="spatial_crossover_weight" min=0.0 max=1.0 step=0.05/>
             <IntSlider params={params} on_change={on_change} label="Tournament size" get={|mp| mp.tournament_size as i64} set={|mp, v| { mp.tournament_size = v as u32; }} min=1 max=16 step=1/>
             <Pow2Slider params={params} on_change={on_change} label="Chains" get={|mp| mp.chain_count} set={|mp, v| { mp.chain_count = v; }} min_exp=0 max_exp=10/>
             <Pow2Slider params={params} on_change={on_change} label="Lambda (\u{03BB})" get={|mp| mp.lambda} set={|mp, v| { mp.lambda = v; }} min_exp=0 max_exp=6/>
@@ -496,7 +495,6 @@ fn get_delta_field(mp: &MutationParams, field: &str) -> f32 {
         "medium_move_delta" => mp.medium_move_delta,
         "merge_centroid_threshold" => mp.merge_centroid_threshold,
         "merge_color_threshold" => mp.merge_color_threshold,
-        "spatial_crossover_weight" => mp.spatial_crossover_weight,
         _ => 0.0,
     }
 }
@@ -510,7 +508,6 @@ fn set_delta_field(mp: &mut MutationParams, field: &str, val: f32) {
         "medium_move_delta" => mp.medium_move_delta = val,
         "merge_centroid_threshold" => mp.merge_centroid_threshold = val,
         "merge_color_threshold" => mp.merge_color_threshold = val,
-        "spatial_crossover_weight" => mp.spatial_crossover_weight = val,
         _ => {}
     }
 }

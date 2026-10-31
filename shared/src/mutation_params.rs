@@ -120,7 +120,6 @@ pub struct MutationParams {
 
     // Crossover parameters
     pub crossover_prob: f32,
-    pub spatial_crossover_weight: f32,
     pub tournament_size: u32,
 
     // Chain count (runtime-configurable, capped to GPU buffer allocation)
@@ -213,7 +212,6 @@ impl MutationParams {
 
         // Crossover parameters
         self.crossover_prob = self.crossover_prob.clamp(0.0, 1.0);
-        self.spatial_crossover_weight = self.spatial_crossover_weight.clamp(0.0, 1.0);
         self.tournament_size = self.tournament_size.clamp(1, 16);
 
         // Rasterize workgroup size: must be one of the supported configurations
@@ -280,7 +278,6 @@ impl Default for MutationParams {
             max_polygons: settings::DEFAULT_MAX_POLYGONS,
             per_point_penalty: settings::PER_POINT_PENALTY,
             crossover_prob: settings::CROSSOVER_PROB,
-            spatial_crossover_weight: settings::SPATIAL_CROSSOVER_WEIGHT,
             tournament_size: settings::TOURNAMENT_SIZE,
             chain_count: settings::GPU_DEFAULT_CHAIN_COUNT,
             lambda: settings::GPU_DEFAULT_LAMBDA,
