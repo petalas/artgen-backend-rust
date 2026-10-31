@@ -591,3 +591,27 @@ average; ff / mona / darwin.
 - Reorder is the most valuable per offspring, at a very small offered share
   (reorder probability 0.002). An earlier sweep found that more reordering
   breaks crossover's slot alignment, so its value is not linear in its weight.
+
+## Operator weight A/B from s120v2, 2026-10-31
+
+`a5d5b96` (`micro_color_prob` split from `micro_adjust_prob`, same default),
+ff + mona + darwin, seeds 1–3, 90 s from `s120v2` (evidence
+`.cache/quality/runs/20261031T090622Z-wtrsyvnh`). Each side keeps the total
+roulette weight, so crossover and add keep their shares; freed weight goes half
+to micro moves, half to color changes.
+
+| side | change | time ratio at 90 s | r ratio at 90 s | median r at 90 s, ff / mona / darwin |
+| --- | --- | --- | --- | --- |
+| control | defaults | 1 | 1 | 1.2112 / 2.0458 / 1.2057 |
+| mchalf | micro color ½ | 0.87 [0.83, 0.92] | 0.9978 [0.9961, 0.9998] | 1.2212 / 2.0386 / 1.1912 |
+| mcquarter | micro color ¼, saturation and brightness ½ | 0.82 [0.75, 0.89] | 0.9955 [0.9926, 0.9990] | 1.2088 / 2.0422 / 1.1928 |
+| reorder2 | reorder 0.002 → 0.004 | 0.82 [0.69, 0.92] | 0.9954 [0.9907, 0.9997] | 1.1852 / 2.0440 / 1.2006 |
+
+Weights: mchalf micro_color 0.001393, micro_adjust 0.003715, change_color
+0.00117; mcquarter micro_color 0.000697, micro_adjust 0.00433, change_color
+0.001631, saturation 0.000667, brightness 0.000237.
+
+- All three reach the control's worst 90 s fitness sooner, with intervals that
+  exclude 1. mcquarter is ahead on every image; mchalf loses on ff; reorder2
+  gains most on ff and is level on mona.
+- reorder2 is slower at 5 s (1.10 [1.02, 1.20]); its gain is late.
