@@ -140,6 +140,9 @@ def parse_args(argv):
                      help="new directory to save each run's final drawing as a start")
     cli.add_argument("--build-only", action="store_true", help="resolve sides and exit")
     cli.add_argument("--note", default="", help="free text recorded in the log")
+    cli.add_argument("--combine", type=Path, nargs="+", metavar="EVIDENCE",
+                     help="re-report finished runs of the same sides on different images "
+                          "as one comparison; runs nothing and logs nothing")
     args = cli.parse_args(argv)
     args.sides = parse_sides(args.side, args.params)
     args.images = tuple(dict.fromkeys(args.images.split(",")))
@@ -183,15 +186,16 @@ def value_at(trajectory, t):
     return trajectory[-1]
 
 
-def time_to(trajectory, target):
-    """Seconds until fitness first reached `target`, interpolated in log remaining error
-    between the bracketing points (the recorder adds a point per 2% error drop); None if never."""
+def time_to(trajectory, target, key="fitness"):
+    """Seconds until `key` (fitness or raw_fitness) first reached `target`, interpolated in
+    log remaining error between the bracketing points (the recorder adds a point per 2% error
+    drop); None if never."""
     previous = None
     for point in trajectory:
-        if point["fitness"] >= target:
+        if point[key] >= target:
             if previous is None:
                 return point["seconds"]
-            r0, r1 = 100 - previous["fitness"], 100 - point["fitness"]
+            r0, r1 = 100 - previous[key], 100 - point[key]
             share = (math.log(r0) - math.log(100 - target)) / (math.log(r0) - math.log(r1))
             return previous["seconds"] + share * (point["seconds"] - previous["seconds"])
         previous = point
@@ -393,17 +397,18 @@ def quality_verdict(point, low, high, seeds, min_effect):
     return "NOISE"
 
 
-def control_targets(runs, control, image, seconds):
-    """Fitness targets every control seed reached: the worst control seed's fitness at
-    the final checkpoint and at the checkpoints nearest a quarter and a sixteenth of it."""
+def control_targets(runs, control, image, seconds, key="fitness"):
+    """Targets every control seed reached: the worst control seed's `key` (fitness or
+    raw_fitness) at the final checkpoint and at the checkpoints nearest a quarter and a
+    sixteenth of it."""
     marks = checkpoints(seconds)
     chosen = sorted({max((t for t in marks if t <= seconds / d), default=marks[0])
                      for d in (16, 4)} | {float(seconds)})
     mine = [r for r in runs if r["side"] == control and r["image"] == image]
-    return [(t, min(r["at"][t]["fitness"] for r in mine)) for t in chosen]
+    return [(t, min(r["at"][t][key] for r in mine)) for t in chosen]
 
 
-def time_ratios(runs, control, name, image_targets):
+def time_ratios(runs, control, name, image_targets, key="fitness"):
     """Per target rank: {image: [t_name / t_control]}; a missed target counts as the
     run's full length (a lower bound) and is counted in `censored`."""
     by_key = {(r["side"], r["image"], r["seed"]): r for r in runs}
@@ -413,10 +418,10 @@ def time_ratios(runs, control, name, image_targets):
             continue
         base = by_key[(control, image, seed)]
         for rank, (_, target) in enumerate(image_targets[image]):
-            reached = time_to(run["trajectory"], target)
+            reached = time_to(run["trajectory"], target, key)
             censored += reached is None
             ours = reached if reached is not None else run["elapsed"]
-            theirs = max(time_to(base["trajectory"], target), 1e-3)
+            theirs = max(time_to(base["trajectory"], target, key), 1e-3)
             ratios.setdefault(rank, {}).setdefault(image, []).append(max(ours, 1e-3) / theirs)
     return ratios, censored
 
@@ -461,6 +466,8 @@ def comparison_table(runs, args):
     names = list(args.sides)
     control, entries, lines = names[0], [], []
     targets = {image: control_targets(runs, control, image, args.seconds) for image in args.images}
+    raw_targets = {image: control_targets(runs, control, image, args.seconds, "raw_fitness")
+                   for image in args.images}
     for name in names[1:]:
         lines.append(f"\n{name} vs {control}: r ratio (geometric mean over images x seeds, "
                      "lower is better) and 95% bootstrap")
@@ -472,12 +479,19 @@ def comparison_table(runs, args):
                             "raw_high95": rh, "raw_verdict": rresult})
             lines.append(f"  T {t:>6g}s  {point:.4f} [{low:.4f}, {high:.4f}] {result:7}"
                          f"  unpenalized {rp:.4f} [{rl:.4f}, {rh:.4f}] {rresult}")
-        ratios, censored = time_ratios(runs, control, name, targets)
-        for rank, by_image in sorted(ratios.items()):
-            point, low, high = hc.aggregate(by_image)
-            label = ", ".join(f"{image} {targets[image][rank][1]:.3f}%" for image in args.images)
-            lines.append(f"  time to control-worst fitness at T={targets[args.images[0]][rank][0]:g}s "
-                         f"({label}): {point:.4f} [{low:.4f}, {high:.4f}]")
+        censored = 0
+        # Unpenalized targets compare sides whose point penalties differ.
+        for key, kind, image_targets in (("fitness", "fitness", targets),
+                                         ("raw_fitness", "unpenalized fitness", raw_targets)):
+            ratios, missed = time_ratios(runs, control, name, image_targets, key)
+            censored += missed
+            for rank, by_image in sorted(ratios.items()):
+                point, low, high = hc.aggregate(by_image)
+                label = ", ".join(f"{image} {image_targets[image][rank][1]:.3f}%"
+                                  for image in args.images)
+                lines.append(f"  time to control-worst {kind} at "
+                             f"T={image_targets[args.images[0]][rank][0]:g}s "
+                             f"({label}): {point:.4f} [{low:.4f}, {high:.4f}]")
         if censored:
             lines.append(f"  {censored} candidate runs missed a target; their time counts as "
                          "the full run (a lower bound)")
@@ -731,9 +745,40 @@ def resolve_sides(sides):
     return {name: builds[side["build"]] for name, side in sides.items()}
 
 
+def combine(directories, min_effect):
+    """Print the distribution and comparison tables for the runs of several evidence
+    directories together: the same sides and seconds, each on its own images."""
+    summaries = [json.loads((d / "summary.json").read_text()) for d in directories]
+    first = summaries[0]
+    sides = list(first["identities"])
+    seconds = first["args"]["seconds"]
+    images = []
+    for summary in summaries:
+        require(list(summary["identities"]) == sides and summary["args"]["seconds"] == seconds,
+                "combined evidence must share sides and seconds")
+        require(summary["identities"] == first["identities"],
+                "combined evidence must share each side's build and params")
+        mine = summary["args"]["images"]
+        require(not set(mine) & set(images), f"images {mine} appear in two evidence directories")
+        images += mine
+    runs = []
+    for summary in summaries:
+        for run in summary["runs"]:
+            record = json.loads((Path(run["output"]) / "result.json").read_text())
+            runs.append(summarize_run(record, run["side"], run["image"], run["seed"], seconds))
+    args = argparse.Namespace(sides=dict.fromkeys(sides), images=tuple(images), seconds=seconds,
+                              min_effect=min_effect)
+    for image in images:
+        print(distribution_table(runs, sides, image, seconds))
+    print(comparison_table(runs, args)[2])
+    return 0
+
+
 def main(argv=None):
     try:
         args = parse_args(argv)
+        if args.combine:
+            return combine(args.combine, args.min_effect)
         require(hc.MANIFEST.is_file(),
                 f"missing fixtures {hc.MANIFEST}; run scripts/evolution-bench.py freeze")
         resolved = resolve_sides(args.sides)

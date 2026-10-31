@@ -49,6 +49,11 @@ scripts/quality.py --start .cache/quality/starts/s120 --side control=HEAD --side
 - `--images` (default ff,mona,darwin; see darwin under Limits), `--seeds` (default 5),
   `--first-seed`, `--seconds` (default 120, at most 3600), `--min-effect` (default
   0.02), `--server-scope image|run`, `--build-only`, `--note`.
+- `--combine EVIDENCE...` runs nothing: it re-reads finished evidence
+  directories of the same sides (same builds, params and seconds), each on its
+  own images, and prints their distribution and comparison tables as one
+  comparison. Use it when a full comparison would outlast a time limit and is
+  run one image at a time. It logs nothing.
 - `--start DIR` starts every run from `DIR/IMAGE/seedN.json` instead of blank;
   each image and seed needs its file. `--save-starts DIR` (one side, `DIR` must
   not exist) copies each run's final delivered drawing there, plus `meta.json`
@@ -222,7 +227,11 @@ At checkpoint T, which is each fixed second below the budget plus the budget:
   nearest a quarter and a sixteenth of the budget. Every control seed reaches
   them by construction. Times are interpolated in ln r between the points that
   bracket a target. A candidate that misses a target is charged its full run
-  length, a lower bound, and the script counts these.
+  length, a lower bound, and the script counts these. The same ratios follow on
+  unpenalized fitness, with targets from the control's unpenalized fitness.
+  Judge sides whose point penalties differ (`per_point_penalty`,
+  `penalty_exponent`) by the unpenalized lines: their penalized fitness is on
+  different scales.
 - **Final polygons:** the median per image, control → candidate.
 
 `sd ln r` sets how many seeds a comparison needs. The paired ratio of one seed

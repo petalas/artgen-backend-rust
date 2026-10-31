@@ -294,6 +294,33 @@ class QualityCli(unittest.TestCase):
         # r ~ 1/sqrt(t): 0.8x the error reaches a target in 0.64x the time.
         line = next(x for x in out.splitlines() if "control-worst fitness at T=20s" in x)
         self.assertAlmostEqual(float(line.split("): ")[1].split()[0]), 0.64, delta=0.03)
+        # The same on unpenalized fitness, which compares sides with different penalties.
+        line = next(x for x in out.splitlines()
+                    if "control-worst unpenalized fitness at T=20s" in x)
+        self.assertAlmostEqual(float(line.split("): ")[1].split()[0]), 0.64, delta=0.03)
+
+    def test_combine_reports_per_image_runs_as_one_comparison(self):
+        sides = ("--side", f"control={self.fake()}", "--side", f"cand={self.fake(scale=0.8)}")
+        evidence = []
+        for image in ("ff", "mona"):
+            code, out, _ = self.run_cli(*sides, "--images", image)
+            self.assertEqual(code, 0, out)
+            evidence.append(str(hc.REPO / out.rsplit("evidence ", 1)[1].strip()))
+        rows = len(self.log_rows())
+        code, out, err = self.run_cli("--combine", *evidence)
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("ff: remaining error", out)
+        self.assertIn("mona: remaining error", out)
+        line = next(x for x in out.splitlines() if x.strip().startswith("T     20s"))
+        self.assertIn("BETTER", line)
+        self.assertIn("final polygons (median), control -> candidate: ff", out)
+        self.assertEqual(len(self.log_rows()), rows)  # combining logs nothing
+        # Evidence of different sides does not combine.
+        code, out, _ = self.run_cli("--side", f"control={self.fake()}", "--images", "darwin")
+        other = str(hc.REPO / out.rsplit("evidence ", 1)[1].strip())
+        code, _, err = self.run_cli("--combine", evidence[0], other)
+        self.assertEqual(code, 1)
+        self.assertIn("must share sides", err)
 
     def test_two_seeds_only_screen(self):
         code, out, _ = self.run_cli("--side", f"control={self.fake()}",
