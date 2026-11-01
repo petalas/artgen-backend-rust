@@ -668,7 +668,8 @@ fn parent_states(
 
 /// Evaluate parents `0..active` in full and stage their errors (stride 2) and
 /// polygon counts in `eval_fitness_staging_buf`. Returns the submission and
-/// the staged byte count. Leaves the raster worklist empty for the next batch.
+/// the staged byte count. Leaves the raster worklist and the evaluated error
+/// sums empty for the next batch.
 fn submit_full_evaluation(p: &GpuPipeline, active: u32) -> (SubmissionIndex, u64) {
     let state_size = GPU_DRAWING_STATE_SIZE as u64;
     let copy_bytes = u64::from(active) * state_size;
@@ -711,6 +712,12 @@ fn submit_full_evaluation(p: &GpuPipeline, active: u32) -> (SubmissionIndex, u64
         encoder.copy_buffer_to_buffer(
             &p.working_states_buf, i * state_size, &p.eval_fitness_staging_buf, errors_size + i * 4, 4);
     }
+    // These slots are the next batch's first offspring's [new, old] sums,
+    // which select reads as parent - old + new. Left full, they cancel only
+    // where the evaluation's two whole-image sums agree; otherwise those
+    // offspring are scored off by the difference, and one scored too low is
+    // accepted with a wrong cached total (0.44 points at 512 px).
+    encoder.clear_buffer(&p.error_accumulators_buf, 0, Some(errors_size));
 
     let submission = p.queue.submit(std::iter::once(encoder.finish()));
     p.reset_raster_work();

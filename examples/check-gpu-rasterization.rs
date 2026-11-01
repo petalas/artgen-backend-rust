@@ -307,14 +307,11 @@ fn verify_mixed_reference(empty: &Drawing) {
                 initialized.parent_total_errors, evaluated.parent_total_errors,
                 "{context}"
             );
-            for (errors, total) in evaluated
-                .offspring_errors
-                .iter()
-                .zip(&evaluated.parent_total_errors)
-            {
-                // Full evaluation visits every pixel: both new and cached old
-                // error accumulators must equal the framebuffer's byte L1.
-                assert_eq!(*errors, [*total, *total], "{context}: new/old errors");
+            // The evaluation's sums sit in the first offspring's slots; it
+            // must clear them, or the next batch scores those offspring off
+            // by the difference of its new and old sums.
+            for errors in &evaluated.offspring_errors[..evaluated.parent_total_errors.len()] {
+                assert_eq!(*errors, [0, 0], "{context}: evaluation left error sums");
             }
         }
     }
