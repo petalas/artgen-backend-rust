@@ -133,14 +133,12 @@ fn main() {
     }
 
     if use_gpu && headless {
-        // Project management mode — image arg is optional
-        let legacy_image = positional.first().map(|s| s.as_str());
         println!("Starting GPU evolution pipeline (headless, project management mode)...");
-        gpu_main_loop_headless(legacy_image, gpu_batch_iters_override);
+        gpu_main_loop_headless(gpu_batch_iters_override);
         return;
     }
 
-    // Legacy mode: require image arg
+    // Windowed mode: optional image arg
     let ref_image_filename = if !positional.is_empty() {
         positional[0].as_str()
     } else {
@@ -480,7 +478,10 @@ fn load_benchmark_store(project: &str) -> BenchmarkStore {
         return BenchmarkStore::default();
     }
     match std::fs::read_to_string(&path) {
-        Ok(data) => serde_json::from_str(&data).unwrap_or_default(),
+        Ok(data) => serde_json::from_str(&data).unwrap_or_else(|e| {
+            eprintln!("[Benchmarks] Ignoring unreadable {}: {e}", path.display());
+            BenchmarkStore::default()
+        }),
         Err(_) => BenchmarkStore::default(),
     }
 }
@@ -1268,7 +1269,6 @@ fn handle_ws_command(
             let mut s = lock.lock().unwrap();
             let project = s.active_project.clone();
             if let Some(data) = cmd.get("data") {
-                // Try BenchmarkExport first, then Vec<BenchmarkResult>
                 if let Ok(export) = serde_json::from_value::<BenchmarkExport>(data.clone()) {
                     let existing_snap_ids: std::collections::HashSet<String> =
                         s.benchmark_store.snapshots.iter().map(|snap| snap.id.clone()).collect();
@@ -1286,14 +1286,6 @@ fn handle_ws_command(
                         if !existing_result_ids.contains(&result.id) {
                             s.benchmark_store.results.push(result);
                         }
-                    }
-                } else if let Ok(results) = serde_json::from_value::<Vec<BenchmarkResult>>(data.clone()) {
-                    // Old format: Vec<BenchmarkResult>
-                    for mut result in results {
-                        if result.id.is_empty() {
-                            result.id = uuid::Uuid::new_v4().to_string();
-                        }
-                        s.benchmark_store.results.push(result);
                     }
                 }
             }
@@ -1954,13 +1946,9 @@ fn run_cli_benchmark(project: &str, gpu_batch_iters_override: Option<u32>) {
     println!("\nJSON: {}", serde_json::to_string(&result).unwrap());
 }
 
-fn gpu_main_loop_headless(legacy_image: Option<&str>, gpu_batch_iters_override: Option<u32>) {
+fn gpu_main_loop_headless(gpu_batch_iters_override: Option<u32>) {
     projects::ensure_projects_dir();
-
-    // Legacy migration
-    // Auto-select: migration first, otherwise first existing project
-    let initial_project = projects::migrate_legacy(legacy_image)
-        .or_else(|| projects::list_projects().first().map(|p| p.name.clone()));
+    let initial_project = projects::list_projects().first().map(|p| p.name.clone());
 
     // Apply CLI overrides to default mutation params
     let mut initial_params = MutationParams::default();

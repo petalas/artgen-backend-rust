@@ -320,30 +320,6 @@ fn crossover_dirty_box(out_count: u32) -> vec4<u32> {
     return bb;
 }
 
-// --- Ordered deletion (remove) ---
-
-/// Delete slot `idx` of offspring `oid`'s `c` polygons by shifting slots
-/// idx+1..c-1 down one, so every other polygon keeps its relative order: the
-/// drawing changes only where the deleted polygon covered pixels. Serial on the
-/// leader lane, the only one that runs mutations: a cooperative shift over the
-/// workgroup's 64 lanes measured within noise (2-4%, one seed) with deletions
-/// at 5% of offspring, where throughput is set by the drawing's larger
-/// triangles, not by the shift (docs/quality-benchmark.md).
-///
-/// Change record: listing the deleted index suffices for every
-/// changed-index reader (changes.wgsl). A pixel that the deleted polygon cannot
-/// cover is covered by the same polygons in the same order before and after,
-/// although their indices shifted, so its colour is unchanged; the parent
-/// version of the listed index is the deleted polygon, so the readers' coverage
-/// test includes every pixel that changed. Deletion only shortens tile lists,
-/// so the listed index leaves room in the truncation guard.
-fn delete_slot_ordered(oid: u32, idx: u32, c: u32) {
-    for (var i = idx; i + 1u < c; i++) {
-        working_states[oid].polygons[i] = working_states[oid].polygons[i + 1u];
-    }
-    working_states[oid].polygon_count = c - 1u;
-}
-
 // --- Mutation: exactly one operator per offspring, picked by weighted roulette ---
 // `ms` multiplies offset, point-move, medium-move and micro vertex step sizes:
 // the offspring's step rung multiplier (op_scales_with_step).
@@ -356,7 +332,6 @@ fn mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<function, u32>
     let h = params.image_height;
 
     let w_add = params.add_polygon_prob;
-    let w_remove = params.remove_polygon_prob;
     let w_reorder = params.reorder_polygon_prob;
     let w_scale = params.scale_polygon_prob;
     let w_rotate = params.rotate_polygon_prob;
@@ -373,7 +348,7 @@ fn mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<function, u32>
     let w_brightness = params.adjust_brightness_prob * fc;
     let w_saturation = params.adjust_saturation_prob * fc;
 
-    let total = w_add + w_remove + w_reorder + w_scale + w_rotate + w_adjacent_swap + w_clone + w_swap_colors + w_offset + w_move_point + w_medium_move + w_micro_adjust + w_change_color + w_micro_color + w_brightness + w_saturation;
+    let total = w_add + w_reorder + w_scale + w_rotate + w_adjacent_swap + w_clone + w_swap_colors + w_offset + w_move_point + w_medium_move + w_micro_adjust + w_change_color + w_micro_color + w_brightness + w_saturation;
 
     let r = rand_f32(rng) * total;
     var cumulative = 0.0;
@@ -396,18 +371,6 @@ fn mutate_offspring(rng: ptr<function, u32>, oid: u32, count: ptr<function, u32>
         *changed = vec2<u32>(changed_indices(c, NO_CHANGED_INDEX), 0u);
         *op = OP_ADD;
         return polygon_bbox_pixels(new_poly, w, h);
-    }
-
-    // Remove polygon: ordered delete, so only the removed polygon's pixels change
-    cumulative += w_remove;
-    if r < cumulative && c > params.min_polygons {
-        let remove_idx = rand_u32(rng, c);
-        let dirty = polygon_bbox_pixels(working_states[oid].polygons[remove_idx], w, h);
-        delete_slot_ordered(oid, remove_idx, c);
-        *count = c - 1u;
-        *changed = vec2<u32>(changed_indices(remove_idx, NO_CHANGED_INDEX), 0u);
-        *op = OP_REMOVE;
-        return dirty;
     }
 
     // Reorder (swap two) — dirty region is union of both polygons' bboxes

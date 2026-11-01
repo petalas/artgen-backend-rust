@@ -279,17 +279,7 @@ fn validate_drawing(drawing: &Drawing) -> Result<()> {
         drawing.polygons.len() <= POLYGON_CAPACITY,
         "too many polygons"
     );
-    let mut triangles = 0;
     for polygon in &drawing.polygons {
-        ensure!(
-            (3..=POLYGON_CAPACITY + 2).contains(&polygon.points.len()),
-            "invalid polygon vertex count"
-        );
-        triangles += polygon.points.len() - 2;
-        ensure!(
-            triangles <= POLYGON_CAPACITY,
-            "packing would truncate triangles"
-        );
         for point in &polygon.points {
             if !point.x.is_finite()
                 || !point.y.is_finite()

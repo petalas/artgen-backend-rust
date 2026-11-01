@@ -10,7 +10,7 @@
 use crate::gpu_evolver::changes::CHANGED_INDICES;
 use crate::gpu_evolver::execution::{RASTER_WORK_HEADER_BYTES, TILE_OVERFLOW_ERROR};
 use crate::gpu_evolver::operators;
-use crate::settings::{PENALTY_REFERENCE_TRIANGLES, POLYGON_CAPACITY, TILE_MAX_POLYS};
+use crate::settings::{POLYGON_CAPACITY, TILE_MAX_POLYS};
 
 const COMMON: &str = include_str!("../../shaders/common.wgsl");
 const CHANGES: &str = include_str!("../../shaders/changes.wgsl");
@@ -138,7 +138,6 @@ fn generated_constants(tile: Option<[u32; 2]>) -> String {
          const TILE_MAX_POLYS: u32 = {TILE_MAX_POLYS}u; // settings::TILE_MAX_POLYS\n\
          const CHANGED_INDICES: u32 = {CHANGED_INDICES}u; // changes::CHANGED_INDICES\n\
          const TILE_OVERFLOW_ERROR: u32 = {TILE_OVERFLOW_ERROR}u; // execution::TILE_OVERFLOW_ERROR\n\
-         const PENALTY_REFERENCE_TRIANGLES: f32 = {PENALTY_REFERENCE_TRIANGLES}.0; // settings::PENALTY_REFERENCE_TRIANGLES\n\
          {}",
         operators::wgsl_constants()
     );
@@ -315,14 +314,12 @@ mod tests {
             &rust_layout!(GpuParams {
                 image_width, image_height, max_polygons, min_polygons,
                 chain_count_param, lambda, crossover_prob, tournament_size,
-                max_error_per_pixel, per_point_penalty, penalty_exponent, _pad0,
-                add_polygon_prob, remove_polygon_prob, reorder_polygon_prob, offset_polygon_prob,
-                move_point_prob, micro_adjust_prob, change_color_prob, adjust_brightness_prob,
-                adjust_saturation_prob, scale_polygon_prob, rotate_polygon_prob, adjacent_swap_prob,
-                _pad3, clone_polygon_prob, medium_move_prob, swap_colors_prob,
-                micro_color_prob, min_alpha_norm, max_alpha_norm, _pad4,
+                max_error_per_pixel, per_point_penalty, min_alpha_norm, max_alpha_norm,
+                add_polygon_prob, reorder_polygon_prob, offset_polygon_prob, move_point_prob,
+                micro_adjust_prob, change_color_prob, adjust_brightness_prob, adjust_saturation_prob,
+                scale_polygon_prob, rotate_polygon_prob, adjacent_swap_prob, clone_polygon_prob,
+                medium_move_prob, swap_colors_prob, micro_color_prob, new_point_max_distance,
                 offset_polygon_magnitude, move_point_max_delta, medium_move_delta, micro_adjust_delta,
-                new_point_max_distance, _pad1, _pad2,
                 step_multipliers, _reserved,
             }),
             same,

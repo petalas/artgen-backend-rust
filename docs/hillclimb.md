@@ -37,6 +37,16 @@ Each side is a git ref, `WORKTREE` (uncommitted tree, default candidate) or a
 prebuilt `evolution-bench` executable. Fixtures come from
 `scripts/evolution-bench.py freeze`.
 
+Every side must parse the manifest's `params` with its own `MutationParams`,
+which requires every field and rejects unknown ones. On 2026-11-01 the v1
+manifest's params were rewritten in place for the strict format: the removed
+keys (remove-polygon and remove-point weights, merge, spatial crossover, adaptive
+and single-mutation flags) were dropped and the keys earlier builds defaulted
+(`microColorProb` 0.002786, `perPointPenalty` 2e-7, `stepSpreadMin`/`Max` 1)
+were written out. Drawings and references are unchanged. Refs from before that
+change cannot read it, so hillclimb sides start at that commit; the v1 remove
+weight (0.000862) is gone, so rows from before it measured a different workload.
+
 ## Why it is fast
 
 Engine construction costs 11–15 s per process. `perf` attributes 83% of it to the

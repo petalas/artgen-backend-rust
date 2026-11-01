@@ -7,8 +7,7 @@ use crate::{
     engine::Rasterizer,
     settings::{
         ADD_POLYGON_PROB, ADJACENT_SWAP_PROB, CLONE_POLYGON_PROB, DEFAULT_MAX_POLYGONS,
-        MIN_POLYGONS_PER_IMAGE, NEW_POINT_MAX_DISTANCE, REMOVE_POLYGON_PROB,
-        REORDER_POLYGON_PROB, START_WITH_POLYGONS_PER_IMAGE, SWAP_COLORS_PROB,
+        NEW_POINT_MAX_DISTANCE, REORDER_POLYGON_PROB, START_WITH_POLYGONS_PER_IMAGE, SWAP_COLORS_PROB,
     },
     utils::{fill_shape, fill_triangle, randomf32, randomf32_clamped},
 };
@@ -29,7 +28,7 @@ impl Drawing {
         buffer.fill(255u8);
 
         for polygon in &self.polygons {
-            if rm == Rasterizer::Scanline || polygon.points.len() > 3 {
+            if rm == Rasterizer::Scanline {
                 fill_shape(buffer, polygon, w, h);
             } else {
                 let _ = fill_triangle(buffer, polygon, w, h);
@@ -70,10 +69,6 @@ impl Drawing {
             self.is_dirty = true;
         }
 
-        if randomf32() < REMOVE_POLYGON_PROB && self.remove_polygon() {
-            self.is_dirty = true;
-        }
-
         if randomf32() < REORDER_POLYGON_PROB && self.reorder_polygons() {
             self.is_dirty = true;
         }
@@ -108,18 +103,6 @@ impl Drawing {
         let polygon = Polygon::new_random();
         let index = rand::rng().random_range(0..self.polygons.len() - 1);
         self.polygons.insert(index, polygon);
-        true
-    }
-
-    pub fn remove_polygon(&mut self) -> bool {
-        if self.polygons.is_empty() {
-            return false;
-        }
-        if self.polygons.len() <= MIN_POLYGONS_PER_IMAGE {
-            return false;
-        }
-        let index = rand::rng().random_range(0..self.polygons.len() - 1);
-        self.polygons.remove(index);
         true
     }
 

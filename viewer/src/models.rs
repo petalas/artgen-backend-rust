@@ -10,7 +10,7 @@ pub struct Drawing {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Polygon {
-    pub points: Vec<Point>,
+    pub points: [Point; 3],
     pub color: Color,
 }
 

@@ -2,54 +2,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::settings;
 
-fn default_rasterize_wg() -> [u32; 2] {
-    [settings::RASTERIZE_WG_X_DEFAULT, settings::RASTERIZE_WG_Y_DEFAULT]
-}
-
-fn default_gpu_batch_iters() -> u32 {
-    settings::GPU_DEFAULT_BATCH_ITERS
-}
-
-fn default_scale_polygon_prob() -> f32 { settings::SCALE_POLYGON_PROB }
-fn default_rotate_polygon_prob() -> f32 { settings::ROTATE_POLYGON_PROB }
-fn default_adjacent_swap_prob() -> f32 { settings::ADJACENT_SWAP_PROB }
-fn default_clone_polygon_prob() -> f32 { settings::CLONE_POLYGON_PROB }
-fn default_medium_move_prob() -> f32 { settings::MEDIUM_MOVE_PROBABILITY }
-fn default_swap_colors_prob() -> f32 { settings::SWAP_COLORS_PROB }
-fn default_medium_move_delta() -> f32 { settings::MEDIUM_MOVE_DELTA }
-fn default_per_point_penalty() -> f32 { settings::PER_POINT_PENALTY }
-fn no_step_spread() -> f32 { settings::STEP_SPREAD_NONE }
-fn legacy_micro_color_prob() -> f32 { settings::LEGACY_MICRO_COLOR_PROBABILITY }
-// Records and frozen fixtures from before the field omit it; leaving the default
-// out keeps their exact parameter maps (effective-parameter gates compare them).
-#[allow(clippy::trivially_copy_pass_by_ref)] // skip_serializing_if passes a reference
-fn is_default_per_point_penalty(value: &f32) -> bool {
-    value.to_bits() == settings::PER_POINT_PENALTY.to_bits()
-}
-// Omitted at the flat penalty (absent means flat), for the same reason as
-// `per_point_penalty`.
-#[allow(clippy::trivially_copy_pass_by_ref)] // skip_serializing_if passes a reference
-fn is_flat_penalty(value: &f32) -> bool {
-    value.to_bits() == settings::PENALTY_EXPONENT.to_bits()
-}
-// Omitted at no spread (absent means no spread), for the same reason as
-// `per_point_penalty`.
-#[allow(clippy::trivially_copy_pass_by_ref)] // skip_serializing_if passes a reference
-fn is_no_step_spread(value: &f32) -> bool {
-    value.to_bits() == settings::STEP_SPREAD_NONE.to_bits()
-}
-// Omitted at the legacy weight (absent means it), for the same reason as
-// `per_point_penalty`.
-#[allow(clippy::trivially_copy_pass_by_ref)] // skip_serializing_if passes a reference
-fn is_legacy_micro_color_prob(value: &f32) -> bool {
-    value.to_bits() == settings::LEGACY_MICRO_COLOR_PROBABILITY.to_bits()
-}
-
 /// A step-spread end as `sanitize` keeps it: within
-/// [1 / STEP_SPREAD_LIMIT, STEP_SPREAD_LIMIT]; NaN becomes the default (no spread).
+/// [1 / STEP_SPREAD_LIMIT, STEP_SPREAD_LIMIT]; NaN becomes 1 (no spread).
 fn clamp_step_spread(value: f32) -> f32 {
     if value.is_nan() {
-        settings::STEP_SPREAD_NONE
+        1.0
     } else {
         value.clamp(1.0 / settings::STEP_SPREAD_LIMIT, settings::STEP_SPREAD_LIMIT)
     }
@@ -57,38 +14,27 @@ fn clamp_step_spread(value: f32) -> f32 {
 
 /// Runtime-configurable mutation parameters.
 /// Sent over WebSocket as JSON (camelCase) and used to build `GpuParams`.
-/// Unknown keys are ignored, so settings saved with removed fields (the merge
-/// and absorb weights, the merge thresholds) still load.
+/// Every field is required and unknown keys are rejected.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MutationParams {
     // Probabilities (0.0–1.0)
     pub add_polygon_prob: f32,
-    pub remove_polygon_prob: f32,
     pub reorder_polygon_prob: f32,
     pub offset_polygon_prob: f32,
     pub move_point_prob: f32,
-    pub remove_point_prob: f32,
     pub micro_adjust_prob: f32,
     pub change_color_prob: f32,
     pub adjust_brightness_prob: f32,
     pub adjust_saturation_prob: f32,
-    #[serde(default = "default_scale_polygon_prob")]
     pub scale_polygon_prob: f32,
-    #[serde(default = "default_rotate_polygon_prob")]
     pub rotate_polygon_prob: f32,
-    #[serde(default = "default_adjacent_swap_prob")]
     pub adjacent_swap_prob: f32,
-    #[serde(default = "default_clone_polygon_prob")]
     pub clone_polygon_prob: f32,
-    #[serde(default = "default_medium_move_prob")]
     pub medium_move_prob: f32,
-    #[serde(default = "default_swap_colors_prob")]
     pub swap_colors_prob: f32,
     /// Weight of micro_adjust's color branch (micro_adjust_prob weighs its
-    /// vertex branch). Missing in settings saved before the split, it reads as
-    /// the default it then shared with micro_adjust_prob.
-    #[serde(default = "legacy_micro_color_prob", skip_serializing_if = "is_legacy_micro_color_prob")]
+    /// vertex branch).
     pub micro_color_prob: f32,
 
     // Deltas / magnitudes
@@ -96,7 +42,6 @@ pub struct MutationParams {
     pub micro_adjust_delta: f32,
     pub new_point_max_distance: f32,
     pub offset_polygon_magnitude: f32,
-    #[serde(default = "default_medium_move_delta")]
     pub medium_move_delta: f32,
 
     // Alpha range
@@ -109,16 +54,7 @@ pub struct MutationParams {
     pub max_polygons: u32,
 
     // Fitness is multiplied by `1 - per_point_penalty * points` (3 per triangle).
-    #[serde(
-        default = "default_per_point_penalty",
-        skip_serializing_if = "is_default_per_point_penalty"
-    )]
     pub per_point_penalty: f32,
-    // Scales the cost of the next triangle by `(n / N0)^penalty_exponent`,
-    // N0 = `settings::PENALTY_REFERENCE_TRIANGLES`; 0 is the flat penalty.
-    // See `PointPenalty`.
-    #[serde(default, skip_serializing_if = "is_flat_penalty")]
-    pub penalty_exponent: f32,
 
     // Crossover parameters
     pub crossover_prob: f32,
@@ -133,21 +69,16 @@ pub struct MutationParams {
     // Step spread: offspring with local index i multiply their offset, point-move
     // and micro vertex step sizes by rung i % STEP_RUNGS of a log-spaced ladder
     // from min to max (see `step_multipliers`). Both 1: no spread.
-    #[serde(default = "no_step_spread", skip_serializing_if = "is_no_step_spread")]
     pub step_spread_min: f32,
-    #[serde(default = "no_step_spread", skip_serializing_if = "is_no_step_spread")]
     pub step_spread_max: f32,
 
     // Rasterize workgroup size: [wg_x, wg_y] (e.g. [16,16], [16,8], [8,8])
     // Affects SM occupancy vs shared memory tradeoff. Default: [16,16] = 256 threads.
-    #[serde(default = "default_rasterize_wg")]
     pub rasterize_wg: [u32; 2],
 
     // GPU batch iterations: number of mutate->rasterize->select cycles per GPU submission.
     // Higher values reduce CPU<->GPU round-trip overhead but delay readback/progress reporting.
-    #[serde(default = "default_gpu_batch_iters")]
     pub gpu_batch_iters: u32,
-
 }
 
 impl MutationParams {
@@ -169,24 +100,15 @@ impl MutationParams {
             self.per_point_penalty.clamp(0.0, settings::MAX_PER_POINT_PENALTY)
         };
 
-        // Penalty exponent: [0, MAX_PENALTY_EXPONENT]; NaN becomes the flat penalty
-        self.penalty_exponent = if self.penalty_exponent.is_nan() {
-            settings::PENALTY_EXPONENT
-        } else {
-            self.penalty_exponent.clamp(0.0, settings::MAX_PENALTY_EXPONENT)
-        };
-
         // Step spread: each end within [1/16, 16], NaN to 1; min <= max
         self.step_spread_max = clamp_step_spread(self.step_spread_max);
         self.step_spread_min = clamp_step_spread(self.step_spread_min).min(self.step_spread_max);
 
         // Probabilities: clamp to [0, 1]
         self.add_polygon_prob = self.add_polygon_prob.clamp(0.0, 1.0);
-        self.remove_polygon_prob = self.remove_polygon_prob.clamp(0.0, 1.0);
         self.reorder_polygon_prob = self.reorder_polygon_prob.clamp(0.0, 1.0);
         self.offset_polygon_prob = self.offset_polygon_prob.clamp(0.0, 1.0);
         self.move_point_prob = self.move_point_prob.clamp(0.0, 1.0);
-        self.remove_point_prob = self.remove_point_prob.clamp(0.0, 1.0);
         self.micro_adjust_prob = self.micro_adjust_prob.clamp(0.0, 1.0);
         self.change_color_prob = self.change_color_prob.clamp(0.0, 1.0);
         self.adjust_brightness_prob = self.adjust_brightness_prob.clamp(0.0, 1.0);
@@ -232,7 +154,7 @@ impl MutationParams {
     /// The fitness penalty these parameters configure.
     #[must_use]
     pub fn point_penalty(&self) -> PointPenalty {
-        PointPenalty { per_point: self.per_point_penalty, exponent: self.penalty_exponent }
+        PointPenalty { per_point: self.per_point_penalty }
     }
 
     /// Step-size multiplier of each rung: rung `k` is
@@ -258,11 +180,9 @@ impl Default for MutationParams {
     fn default() -> Self {
         Self {
             add_polygon_prob: settings::ADD_POLYGON_PROB,
-            remove_polygon_prob: settings::REMOVE_POLYGON_PROB,
             reorder_polygon_prob: settings::REORDER_POLYGON_PROB,
             offset_polygon_prob: settings::OFFSET_POLYGON_PROBABILITY,
             move_point_prob: settings::MOVE_POINT_PROBABILITY,
-            remove_point_prob: settings::REMOVE_POINT_PROBABILITY,
             micro_adjust_prob: settings::MICRO_ADJUSTMENT_PROBABILITY,
             change_color_prob: settings::CHANGE_COLOR_PROB,
             adjust_brightness_prob: settings::ADJUST_BRIGHTNESS_PROB,
@@ -284,7 +204,6 @@ impl Default for MutationParams {
             min_polygons: settings::MIN_POLYGONS_PER_IMAGE as u32,
             max_polygons: settings::DEFAULT_MAX_POLYGONS,
             per_point_penalty: settings::PER_POINT_PENALTY,
-            penalty_exponent: settings::PENALTY_EXPONENT,
             crossover_prob: settings::CROSSOVER_PROB,
             tournament_size: settings::TOURNAMENT_SIZE,
             chain_count: settings::GPU_DEFAULT_CHAIN_COUNT,
@@ -298,52 +217,27 @@ impl Default for MutationParams {
 }
 
 /// The complexity penalty on fitness: the CPU mirror of select.wgsl's
-/// `penalty_fraction` and `compute_fitness`. With `n` triangles and exponent
-/// `k`, fitness is multiplied by `1 - P(n)`, where
-/// `P(n) = 3 p N0 / (k + 1) * (n / N0)^(k + 1)` and N0 is
-/// `settings::PENALTY_REFERENCE_TRIANGLES`: the next triangle costs
-/// `3 p (n / N0)^k`. At `k == 0` this is the flat `P(n) = p * 3n`, computed in
-/// the shader's historical operation order so scores keep every bit.
+/// `penalized_error` and `compute_fitness`. With `n` triangles fitness is
+/// multiplied by `1 - P(n)`, `P(n) = p * 3n`, computed in the shader's f32
+/// operation order so scores keep every bit.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PointPenalty {
     /// `MutationParams::per_point_penalty`, `p`.
     pub per_point: f32,
-    /// `MutationParams::penalty_exponent`, `k`.
-    pub exponent: f32,
 }
 
 impl PointPenalty {
     /// `fitness` penalized for `triangles`, in select.wgsl's f32 operation order.
     #[must_use]
     pub fn apply(self, fitness: f32, triangles: u32) -> f32 {
-        let mut fitness = fitness;
-        if self.exponent == 0.0 {
-            let num_points = triangles * 3;
-            fitness -= fitness * self.per_point * num_points as f32;
-        } else {
-            fitness -= fitness * self.scaled_fraction(triangles);
-        }
-        fitness
+        let num_points = triangles * 3;
+        fitness - fitness * self.per_point * num_points as f32
     }
 
     /// `P(n)`, the fraction of the fitness `triangles` remove; dividing a
     /// penalized fitness by `1 - P(n)` recovers the error-only fitness.
     #[must_use]
     pub fn fraction(self, triangles: u32) -> f64 {
-        if self.exponent == 0.0 {
-            f64::from(self.per_point) * f64::from(triangles * 3)
-        } else {
-            f64::from(self.scaled_fraction(triangles))
-        }
-    }
-
-    /// `P(n)` for `k > 0`, as select.wgsl's `penalty_fraction` computes it.
-    fn scaled_fraction(self, triangles: u32) -> f32 {
-        if triangles == 0 {
-            return 0.0;
-        }
-        let reference = settings::PENALTY_REFERENCE_TRIANGLES as f32;
-        let power = self.exponent + 1.0;
-        3.0 * self.per_point * reference / power * (triangles as f32 / reference).powf(power)
+        f64::from(self.per_point) * f64::from(triangles * 3)
     }
 }

@@ -70,34 +70,15 @@ fn count_winner(block: u32, word: u32, gain: i32) {
     }
 }
 
-// Fraction of the fitness that n triangles remove at penalty exponent k > 0:
-// P(n) = 3 p N0 / (k + 1) * (n / N0)^(k + 1), N0 = PENALTY_REFERENCE_TRIANGLES,
-// so the next triangle costs 3 p (n / N0)^k. PointPenalty mirrors it on the CPU
-// in this operation order. k == 0 (the flat P(n) = 3 p n) never calls this:
-// its callers keep their historical arithmetic so scores keep every bit.
-fn penalty_fraction(polygons: u32) -> f32 {
-    if polygons == 0u {
-        return 0.0;
-    }
-    let power = params.penalty_exponent + 1.0;
-    return 3.0 * params.per_point_penalty * PENALTY_REFERENCE_TRIANGLES / power
-        * pow(f32(polygons) / PENALTY_REFERENCE_TRIANGLES, power);
-}
-
 // The error with the point penalty added, in whole error units, which every
 // selection decision compares. fitness = 100 (M - E) / M * (1 - P(n)), M =
 // max_total_error, equals 100 (1 - (E + (M - E) P(n)) / M), so ordering by
 // E + round((M - E) P(n)) orders by fitness, exactly where the f32 fitness
 // (one ulp is about 9 error units near 99%) rounds differences away. Below
-// 2^32 because P(n) < 1 and M fits u32. At k == 0, P(n) = 3 p n.
+// 2^32 because P(n) = 3 p n < 1 and M fits u32.
 fn penalized_error(error: u32, polygons: u32) -> u32 {
     let max_total_error = params.max_error_per_pixel * f32(params.image_width * params.image_height);
-    var fraction: f32;
-    if params.penalty_exponent == 0.0 {
-        fraction = 3.0 * params.per_point_penalty * f32(polygons);
-    } else {
-        fraction = penalty_fraction(polygons);
-    }
+    let fraction = 3.0 * params.per_point_penalty * f32(polygons);
     return error + u32(round((max_total_error - f32(error)) * fraction));
 }
 
@@ -124,12 +105,8 @@ fn compute_fitness(total_error: u32, polygon_count: u32) -> f32 {
     let h = params.image_height;
     let max_total_error = params.max_error_per_pixel * f32(w * h);
     var fitness = 100.0 * (1.0 - f32(total_error) / max_total_error);
-    if params.penalty_exponent == 0.0 {
-        let num_points = polygon_count * 3u;
-        fitness -= fitness * params.per_point_penalty * f32(num_points);
-    } else {
-        fitness -= fitness * penalty_fraction(polygon_count);
-    }
+    let num_points = polygon_count * 3u;
+    fitness -= fitness * params.per_point_penalty * f32(num_points);
     return fitness;
 }
 

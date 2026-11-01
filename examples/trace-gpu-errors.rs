@@ -378,8 +378,7 @@ fn matching_candidates(
     let mut matches = Vec::with_capacity(lambda);
     for id in chain * lambda..(chain + 1) * lambda {
         let candidate = &state.offspring[id];
-        let (culled, removed) = selection_cull(candidate, input.manifest.params.min_polygons);
-        if candidate.polygons != parent.polygons && culled != parent.polygons {
+        if candidate.polygons != parent.polygons {
             continue;
         }
         let scalar = reference::evaluate(
@@ -390,9 +389,7 @@ fn matching_candidates(
             input.manifest.params.point_penalty(),
         )?;
         matches.push(json!({
-            "offspring_id": id, "exact_polygon_match": candidate.polygons == parent.polygons,
-            "selection_cull_polygon_match": culled == parent.polygons,
-            "candidate": candidate, "removed": removed,
+            "offspring_id": id, "candidate": candidate,
             "candidate_scalar_error": scalar.raw_error,
             "candidate_scalar_framebuffer_differing_pixels": pixel_differences(&scalar.pixels, &state.parent_framebuffers[chain]),
             "candidate_region_errors": region_errors(candidate, &before.parent_framebuffers[chain], &scalar.pixels, input)?,
@@ -447,36 +444,6 @@ fn region_errors(
     }
     Ok(json!({"bbox": bbox, "intersecting_tiles_bbox": tiles,
         "per_pixel_bbox_old_new_error": pixel_errors, "whole_tiles_old_new_error": tile_errors}))
-}
-
-fn selection_cull(
-    candidate: &BenchmarkPackedState,
-    min_polygons: u32,
-) -> (Vec<[u32; 4]>, Vec<Value>) {
-    let mut polygons = candidate.polygons.clone();
-    let mut removed = Vec::with_capacity(polygons.len());
-    let mut write = 0;
-    for (index, polygon) in candidate.polygons.iter().enumerate() {
-        let vertices = [polygon[1], polygon[2], polygon[3]].map(|word| {
-            [
-                (word & 65535) as f32 / 65535.0,
-                (word >> 16) as f32 / 65535.0,
-            ]
-        });
-        let [a, b, c] = vertices;
-        let cross = ((b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1])).abs();
-        if cross > 0.00001 {
-            polygons[write] = *polygon;
-            write += 1;
-        } else {
-            removed
-                .push(json!({"index": index, "packed": polygon, "twice_normalized_area": cross}));
-        }
-    }
-    if write < polygons.len() && write >= min_polygons as usize {
-        polygons.truncate(write);
-    }
-    (polygons, removed)
 }
 
 fn pixel_differences(a: &[u32], b: &[u32]) -> Value {

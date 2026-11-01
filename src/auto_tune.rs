@@ -589,11 +589,9 @@ fn denormalize(v: f32, kind: &ParamKind) -> f32 {
 fn get_param_by_name(params: &MutationParams, name: &str) -> f32 {
     match name {
         "add_polygon_prob" => params.add_polygon_prob,
-        "remove_polygon_prob" => params.remove_polygon_prob,
         "reorder_polygon_prob" => params.reorder_polygon_prob,
         "offset_polygon_prob" => params.offset_polygon_prob,
         "move_point_prob" => params.move_point_prob,
-        "remove_point_prob" => params.remove_point_prob,
         "micro_adjust_prob" => params.micro_adjust_prob,
         "change_color_prob" => params.change_color_prob,
         "adjust_brightness_prob" => params.adjust_brightness_prob,
@@ -620,11 +618,9 @@ fn get_param_by_name(params: &MutationParams, name: &str) -> f32 {
 fn set_param_by_name(params: &mut MutationParams, name: &str, value: f32) {
     match name {
         "add_polygon_prob" => params.add_polygon_prob = value,
-        "remove_polygon_prob" => params.remove_polygon_prob = value,
         "reorder_polygon_prob" => params.reorder_polygon_prob = value,
         "offset_polygon_prob" => params.offset_polygon_prob = value,
         "move_point_prob" => params.move_point_prob = value,
-        "remove_point_prob" => params.remove_point_prob = value,
         "micro_adjust_prob" => params.micro_adjust_prob = value,
         "change_color_prob" => params.change_color_prob = value,
         "adjust_brightness_prob" => params.adjust_brightness_prob = value,
@@ -652,11 +648,9 @@ pub fn default_param_specs() -> Vec<ParamSpec> {
     vec![
         // Probabilities (LogScale)
         ParamSpec { name: "add_polygon_prob".into(), kind: ParamKind::LogScale { min: 1e-4, max: 0.5 }, enabled: true },
-        ParamSpec { name: "remove_polygon_prob".into(), kind: ParamKind::LogScale { min: 1e-4, max: 0.1 }, enabled: true },
         ParamSpec { name: "reorder_polygon_prob".into(), kind: ParamKind::LogScale { min: 1e-4, max: 0.1 }, enabled: true },
         ParamSpec { name: "offset_polygon_prob".into(), kind: ParamKind::LogScale { min: 1e-4, max: 0.1 }, enabled: true },
         ParamSpec { name: "move_point_prob".into(), kind: ParamKind::LogScale { min: 1e-4, max: 0.5 }, enabled: true },
-        ParamSpec { name: "remove_point_prob".into(), kind: ParamKind::LogScale { min: 1e-4, max: 0.1 }, enabled: true },
         ParamSpec { name: "micro_adjust_prob".into(), kind: ParamKind::LogScale { min: 1e-4, max: 0.5 }, enabled: true },
         ParamSpec { name: "change_color_prob".into(), kind: ParamKind::LogScale { min: 1e-4, max: 0.1 }, enabled: true },
         ParamSpec { name: "adjust_brightness_prob".into(), kind: ParamKind::LogScale { min: 1e-4, max: 0.1 }, enabled: true },

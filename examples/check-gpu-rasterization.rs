@@ -17,12 +17,12 @@ use artgen_backend_rust::{
 
 fn layered_drawing() -> Drawing {
     let triangles = [
-        vec![
+        [
             Point { x: 0.0, y: 0.0 },
             Point { x: 1.0, y: 0.0 },
             Point { x: 0.0, y: 1.0 },
         ],
-        vec![
+        [
             Point { x: 1.0, y: 0.0 },
             Point { x: 1.0, y: 1.0 },
             Point { x: 0.0, y: 1.0 },
@@ -31,7 +31,7 @@ fn layered_drawing() -> Drawing {
     Drawing {
         polygons: (0..194)
             .map(|i| Polygon {
-                points: triangles[i % 2].clone(),
+                points: triangles[i % 2],
                 color: Color {
                     r: if i >= 192 { 255 } else { 0 },
                     g: 0,
@@ -46,13 +46,10 @@ fn layered_drawing() -> Drawing {
 }
 
 fn main() {
-    let flat = PointPenalty { per_point: PER_POINT_PENALTY, exponent: 0.0 };
-    verify_visible_layer_acceptance(flat);
+    verify_visible_layer_acceptance(PointPenalty { per_point: PER_POINT_PENALTY });
     // The penalty is a parameter: the host's full evaluation and select's
-    // compute_fitness must both apply it, flat or scaled by the triangle count.
-    let strong = PointPenalty { per_point: 16.0 * PER_POINT_PENALTY, ..flat };
-    verify_visible_layer_acceptance(strong);
-    verify_visible_layer_acceptance(PointPenalty { exponent: 1.5, ..strong });
+    // compute_fitness must both apply it.
+    verify_visible_layer_acceptance(PointPenalty { per_point: 16.0 * PER_POINT_PENALTY });
     // Odd dimensions exercise threads outside the image. At 8x8, the drawing
     // crosses the old 192-entry chunk boundary but stays below the tile-bin
     // limit of 256, so late layers exercise the complete loaded prefix.
@@ -83,14 +80,10 @@ fn main() {
     verify_mixed_reference(&empty);
     verify_full_recompute_after_evolution();
     // The default search cap, then the storage capacity above it.
-    verify_shortcuts_near_polygon_capacity(1000, 0.0);
-    verify_shortcuts_near_polygon_capacity(u32::try_from(POLYGON_CAPACITY).unwrap(), 0.0);
-    // A scaled penalty at a triangle count where it is no longer negligible:
-    // select's and the host's scores must follow the CPU mirror.
-    verify_shortcuts_near_polygon_capacity(u32::try_from(POLYGON_CAPACITY).unwrap(), 1.5);
+    verify_shortcuts_near_polygon_capacity(1000);
+    verify_shortcuts_near_polygon_capacity(u32::try_from(POLYGON_CAPACITY).unwrap());
     verify_tile_list_overflow();
     verify_operator_stats();
-    verify_ordered_remove();
     verify_tile_groups();
     println!("GPU rasterization checks passed");
 }
@@ -103,11 +96,9 @@ fn two_chains() -> MutationParams {
 fn no_op_params() -> MutationParams {
     MutationParams {
         add_polygon_prob: 0.0,
-        remove_polygon_prob: 0.0,
         reorder_polygon_prob: 0.0,
         offset_polygon_prob: 0.0,
         move_point_prob: 0.0,
-        remove_point_prob: 0.0,
         micro_adjust_prob: 0.0,
         micro_color_prob: 0.0,
         change_color_prob: 0.0,
@@ -141,7 +132,7 @@ fn visible_small_layer() -> Drawing {
         a: 255,
     };
     drawing.polygons.push(Polygon {
-        points: vec![
+        points: [
             Point { x: 0.499, y: 0.499 },
             Point { x: 0.501, y: 0.499 },
             Point { x: 0.5, y: 0.501 },
@@ -165,7 +156,6 @@ fn verify_visible_layer_acceptance(penalty: PointPenalty) {
     let drawing = visible_small_layer();
     let params = MutationParams {
         per_point_penalty: penalty.per_point,
-        penalty_exponent: penalty.exponent,
         ..no_op_params()
     };
     let mut evolver = futures_lite::future::block_on(GpuEvolver::new(
@@ -242,7 +232,7 @@ fn assert_no_op_state(initial: &BenchmarkSnapshot, actual: &BenchmarkSnapshot) {
 fn colored_triangle(alpha: u8) -> Drawing {
     Drawing {
         polygons: vec![Polygon {
-            points: vec![
+            points: [
                 Point { x: 0.0, y: 0.0 },
                 Point { x: 1.0, y: 0.0 },
                 Point { x: 0.0, y: 1.0 },
@@ -417,7 +407,7 @@ fn scattered_triangles(count: usize) -> Drawing {
                 let (x, y) = ((i % side) as f32 * cell, (i / side) as f32 * cell);
                 let shade = (i * 37 % 256) as u8;
                 Polygon {
-                    points: vec![
+                    points: [
                         Point { x, y },
                         Point { x: x + cell, y },
                         Point { x, y: y + cell },
@@ -487,7 +477,7 @@ fn verify_full_recompute_after_evolution() {
     }
 }
 
-fn verify_shortcuts_near_polygon_capacity(max_polygons: u32, penalty_exponent: f32) {
+fn verify_shortcuts_near_polygon_capacity(max_polygons: u32) {
     // Parents one polygon below the cap: select's chain change record no longer
     // lives in polygon slots 996..999, so the framebuffer update keeps its
     // unchanged-pixel shortcut at capacity. Accepted winners must leave cached
@@ -507,7 +497,6 @@ fn verify_shortcuts_near_polygon_capacity(max_polygons: u32, penalty_exponent: f
         chain_count: CHAINS,
         gpu_batch_iters: 16,
         max_polygons,
-        penalty_exponent,
         ..Default::default()
     };
     let penalty = params.point_penalty();
@@ -552,7 +541,7 @@ fn verify_shortcuts_near_polygon_capacity(max_polygons: u32, penalty_exponent: f
         "incremental and full totals near capacity (counts {counts:?})"
     );
     println!(
-        "near-capacity shortcut check (penalty exponent {penalty_exponent}): counts {counts:?}, totals {:?}",
+        "near-capacity shortcut check: counts {counts:?}, totals {:?}",
         full.parent_total_errors
     );
 }
@@ -560,7 +549,7 @@ fn verify_shortcuts_near_polygon_capacity(max_polygons: u32, penalty_exponent: f
 /// A triangle covering normalized x in [x0, x1] over the full image height.
 fn column_triangle(x0: f32, x1: f32, color: Color) -> Polygon {
     Polygon {
-        points: vec![
+        points: [
             Point { x: x0, y: 0.0 },
             Point { x: x1, y: 0.0 },
             Point { x: x0, y: 1.0 },
@@ -716,16 +705,12 @@ fn verify_operator_stats() {
     let summary = format!("{} improved (gain {gain} units, fitness {fitness_gain:.1}), {neutral} neutral of {} offered",
         improved, stats.offered.iter().sum::<u64>());
 
-    // A scaled penalty: the penalized error's penalty change follows P(n).
-    let scaled = MutationParams {
-        per_point_penalty: MAX_PER_POINT_PENALTY,
-        penalty_exponent: 1.5,
-        ..params.clone()
-    };
-    let (scaled_improved, _, scaled_gain, scaled_fitness) =
-        assert_gain_follows_fitness(&mut evolver, &drawing, &scaled, [SIDE, CHAINS, LAMBDA]);
-    assert!(scaled_improved > 0, "no chain improved under the scaled penalty");
-    let summary = format!("{summary}; scaled penalty {scaled_improved} improved (gain {scaled_gain} units, fitness {scaled_fitness:.1})");
+    // The strongest penalty: the penalized error's penalty change follows P(n).
+    let strong = MutationParams { per_point_penalty: MAX_PER_POINT_PENALTY, ..params.clone() };
+    let (strong_improved, _, strong_gain, strong_fitness) =
+        assert_gain_follows_fitness(&mut evolver, &drawing, &strong, [SIDE, CHAINS, LAMBDA]);
+    assert!(strong_improved > 0, "no chain improved under the strongest penalty");
+    let summary = format!("{summary}; strongest penalty {strong_improved} improved (gain {strong_gain} units, fitness {strong_fitness:.1})");
 
     // A step spread: the rungs still count exactly the step-scaled operators,
     // and λ 64 gives every rung its share of their offspring.
@@ -763,13 +748,13 @@ fn verify_operator_stats() {
     assert_eq!(stats.offered[Operator::Add as usize], 4 * 4 * u64::from(CHAINS * LAMBDA));
     assert_eq!(stats.offered.iter().sum::<u64>(), stats.offered[Operator::Add as usize]);
 
-    // An empty parent whose only operator (removal) cannot run is evaluated
+    // An empty parent whose only operator (reorder) cannot run is evaluated
     // unchanged; select accepts such equal-fitness copies only as neutral.
     let empty = Drawing { polygons: vec![], is_dirty: false, fitness: 0.0 };
-    let removals = MutationParams { add_polygon_prob: 0.0, remove_polygon_prob: 1.0, ..adds };
-    evolver.prepare_seeded_benchmark(&empty, &removals, 19, 0, true).expect("removals");
+    let reorders = MutationParams { add_polygon_prob: 0.0, reorder_polygon_prob: 1.0, ..adds };
+    evolver.prepare_seeded_benchmark(&empty, &reorders, 19, 0, true).expect("reorders");
     for _ in 0..4 {
-        evolver.run_batch(&removals, true);
+        evolver.run_batch(&reorders, true);
     }
     evolver.benchmark_drain().expect("drain");
     let stats = evolver.operator_stats();
@@ -851,7 +836,7 @@ fn assert_rungs_cover_the_scaled_operators(stats: &OperatorStats, context: &str)
 }
 
 /// Overlapping triangles of varied size, colour and alpha from a fixed LCG, so
-/// deleting one changes the blend of the ones above and below it.
+/// changing one changes the blend of the ones above and below it.
 fn overlapping_triangles(count: usize) -> Drawing {
     let mut state = 0x2545_f491_u32;
     let mut next = move || {
@@ -866,7 +851,7 @@ fn overlapping_triangles(count: usize) -> Drawing {
                     x: (cx + size * (next() - 0.5)).clamp(0.0, 1.0),
                     y: (cy + size * (next() - 0.5)).clamp(0.0, 1.0),
                 };
-                let points = vec![vertex(), vertex(), vertex()];
+                let points = [vertex(), vertex(), vertex()];
                 let mut channel = || (next() * 255.0) as u8;
                 let color = Color { r: channel(), g: channel(), b: channel(), a: 40 + channel() / 2 };
                 Polygon { points, color }
@@ -875,94 +860,6 @@ fn overlapping_triangles(count: usize) -> Drawing {
         is_dirty: false,
         fitness: 0.0,
     }
-}
-
-/// Remove deletes a slot in order, shifting the slots above it, and records
-/// the deleted index rather than the shift. With only remove and a strong
-/// point penalty (so deletions win), every cached framebuffer, cached total
-/// and fitness must equal the scalar renderer's for the accepted drawing after
-/// every batch, and the operator stats must count remove's offspring and
-/// improvements.
-fn verify_ordered_remove() {
-    const SIDE: u32 = 96;
-    const CHAINS: u32 = 4;
-    const LAMBDA: u32 = 64;
-    const BATCHES: usize = 24;
-    let reference: Vec<u8> = (0..SIDE * SIDE)
-        .flat_map(|i| {
-            let (x, y) = (i % SIDE, i / SIDE);
-            let band = if (x / 12 + y / 12) % 2 == 0 { 40 } else { 200 };
-            [(x * 255 / SIDE) as u8, band, (y * 255 / SIDE) as u8, 255]
-        })
-        .collect();
-    let drawing = overlapping_triangles(300);
-    let params = MutationParams {
-        remove_polygon_prob: 1.0,
-        per_point_penalty: MAX_PER_POINT_PENALTY,
-        min_alpha: 30,
-        max_alpha: 220,
-        min_polygons: 1,
-        max_polygons: 1000,
-        chain_count: CHAINS,
-        lambda: LAMBDA,
-        gpu_batch_iters: 4,
-        ..no_op_params()
-    };
-    let penalty = params.point_penalty();
-    let workload = [CHAINS, LAMBDA];
-    let mut evolver = futures_lite::future::block_on(GpuEvolver::new(
-        &reference,
-        SIDE,
-        SIDE,
-        &drawing,
-        EngineCapacity::for_params(&params),
-    ));
-    evolver
-        .prepare_seeded_benchmark(&drawing, &params, 29, 0, true)
-        .expect("deletion preparation failed");
-    let start = assert_chains_cached_byte_l1(&mut evolver, &reference, workload, penalty, "deletion start");
-    assert_parents_match_scalar(&start, &reference, SIDE, penalty, "deletion start");
-    let start_counts: Vec<u32> = start.parents.iter().map(|p| p.polygon_count).collect();
-    // Every CHECKPOINT batches (32 iterations of incremental updates), the
-    // cached framebuffers and totals must equal a full GPU re-render exactly.
-    const CHECKPOINT: usize = 8;
-    let mut counts = start_counts.clone();
-    for batch in 0..BATCHES {
-        evolver.run_batch(&params, true);
-        let context = format!("deletion batch {batch}");
-        let cached = assert_chains_cached_byte_l1(&mut evolver, &reference, workload, penalty, &context);
-        assert_parents_match_scalar(&cached, &reference, SIDE, penalty, &context);
-        if (batch + 1) % CHECKPOINT == 0 {
-            evolver.benchmark_drain().expect("drain");
-            let cached = assert_chains_cached_byte_l1(&mut evolver, &reference, workload, penalty, &context);
-            evolver.evaluate_chain_fitness(&params);
-            let full = assert_chains_cached_byte_l1(&mut evolver, &reference, workload, penalty, &context);
-            assert_eq!(cached.parent_total_errors, full.parent_total_errors, "{context}: incremental and full totals");
-            for chain in 0..CHAINS as usize {
-                assert!(
-                    cached.parent_framebuffers[chain] == full.parent_framebuffers[chain],
-                    "{context}, chain {chain}: incremental framebuffer differs from a full re-render"
-                );
-            }
-            counts = full.parents.iter().map(|p| p.polygon_count).collect();
-        }
-    }
-    assert!(
-        counts.iter().zip(&start_counts).all(|(now, before)| now < before),
-        "every chain must accept deletions: {start_counts:?} -> {counts:?}"
-    );
-
-    let stats = evolver.operator_stats().clone();
-    let offered: u64 = stats.offered.iter().sum();
-    assert_eq!(offered, evolver.benchmark_counters().completed_evaluations);
-    let remove = Operator::Remove as usize;
-    assert_eq!(stats.offered[remove], offered, "only remove runs: {:?}", stats.offered);
-    assert!(stats.improved[remove] > 0, "remove never improved");
-    let shapes = verify_remove_shape(&mut evolver, &drawing, &params);
-    println!(
-        "ordered remove check: {shapes}; counts {start_counts:?} -> {counts:?}; offered/improved {}/{}",
-        stats.offered[remove], stats.improved[remove],
-    );
 }
 
 fn verify_tile_groups() {
@@ -1061,31 +958,4 @@ fn assert_parents_match_scalar(
         let gpu = f32::from_bits(parent.fitness_bits);
         assert!((gpu - scalar.fitness).abs() < 0.01, "{context}, chain {chain}: GPU {gpu}, scalar {}", scalar.fitness);
     }
-}
-
-/// The parent without slot `d`, in order.
-fn without(parent: &[[u32; 4]], d: usize) -> impl Iterator<Item = &[u32; 4]> {
-    parent[..d].iter().chain(&parent[d + 1..])
-}
-
-/// One iteration with only remove: every offspring is its parent with one
-/// slot deleted in order (the others keep their relative order).
-fn verify_remove_shape(evolver: &mut GpuEvolver, drawing: &Drawing, params: &MutationParams) -> String {
-    let (chains, lambda) = (params.chain_count, params.lambda);
-    let only = MutationParams { gpu_batch_iters: 1, ..params.clone() };
-    evolver.prepare_seeded_benchmark(drawing, &only, 31, 0, true).expect("shape preparation");
-    let before = evolver.benchmark_snapshot(chains, lambda).expect("snapshot");
-    evolver.run_batch(&only, true);
-    let after = evolver.benchmark_snapshot(chains, lambda).expect("snapshot");
-    let mut shifted = 0;
-    for (offspring, child) in after.offspring.iter().enumerate() {
-        let parent = &before.parents[offspring / lambda as usize].polygons;
-        let child = &child.polygons;
-        assert_eq!(child.len() + 1, parent.len(), "remove offspring {offspring}: count");
-        let d = (0..parent.len())
-            .find(|&d| without(parent, d).eq(child))
-            .unwrap_or_else(|| panic!("remove offspring {offspring}: not an ordered remove"));
-        shifted += usize::from(d + 1 < parent.len());
-    }
-    format!("{shifted}/{} shifted", after.offspring.len())
 }

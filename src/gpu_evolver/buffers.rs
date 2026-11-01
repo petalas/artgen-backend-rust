@@ -59,57 +59,45 @@ pub struct GpuParams {
     pub crossover_prob: f32,
     pub tournament_size: u32,
 
-    // vec4[2] — fitness: error scale and the point penalty (`PointPenalty`)
+    // vec4[2] — fitness (error scale, point penalty) and the alpha range of
+    // new and recolored polygons
     pub max_error_per_pixel: f32,
     pub per_point_penalty: f32,
-    pub penalty_exponent: f32,
-    pub _pad0: u32,
+    pub min_alpha_norm: f32,
+    pub max_alpha_norm: f32,
 
-    // vec4[3-6] — mutation operator weights
+    // vec4[3-6] — mutation operator weights, then the new vertex spread (add, clone)
     pub add_polygon_prob: f32,
-    pub remove_polygon_prob: f32,
     pub reorder_polygon_prob: f32,
     pub offset_polygon_prob: f32,
-
     pub move_point_prob: f32,
+
     pub micro_adjust_prob: f32,
     pub change_color_prob: f32,
     pub adjust_brightness_prob: f32,
-
     pub adjust_saturation_prob: f32,
+
     pub scale_polygon_prob: f32,
     pub rotate_polygon_prob: f32,
     pub adjacent_swap_prob: f32,
-
-    // `_pad3` and `_pad4` held the removed merge and absorb weights; zero.
-    pub _pad3: u32,
     pub clone_polygon_prob: f32,
+
     pub medium_move_prob: f32,
     pub swap_colors_prob: f32,
-
-    // vec4[7] — micro colour weight, alpha range of new and recolored polygons,
-    // one pad word
     pub micro_color_prob: f32,
-    pub min_alpha_norm: f32,
-    pub max_alpha_norm: f32,
-    pub _pad4: u32,
+    pub new_point_max_distance: f32,
 
-    // vec4[8] — step sizes, multiplied by the offspring's step multiplier
+    // vec4[7] — step sizes, multiplied by the offspring's step multiplier
     pub offset_polygon_magnitude: f32,
     pub move_point_max_delta: f32,
     pub medium_move_delta: f32,
     pub micro_adjust_delta: f32,
 
-    // vec4[9] — new vertex spread (add, clone), three pad words
-    pub new_point_max_distance: f32,
-    pub _pad1: u32,
-    pub _pad2: [u32; 2],
-
-    // vec4[10-11] — step-size multiplier per rung (`MutationParams::step_multipliers`).
+    // vec4[8-9] — step-size multiplier per rung (`MutationParams::step_multipliers`).
     pub step_multipliers: [f32; STEP_RUNGS],
 
-    // vec4[12-15] — reserved padding to fill 256 bytes
-    pub _reserved: [u32; 16],
+    // vec4[10-15] — reserved padding to fill 256 bytes
+    pub _reserved: [u32; 24],
 }
 
 // WGSL `Params` holds the multipliers as two vec4s.
@@ -140,12 +128,11 @@ pub fn gpu_params_from(mp: &MutationParams, w: u32, h: u32, chain_count: u32) ->
         lambda: mp.lambda,
         max_error_per_pixel: MAX_ERROR_PER_PIXEL,
         per_point_penalty: mp.per_point_penalty,
-        penalty_exponent: mp.penalty_exponent,
+        min_alpha_norm: mp.min_alpha as f32 / 255.0,
+        max_alpha_norm: mp.max_alpha as f32 / 255.0,
         crossover_prob: mp.crossover_prob,
         tournament_size: mp.tournament_size,
-        _pad0: 0,
         add_polygon_prob: mp.add_polygon_prob,
-        remove_polygon_prob: mp.remove_polygon_prob,
         reorder_polygon_prob: mp.reorder_polygon_prob,
         offset_polygon_prob: mp.offset_polygon_prob,
         move_point_prob: mp.move_point_prob,
@@ -156,23 +143,17 @@ pub fn gpu_params_from(mp: &MutationParams, w: u32, h: u32, chain_count: u32) ->
         scale_polygon_prob: mp.scale_polygon_prob,
         rotate_polygon_prob: mp.rotate_polygon_prob,
         adjacent_swap_prob: mp.adjacent_swap_prob,
-        _pad3: 0,
         clone_polygon_prob: mp.clone_polygon_prob,
         medium_move_prob: mp.medium_move_prob,
         swap_colors_prob: mp.swap_colors_prob,
         micro_color_prob: mp.micro_color_prob,
-        min_alpha_norm: mp.min_alpha as f32 / 255.0,
-        max_alpha_norm: mp.max_alpha as f32 / 255.0,
-        _pad4: 0,
+        new_point_max_distance: mp.new_point_max_distance,
         offset_polygon_magnitude: mp.offset_polygon_magnitude,
         move_point_max_delta: mp.move_point_max_delta,
         medium_move_delta: mp.medium_move_delta,
         micro_adjust_delta: mp.micro_adjust_delta,
-        new_point_max_distance: mp.new_point_max_distance,
-        _pad1: 0,
-        _pad2: [0; 2],
         step_multipliers: mp.step_multipliers(),
-        _reserved: [0u32; 16],
+        _reserved: [0u32; 24],
     }
 }
 
@@ -195,8 +176,7 @@ fn pack_vertex_u32(x: f32, y: f32) -> u32 {
 }
 
 /// Convert a CPU Drawing to GPU bytes for a single chain's DrawingState.
-/// Multi-vertex polygons are fan-triangulated; triangles past the state's
-/// `POLYGON_CAPACITY` are dropped.
+/// Triangles past the state's `POLYGON_CAPACITY` are dropped.
 /// `seed` is used to initialize the PCG RNG state for this chain.
 pub fn drawing_to_gpu(drawing: &Drawing, seed: u64) -> GpuDrawingState {
     let mut state = GpuDrawingState::zeroed();
@@ -204,8 +184,8 @@ pub fn drawing_to_gpu(drawing: &Drawing, seed: u64) -> GpuDrawingState {
 
     state.fitness_bits = 0; // will be computed on GPU
 
-    let mut gpu_idx = 0;
-    for polygon in &drawing.polygons {
+    let count = drawing.polygons.len().min(POLYGON_CAPACITY);
+    for (index, polygon) in drawing.polygons[..count].iter().enumerate() {
         let color_packed = pack_color_u32(
             polygon.color.r,
             polygon.color.g,
@@ -213,33 +193,18 @@ pub fn drawing_to_gpu(drawing: &Drawing, seed: u64) -> GpuDrawingState {
             polygon.color.a,
         );
 
-        let pts = &polygon.points;
-        if pts.len() < 3 {
-            continue;
-        }
-
-        // Fan triangulation: (0,1,2), (0,2,3), (0,3,4), ...
-        for i in 1..pts.len() - 1 {
-            if gpu_idx >= POLYGON_CAPACITY {
-                break;
-            }
-            state.polygons[gpu_idx] = GpuPolygon {
-                data: [
-                    color_packed,
-                    pack_vertex_u32(pts[0].x, pts[0].y),
-                    pack_vertex_u32(pts[i].x, pts[i].y),
-                    pack_vertex_u32(pts[i + 1].x, pts[i + 1].y),
-                ],
-            };
-            gpu_idx += 1;
-        }
-
-        if gpu_idx >= POLYGON_CAPACITY {
-            break;
-        }
+        let [a, b, c] = polygon.points;
+        state.polygons[index] = GpuPolygon {
+            data: [
+                color_packed,
+                pack_vertex_u32(a.x, a.y),
+                pack_vertex_u32(b.x, b.y),
+                pack_vertex_u32(c.x, c.y),
+            ],
+        };
     }
 
-    state.polygon_count = gpu_idx as u32;
+    state.polygon_count = count as u32;
     state
 }
 
@@ -275,7 +240,7 @@ pub fn gpu_to_drawing(state: &GpuDrawingState) -> Drawing {
     for i in 0..count {
         let gp = &state.polygons[i];
         let color = unpack_color_u32(gp.data[0]);
-        let points = vec![
+        let points = [
             unpack_vertex_u32(gp.data[1]),
             unpack_vertex_u32(gp.data[2]),
             unpack_vertex_u32(gp.data[3]),
@@ -310,7 +275,7 @@ mod tests {
         let drawing = Drawing {
             polygons: vec![
                 Polygon {
-                    points: vec![
+                    points: [
                         Point { x: 0.1, y: 0.2 },
                         Point { x: 0.3, y: 0.4 },
                         Point { x: 0.5, y: 0.6 },
@@ -318,7 +283,7 @@ mod tests {
                     color: Color { r: 100, g: 150, b: 200, a: 30 },
                 },
                 Polygon {
-                    points: vec![
+                    points: [
                         Point { x: 0.7, y: 0.8 },
                         Point { x: 0.9, y: 0.1 },
                         Point { x: 0.2, y: 0.3 },
@@ -338,44 +303,12 @@ mod tests {
 
         // Check first polygon — vertex precision is ~1/65535, color is exact (u8 roundtrip)
         let p0 = &reconstructed.polygons[0];
-        assert_eq!(p0.points.len(), 3);
         assert!((p0.points[0].x - 0.1).abs() < 0.001);
         assert!((p0.points[0].y - 0.2).abs() < 0.001);
         assert_eq!(p0.color.r, 100);
         assert_eq!(p0.color.g, 150);
         assert_eq!(p0.color.b, 200);
         assert_eq!(p0.color.a, 30);
-    }
-
-    #[test]
-    fn test_fan_triangulation() {
-        // A 4-point polygon should become 2 GPU triangles
-        let drawing = Drawing {
-            polygons: vec![Polygon {
-                points: vec![
-                    Point { x: 0.0, y: 0.0 },
-                    Point { x: 1.0, y: 0.0 },
-                    Point { x: 1.0, y: 1.0 },
-                    Point { x: 0.0, y: 1.0 },
-                ],
-                color: Color { r: 128, g: 128, b: 128, a: 30 },
-            }],
-            is_dirty: false,
-            fitness: 0.0,
-        };
-
-        let gpu_state = drawing_to_gpu(&drawing, 42);
-        assert_eq!(gpu_state.polygon_count, 2);
-
-        // First triangle: (0,0) (1,0) (1,1) — packed as u32
-        assert_eq!(gpu_state.polygons[0].data[1], pack_vertex_u32(0.0, 0.0));
-        assert_eq!(gpu_state.polygons[0].data[2], pack_vertex_u32(1.0, 0.0));
-        assert_eq!(gpu_state.polygons[0].data[3], pack_vertex_u32(1.0, 1.0));
-
-        // Second triangle: (0,0) (1,1) (0,1)
-        assert_eq!(gpu_state.polygons[1].data[1], pack_vertex_u32(0.0, 0.0));
-        assert_eq!(gpu_state.polygons[1].data[2], pack_vertex_u32(1.0, 1.0));
-        assert_eq!(gpu_state.polygons[1].data[3], pack_vertex_u32(0.0, 1.0));
     }
 
     #[test]

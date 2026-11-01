@@ -16,7 +16,7 @@ use super::execution::{tile_list_bytes, ResourceSizes};
 use crate::models::drawing::Drawing;
 use crate::mutation_params::MutationParams;
 use crate::settings::{
-    GPU_MAX_BATCH_ITERS, GPU_MAX_LAMBDA, MAX_PENALTY_EXPONENT, MAX_PER_POINT_PENALTY, POLYGON_CAPACITY,
+    GPU_MAX_BATCH_ITERS, GPU_MAX_LAMBDA, MAX_PER_POINT_PENALTY, POLYGON_CAPACITY,
 };
 
 pub use super::pipeline::{
@@ -614,9 +614,6 @@ fn validate_shape(params: &MutationParams) -> Result<(), String> {
     if !(0.0..=MAX_PER_POINT_PENALTY).contains(&params.per_point_penalty) {
         return Err(format!("per_point_penalty is outside 0..={MAX_PER_POINT_PENALTY}"));
     }
-    if !(0.0..=MAX_PENALTY_EXPONENT).contains(&params.penalty_exponent) {
-        return Err(format!("penalty_exponent is outside 0..={MAX_PENALTY_EXPONENT}"));
-    }
     Ok(())
 }
 
@@ -624,16 +621,10 @@ fn validate_drawing(drawing: &Drawing, max_polygons: u32) -> Result<(), String> 
     if drawing.polygons.len() > POLYGON_CAPACITY {
         return Err("drawing exceeds source polygon capacity".into());
     }
-    let mut triangles = 0;
+    if drawing.polygons.len() > max_polygons as usize {
+        return Err("drawing exceeds max_polygons".into());
+    }
     for polygon in &drawing.polygons {
-        let points = polygon.points.len();
-        if !(3..=POLYGON_CAPACITY + 2).contains(&points) {
-            return Err("drawing contains an invalid or oversized polygon".into());
-        }
-        triangles += points - 2;
-        if triangles > max_polygons as usize {
-            return Err("fan-triangulated drawing would be truncated".into());
-        }
         if polygon.points.iter().any(|point| {
             !point.x.is_finite()
                 || !point.y.is_finite()
@@ -898,7 +889,7 @@ mod tests {
     fn drawing_validation_rejects_truncation_and_nonfinite_coordinates() {
         let mut drawing = Drawing {
             polygons: vec![Polygon {
-                points: vec![Point { x: 0.5, y: 0.5 }; 4],
+                points: [Point { x: 0.5, y: 0.5 }; 3],
                 color: Color {
                     r: 1,
                     g: 2,
@@ -909,10 +900,10 @@ mod tests {
             is_dirty: false,
             fitness: 0.0,
         };
-        assert!(validate_drawing(&drawing, 2).is_ok());
-        assert!(validate_drawing(&drawing, 1).is_err());
+        assert!(validate_drawing(&drawing, 1).is_ok());
+        assert!(validate_drawing(&drawing, 0).is_err());
         drawing.polygons[0].points[0].x = f32::NAN;
-        assert!(validate_drawing(&drawing, 2).is_err());
+        assert!(validate_drawing(&drawing, 1).is_err());
     }
 
     #[test]

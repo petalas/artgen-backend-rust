@@ -774,10 +774,6 @@ fn validate_png(png: &[u8], drawing: &Drawing, width: u32, height: u32) -> Resul
     );
     for polygon in &drawing.polygons {
         ensure!(
-            polygon.points.len() == 3,
-            "published geometry is not packed triangles"
-        );
-        ensure!(
             polygon.points.iter().all(|point| point.x.is_finite()
                 && point.y.is_finite()
                 && (0.0..=1.0).contains(&point.x)
@@ -1325,12 +1321,9 @@ mod tests {
             },
             // The frozen v1 manifest's settings, which predate the 2000 cap,
             // the 2026-10-30 operator weights and micro step, the step spread and
-            // the 2026-10-31 micro color cut and removal default. Its merge weight
-            // (0.000667) and merge thresholds are no longer fields, so they load
-            // and are dropped from the wire map.
+            // the 2026-10-31 micro color cut.
             params: MutationParams {
                 max_polygons: 1000,
-                remove_polygon_prob: 0.000862,
                 offset_polygon_prob: 0.00565,
                 medium_move_prob: 0.004,
                 micro_adjust_prob: 0.002786,
@@ -1359,10 +1352,10 @@ mod tests {
             serde_json::from_slice(&serde_json::to_vec_pretty(&value).unwrap()).unwrap();
         let manifest_params: serde_json::Value = serde_json::from_str(
             r#"{
-                "addPolygonProb": 0.5, "removePolygonProb": 0.000862,
+                "addPolygonProb": 0.5,
                 "reorderPolygonProb": 0.002, "offsetPolygonProb": 0.00565,
-                "movePointProb": 0.000294, "removePointProb": 0.002,
-                "microAdjustProb": 0.002786, "changeColorProb": 0.000473,
+                "movePointProb": 0.000294,
+                "microAdjustProb": 0.002786, "microColorProb": 0.002786, "changeColorProb": 0.000473,
                 "adjustBrightnessProb": 0.000473, "adjustSaturationProb": 0.001333,
                 "scalePolygonProb": 0.00565, "rotatePolygonProb": 0.002,
                 "adjacentSwapProb": 0.002,
@@ -1371,9 +1364,10 @@ mod tests {
                 "microAdjustDelta": 0.001, "newPointMaxDistance": 0.005,
                 "offsetPolygonMagnitude": 0.01, "mediumMoveDelta": 0.03,
                 "minAlpha": 10, "maxAlpha": 65, "minPolygons": 1,
-                "maxPolygons": 1000, "crossoverProb": 0.2,
-                "tournamentSize": 3,
-                "chainCount": 4, "lambda": 64, "rasterizeWg": [32, 16], "gpuBatchIters": 64
+                "maxPolygons": 1000, "perPointPenalty": 2e-7, "crossoverProb": 0.2,
+                "tournamentSize": 3, "chainCount": 4, "lambda": 64,
+                "stepSpreadMin": 1.0, "stepSpreadMax": 1.0,
+                "rasterizeWg": [32, 16], "gpuBatchIters": 64
             }"#,
         )
         .unwrap();

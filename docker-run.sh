@@ -3,8 +3,10 @@
 # Usage: ./docker-run.sh <image_file> [extra args...]
 #
 # Examples:
-#   ./docker-run.sh ff.jpg --gpu --headless
 #   ./docker-run.sh ff.jpg --gpu
+#
+# Headless mode (--gpu --headless) ignores the image and serves projects/; use
+# docker-compose for it.
 #
 # Output files (*.best.json, *.best.png) are written to the current directory.
 # Requires: nvidia-container-toolkit, Docker

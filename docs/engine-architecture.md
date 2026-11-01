@@ -127,23 +127,13 @@ selection (LEARNINGS, "Fitness ~99.9% while the image is still poor").
 fitness by `1 - penalty * points`, three points per triangle. It reaches the GPU
 as `GpuParams::per_point_penalty` (select.wgsl `compute_fitness`); the host's
 `evaluate_chain_fitness`, the scalar `reference::evaluate`, trial qualification,
-engine-lab and the quality recorder take it from the run's parameters. Serialized
-parameters omit it at its default, so frozen fixtures, trial records and
-effective-parameter gates keep their exact maps.
+engine-lab and the quality recorder take it from the run's parameters. The CPU
+mirror is `PointPenalty` (`MutationParams::point_penalty()`): `apply` follows the
+shader's f32 operation order, `fraction` gives `P(n) = 3 p n` for removing the
+penalty.
 
-`MutationParams::penalty_exponent` k (default 0, `settings::PENALTY_EXPONENT`;
-`sanitize` bounds it to 0..=`MAX_PENALTY_EXPONENT`, 2, NaN to 0) scales the
-penalty with the triangle count n: the next triangle costs `3 p (n / N0)^k`,
-N0 = `settings::PENALTY_REFERENCE_TRIANGLES` (1000, a generated WGSL f32
-constant), so fitness is multiplied by `1 - P(n)` with
-`P(n) = 3 p N0 / (k + 1) * (n / N0)^(k + 1)`. At k = 0 select.wgsl
-(`compute_fitness`, `penalized_error`) and every CPU mirror branch to the
-historical flat expression, so scores and replay hashes keep every bit;
-k > 0 goes through select.wgsl `penalty_fraction` (f32 `pow`). The CPU mirror
-is `PointPenalty` (`MutationParams::point_penalty()`): `apply` follows the
-shader's f32 operation order, `fraction` gives `P(n)` for removing the
-penalty. GPU `pow` and Rust `powf` may differ by a few ulps at k > 0, far
-inside the fitness checks' tolerances. Serialized parameters omit k at 0.
+`MutationParams` serializes every field and rejects missing or unknown keys, so
+settings, records and fixtures written by builds with other fields do not load.
 
 ### Selection compares penalized error
 
@@ -194,14 +184,10 @@ canonical state and replay hashes from before that change do not compare.
 
 `GpuParams` (WGSL `Params`) is a 256-byte uniform of vec4 groups: image size
 and polygon bounds; chain count, λ and crossover (`crossover_prob`,
-`tournament_size`); fitness (`max_error_per_pixel`, `per_point_penalty`,
-`penalty_exponent`, one pad); four groups of
-operator weights (`_pad3` first in the fourth); `micro_color_prob` with the
-alpha range and `_pad4`; the four step-scaled sizes; new-vertex spread and three
-pad words (the merge thresholds were removed); two groups of step
-multipliers; four reserved. `_pad3` and `_pad4` held the removed merge and
-absorb weights; keeping them as zero pads leaves every other offset unchanged,
-so `check-gpu-mutation` can compare a mutate shader from before the removal.
+`tournament_size`); fitness (`max_error_per_pixel`, `per_point_penalty`) with the alpha range; four
+groups of operator weights, the last ending with the new-vertex spread; the four
+step-scaled sizes; two groups of step multipliers; six reserved. Mutate shaders
+written for an older layout do not compare in `check-gpu-mutation`.
 Every field is read by a bundled shader. The layout test in
 `programs/bundled.rs` maps both structs field by field.
 
@@ -388,37 +374,10 @@ is covered by the same polygons, in the same order, in both drawings, so its
 cached colour and error stand. raster tests it per pixel, the binner per tile
 (`changed_meets_rect`), update_framebuffers per pixel with select's copies of
 the parent versions. The truncation guard (`changes_shortcut`) needs room for
-one polygon per listed index because neither list may be truncated; a deletion
-only shortens lists.
-
-remove deletes a slot in order (`delete_slot_ordered` in
-mutate.wgsl: slots above it shift down one, so every other polygon keeps its
-relative order; it used to swap the topmost polygon into the slot, which also
-moved that polygon to the middle of the stack). A shift renumbers every slot
-above the deleted one, which the slot-wise list cannot name, but it need not:
-the shifted polygons cover the same pixels in the same order. Listing the
-deleted index suffices, because its parent version is the deleted polygon.
-The dirty rectangle is the deleted polygon's pixel bounds; the binner rebuilds
-only the tiles it meets, and update_framebuffers reuses the winner's lists,
-which index the winner's shifted slots, in those tiles only. (The merge and
-absorb operators, removed after they never helped at any weight, also deleted
-in order; see [quality benchmark](quality-benchmark.md).)
+one polygon per listed index because neither list may be truncated.
 
 Unknown words with the same dirty rectangle would also be exact (every
 consumed tile is rastered and every dirty pixel re-blended), only slower.
-`check-gpu-rasterization` (`verify_ordered_remove`) runs only remove from 300
-overlapping triangles and requires cached framebuffers and
-totals to equal a full re-render exactly every 32 iterations, and each
-offspring to be its parent with one slot deleted in order.
-
-The shift is a serial loop on mutate's leader lane, up to `polygon_count`
-16-byte copies. Hillclimb at the then default weights (remove and merge rare):
-1.0022 [0.9982, 1.0069], NOISE. With merge, absorb or remove at weight 0.7
-(about 5% of offspring) evals/s fall to about half of the defaults' by 30 s, but
-the 0–5 s rates match the defaults': the deleting sides keep 450–550 larger
-triangles, whose mutations touch more pixels, while the defaults grow to 780
-small ones. A cooperative 64-lane shift changed those runs by 2–4% (one seed),
-so the serial loop stays.
 
 An all-zero record is unknown and turns every shortcut off. The host writes
 records only through two `GpuPipeline` methods. `write_chain_states`, the only
@@ -438,8 +397,8 @@ produced (offered) and the winners select accepted from it, as a strict
 improvement (improved) or at equal penalized error (neutral). `Operator` lists the
 codes once; the bundled prelude gets them as `OP_*` constants, and a CPU test
 checks that mutate stores every one. Codes are positions in that list and can
-change when an operator is removed (merge and absorb were, which renumbered the
-codes after adjacent swap); every quality record stores `operator_names` in code
+change when an operator is removed (remove, merge and absorb were, which
+renumbered the codes after them); every quality record stores `operator_names` in code
 order, and `scripts/quality.py` reads counts through those names, so older
 records stay readable.
 

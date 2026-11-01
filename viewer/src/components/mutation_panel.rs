@@ -5,7 +5,6 @@ use crate::mutation_params::MutationParams;
 
 /// The GPU state's storage; `max_polygons` may not exceed it.
 const POLYGON_CAPACITY: i64 = artgen_shared::settings::POLYGON_CAPACITY as i64;
-use artgen_shared::settings::MAX_PENALTY_EXPONENT;
 use crate::ws::{send_ws_json, send_ws_loading, ViewerState};
 
 /// Format a probability as a decimal string with adaptive precision.
@@ -160,13 +159,10 @@ pub fn ParamsEditor(
             <div class="mutation-section-title">"Polygons"</div>
             <IntSlider params={params} on_change={on_change} label="Min polygons" get={|mp| mp.min_polygons as i64} set={|mp, v| { mp.min_polygons = v as u32; if mp.max_polygons < mp.min_polygons { mp.max_polygons = mp.min_polygons; } }} min=1 max={POLYGON_CAPACITY} step=1/>
             <IntSlider params={params} on_change={on_change} label="Max polygons" get={|mp| mp.max_polygons as i64} set={|mp, v| { mp.max_polygons = v as u32; if mp.min_polygons > mp.max_polygons { mp.min_polygons = mp.max_polygons; } }} min=1 max={POLYGON_CAPACITY} step=1/>
-            // 0 charges every triangle alike; k makes the next triangle cost (n / 1000)^k as much.
-            <DeltaSlider params={params} on_change={on_change} label="Penalty exponent" field="penalty_exponent" min=0.0 max={f64::from(MAX_PENALTY_EXPONENT)} step=0.1/>
         </div>
         <div class="mutation-section">
             <div class="mutation-section-title">"Structure"</div>
             <ProbSlider params={params} on_change={on_change} label="Add polygon" field="add_polygon_prob"/>
-            <ProbSlider params={params} on_change={on_change} label="Remove polygon" field="remove_polygon_prob"/>
             <ProbSlider params={params} on_change={on_change} label="Reorder polygon" field="reorder_polygon_prob"/>
             <ProbSlider params={params} on_change={on_change} label="Adjacent swap" field="adjacent_swap_prob"/>
             <ProbSlider params={params} on_change={on_change} label="Clone + jitter" field="clone_polygon_prob"/>
@@ -439,11 +435,9 @@ fn Pow2Slider(
 fn get_prob_field(mp: &MutationParams, field: &str) -> f32 {
     match field {
         "add_polygon_prob" => mp.add_polygon_prob,
-        "remove_polygon_prob" => mp.remove_polygon_prob,
         "reorder_polygon_prob" => mp.reorder_polygon_prob,
         "offset_polygon_prob" => mp.offset_polygon_prob,
         "move_point_prob" => mp.move_point_prob,
-        "remove_point_prob" => mp.remove_point_prob,
         "micro_adjust_prob" => mp.micro_adjust_prob,
         "change_color_prob" => mp.change_color_prob,
         "adjust_brightness_prob" => mp.adjust_brightness_prob,
@@ -463,11 +457,9 @@ fn get_prob_field(mp: &MutationParams, field: &str) -> f32 {
 fn set_prob_field(mp: &mut MutationParams, field: &str, val: f32) {
     match field {
         "add_polygon_prob" => mp.add_polygon_prob = val,
-        "remove_polygon_prob" => mp.remove_polygon_prob = val,
         "reorder_polygon_prob" => mp.reorder_polygon_prob = val,
         "offset_polygon_prob" => mp.offset_polygon_prob = val,
         "move_point_prob" => mp.move_point_prob = val,
-        "remove_point_prob" => mp.remove_point_prob = val,
         "micro_adjust_prob" => mp.micro_adjust_prob = val,
         "change_color_prob" => mp.change_color_prob = val,
         "adjust_brightness_prob" => mp.adjust_brightness_prob = val,
@@ -491,7 +483,6 @@ fn get_delta_field(mp: &MutationParams, field: &str) -> f32 {
         "new_point_max_distance" => mp.new_point_max_distance,
         "offset_polygon_magnitude" => mp.offset_polygon_magnitude,
         "medium_move_delta" => mp.medium_move_delta,
-        "penalty_exponent" => mp.penalty_exponent,
         _ => 0.0,
     }
 }
@@ -503,7 +494,6 @@ fn set_delta_field(mp: &mut MutationParams, field: &str, val: f32) {
         "new_point_max_distance" => mp.new_point_max_distance = val,
         "offset_polygon_magnitude" => mp.offset_polygon_magnitude = val,
         "medium_move_delta" => mp.medium_move_delta = val,
-        "penalty_exponent" => mp.penalty_exponent = val,
         _ => {}
     }
 }

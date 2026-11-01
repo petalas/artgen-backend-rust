@@ -37,7 +37,6 @@ use crate::settings::STEP_RUNGS;
 #[repr(u32)]
 pub enum Operator {
     Add,
-    Remove,
     Reorder,
     Scale,
     Rotate,
@@ -61,7 +60,7 @@ pub enum Operator {
     Unchanged,
 }
 
-pub const OPERATOR_COUNT: usize = 18;
+pub const OPERATOR_COUNT: usize = 17;
 
 /// Words of `operator_stats`: offered, then improved, then neutral, each
 /// indexed by operator code; then the same three blocks indexed by step rung;
@@ -77,7 +76,6 @@ impl Operator {
     /// In code order: `ALL[i] as usize == i`.
     pub const ALL: [Self; OPERATOR_COUNT] = [
         Self::Add,
-        Self::Remove,
         Self::Reorder,
         Self::Scale,
         Self::Rotate,
@@ -101,7 +99,6 @@ impl Operator {
     pub const fn name(self) -> &'static str {
         match self {
             Self::Add => "add",
-            Self::Remove => "remove",
             Self::Reorder => "reorder",
             Self::Scale => "scale",
             Self::Rotate => "rotate",
@@ -260,8 +257,8 @@ mod tests {
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), OPERATOR_COUNT);
-        assert!(wgsl_constants().contains("const OP_ADJACENT_SWAP: u32 = 5u;\n"));
-        assert!(wgsl_constants().contains("const OP_UNCHANGED: u32 = 17u;\n"));
+        assert!(wgsl_constants().contains("const OP_ADJACENT_SWAP: u32 = 4u;\n"));
+        assert!(wgsl_constants().contains("const OP_UNCHANGED: u32 = 16u;\n"));
         assert!(wgsl_constants().contains(
             "return op == OP_OFFSET || op == OP_MOVE_POINT || op == OP_MEDIUM_MOVE || op == OP_MICRO_MOVE;"
         ));
@@ -327,7 +324,7 @@ mod tests {
     fn tally_reads_signed_gains_after_the_rung_blocks() {
         let gains = 3 * OPERATOR_COUNT + 3 * STEP_RUNGS;
         let mut words = [0; OPERATOR_STATS_WORDS];
-        words[gains + Operator::Remove as usize] = 500;
+        words[gains + Operator::Scale as usize] = 500;
         words[gains + Operator::Add as usize] = (-40i32) as u32; // add's penalty outweighed its error drop
         words[gains + OPERATOR_COUNT + STEP_RUNGS - 1] = 70; // last rung
         let mut tally = OperatorTally::default();
@@ -337,7 +334,7 @@ mod tests {
         tally.fold(&words);
         let totals = tally.totals();
         assert_eq!(totals.gain[Operator::Add as usize], 60);
-        assert_eq!(totals.gain[Operator::Remove as usize], 500);
+        assert_eq!(totals.gain[Operator::Scale as usize], 500);
         assert_eq!(totals.rung_gain, [0, 0, 0, 0, 0, 0, 0, 70]);
         assert_eq!(totals.improved, [0; OPERATOR_COUNT]);
     }

@@ -251,25 +251,13 @@ pub struct QualityRecord {
 /// Rejects unknown keys, ill-typed values and values that production's
 /// `sanitize` would silently change.
 pub fn params_with(overrides: &Map<String, Value>) -> Result<MutationParams> {
-    // `per_point_penalty`, `penalty_exponent` and the step spread are serialized
-    // only away from their defaults, so name them from parameters that hold
-    // other values.
-    let every_field = MutationParams {
-        per_point_penalty: 0.0,
-        penalty_exponent: 1.0,
-        step_spread_min: 0.5,
-        step_spread_max: 2.0,
-        ..MutationParams::default()
-    };
-    let known = serde_json::to_value(every_field)?;
-    let known = known.as_object().context("MutationParams is an object")?;
     let mut value = serde_json::to_value(MutationParams::default())?;
     let fields = value
         .as_object_mut()
         .context("MutationParams is an object")?;
     for (key, override_value) in overrides {
         ensure!(
-            known.contains_key(key),
+            fields.contains_key(key),
             "unknown MutationParams field {key} (fields are camelCase)"
         );
         fields.insert(key.clone(), override_value.clone());
@@ -415,11 +403,7 @@ fn point_of(
     evaluations: u64,
 ) -> Point {
     let polygons = u32::try_from(best.polygons.len()).unwrap_or(u32::MAX);
-    let points = best
-        .polygons
-        .iter()
-        .map(|polygon| u32::try_from(polygon.points.len()).unwrap_or(u32::MAX))
-        .fold(0u32, u32::saturating_add);
+    let points = polygons.saturating_mul(3);
     let fitness = f64::from(best.fitness);
     Point {
         seconds,
@@ -617,7 +601,6 @@ mod tests {
             .to_string()
             .contains("sanitize"));
         assert!(set(r#"{"lambda":"64"}"#).is_err());
-        // A field omitted at its default is still known.
         let strong = set(r#"{"perPointPenalty":3.2e-6}"#).unwrap();
         assert_eq!(strong.per_point_penalty, 3.2e-6);
         assert_eq!(set(r#"{"maxPolygons":2048}"#).unwrap().max_polygons, 2048);
@@ -626,8 +609,7 @@ mod tests {
             .to_string()
             .contains("sanitize"));
         assert!(set(r#"{"perPointPenalty":1.0}"#).is_err());
-        assert_eq!(set(r#"{"penaltyExponent":1.5}"#).unwrap().penalty_exponent, 1.5);
-        assert!(set(r#"{"penaltyExponent":2.5}"#).is_err());
+        assert!(set(r#"{"penaltyExponent":1.5}"#).is_err());
         let spread = set(r#"{"stepSpreadMin":0.25,"stepSpreadMax":4}"#).unwrap();
         assert_eq!((spread.step_spread_min, spread.step_spread_max), (0.25, 4.0));
         assert!(set(r#"{"stepSpreadMin":2,"stepSpreadMax":1}"#)
@@ -713,7 +695,7 @@ mod tests {
     fn raw_fitness_removes_the_point_penalty() {
         use crate::models::{color::Color, point::Point as Vertex, polygon::Polygon};
         let triangle = Polygon {
-            points: vec![Vertex { x: 0.0, y: 0.0 }; 3],
+            points: [Vertex { x: 0.0, y: 0.0 }; 3],
             color: Color {
                 r: 0,
                 g: 0,
@@ -726,20 +708,15 @@ mod tests {
             is_dirty: false,
             fitness: 99.0,
         };
-        let flat = PointPenalty { per_point: crate::settings::PER_POINT_PENALTY, exponent: 0.0 };
+        let flat = PointPenalty { per_point: crate::settings::PER_POINT_PENALTY };
         let point = point_of(&best, flat, 1.0, 1, 1);
         assert_eq!((point.polygons, point.points), (1000, 3000));
         let expected = 99.0 / (1.0 - 3000.0 / 5_000_000.0);
         assert!((point.raw_fitness - expected).abs() < 1e-9);
         // The run's own penalty is removed.
-        let strong = PointPenalty { per_point: 16.0 * flat.per_point, ..flat };
+        let strong = PointPenalty { per_point: 16.0 * flat.per_point };
         let point = point_of(&best, strong, 1.0, 1, 1);
         let expected = 99.0 / (1.0 - f64::from(strong.per_point) * 3000.0);
         assert!((point.raw_fitness - expected).abs() < 1e-9);
-        // A scaled penalty: at N0 = 1000 triangles, P = 3 p N0 / (k + 1).
-        let scaled = PointPenalty { exponent: 1.0, ..strong };
-        let point = point_of(&best, scaled, 1.0, 1, 1);
-        let expected = 99.0 / (1.0 - f64::from(strong.per_point) * 3000.0 / 2.0);
-        assert!((point.raw_fitness - expected).abs() < 1e-6, "{}", point.raw_fitness);
     }
 }

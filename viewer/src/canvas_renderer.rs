@@ -27,10 +27,6 @@ pub fn render_drawing(drawing: &Drawing, canvas: &HtmlCanvasElement) -> bool {
 
     // Draw each polygon
     for polygon in &drawing.polygons {
-        if polygon.points.len() < 3 {
-            continue;
-        }
-
         let c = &polygon.color;
         let alpha = c.a as f64 / 255.0;
         ctx.set_fill_style_str(&format!("rgba({},{},{},{})", c.r, c.g, c.b, alpha));

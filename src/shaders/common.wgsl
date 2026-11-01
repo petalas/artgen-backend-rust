@@ -31,40 +31,33 @@ struct Params {
     crossover_prob: f32,
     tournament_size: u32,
 
-    // Fitness: error scale and the point penalty (select.wgsl penalty_fraction)
+    // Fitness (error scale, point penalty; select.wgsl penalized_error) and the
+    // alpha range of new and recolored polygons
     max_error_per_pixel: f32,
     per_point_penalty: f32,
-    penalty_exponent: f32,
-    _pad0: u32,
+    min_alpha_norm: f32,
+    max_alpha_norm: f32,
 
-    // Mutation operator weights
+    // Mutation operator weights, then the new vertex spread (add, clone)
     add_polygon_prob: f32,
-    remove_polygon_prob: f32,
     reorder_polygon_prob: f32,
     offset_polygon_prob: f32,
-
     move_point_prob: f32,
+
     micro_adjust_prob: f32,
     change_color_prob: f32,
     adjust_brightness_prob: f32,
-
     adjust_saturation_prob: f32,
+
     scale_polygon_prob: f32,
     rotate_polygon_prob: f32,
     adjacent_swap_prob: f32,
-
-    // _pad3 and _pad4 held the removed merge and absorb weights; zero.
-    _pad3: u32,
     clone_polygon_prob: f32,
+
     medium_move_prob: f32,
     swap_colors_prob: f32,
-
-    // Micro colour weight, the alpha range of new and recolored polygons, then
-    // padding
     micro_color_prob: f32,
-    min_alpha_norm: f32,
-    max_alpha_norm: f32,
-    _pad4: u32,
+    new_point_max_distance: f32,
 
     // Step sizes, multiplied by the offspring's step_multiplier()
     offset_polygon_magnitude: f32,
@@ -72,16 +65,11 @@ struct Params {
     medium_move_delta: f32,
     micro_adjust_delta: f32,
 
-    // New vertex spread (add, clone), then padding
-    new_point_max_distance: f32,
-    _pad1: u32,
-    _pad2: vec2<u32>,
-
-    // Step-size multiplier per rung (vec4[10-11]); mutate's step_multiplier() reads it
+    // Step-size multiplier per rung (vec4[8-9]); mutate's step_multiplier() reads it
     step_multipliers: array<vec4<f32>, 2>,
 
-    // Reserved (vec4[12-15])
-    _reserved: array<vec4<u32>, 4>,
+    // Reserved (vec4[10-15])
+    _reserved: array<vec4<u32>, 6>,
 }
 const_assert STEP_RUNGS == 8u;
 

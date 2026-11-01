@@ -585,7 +585,7 @@ mod tests {
 
         // First triangle covering the top-left half
         let polygon1 = Polygon {
-            points: vec![
+            points: [
                 Point { x: 0.0, y: 0.0 },
                 Point { x: 1.0, y: 0.0 },
                 Point { x: 0.0, y: 1.0 },
@@ -596,7 +596,7 @@ mod tests {
 
         // Second triangle covering the bottom-right half
         let polygon2 = Polygon {
-            points: vec![
+            points: [
                 Point { x: 1.0, y: 0.0 },
                 Point { x: 1.0, y: 1.0 },
                 Point { x: 0.0, y: 1.0 },
@@ -617,7 +617,7 @@ mod tests {
     fn test_fill_triangle_out_of_bounds() {
         let mut buffer = vec![0u8; 16 * 16 * 4]; // 16x16 image with RGBA channels
         let polygon = Polygon {
-            points: vec![
+            points: [
                 Point { x: -1.0, y: -1.0 },
                 Point { x: -0.5, y: -1.0 },
                 Point { x: -1.0, y: -0.5 },

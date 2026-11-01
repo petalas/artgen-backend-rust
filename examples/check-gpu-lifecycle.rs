@@ -136,10 +136,6 @@ impl DrawingObservation {
             drawing.polygons.len() <= POLYGON_CAPACITY,
             "oversized returned drawing"
         );
-        ensure!(
-            drawing.polygons.iter().all(|p| p.points.len() == 3),
-            "non-triangle returned drawing"
-        );
         Ok(Self {
             // A deferred drawing may score below the current acquisition maximum.
             // Preserve its mapped header, rather than replacing its fitness.
@@ -803,7 +799,7 @@ mod tests {
     fn drawing() -> Drawing {
         Drawing {
             polygons: vec![Polygon {
-                points: vec![
+                points: [
                     Point { x: 0.1, y: 0.2 },
                     Point { x: 0.3, y: 0.4 },
                     Point { x: 0.5, y: 0.6 },

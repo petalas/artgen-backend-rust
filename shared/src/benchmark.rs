@@ -10,7 +10,6 @@ pub struct BenchmarkSnapshot {
     pub drawing_json: String,
     pub fitness: f32,
     pub polygon_count: u32,
-    #[serde(default)]
     pub created_at: String, // ISO 8601
 }
 
@@ -21,9 +20,7 @@ pub struct BenchmarkRequest {
     pub params: MutationParams,
     pub duration_secs: u32,
     pub label: String,
-    #[serde(default)]
     pub resolution: u32,
-    #[serde(default)]
     pub snapshot_id: String,
 }
 
@@ -39,20 +36,10 @@ pub struct BenchmarkSample {
     pub evals_per_sec: f64,
 }
 
-fn default_lambda() -> u32 {
-    crate::settings::GPU_DEFAULT_LAMBDA
-}
-
-fn default_gpu_batch_iters() -> u32 {
-    crate::settings::GPU_DEFAULT_BATCH_ITERS
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BenchmarkResult {
-    #[serde(default)]
     pub id: String,
-    #[serde(default)]
     pub snapshot_id: String,
     pub label: String,
     pub start_fitness: f32,
@@ -60,20 +47,14 @@ pub struct BenchmarkResult {
     pub total_improvements: u64,
     pub total_evals: u64,
     pub duration_secs: u32,
-    #[serde(default)]
     pub actual_duration_secs: f32,
     pub improvements_per_sec: f64,
     pub samples: Vec<BenchmarkSample>,
     pub chain_count: u32,
-    #[serde(default = "default_lambda")]
     pub lambda: u32,
-    #[serde(default = "default_gpu_batch_iters")]
     pub gpu_batch_iters: u32,
-    #[serde(default)]
     pub resolution: u32,
-    #[serde(default)]
     pub params: MutationParams,
-    #[serde(default)]
     pub pass_timings: Option<PassTimingsResult>,
 }
 
@@ -91,9 +72,7 @@ pub struct PassTimingsResult {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BenchmarkStore {
-    #[serde(default)]
     pub snapshots: Vec<BenchmarkSnapshot>,
-    #[serde(default)]
     pub results: Vec<BenchmarkResult>,
 }
 

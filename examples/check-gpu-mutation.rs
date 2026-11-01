@@ -23,13 +23,10 @@
 //! agree. Inactive polygon padding may differ, and its differences are logged.
 //! A later active tail is always compared, even if it used to be padding.
 //!
-//! There are 132 fixtures: 64 small-parent cases covering every integer lambda
+//! There are 128 fixtures: 64 small-parent cases covering every integer lambda
 //! 1..64 at crossover .2; 10 small cases at lambdas 1/3/32/33/64 and crossover
-//! 0/1; 27 targeted dense cases plus 27 immediate small-parent history probes;
-//! 4 deletion cases (small and each dense parent set, lambda 64, no crossover)
-//! whose remove weight dominates the roulette, since the default weights
-//! never pick it. Three candidates mean
-//! 528 GPU dispatches; four mean 660. All 1024 parents remain bound because tournament
+//! 0/1; and 27 targeted dense cases plus 27 immediate small-parent history
+//! probes. Three candidates mean 384 GPU dispatches; four mean 512. All 1024 parents remain bound because tournament
 //! selection uses arrayLength, although only four chains produce children.
 //! The maximum is 256 offspring, each with `POLYGON_CAPACITY` (2048) physical
 //! polygon slots; fixtures cap drawings at 1000 polygons.
@@ -121,7 +118,7 @@ const MAX_SOURCE_BYTES: usize = 256 * 1024;
 const MAX_ERROR_CHARS: usize = 16 * 1024;
 const MAX_SAMPLES: usize = 12;
 const MAX_FIXTURES: usize = 400;
-const FIXTURES: usize = 132;
+const FIXTURES: usize = 128;
 const MAX_DISPATCHES: usize = 2000;
 const WAIT: Duration = Duration::from_secs(120);
 const OUTER: Duration = Duration::from_secs(600);
@@ -158,8 +155,6 @@ struct Fixture {
     lambda: u32,
     crossover: f32,
     history_probe: bool,
-    /// Remove dominates the operator weights.
-    deletions: bool,
 }
 
 struct Variant {
@@ -332,7 +327,7 @@ fn print_help() {
         Compare one reference with 1..4 mutation sources on the main thread.\n\
         NEWDIR must not exist; its parent must exist. UTF-8 sources: 1..256 KiB.\n\
         Run the built executable under `timeout 600s`. Poll/map limit: 120s.\n\
-        132 fixtures, dispatch(4,1,1), 1024 parents, up to 256 children.\n\
+        128 fixtures, dispatch(4,1,1), 1024 parents, up to 256 children.\n\
         Compare all header bits, active polygons/counts, errors and untouched slots.\n\
         Log inactive polygon padding differences without treating them as semantic.\n\
         Save exact sources/SHA-256, events.jsonl and result.json. No throughput scores.\n\
@@ -567,7 +562,6 @@ fn fixtures() -> Vec<Fixture> {
             lambda,
             crossover: 0.2,
             history_probe: false,
-            deletions: false,
         });
     }
     for lambda in [1, 3, 32, 33, 64] {
@@ -577,20 +571,10 @@ fn fixtures() -> Vec<Fixture> {
                 lambda,
                 crossover,
                 history_probe: false,
-                deletions: false,
             });
         }
     }
     dense_fixtures(&mut cases);
-    for counts in std::iter::once(SMALL).chain(DENSE) {
-        cases.push(Fixture {
-            counts,
-            lambda: 64,
-            crossover: 0.0,
-            history_probe: false,
-            deletions: true,
-        });
-    }
     assert_eq!(cases.len(), FIXTURES);
     assert!(cases.len() <= MAX_FIXTURES);
     cases
@@ -606,7 +590,6 @@ fn dense_fixtures(cases: &mut Vec<Fixture>) {
                     lambda,
                     crossover,
                     history_probe: false,
-                    deletions: false,
                 });
                 // Preserve large/different tails, then change slot ownership and
                 // shrink counts. A subsequent dense case makes tails active again.
@@ -615,7 +598,6 @@ fn dense_fixtures(cases: &mut Vec<Fixture>) {
                     lambda: next_lambda,
                     crossover: 0.2,
                     history_probe: true,
-                    deletions: false,
                 });
             }
         }
@@ -851,11 +833,6 @@ fn fixture_params(case: Fixture, index: usize) -> GpuParams {
     params.min_polygons = 0;
     params.max_polygons = u32::try_from(POLYGONS).expect("polygon capacity is 1000");
     params.tournament_size = [1, 3, 7][index % 3];
-    if case.deletions {
-        // Absolute weights against about 0.03 per polygon for the per-polygon
-        // operators: about half of the mutations at 1000 polygons.
-        params.remove_polygon_prob = 25.0;
-    }
     params
 }
 

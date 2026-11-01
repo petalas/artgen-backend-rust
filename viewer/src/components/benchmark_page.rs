@@ -1042,15 +1042,12 @@ fn import_results_from_file() {
             let result = reader_clone.result().unwrap();
             let text = result.as_string().unwrap_or_default();
 
-            // Try BenchmarkExport first, then Vec<BenchmarkResult> for backwards compat
-            let data: serde_json::Value = if let Ok(export) = serde_json::from_str::<BenchmarkExport>(&text) {
-                serde_json::to_value(&export).unwrap()
-            } else if let Ok(results) = serde_json::from_str::<Vec<BenchmarkResult>>(&text) {
-                // Wrap old format — send as-is, backend handles it
-                serde_json::Value::Array(results.into_iter().map(|r| serde_json::to_value(r).unwrap()).collect())
-            } else {
-                web_sys::console::error_1(&"Failed to parse benchmark JSON: not a BenchmarkExport or Vec<BenchmarkResult>".into());
-                return;
+            let data = match serde_json::from_str::<BenchmarkExport>(&text) {
+                Ok(export) => serde_json::to_value(&export).unwrap(),
+                Err(e) => {
+                    web_sys::console::error_1(&format!("Failed to parse benchmark export: {e}").into());
+                    return;
+                }
             };
 
             let msg = serde_json::json!({
@@ -1156,12 +1153,10 @@ fn params_detail_view(p: &MutationParams, resolution: u32, pass_timings: &Option
             <div class="bench-params-row">
                 {pv("Polygons", format!("{}\u{2013}{}", p.min_polygons, p.max_polygons), p.min_polygons != d.min_polygons || p.max_polygons != d.max_polygons)}
                 {pv("Alpha", format!("{}\u{2013}{}", p.min_alpha, p.max_alpha), p.min_alpha != d.min_alpha || p.max_alpha != d.max_alpha)}
-                {pv("Penalty exp", format!("{:.1}", p.penalty_exponent), p.penalty_exponent != d.penalty_exponent)}
             </div>
             <div class="bench-params-row">
                 <span class="bench-params-group">"Structure: "</span>
                 {pv("add", fmt_prob(p.add_polygon_prob), p.add_polygon_prob != d.add_polygon_prob)}
-                {pv("remove", fmt_prob(p.remove_polygon_prob), p.remove_polygon_prob != d.remove_polygon_prob)}
                 {pv("reorder", fmt_prob(p.reorder_polygon_prob), p.reorder_polygon_prob != d.reorder_polygon_prob)}
                 {pv("adj-swap", fmt_prob(p.adjacent_swap_prob), p.adjacent_swap_prob != d.adjacent_swap_prob)}
                 {pv("clone", fmt_prob(p.clone_polygon_prob), p.clone_polygon_prob != d.clone_polygon_prob)}

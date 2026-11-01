@@ -309,7 +309,7 @@ fn rank_index(count: usize, percentile: usize) -> usize {
 mod tests {
     use crate::mutation_params::PointPenalty;
     const PENALTY: PointPenalty =
-        PointPenalty { per_point: crate::settings::PER_POINT_PENALTY, exponent: 0.0 };
+        PointPenalty { per_point: crate::settings::PER_POINT_PENALTY };
     use super::{complexity, evaluate, AreaDistribution, MAX_TRIANGLES};
 
     fn triangle(color: [u8; 4], vertices: [[u16; 2]; 3]) -> [u32; 4] {

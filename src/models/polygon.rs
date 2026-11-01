@@ -3,18 +3,19 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     settings::{
-        MIN_POINTS_PER_POLYGON, NEW_POINT_MAX_DISTANCE, OFFSET_POLYGON_MAGNITUDE,
-        OFFSET_POLYGON_PROBABILITY, REMOVE_POINT_PROBABILITY, ROTATE_POLYGON_PROB,
-        SCALE_POLYGON_PROB,
+        NEW_POINT_MAX_DISTANCE, OFFSET_POLYGON_MAGNITUDE, OFFSET_POLYGON_PROBABILITY,
+        ROTATE_POLYGON_PROB, SCALE_POLYGON_PROB,
     },
     utils::randomf32_clamped,
 };
 
 use super::{color::Color, point::Point};
 
+/// A triangle: drawings hold only triangles, so the JSON `points` array must
+/// have exactly three entries.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Polygon {
-    pub points: Vec<Point>,
+    pub points: [Point; 3],
     pub color: Color,
 }
 
@@ -26,13 +27,11 @@ impl Polygon {
     pub fn new_random() -> Polygon {
         let origin: Point = Point::new_random();
         let d = NEW_POINT_MAX_DISTANCE;
-        let points = (0..3)
-            .map(|_| {
-                let x = randomf32_clamped(origin.x - d, origin.x + d).clamp(0.0, 1.0);
-                let y = randomf32_clamped(origin.y - d, origin.y + d).clamp(0.0, 1.0);
-                Point { x, y }
-            })
-            .collect();
+        let points = std::array::from_fn(|_| {
+            let x = randomf32_clamped(origin.x - d, origin.x + d).clamp(0.0, 1.0);
+            let y = randomf32_clamped(origin.y - d, origin.y + d).clamp(0.0, 1.0);
+            Point { x, y }
+        });
         Polygon {
             points,
             color: Color::new_random(),
@@ -40,10 +39,6 @@ impl Polygon {
     }
 
     fn offset_polygon(&mut self) -> bool {
-        if self.points.len() < 3 {
-            return false;
-        }
-
         let x_offset = randomf32_clamped(-OFFSET_POLYGON_MAGNITUDE, OFFSET_POLYGON_MAGNITUDE);
         let y_offset = randomf32_clamped(-OFFSET_POLYGON_MAGNITUDE, OFFSET_POLYGON_MAGNITUDE);
         self.points
@@ -54,9 +49,6 @@ impl Polygon {
     }
 
     fn scale_polygon(&mut self) -> bool {
-        if self.points.len() < 3 {
-            return false;
-        }
         let n = self.points.len() as f32;
         let cx = self.points.iter().map(|p| p.x).sum::<f32>() / n;
         let cy = self.points.iter().map(|p| p.y).sum::<f32>() / n;
@@ -69,9 +61,6 @@ impl Polygon {
     }
 
     fn rotate_polygon(&mut self) -> bool {
-        if self.points.len() < 3 {
-            return false;
-        }
         let n = self.points.len() as f32;
         let cx = self.points.iter().map(|p| p.x).sum::<f32>() / n;
         let cy = self.points.iter().map(|p| p.y).sum::<f32>() / n;
@@ -84,16 +73,6 @@ impl Polygon {
             p.x = (cx + dx * cos_a - dy * sin_a).clamp(0.0, 1.0);
             p.y = (cy + dx * sin_a + dy * cos_a).clamp(0.0, 1.0);
         }
-        true
-    }
-
-    fn remove_point(&mut self) -> bool {
-        let n = self.points.len();
-        if n <= MIN_POINTS_PER_POLYGON {
-            return false;
-        }
-        let i = rand::rng().random_range(0..(n - 1));
-        self.points.remove(i);
         true
     }
 
@@ -111,11 +90,6 @@ impl Polygon {
         }
         if rand::rng().random::<f32>() < ROTATE_POLYGON_PROB
             && self.rotate_polygon()
-        {
-            mutated = true;
-        }
-        if rand::rng().random::<f32>() < REMOVE_POINT_PROBABILITY
-            && self.remove_point()
         {
             mutated = true;
         }
