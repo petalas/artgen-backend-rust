@@ -49,7 +49,9 @@ sizes storage for it, each buffer still clamped to the device's binding limit
 checkers use `EngineCapacity::for_params` of the parameters they run. At
 32800-byte states the binding limit holds 4092 offspring (8371 at the old
 16032), so the application runs at most 4092 offspring per iteration, e.g. 63
-chains at λ 64.
+chains at λ 64. Tile counts and raster worklist entries take a word per
+(offspring, tile) at the 8x8 tile, so they also bound the offspring capacity
+on large images (2047 at 1024x1024); they are no longer clamped.
 
 A batch beyond the capacity fails loudly: `Workload::for_batch` panics when the
 chain count or chains x λ exceeds what was allocated (it used to clamp chains
@@ -58,10 +60,65 @@ error naming the capacity. `evolution-bench serve` sizes a case's engine for its
 first request: the fixture's parameters for a trial, the run's parameters for a
 quality request. `scripts/quality.py` gives each side its own server.
 
-Allocation preserves the existing independent storage clamps. Benchmark
-preparation rejects configurations that do not fit every required buffer.
-Reporting a smaller framebuffer capacity without enforcing it in ordinary
-configuration is a separate behavior issue, not silently changed here.
+Allocation preserves the existing independent framebuffer and tile-data
+clamps. Benchmark preparation rejects configurations that do not fit every
+required buffer. Reporting a smaller framebuffer capacity without enforcing it
+in ordinary configuration is a separate behavior issue, not silently changed
+here.
+
+### Tile groups
+
+An offspring's tile lists take `tiles x TILE_MAX_POLYS x 4` bytes
+(`execution::tile_list_bytes`): 1.41 MB at 1024x682 with a 32x16 tile, so
+256 offspring need 361 MB against a 128 MiB `tile_data`. `Workload` therefore
+splits each iteration's offspring into `TileGroups`, the fewest even groups
+whose lists fit the actual allocation (`TileStorage::slots`): one up to about
+512x340, two at 768x512, three at 1024x682, four at 1024x1024. Mutate and
+select still run once over all offspring; bin and raster run once per group,
+each group in its own pass (see Stage schedule). Before this, the clamp was
+silent and offspring past the allocation scored near-zero error and won
+selection (LEARNINGS, "Fitness ~99.9% while the image is still poor").
+
+- **Offset.** `tile_group_buf` holds every possible first offspring, one per
+  `min_storage_buffer_offset_alignment` bytes. Bin, raster and
+  update_framebuffers bind it (`Resource::TileGroup`, a read-only `u32`, the
+  engine's one dynamic-offset binding) at the group's offset
+  (`GpuPipeline::tile_group_offset`), so choosing a group is a `set_bind_group`
+  call. The binner bins offspring `tile_group_first + wid.x` into `tile_data`
+  slot `wid.x`; raster reads slot `offspring - tile_group_first`. Tile counts,
+  worklist entries and error sums keep full offspring ids.
+- **Passes.** Group 0 bins and rasters in the mutate pass. Each later group
+  gets a bin+raster pass after a 4-byte copy of the table's entry 0 (zero)
+  over the worklist count, so raster sees only its group's entries. A
+  one-group workload records the ungrouped commands at offset 0.
+- **Rejected designs**, all on Dozen. A second worklist header word read from
+  read-write storage made the binner's offspring id divergent to the compiler:
+  one group lost 4.2% (hillclimb 0.9584 [0.9547, 0.9607]). All groups in one
+  pass, with raster skipping earlier groups' entries, ran two forced groups at
+  0.88 of one group instead of 0.80, but the skip cost one group 1.5–2% (an
+  early return 0.9795; an empty tile, case medians 0.982–0.985), and at
+  768x512 and 1024x682 it gained under 1%. Copying the offset into the params
+  uniform (one group: NOISE) needs a second copy per group and a restore copy
+  per iteration. `clear_buffer` on the 4-byte count cost two groups another 25%.
+- **Winner lists.** update_framebuffers reuses the winner's tile lists, but
+  only the last group's lists survive. A winner below `tile_group_first` takes
+  the existing full-scan fallback (every polygon, AABB-culled), which blends
+  the same polygons in the same order, so framebuffers stay bit-identical.
+  Forcing the fallback for every winner (same search) cost 8% at 512x340 and
+  1.5% at 768x512, so binning winners again would not pay for its dispatch.
+- **Same search.** Groups change no score: error sums are integer atomics and
+  every offspring is binned and rastered exactly once. `check-gpu-rasterization`
+  (`verify_tile_groups`) runs 7 capped groups and 1 group on one image and
+  requires equal states, errors, update flags, framebuffers and totals;
+  `GpuEvolver::benchmark_set_tile_group_limit` sets the cap. Full evaluation
+  (`record_full_evaluation`) groups chains the same way.
+- **Validation.** `TileGroups::new` panics when the storage holds no single
+  offspring's lists. Benchmark validation requires one offspring's lists in
+  `tile_data` rather than all of them.
+- **Cost.** From one fixed start drawing on a project photo (4 x 64,
+  16-iteration batches): 769–779k evals/s at 512x340 (one group; capped to two
+  groups 617–630k, three 507–509k), 364k at 768x512 (two), 229–230k at
+  1024x682 (three).
 
 ### Per-point penalty
 
@@ -224,8 +281,8 @@ rows, so full-image (crossover) offspring do not bound the dispatch alone.
 After binning its band, each bin workgroup appends the consumed tiles that a
 changed polygon may meet (or that have the shortcut off) to `raster_work`.
 `GpuPipeline::record_raster` then dispatches 8192 raster workgroups that loop
-over the list. On the v1 fixtures, about 7–10% of the former 73.7k-workgroup grid
-had work. The test must match the raster shortcut exactly, because skipped tiles
+over the list (once per tile group; see Tile groups). On the v1 fixtures,
+about 7–10% of the former 73.7k-workgroup grid had work. The test must match the raster shortcut exactly, because skipped tiles
 used to return before adding to the error sums. update_framebuffers empties the
 list at the end of every iteration, and `evaluate_chain_fitness` resets it from
 the host because it runs no update. A separate worklist pass made 512-batch
@@ -283,9 +340,12 @@ compute pass. Raster's dispatch comes from `GpuPipeline::record_raster`.
 `record_batch` records a batch of search
 iterations (mutate, bin, raster, select, `update_framebuffers`), each as two
 compute passes, mutate+bin+raster and select+update: the pass boundaries are the
-error-sum barriers, since wgpu inserts none for RW→RW use inside a pass. A timed
-batch records its final iteration as four passes with per-stage query pairs and
-resolves the queries; `BatchTimestamps` names the three timing modes.
+error-sum barriers, since wgpu inserts none for RW→RW use inside a pass. Each
+later tile group adds a worklist reset copy and a bin+raster pass. A timed
+batch records its final iteration as four passes with per-stage query pairs
+(with tile groups, a bin and a raster pass per group, the queries on the last
+group's) and resolves the queries; `BatchTimestamps` names the three timing
+modes.
 `record_full_evaluation` records bin and raster only, in one pass;
 `record_framebuffer_init` the initial full rasterization. The module records
 commands only. Callers upload params, do the host part of skipped stages

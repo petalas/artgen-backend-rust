@@ -12,7 +12,7 @@ use wgpu::{Buffer, BufferDescriptor, BufferUsages, CommandEncoderDescriptor, Map
 
 use super::buffers::{ControlFlags, GpuDrawingState, GPU_DRAWING_STATE_SIZE};
 use super::{GpuEvolver, PassTimings};
-use super::execution::ResourceSizes;
+use super::execution::{tile_list_bytes, ResourceSizes};
 use crate::models::drawing::Drawing;
 use crate::mutation_params::MutationParams;
 use crate::settings::{
@@ -241,8 +241,8 @@ impl GpuEvolver {
                 params.lambda, p.chain_count, p.offspring_capacity
             ));
         }
-        validate_dispatch(p, params)?;
-        validate_resources(p, params)
+        validate_resources(p, params)?;
+        validate_dispatch(p, params)
     }
 
     /// Install and cache a lab mutation source using the original layout and
@@ -312,6 +312,17 @@ impl GpuEvolver {
     pub fn benchmark_set_raster_shader(&mut self, source: &str) -> Result<(), String> {
         self.benchmark_drain()?;
         self.pipeline.shader_variants().set_raster_shader(source)
+    }
+
+    /// Bin and raster at most `limit` offspring per tile group (`None`: as many
+    /// as tile data holds), so a checker can compare grouped and ungrouped runs
+    /// on one small image. The search does not depend on the grouping.
+    ///
+    /// # Panics
+    /// Panics on a zero limit.
+    pub fn benchmark_set_tile_group_limit(&mut self, limit: Option<u32>) {
+        assert!(limit != Some(0), "a tile group holds at least one offspring");
+        self.pipeline.tile_group_limit = limit;
     }
 
     /// Replace binning only for an untimed replay. Prepare resets the persistent
@@ -565,9 +576,15 @@ fn validate_resources(
     p: &super::pipeline::GpuPipeline,
     params: &MutationParams,
 ) -> Result<(), String> {
-    let work = p.workload(params);
-    let required = ResourceSizes::new(u64::from(work.active), u64::from(work.offspring),
-        [p.image_width, p.image_height], work.raster);
+    let active = u64::from(params.chain_count);
+    let grid = p.raster_grid(params.rasterize_wg);
+    // Tile lists are binned and rastered in groups (`TileGroups`), so tile data
+    // needs one offspring's lists, however many offspring run.
+    let required = ResourceSizes {
+        tile_data: tile_list_bytes(grid),
+        ..ResourceSizes::new(active, active * u64::from(params.lambda),
+            [p.image_width, p.image_height], grid)
+    };
     let limits = p.device.limits();
     required.validate(p.allocated_resources(),
         limits.max_buffer_size.min(limits.max_storage_buffer_binding_size))

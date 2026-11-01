@@ -1,8 +1,10 @@
 // Paired pixels per physical lane, same logical raster tile.
-// Dispatch: (n, 1, 1) for a fixed n (pipeline.rs). bin_polygons lists the
-// (offspring, tile) pairs that have work; workgroup g rasterizes entries g,
-// g + n, g + 2n, ... The list omits tiles outside the dirty rectangle and tiles no
-// changed polygon meets, which added nothing to the error sums, so far fewer
+// Dispatch: (n, 1, 1) for a fixed n (pipeline.rs), once per tile group
+// (execution::TileGroups). bin_polygons lists the (offspring, tile) pairs that
+// have work; workgroup g rasterizes entries g, g + n, g + 2n, ... The list
+// holds only the current tile group's entries (schedule.rs empties it between
+// groups). It omits tiles outside the dirty rectangle and tiles no changed
+// polygon meets, which added nothing to the error sums, so far fewer
 // workgroups launch than the former (tiles_x, tiles_y, offspring) grid.
 // 1D workgroup layout is retained for subgroup intrinsics.
 // Each lane owns ordinal local_idx + k*PHYSICAL_LANES, within TILE_W*TILE_H.
@@ -38,6 +40,9 @@ struct DecodedPolygon {
 @group(0) @binding(5) var<storage, read>       chain_states:       array<DrawingState>;
 @group(0) @binding(6) var<storage, read>       chain_framebuffers: array<u32>;
 @group(0) @binding(7) var<storage, read>       raster_work:        array<u32>;
+// The first offspring of the tile group whose lists tile_data holds, bound at
+// a dynamic offset.
+@group(0) @binding(8) var<storage, read>       tile_group_first:   u32;
 @group(1) @binding(0) var<uniform>             params:             Params;
 
 // Shared polygon capacity follows the tile polygon clamp.
@@ -350,7 +355,9 @@ fn raster_tile(entry: u32, local_idx: u32, sg_inv_id: u32, sg_idx: u32, num_subg
         let raw_count = tile_counts_buf[tile_global];
         overflowed = raw_count > TILE_MAX_POLYS;
         tile_poly_count = min(raw_count, TILE_MAX_POLYS);
-        tile_data_base = chain_id * num_tiles * TILE_MAX_POLYS + tile_id * TILE_MAX_POLYS;
+        // tile_data holds the current tile group's lists.
+        let slot = chain_id - tile_group_first;
+        tile_data_base = (slot * num_tiles + tile_id) * TILE_MAX_POLYS;
         // Neither the parent's nor the offspring's list may be truncated.
         changed = changes_shortcut(offspring_changed_words(chain_id), raw_count);
     }

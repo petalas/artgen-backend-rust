@@ -326,6 +326,16 @@ fn new_bin_buffers(p: &GpuPipeline, poison: &[u32], slots: usize) -> BinBuffers 
                 resource: buffer.as_entire_binding(),
             }
         });
+    // The engine's tile-group table, at tile group 0 (offset 0 in `dispatch`).
+    let tile_group = wgpu::BindGroupEntry {
+        binding: 5,
+        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+            buffer: &p.tile_group_buf,
+            offset: 0,
+            size: std::num::NonZeroU64::new(4),
+        }),
+    };
+    let entries: Vec<_> = entries.into_iter().chain([tile_group]).collect();
     let bind_group = p.device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("checker bin bindings"),
         layout: &p.bin_polygons_pipeline().get_bind_group_layout(0),
@@ -364,7 +374,7 @@ fn dispatch(
             timestamp_writes: None,
         });
         pass.set_pipeline(pipeline);
-        pass.set_bind_group(0, &bins.bind_group, &[]);
+        pass.set_bind_group(0, &bins.bind_group, &[p.tile_group_offset(0)]);
         pass.set_bind_group(1, &p.params_bind_group, &[]);
         pass.dispatch_workgroups(u32::try_from(OFFSPRING)?, BIN_ROW_BANDS, 1);
     }

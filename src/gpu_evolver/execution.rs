@@ -85,12 +85,76 @@ impl EngineCapacity {
 /// no copy of a parent there.
 pub(super) const WORKGROUP_STORAGE_BYTES: u32 = 32 * 1024;
 
+/// Bytes of one offspring's tile lists over `grid`: `TILE_MAX_POLYS` indices per tile.
+pub(super) fn tile_list_bytes(grid: RasterGrid) -> u64 {
+    grid.tiles() * u64::from(TILE_MAX_POLYS) * 4
+}
+
+/// The tile-list storage a workload is split over: the bytes of `tile_data`,
+/// and an optional cap on a group's offspring that checkers set to exercise
+/// grouping on small images.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct TileStorage {
+    pub bytes: u64,
+    pub group_limit: Option<u32>,
+}
+
+impl TileStorage {
+    /// Offspring whose lists over `grid` fit at once.
+    pub fn slots(self, grid: RasterGrid) -> u64 {
+        let held = self.bytes / tile_list_bytes(grid);
+        self.group_limit.map_or(held, |limit| held.min(u64::from(limit)))
+    }
+}
+
+/// Consecutive offspring binned and rastered together. `tile_data` holds the
+/// tile lists of one group at a time, indexed from the group's first
+/// offspring, so a workload whose lists exceed the allocation (large images:
+/// 1024x682 at a 32x16 tile needs 361 MB of lists for 256 offspring, the
+/// binding limit is 128 MiB) runs in several groups instead of writing past it.
+/// Groups are as even as possible; one group when everything fits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct TileGroups {
+    offspring: u32,
+    size: u32,
+}
+
+impl TileGroups {
+    /// Split `offspring` into the fewest groups of at most `slots`, the
+    /// offspring whose lists `tile_data` holds.
+    ///
+    /// # Panics
+    /// Panics if `slots` is zero: the allocation holds no offspring's lists.
+    pub fn new(offspring: u32, slots: u64) -> Self {
+        assert!(slots >= 1, "tile storage holds no offspring's tile lists at this raster tile");
+        let count = u64::from(offspring).div_ceil(slots).max(1);
+        let size = u32::try_from(u64::from(offspring).div_ceil(count))
+            .expect("group size fits u32");
+        Self { offspring, size }
+    }
+
+    pub fn count(self) -> u32 {
+        self.offspring.div_ceil(self.size.max(1)).max(1)
+    }
+
+    /// The first offspring of `group`.
+    pub fn first(self, group: u32) -> u32 {
+        group * self.size
+    }
+
+    /// Offspring in `group`; the last group may be smaller.
+    pub fn len(self, group: u32) -> u32 {
+        self.size.min(self.offspring - self.first(group))
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Workload {
     pub active: u32,
     pub offspring: u32,
     pub iterations: u32,
     pub raster: RasterGrid,
+    pub tile_groups: TileGroups,
     pub mutate_y: u32,
     pub evaluations: u64,
 }
@@ -102,6 +166,7 @@ impl Workload {
         chain_capacity: u32,
         offspring_capacity: u32,
         mutation_group: u32,
+        tile_storage: TileStorage,
     ) -> Self {
         assert!(params.chain_count <= chain_capacity,
             "{} chains exceed the engine's chain capacity ({chain_capacity}); construct it \
@@ -115,11 +180,13 @@ impl Workload {
              ({offspring_capacity}); construct it with a larger EngineCapacity",
             params.lambda);
         let iterations = params.gpu_batch_iters.max(1);
+        let raster = RasterGrid::new(image, params.rasterize_wg);
         Self {
             active,
             offspring,
             iterations,
-            raster: RasterGrid::new(image, params.rasterize_wg),
+            raster,
+            tile_groups: TileGroups::new(offspring, tile_storage.slots(raster)),
             mutate_y: params.lambda.div_ceil(mutation_group),
             evaluations: u64::from(iterations) * u64::from(offspring),
         }
@@ -228,10 +295,14 @@ impl AllocationPlan {
             image[1]
         );
         let states = max_storage / GPU_DRAWING_STATE_SIZE as u64;
+        // Sized for the smallest supported tile, the most tiles.
+        let grid = RasterGrid::new(image, [8, 8]);
+        // Tile counts and worklist entries take one word per (offspring, tile)
+        // for every offspring of an iteration, so they bound the offspring too.
+        let tile_words = (max_storage - RASTER_WORK_HEADER_BYTES) / (grid.tiles() * 4);
         let chains = u64::from(capacity.chains).min(states);
-        let offspring = states.min(chains * u64::from(capacity.lambda));
-        let mut resources =
-            ResourceSizes::new(chains, offspring, image, RasterGrid::new(image, [8, 8]));
+        let offspring = states.min(tile_words).min(chains * u64::from(capacity.lambda));
+        let mut resources = ResourceSizes::new(chains, offspring, image, grid);
         // The device may create buffers up to the whole binding limit, whatever
         // the workload: requesting a limit allocates nothing, and diagnostic
         // snapshots stage several resources in one buffer. (A limit derived from
@@ -239,11 +310,12 @@ impl AllocationPlan {
         // keeps its independent clamp; usable capacities are checked against
         // actual storage before qualification.
         let max_buffer_size = max_storage;
+        // Tile lists beyond the allocation are binned in groups (`TileGroups`).
         resources.tile_data = resources.tile_data.min(max_buffer_size);
         // The diagnostic word is allocated too: an engine sized exactly for its
         // workload has no unused worst-case slack to hold it.
-        resources.tile_counts = resources.tile_counts.min(max_buffer_size);
-        resources.raster_work = resources.raster_work.min(max_buffer_size);
+        assert!(resources.tile_counts.max(resources.raster_work) <= max_buffer_size,
+            "the offspring capacity bounds tile counts and the raster worklist");
         resources.framebuffers = resources.framebuffers.min(max_buffer_size);
         Self {
             chain_count: u32::try_from(chains).expect("chain count fits requested u32"),
@@ -257,6 +329,73 @@ impl AllocationPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const BINDING_LIMIT: u64 = 128 * 1024 * 1024;
+    const UNGROUPED: TileStorage = TileStorage { bytes: BINDING_LIMIT, group_limit: None };
+
+    /// Groups of the default 4 x 64 workload at a 32x16 tile, its lists in one
+    /// binding-limit allocation.
+    fn default_groups(image: [u32; 2]) -> TileGroups {
+        let params = MutationParams::default();
+        let plan = AllocationPlan::new(EngineCapacity::for_params(&params), image, BINDING_LIMIT);
+        let storage = TileStorage { bytes: plan.resources.tile_data, group_limit: None };
+        Workload::for_batch(&params, image, plan.chain_count, plan.offspring_capacity, 1, storage)
+            .tile_groups
+    }
+
+    #[test]
+    fn tile_lists_beyond_the_allocation_run_in_groups() {
+        // 1376 tiles of 1 KiB: 95 offspring per 128 MiB.
+        assert_eq!(tile_list_bytes(RasterGrid::new([1024, 682], [32, 16])), 1_409_024);
+        for (image, count, size) in [
+            ([384, 384], 1, 256),
+            ([512, 340], 1, 256),
+            ([768, 512], 2, 128),
+            ([1024, 682], 3, 86),
+            ([1024, 1024], 4, 64),
+        ] {
+            let groups = default_groups(image);
+            assert_eq!((groups.count(), groups.len(0)), (count, size), "{image:?}");
+            let lengths: Vec<u32> = (0..count).map(|g| groups.len(g)).collect();
+            assert_eq!(lengths.iter().sum::<u32>(), 256, "{image:?}");
+            assert!((1..count).all(|g| groups.first(g) == groups.first(g - 1) + groups.len(g - 1)));
+        }
+    }
+
+    #[test]
+    fn groups_cover_every_offspring_once_within_the_slots() {
+        for offspring in [1, 2, 63, 64, 65, 255, 256, 4092] {
+            for slots in [1, 2, 3, 37, 95, 256, 10_000] {
+                let groups = TileGroups::new(offspring, slots);
+                let count = groups.count();
+                assert_eq!(count, u32::try_from(u64::from(offspring).div_ceil(slots)).unwrap());
+                let mut next = 0;
+                for g in 0..count {
+                    assert_eq!(groups.first(g), next);
+                    assert!((1..=slots).contains(&u64::from(groups.len(g))));
+                    next += groups.len(g);
+                }
+                assert_eq!(next, offspring, "{offspring} offspring, {slots} slots");
+            }
+        }
+    }
+
+    #[test]
+    fn a_group_limit_caps_the_slots() {
+        let grid = RasterGrid::new([384, 384], [32, 16]);
+        assert_eq!(UNGROUPED.slots(grid), 455);
+        let limited = TileStorage { group_limit: Some(37), ..UNGROUPED };
+        assert_eq!(limited.slots(grid), 37);
+        assert_eq!(TileGroups::new(256, limited.slots(grid)).count(), 7);
+    }
+
+    #[test]
+    #[should_panic(expected = "holds no offspring")]
+    fn storage_without_one_offspring_of_lists_fails_loudly() {
+        let grid = RasterGrid::new([1024, 1024], [8, 8]);
+        let short = TileStorage { bytes: tile_list_bytes(grid) - 4, group_limit: None };
+        let _ = TileGroups::new(1, short.slots(grid));
+    }
 
     #[test]
     fn the_overflow_flag_lies_above_every_supported_error_sum() {
@@ -295,23 +434,25 @@ mod tests {
         assert_eq!(plan.resources.parents, 4 * GPU_DRAWING_STATE_SIZE as u64);
         assert_eq!(plan.resources.working, 256 * GPU_DRAWING_STATE_SIZE as u64);
         assert_eq!(plan.resources.framebuffers, 4 * 384 * 384 * 4);
+        let storage = TileStorage { bytes: plan.resources.tile_data, group_limit: None };
         let work = Workload::for_batch(&params, [384, 384], plan.chain_count,
-            plan.offspring_capacity, 1);
+            plan.offspring_capacity, 1, storage);
         assert_eq!(work.offspring, 256);
+        assert_eq!(work.tile_groups.count(), 1);
     }
 
     #[test]
     #[should_panic(expected = "offspring capacity")]
     fn a_batch_beyond_the_offspring_capacity_fails_loudly() {
         let params = MutationParams { chain_count: 4, lambda: 64, ..MutationParams::default() };
-        let _ = Workload::for_batch(&params, [384, 384], 4, 128, 1);
+        let _ = Workload::for_batch(&params, [384, 384], 4, 128, 1, UNGROUPED);
     }
 
     #[test]
     #[should_panic(expected = "chain capacity")]
     fn a_batch_beyond_the_chain_capacity_fails_loudly() {
         let params = MutationParams { chain_count: 8, lambda: 1, ..MutationParams::default() };
-        let _ = Workload::for_batch(&params, [384, 384], 4, 256, 1);
+        let _ = Workload::for_batch(&params, [384, 384], 4, 256, 1, UNGROUPED);
     }
 
     #[test]
@@ -330,7 +471,7 @@ mod tests {
             ..MutationParams::default()
         };
         for group in [1, 2, 4, 8, 16, 32, 64] {
-            let work = Workload::for_batch(&params, [65, 51], 1024, 8192, group);
+            let work = Workload::for_batch(&params, [65, 51], 1024, 8192, group, UNGROUPED);
             assert_eq!((work.raster.x, work.raster.y), (3, 4));
             assert_eq!((work.active, work.offspring), (4, 256));
             assert_eq!(work.mutate_y, 64 / group);
@@ -368,6 +509,7 @@ mod tests {
                 raster_work: required.raster_work - 4,
                 ..required
             },
+
             ResourceSizes {
                 framebuffers: required.framebuffers - 4,
                 ..required

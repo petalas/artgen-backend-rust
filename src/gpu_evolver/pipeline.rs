@@ -3,7 +3,8 @@ use wgpu::util::DeviceExt;
 
 use super::bindings::{self, Resource};
 use super::execution::{
-    AllocationPlan, EngineCapacity, RasterGrid, ResourceSizes, Workload, WORKGROUP_STORAGE_BYTES,
+    AllocationPlan, EngineCapacity, RasterGrid, ResourceSizes, TileStorage, Workload,
+    WORKGROUP_STORAGE_BYTES,
 };
 
 use super::buffers::{
@@ -45,6 +46,13 @@ pub struct GpuPipeline {
     pub tile_counts_buf: Buffer,
     // The (offspring, tile) pairs that need raster, after an entry count.
     pub raster_work_buf: Buffer,
+    // Every possible first offspring of a tile group (`execution::TileGroups`),
+    // one per `tile_group_stride` bytes. Bin, raster and update_framebuffers
+    // bind the current group's entry at a dynamic offset (`tile_group_offset`).
+    pub tile_group_buf: Buffer,
+    pub(super) tile_group_stride: u32,
+    // Caps a tile group's offspring below what tile_data holds; a checker hook.
+    pub(super) tile_group_limit: Option<u32>,
 
     // Incremental evaluation buffers
     pub chain_framebuffers_buf: Buffer,
@@ -368,6 +376,20 @@ impl GpuPipeline {
             mapped_at_creation: false,
         });
 
+        // Every first offspring of a tile group, of a batch or of a full
+        // evaluation, each at a dynamic-offset boundary.
+        let tile_group_stride = device.limits().min_storage_buffer_offset_alignment;
+        let words = tile_group_stride as usize / 4;
+        let firsts: Vec<u32> = (0..allocation.offspring_capacity.max(chain_count))
+            .flat_map(|first| std::iter::once(first).chain(std::iter::repeat_n(0, words - 1)))
+            .collect();
+        // Entry 0 is also the zero that empties the raster worklist between groups.
+        let tile_group_buf = device.create_buffer_init(&util::BufferInitDescriptor {
+            label: Some("tile_group"),
+            contents: bytemuck::cast_slice(&firsts),
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+        });
+
         println!(
             "Tile culling buffers allocated: tile_data {:.1} MB, tile_counts {:.1} MB (max {} tiles, {} offspring)",
             tile_data_buf_size as f64 / (1024.0 * 1024.0),
@@ -480,6 +502,11 @@ impl GpuPipeline {
             Resource::TileData => tile_data_buf.as_entire_binding(),
             Resource::TileCounts => tile_counts_buf.as_entire_binding(),
             Resource::RasterWork => raster_work_buf.as_entire_binding(),
+            Resource::TileGroup => BindingResource::Buffer(BufferBinding {
+                buffer: &tile_group_buf,
+                offset: 0,
+                size: std::num::NonZeroU64::new(4),
+            }),
             Resource::ChainFramebuffers => chain_framebuffers_buf.as_entire_binding(),
             Resource::ChainTotalErrors => chain_total_errors_buf.as_entire_binding(),
             Resource::ChainUpdateFlags => chain_update_flags_buf.as_entire_binding(),
@@ -536,6 +563,9 @@ impl GpuPipeline {
             tile_data_buf,
             tile_counts_buf,
             raster_work_buf,
+            tile_group_buf,
+            tile_group_stride,
+            tile_group_limit: None,
             chain_framebuffers_buf,
             chain_total_errors_buf,
             chain_update_flags_buf,
@@ -573,7 +603,12 @@ impl GpuPipeline {
             "max_polygons {} exceeds the polygon capacity {}",
             params.max_polygons, crate::settings::POLYGON_CAPACITY);
         Workload::for_batch(params, [self.image_width, self.image_height],
-            self.chain_count, self.offspring_capacity, self.programs.mutation().group_size())
+            self.chain_count, self.offspring_capacity, self.programs.mutation().group_size(),
+            self.tile_storage())
+    }
+
+    pub(super) fn tile_storage(&self) -> TileStorage {
+        TileStorage { bytes: self.tile_data_buf.size(), group_limit: self.tile_group_limit }
     }
 
     pub(super) fn allocated_resources(&self) -> ResourceSizes {
@@ -601,15 +636,25 @@ impl GpuPipeline {
         &self.programs.tiles().raster
     }
 
-    /// Record raster/error for `offspring` offspring over `grid` tiles.
+    /// The dynamic offset of `tile_group_buf`'s entry for a tile group starting
+    /// at offspring `first`.
+    #[must_use]
+    pub fn tile_group_offset(&self, first: u32) -> u32 {
+        first * self.tile_group_stride
+    }
+
+    /// Record raster/error for the `offspring` offspring of the tile group
+    /// starting at `first`, over `grid` tiles.
     ///
     /// The raster program runs a fixed number of raster workgroups that share
     /// the (offspring, tile) pairs the binner listed. An indirect dispatch sized
     /// to the list cut throughput about 6x on Dozen (the host fell behind; see
     /// LEARNINGS). The pass must already have the params bind group at 1.
-    pub(super) fn record_raster(&self, pass: &mut ComputePass<'_>, grid: [u32; 2], offspring: u32) {
+    pub(super) fn record_raster(
+        &self, pass: &mut ComputePass<'_>, grid: [u32; 2], first: u32, offspring: u32,
+    ) {
         pass.set_pipeline(&self.programs.tiles().raster);
-        pass.set_bind_group(0, &self.rasterize_error_bind_group, &[]);
+        pass.set_bind_group(0, &self.rasterize_error_bind_group, &[self.tile_group_offset(first)]);
         let pairs = u64::from(grid[0]) * u64::from(grid[1]) * u64::from(offspring);
         let groups = u32::try_from(pairs.min(u64::from(RASTER_WORKGROUPS)))
             .expect("raster workgroups fit u32");

@@ -91,6 +91,7 @@ fn main() {
     verify_tile_list_overflow();
     verify_operator_stats();
     verify_ordered_remove();
+    verify_tile_groups();
     println!("GPU rasterization checks passed");
 }
 
@@ -965,6 +966,71 @@ fn verify_ordered_remove() {
         "ordered remove check: {shapes}; counts {start_counts:?} -> {counts:?}; offered/improved {}/{}",
         stats.offered[remove], stats.improved[remove],
     );
+}
+
+fn verify_tile_groups() {
+    // Large images bin and raster their offspring in tile groups, since
+    // tile_data holds the lists of a few offspring only (1024x682: 95 of 256).
+    // Capping the group at 37 offspring (seven groups, the last of 34) must
+    // search exactly as one group: same offspring, errors, winners and caches.
+    // update_framebuffers then scans every polygon for winners of the first six
+    // groups, whose lists the last group overwrote.
+    const SIDE: u32 = 96;
+    const CHAINS: u32 = 4;
+    const BATCHES: usize = 12;
+    let reference: Vec<u8> = (0..SIDE * SIDE)
+        .flat_map(|i| {
+            let (x, y) = (i % SIDE, i / SIDE);
+            let band = if (x / 16 + y / 8) % 2 == 0 { 60 } else { 190 };
+            [(x * 255 / SIDE) as u8, band, (y * 255 / SIDE) as u8, 255]
+        })
+        .collect();
+    // Not scattered_triangles: its grid puts hypotenuses on pixel centres,
+    // where the GPU's contracted edge test and the scalar one can disagree.
+    let drawing = overlapping_triangles(300);
+    let params = MutationParams { chain_count: CHAINS, gpu_batch_iters: 8, ..Default::default() };
+    let penalty = params.point_penalty();
+    let workload = [CHAINS, params.lambda];
+    let mut evolver = futures_lite::future::block_on(GpuEvolver::new(
+        &reference,
+        SIDE,
+        SIDE,
+        &drawing,
+        EngineCapacity::for_params(&params),
+    ));
+    let mut run = |limit: Option<u32>| {
+        evolver.benchmark_set_tile_group_limit(limit);
+        let start = evolver
+            .prepare_seeded_benchmark(&drawing, &params, 13, 0, true)
+            .expect("tile group preparation failed");
+        // Timed batches record bin and raster as a pass per stage and group.
+        for batch in 0..BATCHES {
+            evolver.run_batch(&params, batch % 2 == 0);
+        }
+        let context = format!("tile group limit {limit:?}");
+        let snapshot = assert_chains_cached_byte_l1(&mut evolver, &reference, workload, penalty, &context);
+        assert_parents_match_scalar(&snapshot, &reference, SIDE, penalty, &context);
+        let fitness: Vec<f32> = snapshot.parents.iter().map(|p| f32::from_bits(p.fitness_bits)).collect();
+        assert!(fitness.iter().all(|&now| now > start), "{context}: every chain must improve on {start}: {fitness:?}");
+        snapshot
+    };
+    let whole = run(None);
+    let grouped = run(Some(37));
+    assert!(whole.parents == grouped.parents, "grouped parents differ");
+    assert!(whole.offspring == grouped.offspring, "grouped offspring differ");
+    assert_eq!(whole.offspring_errors, grouped.offspring_errors, "grouped offspring errors");
+    assert_eq!(whole.chain_update_flags, grouped.chain_update_flags, "grouped update flags");
+    assert_eq!(whole.parent_total_errors, grouped.parent_total_errors, "grouped cached totals");
+    assert!(whole.parent_framebuffers == grouped.parent_framebuffers, "grouped framebuffers differ");
+    assert_eq!(whole.fitness_packed, grouped.fitness_packed, "grouped fitness");
+    // A full evaluation in groups of one chain re-derives the cached totals.
+    evolver.benchmark_set_tile_group_limit(Some(1));
+    evolver.evaluate_chain_fitness(&params);
+    let full = assert_chains_cached_byte_l1(&mut evolver, &reference, workload, penalty, "grouped full");
+    assert_eq!(grouped.parent_total_errors, full.parent_total_errors, "incremental and grouped full totals");
+    let counts: Vec<_> = grouped.parents.iter().map(|p| p.polygon_count).collect();
+    println!("tile group check: 7 groups match 1 over {BATCHES} batches; counts {counts:?}, totals {:?}",
+        full.parent_total_errors);
 }
 
 /// Every parent's cached framebuffer is the scalar renderer's for its polygons

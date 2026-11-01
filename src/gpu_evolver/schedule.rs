@@ -15,6 +15,16 @@
 //! passes, mutate+bin+raster and select+update. The timestamped final iteration
 //! records four, one per sampled stage.
 //!
+//! When the tile lists of all offspring exceed `tile_data`, bin and raster run
+//! once per tile group (`execution::TileGroups`). Each binds the group's entry
+//! of `tile_group_buf` (its first offspring, from which the binner, raster and
+//! `update_framebuffers` index `tile_data`) at a dynamic offset. Each later
+//! group gets its own bin+raster pass after a 4-byte copy that empties the
+//! raster worklist, so raster sees only its group's entries. A workload with
+//! one group records the ungrouped commands, at offset 0. (Skipping earlier
+//! groups' entries in raster instead, all groups in one pass, made one group
+//! 1.5–2% slower.)
+//!
 //! A batch is split here into up to `FINISH_THREADS` command encoders,
 //! finished in parallel by [`BatchCommands::finish`]. The chunk boundaries fall
 //! between iterations, so the split belongs with iteration recording; the
@@ -27,7 +37,7 @@ use wgpu::{
 
 use crate::settings::BIN_ROW_BANDS;
 
-use super::execution::{RasterGrid, Workload};
+use super::execution::{RasterGrid, TileGroups, Workload, RASTER_WORK_HEADER_BYTES};
 use super::pipeline::GpuPipeline;
 
 /// Command buffers one batch is split into; each but the last is finished on
@@ -140,18 +150,21 @@ pub(super) fn record_batch(
 }
 
 /// Record a full evaluation of working states `0..chains`: bin and raster only,
-/// in one pass. mutate and `update_framebuffers` do not run, so the host must
-/// first have done their part: copied the parents into those states, marked
-/// them with `GpuPipeline::mark_full_evaluation`, and emptied the raster
-/// worklist (and empty it again after submitting, for the next batch).
+/// in one pass per tile group. mutate and `update_framebuffers` do not run, so
+/// the host must first have done their part: copied the parents into those
+/// states, marked them with `GpuPipeline::mark_full_evaluation`, and emptied
+/// the raster worklist (and empty it again after submitting, for the next
+/// batch).
 pub(super) fn record_full_evaluation(p: &GpuPipeline, encoder: &mut CommandEncoder, chains: u32) {
     let grid = p.raster_grid(p.rasterize_wg());
-    let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-        label: Some("evaluate_fitness"),
-        timestamp_writes: None,
-    });
-    record_bin(&mut pass, p, chains);
-    record_raster(&mut pass, p, grid, chains);
+    let groups = TileGroups::new(chains, p.tile_storage().slots(grid));
+    for group in 0..groups.count() {
+        if group > 0 {
+            record_worklist_reset(p, encoder);
+        }
+        let mut pass = begin_pass(encoder, "evaluate_fitness", None);
+        record_bin_raster(&mut pass, p, grid, groups, group);
+    }
 }
 
 /// Record the full rasterization of `chains` parents into their framebuffers
@@ -192,41 +205,72 @@ fn begin_pass<'e>(
     encoder.begin_compute_pass(&ComputePassDescriptor { label: Some(label), timestamp_writes })
 }
 
-/// Two passes; `batch_start` timestamps the beginning of the first.
+/// Two passes, plus one per later tile group; `batch_start` timestamps the
+/// beginning of the first.
 fn record_search_iteration(
     p: &GpuPipeline,
     encoder: &mut CommandEncoder,
     work: &Workload,
     batch_start: Option<ComputePassTimestampWrites<'_>>,
 ) {
+    let groups = work.tile_groups;
     {
         let mut pass = begin_pass(encoder, "mutate_bin_rasterize", batch_start);
         record_mutate(&mut pass, p, work);
-        record_bin(&mut pass, p, work.offspring);
-        record_raster(&mut pass, p, work.raster, work.offspring);
+        record_bin_raster(&mut pass, p, work.raster, groups, 0);
+    }
+    for group in 1..groups.count() {
+        record_worklist_reset(p, encoder);
+        let mut pass = begin_pass(encoder, "bin_rasterize", None);
+        record_bin_raster(&mut pass, p, work.raster, groups, group);
     }
     let mut pass = begin_pass(encoder, "select_update", None);
     record_select_update(&mut pass, p, work);
 }
 
 /// Four passes, each with its query pair; under the envelope, select's
-/// beginning query stays the batch start.
+/// beginning query stays the batch start. With several tile groups, bin and
+/// raster get a pass each per group, and their queries time the last group.
 fn record_timed_iteration(p: &GpuPipeline, encoder: &mut CommandEncoder, work: &Workload, envelope: bool) {
+    let groups = work.tile_groups;
     {
         let mut pass = begin_pass(encoder, "mutate", Some(pass_timestamps(p, Some(0), Some(1))));
         record_mutate(&mut pass, p, work);
     }
-    {
-        let mut pass = begin_pass(encoder, "bin_polygons", Some(pass_timestamps(p, Some(2), Some(3))));
-        record_bin(&mut pass, p, work.offspring);
-    }
-    {
-        let mut pass = begin_pass(encoder, "rasterize_error", Some(pass_timestamps(p, Some(4), Some(5))));
-        record_raster(&mut pass, p, work.raster, work.offspring);
+    for group in 0..groups.count() {
+        if group > 0 {
+            record_worklist_reset(p, encoder);
+        }
+        let last = group + 1 == groups.count();
+        let (first, offspring) = (groups.first(group), groups.len(group));
+        {
+            let queries = last.then(|| pass_timestamps(p, Some(2), Some(3)));
+            let mut pass = begin_pass(encoder, "bin_polygons", queries);
+            record_bin(&mut pass, p, first, offspring);
+        }
+        let queries = last.then(|| pass_timestamps(p, Some(4), Some(5)));
+        let mut pass = begin_pass(encoder, "rasterize_error", queries);
+        record_raster(&mut pass, p, work.raster, first, offspring);
     }
     let select_begin = if envelope { None } else { Some(6) };
     let mut pass = begin_pass(encoder, "select", Some(pass_timestamps(p, select_begin, Some(7))));
     record_select_update(&mut pass, p, work);
+}
+
+/// Empty the raster worklist between tile groups, by copying `tile_group_buf`'s
+/// entry 0 (zero) over the count: raster consumed the previous group's
+/// entries. `clear_buffer` cost two groups another 25% on Dozen.
+fn record_worklist_reset(p: &GpuPipeline, encoder: &mut CommandEncoder) {
+    encoder.copy_buffer_to_buffer(&p.tile_group_buf, 0, &p.raster_work_buf, 0, RASTER_WORK_HEADER_BYTES);
+}
+
+/// Bin, then raster, tile group `group`.
+fn record_bin_raster(
+    pass: &mut ComputePass<'_>, p: &GpuPipeline, grid: RasterGrid, groups: TileGroups, group: u32,
+) {
+    let (first, offspring) = (groups.first(group), groups.len(group));
+    record_bin(pass, p, first, offspring);
+    record_raster(pass, p, grid, first, offspring);
 }
 
 fn record_mutate(pass: &mut ComputePass<'_>, p: &GpuPipeline, work: &Workload) {
@@ -236,28 +280,32 @@ fn record_mutate(pass: &mut ComputePass<'_>, p: &GpuPipeline, work: &Workload) {
     pass.dispatch_workgroups(work.active, work.mutate_y, 1);
 }
 
-/// One workgroup per offspring and band of tile rows.
-fn record_bin(pass: &mut ComputePass<'_>, p: &GpuPipeline, offspring: u32) {
+/// One workgroup per offspring of the tile group starting at `first` and band
+/// of tile rows.
+fn record_bin(pass: &mut ComputePass<'_>, p: &GpuPipeline, first: u32, offspring: u32) {
     pass.set_pipeline(p.bin_polygons_pipeline());
-    pass.set_bind_group(0, &p.bin_polygons_bind_group, &[]);
+    pass.set_bind_group(0, &p.bin_polygons_bind_group, &[p.tile_group_offset(first)]);
     pass.set_bind_group(1, &p.params_bind_group, &[]);
     pass.dispatch_workgroups(offspring, BIN_ROW_BANDS, 1);
 }
 
-fn record_raster(pass: &mut ComputePass<'_>, p: &GpuPipeline, grid: RasterGrid, offspring: u32) {
+fn record_raster(pass: &mut ComputePass<'_>, p: &GpuPipeline, grid: RasterGrid, first: u32, offspring: u32) {
     pass.set_bind_group(1, &p.params_bind_group, &[]);
-    p.record_raster(pass, [grid.x, grid.y], offspring);
+    p.record_raster(pass, [grid.x, grid.y], first, offspring);
 }
 
-/// select, then `update_framebuffers` in the same pass.
+/// select, then `update_framebuffers` in the same pass. The update binds the
+/// last tile group, whose lists `tile_data` still holds.
 fn record_select_update(pass: &mut ComputePass<'_>, p: &GpuPipeline, work: &Workload) {
+    let groups = work.tile_groups;
+    let last_group = p.tile_group_offset(groups.first(groups.count() - 1));
     pass.set_pipeline(p.select_pipeline());
     pass.set_bind_group(0, &p.select_bind_group, &[]);
     pass.set_bind_group(1, &p.params_bind_group, &[]);
     pass.dispatch_workgroups(work.active, 1, 1);
 
     pass.set_pipeline(p.update_framebuffers_pipeline());
-    pass.set_bind_group(0, &p.update_framebuffers_bind_group, &[]);
+    pass.set_bind_group(0, &p.update_framebuffers_bind_group, &[last_group]);
     pass.set_bind_group(1, &p.params_bind_group, &[]);
     pass.dispatch_workgroups(work.raster.x, work.raster.y, work.active);
 }

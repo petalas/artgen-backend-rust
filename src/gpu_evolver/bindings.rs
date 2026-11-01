@@ -29,6 +29,9 @@ pub(super) enum Resource {
     TileData,
     TileCounts,
     RasterWork,
+    /// The first offspring of the tile group being binned and rastered: one
+    /// entry of `GpuPipeline::tile_group_buf`, chosen by a dynamic offset.
+    TileGroup,
     ChainFramebuffers,
     ChainTotalErrors,
     ChainUpdateFlags,
@@ -57,7 +60,7 @@ use Access::{Read, Write};
 use Resource::{
     ChainChanges, ChainFramebuffers, ChainStates, ChainTotalErrors, ChainUpdateFlags, Control,
     ErrorAccumulators, FitnessPacked, OffspringOps, OperatorStats, Params, RasterWork,
-    ReferenceImage, TileCounts, TileData, WorkingStates,
+    ReferenceImage, TileCounts, TileData, TileGroup, WorkingStates,
 };
 
 pub(super) const PARAMS: Stage = Stage {
@@ -81,6 +84,7 @@ pub(super) const RASTERIZE_ERROR: Stage = Stage {
         (ChainStates, Read),
         (ChainFramebuffers, Read),
         (RasterWork, Read),
+        (TileGroup, Read),
     ],
 };
 
@@ -92,6 +96,7 @@ pub(super) const BIN_POLYGONS: Stage = Stage {
         (TileCounts, Write),
         (ChainStates, Read),
         (RasterWork, Write),
+        (TileGroup, Read),
     ],
 };
 
@@ -132,6 +137,7 @@ pub(super) const UPDATE_FRAMEBUFFERS: Stage = Stage {
         (TileCounts, Read),
         (RasterWork, Write),
         (ChainChanges, Read),
+        (TileGroup, Read),
     ],
 };
 
@@ -187,7 +193,7 @@ impl Resource {
             ChainChanges => GPU_CHAIN_CHANGE_SIZE,
             Params => std::mem::size_of::<GpuParams>(),
             ReferenceImage => unreachable!("the reference image is a texture"),
-            ErrorAccumulators | FitnessPacked | TileData | TileCounts | RasterWork
+            ErrorAccumulators | FitnessPacked | TileData | TileCounts | RasterWork | TileGroup
             | ChainFramebuffers | ChainTotalErrors | ChainUpdateFlags | OffspringOps
             | OperatorStats => 4,
         }
@@ -213,7 +219,7 @@ impl Resource {
         };
         BindingType::Buffer {
             ty,
-            has_dynamic_offset: false,
+            has_dynamic_offset: self == TileGroup,
             min_binding_size: NonZeroU64::new(self.element_size() as u64),
         }
     }
@@ -280,9 +286,10 @@ mod tests {
         let mut declared = Vec::new();
         for (group, stage) in groups {
             for entry in layout_entries(stage) {
+                // The shader cannot tell a dynamic offset; only the tile group has one.
                 let BindingType::Buffer {
                     ty,
-                    has_dynamic_offset: false,
+                    has_dynamic_offset,
                     min_binding_size,
                 } = entry.ty
                 else {
@@ -297,6 +304,8 @@ mod tests {
                     declared.push((group, entry.binding, "texture_2d<f32>", 0));
                     continue;
                 };
+                let resource = stage.bindings[entry.binding as usize].0;
+                assert_eq!(has_dynamic_offset, resource == super::Resource::TileGroup);
                 let kind = match ty {
                     BufferBindingType::Uniform => "uniform",
                     BufferBindingType::Storage { read_only: true } => "storage, read",

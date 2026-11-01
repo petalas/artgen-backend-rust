@@ -1,5 +1,9 @@
 // Polygon binning compute shader — assigns each polygon to the spatial tiles it overlaps.
-// Dispatch: (offspring_count, BIN_ROW_BANDS, 1). Workgroup (offspring, band) bins
+// Dispatch: (group offspring, BIN_ROW_BANDS, 1) per tile group. Offspring
+// tile_group_first + wid.x (bound at a dynamic offset) stores its lists at
+// tile_data slot wid.x: tile_data holds one group at a time
+// (execution::TileGroups). Counts and worklist entries use the offspring id.
+// Workgroup (offspring, band) bins
 // only the offspring's consumed tiles (those meeting its dirty rectangle) in its
 // band of tile rows. It computes tile bounds cooperatively, then one polygon
 // bitmask per consumed tile column and row. A tile's list is its column mask AND
@@ -19,6 +23,8 @@
 @group(0) @binding(2) var<storage, read_write> tile_counts:    array<atomic<u32>>;
 @group(0) @binding(3) var<storage, read>       chain_states:   array<DrawingState>;
 @group(0) @binding(4) var<storage, read_write> raster_work:    array<atomic<u32>>;
+// The tile group's first offspring (execution::TileGroups).
+@group(0) @binding(5) var<storage, read>       tile_group_first: u32;
 @group(1) @binding(0) var<uniform>             params:         Params;
 
 // Shared scratch, 16,320 bytes, below the 16,352-byte downlevel limit.
@@ -64,7 +70,7 @@ fn main(
     @builtin(local_invocation_index) local_idx: u32,
     @builtin(subgroup_invocation_id) sg_inv_id: u32,
 ) {
-    let offspring_id = wid.x;
+    let offspring_id = tile_group_first + wid.x;
     let offspring_count = arrayLength(&working_states);
     if offspring_id >= offspring_count {
         return;
@@ -188,7 +194,7 @@ fn main(
                 let offset = word * line_count;
                 raw_count += countOneBits(scratch[col_line + offset] & scratch[row_line + offset]);
             }
-            let data_base = offspring_id * num_tiles * TILE_MAX_POLYS + tile_id * TILE_MAX_POLYS;
+            let data_base = (wid.x * num_tiles + tile_id) * TILE_MAX_POLYS;
             for (var word = word_lo; word < word_hi; word++) {
                 let offset = word * line_count;
                 var mask = scratch[col_line + offset] & scratch[row_line + offset];

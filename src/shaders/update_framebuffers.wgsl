@@ -8,7 +8,10 @@
 // iteration (select records the offspring in chain_update_flags[4c+3]). The list
 // holds, in drawing order, every polygon whose AABB can reach a pixel centre in
 // this tile, so blending the same polygons in the same order is bit-identical to
-// scanning all polygons. An overflowed list falls back to the full scan.
+// scanning all polygons. An overflowed list falls back to the full scan, and so
+// does a winner from an earlier tile group: tile_data holds only the last
+// group's lists (from offspring tile_group_first), which overwrote the earlier
+// ones.
 //
 // common.wgsl, changes.wgsl, tiles.wgsl and the generated constants (TILE_W,
 // TILE_H, TILE_MAX_POLYS, CHANGED_INDICES, WORK_COUNT) are appended by
@@ -26,6 +29,9 @@ const THREAD_COUNT: u32 = TILE_W * TILE_H;
 @group(0) @binding(5) var<storage, read_write> raster_work:        array<u32>;
 // Written by select this iteration for every accepted chain.
 @group(0) @binding(6) var<storage, read>       chain_changes:      array<ChainChange>;
+// The last tile group's first offspring, bound at a dynamic offset; tile_data
+// holds only its lists.
+@group(0) @binding(7) var<storage, read>       tile_group_first:   u32;
 @group(1) @binding(0) var<uniform>             params:             Params;
 
 // Shared memory: acceptance flag + dirty bbox (read by thread 0, broadcast to workgroup)
@@ -125,7 +131,7 @@ fn main(
     let num_tiles = num_tiles_x * grid.y;
     let bin_tile = shared_offspring_id * num_tiles + wid.y * num_tiles_x + wid.x;
     let listed_count = tile_counts[bin_tile];
-    let use_list = listed_count <= TILE_MAX_POLYS;
+    let use_list = listed_count <= TILE_MAX_POLYS && shared_offspring_id >= tile_group_first;
 
     // Changed-index guards mirror rasterize_error: known indices, and neither the
     // parent's nor the winner's tile list truncated.
@@ -170,7 +176,7 @@ fn main(
     var r = 255.0;
     var g = 255.0;
     var b = 255.0;
-    let list_base = bin_tile * TILE_MAX_POLYS;
+    let list_base = (bin_tile - tile_group_first * num_tiles) * TILE_MAX_POLYS;
     let poly_count = select(chain_states[chain_id].polygon_count, listed_count, use_list);
     let tile_count = (poly_count + TILE_CAP - 1u) / TILE_CAP;
 
