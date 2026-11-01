@@ -74,7 +74,6 @@ fn initialize_engine_from_rgba(rgba: &[u8], w: usize, h: usize) -> Engine {
     engine.ref_image_data = rgba.to_vec();
     engine.working_data = vec![0u8; size];
     engine.error_data = vec![0u8; size];
-    engine.initialized = true;
     engine
 }
 

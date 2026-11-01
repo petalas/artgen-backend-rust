@@ -25,7 +25,7 @@ fn draw(bencher: Bencher, rm: Rasterizer) {
     });
 }
 
-#[divan::bench(args=[HalfSpace, Scanline, GPU])]
+#[divan::bench(args=[HalfSpace, Scanline])]
 fn calculate_fitness(bencher: Bencher, rm: Rasterizer) {
     let w = 384;
     let h = 384;

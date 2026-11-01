@@ -411,14 +411,6 @@ fn points_between(a: &Point, b: &Point) -> Vec<Point> {
         .collect()
 }
 
-pub fn translate_coord(number: f32) -> f32 {
-    number * 2.0 - 1.0
-}
-
-pub fn translate_color(color: u8) -> f32 {
-    color as f32 / 255.0
-}
-
 pub fn print_stats(stats: EvaluatorPayload, real_elapsed: Duration) {
     let t = stats.elapsed;
     if t == 0 || real_elapsed.as_millis() == 0 {

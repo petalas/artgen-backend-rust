@@ -1,6 +1,6 @@
 # artgen-backend-rust
 
-Genetic art generator in Rust. Evolves polygon-based drawings to approximate a reference image. Worker threads (one per CPU core) mutate drawings and evaluate fitness via CPU rasterization (half-space triangles + scanline fill) with SIMD alpha blending. A GPU path (wgpu) exists for rendering + compute-shader error diff but has known issues (errors returning 0). SDL2 window displays upscaled best result. Drawings are serialized to/from JSON (`*.best.json`).
+Genetic art generator in Rust. Evolves polygon-based drawings to approximate a reference image. Worker threads (one per CPU core) mutate drawings and evaluate fitness via CPU rasterization (half-space triangles + scanline fill) with SIMD alpha blending. The GPU evolver (`src/gpu_evolver/`, wgpu compute) runs the headless project server the viewer talks to. SDL2 window displays upscaled best result. Drawings are serialized to/from JSON (`*.best.json`).
 
 ## Active Warnings
 
@@ -25,11 +25,10 @@ This project uses a routing table (below) to map file patterns to docs you must 
 
 | File pattern you are editing | Read first |
 |------------------------------|-----------|
-| `src/engine.rs` | Engine struct, wgpu pipeline setup, fitness calculation, GPU rasterization path |
+| `src/engine.rs` | Reference-image loading and the CPU fitness calculation (`Rasterizer`: half-space or scanline) |
 | `src/evaluator.rs` | Evolutionary loop — worker threads call `produce_new_best()` until improvement found |
 | `src/utils.rs` | CPU rasterization (half-space `fill_triangle`, scanline `fill_shape`), SIMD color blending, helpers |
 | `src/models/**` | Data models: Drawing (serialize/mutate), Polygon, Point, Color, Line. Coords are normalized 0.0–1.0 |
-| `src/shader.wgsl`, `src/error.compute2.wgsl` | GPU shaders — vertex/fragment passthrough + compute error diff (workgroup 8x8) |
 | `src/settings.rs` | Global constants (image dims, mutation probabilities, alpha range, polygon limits) |
 | `src/main.rs` | SDL2 display, worker thread spawning (`num_cpus`), broadcast channel for new best, CLI args |
 | `src/gpu_evolver/**` | Read [engine module ownership](docs/engine-architecture.md) before changing capacity, shader installation, command scheduling or readback. |
@@ -37,7 +36,6 @@ This project uses a routing table (below) to map file patterns to docs you must 
 | Engine performance work, `scripts/hillclimb.py`, `examples/evolution-bench.rs` | Read [hill-climbing](docs/hillclimb.md). Screen every engine change with `scripts/hillclimb.py` before and after; it logs to `benchmarks/hillclimb/log.tsv`. |
 | `src/benchmark/quality.rs`, `scripts/quality.py`, evolution-settings tuning | Read [quality benchmark](docs/quality-benchmark.md). Judge settings and search changes by remaining error over minutes (from blank, or from saved mature starts for late-game questions), not by evals/s. |
 | `src/shaders/*.wgsl` | GPU compute shaders — `mutate.wgsl` (PCG RNG + all mutations), `rasterize_error.wgsl` (half-space triangle per pixel + error reduction), `select.wgsl` (selection + migration). Stage files are not complete WGSL: `common.wgsl`, `tiles.wgsl` and Rust-generated constants are appended (see "Shader installation" in [engine module ownership](docs/engine-architecture.md)) |
-| `src/texture_wrapper.rs`, `src/buffer_dimensions.rs` | wgpu texture/buffer helpers (row alignment padding) |
 | `benches/**` | Benchmarks use `divan` crate, not `criterion` |
 | `Cargo.toml`, `build.sh`, `rust-toolchain.toml` | Build config — uses nightly (`portable_simd` feature) |
 | Weird bug or unexpected behavior | [LEARNINGS.md](docs/LEARNINGS.md) — search for the symptom |
