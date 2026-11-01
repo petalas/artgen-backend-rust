@@ -1,8 +1,10 @@
+use std::sync::Arc;
+
 use leptos::prelude::*;
 use web_sys::HtmlCanvasElement;
 
 use crate::canvas_renderer::render_drawing;
-use crate::heatmap::compute_heatmap;
+use crate::heatmap::{compute_heatmap, decode_png_b64};
 use crate::models::Drawing;
 use crate::ws::ViewerState;
 
@@ -16,12 +18,19 @@ pub fn ImageRow(state: RwSignal<ViewerState>) -> impl IntoView {
     let error_pct = RwSignal::new(0.0f64);
     let preview_src = RwSignal::new(Option::<String>::None);
 
+    // Each payload memo changes only when a message carries a new payload, so
+    // stats messages rerun none of the decoding and drawing below.
+    let reference = Memo::new(move |_| state.with(|s| s.reference_image_b64.clone()));
+    let generated = Memo::new(move |_| state.with(|s| s.generated_image_b64.clone()));
+    let drawing_json = Memo::new(move |_| state.with(|s| s.drawing_json.clone()));
+    let image_size = Memo::new(move |_| state.with(|s| (s.image_width, s.image_height)));
+
     let ref_src = move || {
-        let s = state.get();
-        if s.reference_image_b64.is_empty() {
+        let reference = reference.get();
+        if reference.is_empty() {
             String::new()
         } else {
-            format!("data:image/png;base64,{}", s.reference_image_b64)
+            format!("data:image/png;base64,{reference}")
         }
     };
 
@@ -36,11 +45,8 @@ pub fn ImageRow(state: RwSignal<ViewerState>) -> impl IntoView {
 
     // Render drawing on canvas when drawing_json updates
     Effect::new(move || {
-        let s = state.get();
-        let json = match &s.drawing_json {
-            Some(j) => j.clone(),
-            None => return,
-        };
+        let Some(json) = drawing_json.get() else { return };
+        let (image_width, image_height) = image_size.get();
         let drawing: Drawing = match serde_json::from_str(&json) {
             Ok(d) => d,
             Err(_) => return,
@@ -48,11 +54,11 @@ pub fn ImageRow(state: RwSignal<ViewerState>) -> impl IntoView {
         if let Some(canvas) = gen_canvas_ref.get() {
             let canvas_el: &HtmlCanvasElement = &canvas;
             // Set canvas resolution based on image aspect ratio
-            let (cw, ch) = if s.image_width > 0 && s.image_height > 0 {
-                if s.image_width >= s.image_height {
-                    (RENDER_SIZE, RENDER_SIZE * s.image_height / s.image_width)
+            let (cw, ch) = if image_width > 0 && image_height > 0 {
+                if image_width >= image_height {
+                    (RENDER_SIZE, RENDER_SIZE * image_height / image_width)
                 } else {
-                    (RENDER_SIZE * s.image_width / s.image_height, RENDER_SIZE)
+                    (RENDER_SIZE * image_width / image_height, RENDER_SIZE)
                 }
             } else {
                 (RENDER_SIZE, RENDER_SIZE)
@@ -63,19 +69,22 @@ pub fn ImageRow(state: RwSignal<ViewerState>) -> impl IntoView {
         }
     });
 
+    // The reference decoded once per reference image, not once per update.
+    let decoded_reference = Memo::new(move |_| {
+        let reference = reference.get();
+        (!reference.is_empty()).then(|| decode_png_b64(&reference)).flatten().map(Arc::new)
+    });
+
     // Compute heatmap when generated image updates (still uses server PNGs for pixel-accurate diff)
     Effect::new(move || {
-        let s = state.get();
-        if s.reference_image_b64.is_empty() || s.generated_image_b64.is_empty() {
+        let generated = generated.get();
+        let Some(reference) = decoded_reference.get() else { return };
+        if generated.is_empty() {
             return;
         }
         if let Some(canvas) = heatmap_canvas_ref.get() {
             let canvas_el: &HtmlCanvasElement = &canvas;
-            if let Some(pct) = compute_heatmap(
-                &s.reference_image_b64,
-                &s.generated_image_b64,
-                canvas_el,
-            ) {
+            if let Some(pct) = compute_heatmap(&reference, &generated, canvas_el) {
                 error_pct.set(pct);
             }
         }

@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::sync::Arc;
 
 use leptos::prelude::*;
 use wasm_bindgen::prelude::*;
@@ -42,8 +43,10 @@ pub struct ProjectInfo {
 
 #[derive(Clone, Debug)]
 pub struct ViewerState {
-    pub reference_image_b64: String,
-    pub generated_image_b64: String,
+    // The large payloads are shared, so cloning the state (every `state.get()`)
+    // costs a reference count rather than a copy of megabytes.
+    pub reference_image_b64: Arc<str>,
+    pub generated_image_b64: Arc<str>,
     pub fitness: f64,
     pub polygons: u32,
     pub improvements: u64,
@@ -53,7 +56,7 @@ pub struct ViewerState {
     pub paused: bool,
     pub connected: bool,
     pub connecting: bool,
-    pub drawing_json: Option<String>,
+    pub drawing_json: Option<Arc<str>>,
     pub image_width: u32,
     pub image_height: u32,
     // Engine state tracking
@@ -83,8 +86,8 @@ pub struct ViewerState {
 impl Default for ViewerState {
     fn default() -> Self {
         Self {
-            reference_image_b64: String::new(),
-            generated_image_b64: String::new(),
+            reference_image_b64: Arc::from(""),
+            generated_image_b64: Arc::from(""),
             fitness: 0.0,
             polygons: 0,
             improvements: 0,
@@ -335,13 +338,13 @@ fn handle_message(data: &serde_json::Value, state: RwSignal<ViewerState>) {
                 s.init_received = true;
                 s.engine_loading = false;
                 if let Some(ref_img) = data["referenceImage"].as_str() {
-                    s.reference_image_b64 = ref_img.to_string();
+                    s.reference_image_b64 = Arc::from(ref_img);
                 }
                 if let Some(img) = data["image"].as_str() {
-                    s.generated_image_b64 = img.to_string();
+                    s.generated_image_b64 = Arc::from(img);
                 }
                 if let Some(dj) = data["drawingJson"].as_str() {
-                    s.drawing_json = Some(dj.to_string());
+                    s.drawing_json = Some(Arc::from(dj));
                 }
                 if let Some(ap) = data["activeProject"].as_str() {
                     s.active_project = Some(ap.to_string());
@@ -363,10 +366,10 @@ fn handle_message(data: &serde_json::Value, state: RwSignal<ViewerState>) {
             }
             "update" => {
                 if let Some(img) = data["image"].as_str() {
-                    s.generated_image_b64 = img.to_string();
+                    s.generated_image_b64 = Arc::from(img);
                 }
                 if let Some(dj) = data["drawingJson"].as_str() {
-                    s.drawing_json = Some(dj.to_string());
+                    s.drawing_json = Some(Arc::from(dj));
                 }
                 if let Some(gs) = parse_gpu_stats(data) {
                     s.gpu_stats = Some(gs);
@@ -391,13 +394,13 @@ fn handle_message(data: &serde_json::Value, state: RwSignal<ViewerState>) {
                 s.engine_loading = false;
                 // Treat like init — update images and active project
                 if let Some(ref_img) = data["referenceImage"].as_str() {
-                    s.reference_image_b64 = ref_img.to_string();
+                    s.reference_image_b64 = Arc::from(ref_img);
                 }
                 if let Some(img) = data["image"].as_str() {
-                    s.generated_image_b64 = img.to_string();
+                    s.generated_image_b64 = Arc::from(img);
                 }
                 if let Some(dj) = data["drawingJson"].as_str() {
-                    s.drawing_json = Some(dj.to_string());
+                    s.drawing_json = Some(Arc::from(dj));
                 }
                 if let Some(ap) = data["project"].as_str() {
                     s.active_project = Some(ap.to_string());

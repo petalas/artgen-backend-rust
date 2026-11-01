@@ -4,7 +4,7 @@ use wasm_bindgen::Clamped;
 use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement};
 
 /// Decode a base64-encoded PNG into raw RGBA pixels + dimensions.
-fn decode_png_b64(b64: &str) -> Option<(Vec<u8>, u32, u32)> {
+pub fn decode_png_b64(b64: &str) -> Option<(Vec<u8>, u32, u32)> {
     let bytes = BASE64.decode(b64).ok()?;
     let img = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png).ok()?;
     let rgba = img.to_rgba8();
@@ -13,19 +13,21 @@ fn decode_png_b64(b64: &str) -> Option<(Vec<u8>, u32, u32)> {
     Some((rgba.into_raw(), w, h))
 }
 
-/// Compute per-pixel error heatmap between reference and generated images.
-/// Decodes PNGs in Rust (synchronous, no DOM image elements).
-/// Returns total error percent.
+/// Compute per-pixel error heatmap between the decoded reference and the
+/// generated image. Decodes the generated PNG in Rust (synchronous, no DOM
+/// image elements). Returns total error percent, or None when the images'
+/// sizes differ (a project switch can deliver one before the other).
 pub fn compute_heatmap(
-    ref_b64: &str,
+    reference: &(Vec<u8>, u32, u32),
     gen_b64: &str,
     canvas: &HtmlCanvasElement,
 ) -> Option<f64> {
-    let (ref_pixels, w, h) = decode_png_b64(ref_b64)?;
+    let (ref_pixels, w, h) = reference;
+    let (w, h) = (*w, *h);
     let (gen_pixels, gw, gh) = decode_png_b64(gen_b64)?;
-
-    // Use generated image dimensions if reference differs (shouldn't happen, but be safe)
-    let (w, h) = if gw != w || gh != h { (gw, gh) } else { (w, h) };
+    if (gw, gh) != (w, h) {
+        return None;
+    }
 
     canvas.set_width(w);
     canvas.set_height(h);

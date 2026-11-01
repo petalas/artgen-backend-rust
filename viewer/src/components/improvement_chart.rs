@@ -1,69 +1,61 @@
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::rc::Rc;
 
 use leptos::prelude::*;
-use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::HtmlCanvasElement;
 
 use crate::ws::ViewerState;
 
-const WINDOW_SECS: usize = 30;
-// We need WINDOW_SECS + 1 samples to compute WINDOW_SECS deltas
-const MAX_SAMPLES: usize = WINDOW_SECS + 1;
+/// Seconds of server time the chart spans.
+const WINDOW_SECS: f64 = 30.0;
+/// Each plotted rate covers this much server time, ending at its point.
+const RATE_SPAN_SECS: f64 = 1.0;
 const CSS_HEIGHT: f64 = 80.0;
 
+/// The server's counter at one of its own timestamps.
+#[derive(Clone, Copy)]
 struct Sample {
+    elapsed: f64,
     improvements: u64,
 }
 
+/// Rates from the server's own clock: every stats and update message carries
+/// the run's elapsed time with the improvement counter, so the rate stays
+/// correct however late the browser handles the message.
 #[component]
 pub fn ImprovementChart(state: RwSignal<ViewerState>) -> impl IntoView {
     let canvas_ref = NodeRef::<leptos::html::Canvas>::new();
-    let samples: Rc<RefCell<Vec<Sample>>> = Rc::new(RefCell::new(Vec::with_capacity(MAX_SAMPLES)));
+    let samples: Rc<RefCell<VecDeque<Sample>>> = Rc::new(RefCell::new(VecDeque::new()));
+    let latest = Memo::new(move |_| {
+        state.with(|s| (s.elapsed_secs.to_bits(), s.improvements))
+    });
 
-    // Tick every 1 second: record current improvements count, then redraw
-    let samples_tick = Rc::clone(&samples);
-    let canvas_tick = canvas_ref;
-    Effect::new(move |_| {
-        let samples = Rc::clone(&samples_tick);
-        let canvas_ref = canvas_tick;
-
-        let cb = Closure::<dyn Fn()>::new(move || {
-            let improvements = state.with_untracked(|s| s.improvements);
-            let mut buf = samples.borrow_mut();
-            buf.push(Sample { improvements });
-            let excess = buf.len().saturating_sub(MAX_SAMPLES);
-            if excess > 0 {
-                buf.drain(..excess);
+    Effect::new(move || {
+        let (elapsed, improvements) = latest.get();
+        let sample = Sample { elapsed: f64::from_bits(elapsed), improvements };
+        let mut buf = samples.borrow_mut();
+        match buf.back() {
+            // A new or restarted run: its clock or counter went back.
+            Some(last) if sample.elapsed < last.elapsed || sample.improvements < last.improvements => {
+                buf.clear();
+                buf.push_back(sample);
             }
-
-            // Compute rates from consecutive samples
-            let rates: Vec<f64> = buf.windows(2)
-                .map(|w| (w[1].improvements as f64 - w[0].improvements as f64).max(0.0))
-                .collect();
-
-            // Draw
-            if let Some(el) = canvas_ref.get() {
-                let canvas: HtmlCanvasElement = el.into();
-                draw_chart(&canvas, &rates);
-            }
-        });
-
-        let window = web_sys::window().unwrap();
-        let id = window
-            .set_interval_with_callback_and_timeout_and_arguments_0(
-                cb.as_ref().unchecked_ref(),
-                1000,
-            )
-            .unwrap();
-        cb.forget();
-
-        on_cleanup(move || {
-            if let Some(w) = web_sys::window() {
-                w.clear_interval_with_handle(id);
-            }
-        });
+            // Paused, or a message from the same instant.
+            Some(last) if sample.elapsed <= last.elapsed => return,
+            _ => buf.push_back(sample),
+        }
+        // Keep one sample older than the window so its first rate has a start.
+        let cutoff = sample.elapsed - WINDOW_SECS - RATE_SPAN_SECS;
+        while buf.len() > 2 && buf[1].elapsed <= cutoff {
+            buf.pop_front();
+        }
+        let rates = rates(&buf);
+        if let Some(el) = canvas_ref.get() {
+            let canvas: HtmlCanvasElement = el.into();
+            draw_chart(&canvas, &rates, sample.elapsed);
+        }
     });
 
     view! {
@@ -76,7 +68,26 @@ pub fn ImprovementChart(state: RwSignal<ViewerState>) -> impl IntoView {
     }
 }
 
-fn draw_chart(canvas: &HtmlCanvasElement, rates: &[f64]) {
+/// `(elapsed, rate)` at each sample with at least `RATE_SPAN_SECS` of history:
+/// improvements per second since the latest sample that span earlier.
+fn rates(samples: &VecDeque<Sample>) -> Vec<(f64, f64)> {
+    let mut rates = Vec::with_capacity(samples.len());
+    let mut start = 0;
+    for end in 0..samples.len() {
+        let point = samples[end];
+        while start + 1 < end && samples[start + 1].elapsed <= point.elapsed - RATE_SPAN_SECS {
+            start += 1;
+        }
+        let from = samples[start];
+        if point.elapsed - from.elapsed >= RATE_SPAN_SECS {
+            let count = (point.improvements - from.improvements) as f64;
+            rates.push((point.elapsed, count / (point.elapsed - from.elapsed)));
+        }
+    }
+    rates
+}
+
+fn draw_chart(canvas: &HtmlCanvasElement, rates: &[(f64, f64)], now: f64) {
     let ctx = match canvas.get_context("2d").ok().flatten() {
         Some(c) => c.dyn_into::<web_sys::CanvasRenderingContext2d>().unwrap(),
         None => return,
@@ -116,20 +127,12 @@ fn draw_chart(canvas: &HtmlCanvasElement, rates: &[f64]) {
     let cw = w - left - right;
     let ch = h - top - bottom;
 
-    // Pad rates to WINDOW_SECS length (prepend zeros for the unfilled portion)
-    let n = WINDOW_SECS;
-    let padded: Vec<f64> = if rates.len() < n {
-        let mut v = vec![0.0; n - rates.len()];
-        v.extend_from_slice(rates);
-        v
-    } else {
-        rates[rates.len() - n..].to_vec()
-    };
+    let visible: Vec<(f64, f64)> =
+        rates.iter().copied().filter(|&(t, _)| t >= now - WINDOW_SECS).collect();
+    let max_rate = visible.iter().map(|&(_, r)| r).fold(1.0_f64, f64::max);
+    let current_rate = visible.last().map_or(0.0, |&(_, r)| r);
 
-    let max_rate = padded.iter().cloned().fold(1.0_f64, f64::max);
-    let current_rate = padded.last().copied().unwrap_or(0.0);
-
-    let to_x = |i: usize| left + (i as f64 / (n - 1) as f64) * cw;
+    let to_x = |t: f64| left + (1.0 - (now - t) / WINDOW_SECS) * cw;
     let to_y = |v: f64| top + ch - (v / max_rate) * ch;
 
     // Y-axis gridline at 50%
@@ -141,24 +144,28 @@ fn draw_chart(canvas: &HtmlCanvasElement, rates: &[f64]) {
     ctx.line_to(w - right, y);
     ctx.stroke();
 
+    let (Some(&(first, _)), Some(&(last, _))) = (visible.first(), visible.last()) else {
+        return;
+    };
+
     // Area fill
     ctx.begin_path();
-    ctx.move_to(to_x(0), to_y(0.0));
-    for (i, &v) in padded.iter().enumerate() {
-        ctx.line_to(to_x(i), to_y(v));
+    ctx.move_to(to_x(first), to_y(0.0));
+    for &(t, v) in &visible {
+        ctx.line_to(to_x(t), to_y(v));
     }
-    ctx.line_to(to_x(n - 1), to_y(0.0));
+    ctx.line_to(to_x(last), to_y(0.0));
     ctx.close_path();
     ctx.set_fill_style_str("rgba(46, 125, 50, 0.12)");
     ctx.fill();
 
     // Line
     ctx.begin_path();
-    for (i, &v) in padded.iter().enumerate() {
+    for (i, &(t, v)) in visible.iter().enumerate() {
         if i == 0 {
-            ctx.move_to(to_x(i), to_y(v));
+            ctx.move_to(to_x(t), to_y(v));
         } else {
-            ctx.line_to(to_x(i), to_y(v));
+            ctx.line_to(to_x(t), to_y(v));
         }
     }
     ctx.set_stroke_style_str("#2e7d32");
@@ -196,4 +203,31 @@ fn draw_chart(canvas: &HtmlCanvasElement, rates: &[f64]) {
     ctx.fill_text("-30s", left, top + ch + 3.0).ok();
     ctx.set_text_align("right");
     ctx.fill_text("now", w - right, top + ch + 3.0).ok();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn samples(points: &[(f64, u64)]) -> VecDeque<Sample> {
+        points.iter().map(|&(elapsed, improvements)| Sample { elapsed, improvements }).collect()
+    }
+
+    /// 20 improvements per server second, delivered in irregular batches as a
+    /// lagging browser would handle them, still reads 20/s.
+    #[test]
+    fn rates_follow_server_time_not_message_spacing() {
+        let buf = samples(&[(10.0, 200), (10.2, 204), (10.25, 205), (11.0, 220), (14.0, 280), (14.1, 282)]);
+        let rates = rates(&buf);
+        let times: Vec<f64> = rates.iter().map(|&(t, _)| t).collect();
+        assert_eq!(times, [11.0, 14.0, 14.1]);
+        for (t, rate) in rates {
+            assert!((rate - 20.0).abs() < 1e-9, "{t}: {rate}");
+        }
+    }
+
+    #[test]
+    fn a_sample_less_than_a_span_after_the_first_has_no_rate() {
+        assert!(rates(&samples(&[(5.0, 10), (5.5, 20)])).is_empty());
+    }
 }
