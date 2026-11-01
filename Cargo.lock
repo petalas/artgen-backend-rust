@@ -105,8 +105,6 @@ dependencies = [
  "base64 0.23.1",
  "bytemuck",
  "divan",
- "futures",
- "futures-intrusive",
  "futures-lite",
  "image",
  "num_cpus",
@@ -128,7 +126,6 @@ name = "artgen-shared"
 version = "0.1.0"
 dependencies = [
  "serde",
- "uuid",
 ]
 
 [[package]]
@@ -143,7 +140,6 @@ dependencies = [
  "leptos",
  "serde",
  "serde_json",
- "uuid",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
@@ -963,17 +959,6 @@ dependencies = [
  "futures-core",
  "futures-task",
  "futures-util",
-]
-
-[[package]]
-name = "futures-intrusive"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d930c203dd0b6ff06e0201a4a2fe9149b43c684fd4420555b26d21b1a02956f"
-dependencies = [
- "futures-core",
- "lock_api",
- "parking_lot",
 ]
 
 [[package]]
@@ -3349,7 +3334,6 @@ checksum = "4a0e2d11620c50695fe12bbbfde96b3477fe606e7284c22d505c12ce51214514"
 dependencies = [
  "getrandom 0.4.3",
  "js-sys",
- "serde_core",
  "wasm-bindgen",
 ]
 

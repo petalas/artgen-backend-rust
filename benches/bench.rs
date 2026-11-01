@@ -92,7 +92,7 @@ fn color_blend_entire_buffer(bencher: Bencher, implementation: FillImplementatio
     let height = 384;
     let buffer_size = width * height * 4; // 4 bytes per pixel (RGBA)
     let mut vec_buf: Vec<u8> = vec![134, 125, 152, 45].repeat(buffer_size / 4);
-    let mut slice_buf: &mut [u8] = vec_buf.as_mut_slice();
+    let slice_buf: &mut [u8] = vec_buf.as_mut_slice();
 
     match implementation {
         FillImplementation::SIMD => {

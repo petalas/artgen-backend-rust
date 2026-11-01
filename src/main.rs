@@ -286,10 +286,7 @@ fn gpu_main_loop(
     let mut last_draw_timestamp = Instant::now() - frametime;
     let mut last_save_timestamp = Instant::now();
     let mut last_stats_timestamp = Instant::now();
-    let mut batches = 0u64;
-
     loop {
-        batches += 1;
         let collect_timestamps = true;
         if let Some(new_best) = evolver.run_batch(&default_params, collect_timestamps) {
             if new_best.fitness > global_best.fitness {

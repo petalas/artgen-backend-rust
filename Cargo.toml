@@ -11,9 +11,6 @@ artgen-shared = { path = "shared" }
 anyhow = "1.0.104"
 base64 = "0.23"
 bytemuck = { version = "1.25.2", features = ["derive"] }
-divan = "0.1.21"
-futures = "0.3.34"
-futures-intrusive = "0.5.0"
 futures-lite = "2.6.1"
 image = "0.25.10"
 num_cpus = "1.17.0"
@@ -28,6 +25,9 @@ tracing-subscriber = { version = "0.3.23", features = ["fmt", "env-filter"] }
 tungstenite = "0.30"
 uuid = { version = "1", features = ["v4"] }
 wgpu = "30.0.1"
+
+[dev-dependencies]
+divan = "0.1.21"
 
 [[bench]]
 name = "bench"
