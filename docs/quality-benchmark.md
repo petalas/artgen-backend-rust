@@ -779,3 +779,19 @@ regions, mostly worthless children). Evidence
   its frozen v1 params keep removal and merge on, so under exact selection
   the frozen workload deletes and loses crossover alignment. This is a change
   to the workload, not to the engine's speed.
+
+## Scale weight late game (grow before adding), 2026-11-01
+
+`89ae97a`, defaults (`scale_polygon_prob` 0.00565, about 0.0% of late-game
+offspring) vs 0.3 (about 0.7%) and 1.0 (about 2.3%; probabilities above 1 fail
+`sanitize`), from s120v2, 90 s, seeds 1–3, pooled (evidence
+`.cache/quality/runs/20261031T231946Z-krd0bdex` ff, `20261031T233415Z-il826457`
+mona, `20261031T234841Z-7xlxdsg5` darwin).
+
+| side | r ratio at 90 s | time to control's 90 s result (unpenalized) | triangles at equal unpenalized fitness |
+| --- | --- | --- | --- |
+| scale 0.3 | 1.005 NOISE | 1.06 [0.97, 1.17] | 1.001 |
+| scale 1.0 | 1.006 NOISE | 1.12 [1.02, 1.26] | 1.002 |
+
+Scale wins about 0.1 per 1000 offered, below the moves it displaces, and
+triangles do not stretch into the space new ones would take. Default kept.
